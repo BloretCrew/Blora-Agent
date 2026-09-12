@@ -1,0 +1,20 @@
+[package]
+name = "blora-session"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description = "Session, run, and projection state machines for Blora Agent."
+
+[dependencies]
+blora-events.workspace = true
+blora-types.workspace = true
+chrono.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

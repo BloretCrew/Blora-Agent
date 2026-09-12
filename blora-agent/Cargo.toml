@@ -1,0 +1,44 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/blora-types",
+    "crates/blora-events",
+    "crates/blora-session",
+    "crates/blora-storage",
+    "crates/blora-runtime",
+    "crates/blora-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+rust-version = "1.85"
+authors = ["Blora Agent contributors"]
+homepage = "https://github.com/bloret-crew/blora-agent"
+repository = "https://github.com/bloret-crew/blora-agent"
+description = "Blora Agent: a local-first Code, Work, and Agent harness."
+
+[workspace.dependencies]
+blora-types = { path = "crates/blora-types" }
+blora-events = { path = "crates/blora-events" }
+blora-session = { path = "crates/blora-session" }
+blora-storage = { path = "crates/blora-storage" }
+blora-runtime = { path = "crates/blora-runtime" }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
+clap = { version = "4", features = ["derive", "env"] }
+dirs = "6"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v7", "serde"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
