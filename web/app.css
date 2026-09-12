@@ -88,6 +88,13 @@ blora-sidebar-layout-sidebar {
   align-items: end;
 }
 
+.ba-toolbar__actions {
+  display: flex;
+  gap: var(--blora-space-3, 12px);
+  align-items: center;
+  flex-wrap: wrap;
+}
+
 .ba-toolbar h1 {
   margin: 0 0 4px;
   font-size: var(--blora-text-2xl, 28px);

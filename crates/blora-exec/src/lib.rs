@@ -181,6 +181,40 @@ impl LocalBackend {
         Ok(out)
     }
 
+    pub fn git_status(&self) -> Result<String> {
+        self.policy.require(self.policy.file_read(), "git_status")?;
+        self.git(&["status", "--short", "--branch"])
+    }
+
+    pub fn git_diff(&self) -> Result<String> {
+        self.policy.require(self.policy.file_read(), "git_diff")?;
+        self.git(&["diff", "--stat", "HEAD"])
+    }
+
+    pub fn git_log(&self) -> Result<String> {
+        self.policy.require(self.policy.file_read(), "git_log")?;
+        self.git(&["log", "-8", "--oneline"])
+    }
+
+    fn git(&self, args: &[&str]) -> Result<String> {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(self.policy.workspace())
+            .output()
+            .map_err(BloraError::exec)?;
+        let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+        if !output.stderr.is_empty() {
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            text.push_str(&String::from_utf8_lossy(&output.stderr));
+        }
+        if text.trim().is_empty() {
+            text = "(clean)".to_owned();
+        }
+        Ok(text)
+    }
+
     fn resolve_for_write(&self, path: &str) -> Result<PathBuf> {
         let requested = path.trim();
         let raw = PathBuf::from(requested);
@@ -237,6 +271,38 @@ fn read_capped<R: Read>(reader: Option<R>, max: usize) -> Result<String> {
         buf.extend_from_slice(b"\n... truncated ...");
     }
     Ok(String::from_utf8_lossy(&buf).into_owned())
+}
+
+/// Local filesystem/process backend. Future sandbox/container backends
+/// should implement the same method set.
+pub trait ExecutionBackend {
+    fn read_file(&self, path: &str) -> Result<String>;
+    fn write_file(&self, path: &str, contents: &str) -> Result<()>;
+    fn list_dir(&self, path: &str) -> Result<String>;
+    fn search(&self, pattern: &str, path: Option<&str>) -> Result<String>;
+    fn shell(&self, command: &str) -> Result<String>;
+}
+
+impl ExecutionBackend for LocalBackend {
+    fn read_file(&self, path: &str) -> Result<String> {
+        LocalBackend::read_file(self, path)
+    }
+
+    fn write_file(&self, path: &str, contents: &str) -> Result<()> {
+        LocalBackend::write_file(self, path, contents)
+    }
+
+    fn list_dir(&self, path: &str) -> Result<String> {
+        LocalBackend::list_dir(self, path)
+    }
+
+    fn search(&self, pattern: &str, path: Option<&str>) -> Result<String> {
+        LocalBackend::search(self, pattern, path)
+    }
+
+    fn shell(&self, command: &str) -> Result<String> {
+        LocalBackend::shell(self, command)
+    }
 }
 
 #[cfg(test)]

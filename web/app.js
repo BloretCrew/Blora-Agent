@@ -11,6 +11,7 @@ const prompt = document.querySelector("#prompt");
 const autoApprove = document.querySelector("#auto-approve");
 const taskList = document.querySelector("#task-list");
 const subagents = document.querySelector("#subagents");
+const approvalList = document.querySelector("#approval-list");
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -67,6 +68,7 @@ async function selectSession(id) {
   pathEl.textContent = session.workspace_path;
   renderTranscript(session.transcript);
   renderSubagents(session.subagents);
+  await refreshApprovals();
   await refreshTasks();
   await refreshSessions();
   if (state.source) {
@@ -76,6 +78,8 @@ async function selectSession(id) {
   state.source.onmessage = async () => {
     const latest = await api(`/api/sessions/${id}`);
     renderTranscript(latest.transcript);
+    renderSubagents(latest.subagents);
+    await refreshApprovals();
   };
 }
 
@@ -137,6 +141,52 @@ async function refreshTasks() {
     taskList.append(row);
   }
 }
+
+async function refreshApprovals() {
+  if (!state.sessionId) {
+    approvalList.replaceChildren();
+    return;
+  }
+  const rows = await api(`/api/approvals?session=${state.sessionId}`);
+  approvalList.replaceChildren();
+  for (const row of rows) {
+    const wrap = document.createElement("div");
+    const text = document.createElement("p");
+    text.textContent = row.summary;
+    const allow = document.createElement("button");
+    allow.type = "button";
+    allow.className = "blora-button";
+    allow.textContent = "允许";
+    allow.addEventListener("click", async () => {
+      await api(`/api/approvals/${row.id}/resolve`, {
+        method: "POST",
+        body: JSON.stringify({ allow: true }),
+      });
+      await refreshApprovals();
+    });
+    const deny = document.createElement("button");
+    deny.type = "button";
+    deny.className = "blora-button";
+    deny.textContent = "拒绝";
+    deny.addEventListener("click", async () => {
+      await api(`/api/approvals/${row.id}/resolve`, {
+        method: "POST",
+        body: JSON.stringify({ allow: false }),
+      });
+      await refreshApprovals();
+    });
+    wrap.append(text, allow, deny);
+    approvalList.append(wrap);
+  }
+}
+
+document.querySelector("#compact").addEventListener("click", async () => {
+  if (!state.sessionId) {
+    return;
+  }
+  await api(`/api/sessions/${state.sessionId}/compact`, { method: "POST", body: "{}" });
+  await selectSession(state.sessionId);
+});
 
 document.querySelector("#task-form").addEventListener("submit", async (event) => {
   event.preventDefault();

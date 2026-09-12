@@ -8,6 +8,6 @@ mod projection;
 
 pub use machine::transition_run;
 pub use projection::{
-    RunRecord, SessionProjection, SessionRecord, SubagentView, TaskView, TranscriptItem,
-    apply_event, rebuild,
+    ApprovalView, RunRecord, SessionProjection, SessionRecord, SubagentView, TaskView,
+    TranscriptItem, apply_event, rebuild,
 };

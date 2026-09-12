@@ -91,6 +91,21 @@ impl ToolRegistry {
                 }),
             },
             ToolSpec {
+                name: "git_status",
+                description: "Show git status for the workspace.",
+                parameters: json!({"type": "object", "properties": {}}),
+            },
+            ToolSpec {
+                name: "git_diff",
+                description: "Show git diff --stat against HEAD.",
+                parameters: json!({"type": "object", "properties": {}}),
+            },
+            ToolSpec {
+                name: "git_log",
+                description: "Show recent git commits.",
+                parameters: json!({"type": "object", "properties": {}}),
+            },
+            ToolSpec {
                 name: "delegate",
                 description: "Spawn a child agent with a limited turn budget. The child runs in Code mode and returns a summary.",
                 parameters: json!({
@@ -121,6 +136,9 @@ impl ToolRegistry {
                 optional_str(arguments, "path"),
             ),
             "shell" => backend.shell(required_str(arguments, "command")?),
+            "git_status" => backend.git_status(),
+            "git_diff" => backend.git_diff(),
+            "git_log" => backend.git_log(),
             other => Err(BloraError::Other(format!("unknown tool: {other}"))),
         }
     }

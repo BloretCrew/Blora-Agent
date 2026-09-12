@@ -98,6 +98,20 @@ CREATE INDEX IF NOT EXISTS idx_tasks_due ON tasks(status, delay_until);
 CREATE INDEX IF NOT EXISTS idx_tasks_session ON tasks(session_id);
 CREATE INDEX IF NOT EXISTS idx_agents_parent ON agents(parent_session_id, status);
 
+CREATE TABLE IF NOT EXISTS approvals (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    run_id TEXT,
+    capability TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (session_id) REFERENCES sessions(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_approvals_session ON approvals(session_id, status);
+
 CREATE TRIGGER IF NOT EXISTS events_no_update BEFORE UPDATE ON events
 BEGIN
     SELECT RAISE(ABORT, 'events are append-only');

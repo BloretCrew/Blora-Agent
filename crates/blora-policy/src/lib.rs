@@ -47,6 +47,14 @@ impl Policy {
         self.auto_approve
     }
 
+    #[must_use]
+    pub fn granting(&self) -> Self {
+        Self {
+            workspace: self.workspace.clone(),
+            auto_approve: true,
+        }
+    }
+
     pub fn resolve(&self, requested: &str) -> Result<PathBuf> {
         let requested = requested.trim();
         if requested.is_empty() || requested == "." {

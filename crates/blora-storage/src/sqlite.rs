@@ -76,13 +76,18 @@ impl SqliteStore {
             params![now],
         )
         .map_err(BloraError::storage)?;
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (3, ?1)",
+            params![now],
+        )
+        .map_err(BloraError::storage)?;
         Ok(Self {
             conn: Mutex::new(conn),
             clock: SystemClock,
         })
     }
 
-    fn lock(&self) -> MutexGuard<'_, Connection> {
+    pub(crate) fn lock(&self) -> MutexGuard<'_, Connection> {
         self.conn
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)

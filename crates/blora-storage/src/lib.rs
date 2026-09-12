@@ -3,8 +3,10 @@
 
 //! Local SQLite persistence. The event table is the source of truth.
 
+mod approvals;
 mod sqlite;
 mod tasks;
 
+pub use approvals::ApprovalRecord;
 pub use sqlite::{CreateSession, SessionSummary, SqliteStore};
 pub use tasks::{AgentRecord, CreateTask, TaskRecord};

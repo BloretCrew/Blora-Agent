@@ -3,8 +3,8 @@
 
 use blora_events::{EventEnvelope, KnownPayload};
 use blora_types::{
-    AgentId, BloraError, EventId, Mode, Result, RunId, RunStatus, SessionId, SessionStatus, TaskId,
-    TaskStatus, TurnId,
+    AgentId, ApprovalId, BloraError, EventId, Mode, Result, RunId, RunStatus, SessionId,
+    SessionStatus, TaskId, TaskStatus, TurnId,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -73,6 +73,13 @@ pub struct SubagentView {
     pub summary: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ApprovalView {
+    pub id: ApprovalId,
+    pub summary: String,
+    pub status: String,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SessionProjection {
     pub session: Option<SessionRecord>,
@@ -80,6 +87,7 @@ pub struct SessionProjection {
     pub transcript: Vec<TranscriptItem>,
     pub tasks: Vec<TaskView>,
     pub subagents: Vec<SubagentView>,
+    pub approvals: Vec<ApprovalView>,
     pub last_sequence: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -211,6 +219,26 @@ pub fn apply_event(projection: &mut SessionProjection, event: &EventEnvelope) ->
                 event_id: event.event_id.clone(),
             });
             touch_run(projection, event)?;
+        }
+        KnownPayload::ApprovalRequested(requested) => {
+            projection.approvals.push(ApprovalView {
+                id: requested.approval_id,
+                summary: requested.summary.clone(),
+                status: "pending".to_owned(),
+            });
+            projection.transcript.push(TranscriptItem::System {
+                summary: format!("approval required: {}", requested.summary),
+                event_id: event.event_id.clone(),
+            });
+        }
+        KnownPayload::ApprovalResolved(resolved) => {
+            if let Some(view) = projection
+                .approvals
+                .iter_mut()
+                .find(|item| item.id == resolved.approval_id)
+            {
+                view.status = resolved.decision.clone();
+            }
         }
         KnownPayload::UsageRecorded(usage) => {
             projection.input_tokens += usage.input_tokens;

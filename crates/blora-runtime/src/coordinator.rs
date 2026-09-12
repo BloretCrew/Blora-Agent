@@ -2,10 +2,10 @@
 // Copyright (C) 2026 Blora Agent contributors
 
 use blora_events::{
-    AssistantDelta, AssistantMessageCompleted, EventEnvelope, KnownPayload, ModelRequested,
-    ModelResponseCompleted, NewEvent, RunCancelRequested, RunCancelled, RunCompleted, RunCreated,
-    RunFailed, RunStarted, ToolCompleted, ToolFailed, ToolOutput, ToolRequested, UsageRecorded,
-    UserInput,
+    AssistantDelta, AssistantMessageCompleted, ContextSnapshotCreated, EventEnvelope, KnownPayload,
+    ModelRequested, ModelResponseCompleted, NewEvent, RetryStarted, RunCancelRequested,
+    RunCancelled, RunCompleted, RunCreated, RunFailed, RunStarted, ToolCompleted, ToolFailed,
+    ToolOutput, ToolRequested, UsageRecorded, UserInput,
 };
 use blora_exec::LocalBackend;
 use blora_model::{
@@ -39,6 +39,7 @@ pub struct RunOptions {
     pub model: String,
     pub mock: bool,
     pub auto_approve: bool,
+    pub interactive: bool,
     pub max_turns: u32,
 }
 
@@ -48,6 +49,7 @@ impl Default for RunOptions {
             model: String::new(),
             mock: false,
             auto_approve: false,
+            interactive: false,
             max_turns: 12,
         }
     }
@@ -222,6 +224,14 @@ impl Runtime {
                 text: prompt.to_owned(),
             }),
         )?;
+        self.emit(
+            session_id,
+            Some(&run_id),
+            Some(&turn_id),
+            KnownPayload::ContextSnapshotCreated(ContextSnapshotCreated {
+                snapshot_id: workspace.clone(),
+            }),
+        )?;
 
         let tools = ToolRegistry::specs()
             .into_iter()
@@ -248,40 +258,55 @@ impl Runtime {
                 }),
             )?;
             let mut streamed = String::new();
-            let completion = match provider.complete(
-                &CompletionRequest {
-                    model: model.clone(),
-                    messages,
-                    tools: tools.clone(),
-                },
-                cancel,
-                &mut |event| match event {
-                    StreamEvent::TextDelta(text) => {
-                        streamed.push_str(&text);
+            let mut attempt = 0;
+            let completion = loop {
+                match provider.complete(
+                    &CompletionRequest {
+                        model: model.clone(),
+                        messages: messages.clone(),
+                        tools: tools.clone(),
+                    },
+                    cancel,
+                    &mut |event| match event {
+                        StreamEvent::TextDelta(text) => {
+                            streamed.push_str(&text);
+                            self.emit(
+                                session_id,
+                                Some(&run_id),
+                                Some(&turn_id),
+                                KnownPayload::AssistantDelta(AssistantDelta { text }),
+                            )
+                        }
+                        StreamEvent::ToolCall(_) => Ok(()),
+                    },
+                ) {
+                    Ok(completion) => break completion,
+                    Err(BloraError::Cancelled) => {
+                        return self.cancel_run(session_id, &run_id, &turn_id);
+                    }
+                    Err(err) if attempt < 1 && is_retryable(&err) => {
+                        attempt += 1;
                         self.emit(
                             session_id,
                             Some(&run_id),
                             Some(&turn_id),
-                            KnownPayload::AssistantDelta(AssistantDelta { text }),
-                        )
+                            KnownPayload::RetryStarted(RetryStarted {
+                                attempt,
+                                reason: err.to_string(),
+                            }),
+                        )?;
                     }
-                    StreamEvent::ToolCall(_) => Ok(()),
-                },
-            ) {
-                Ok(completion) => completion,
-                Err(BloraError::Cancelled) => {
-                    return self.cancel_run(session_id, &run_id, &turn_id);
-                }
-                Err(err) => {
-                    self.emit(
-                        session_id,
-                        Some(&run_id),
-                        Some(&turn_id),
-                        KnownPayload::RunFailed(RunFailed {
-                            error: err.to_string(),
-                        }),
-                    )?;
-                    return Err(err);
+                    Err(err) => {
+                        self.emit(
+                            session_id,
+                            Some(&run_id),
+                            Some(&turn_id),
+                            KnownPayload::RunFailed(RunFailed {
+                                error: err.to_string(),
+                            }),
+                        )?;
+                        return Err(err);
+                    }
                 }
             };
 
@@ -339,12 +364,27 @@ impl Runtime {
                         summary: Some(format!("completed in {} model turns", turn + 1)),
                     }),
                 )?;
+                let _ = self.checkpoint(session_id, Some(&run_id), Some("run completed"));
                 return Ok(run_id);
             }
 
+            let mut fingerprints: Vec<String> = Vec::new();
             for call in completion.tool_calls {
                 if cancel.is_cancelled() {
                     return self.cancel_run(session_id, &run_id, &turn_id);
+                }
+                let fingerprint = format!("{}:{}", call.name, call.arguments);
+                fingerprints.push(fingerprint.clone());
+                if fingerprints.len() >= 4
+                    && fingerprints
+                        .iter()
+                        .rev()
+                        .take(4)
+                        .all(|item| item == &fingerprint)
+                {
+                    return Err(BloraError::Other(
+                        "repeated tool calls detected; aborting loop".to_owned(),
+                    ));
                 }
                 self.dispatch_tool(
                     session_id, &run_id, &turn_id, &backend, &call, options, cancel,
@@ -385,7 +425,7 @@ impl Runtime {
                 call_id: Some(call.id.clone()),
             }),
         )?;
-        let intercepted = match call.name.as_str() {
+        let execute = |backend: &LocalBackend| match call.name.as_str() {
             "delegate" => {
                 let prompt = arguments
                     .get("prompt")
@@ -429,6 +469,17 @@ impl Runtime {
                 .map(|id| format!("queued {id}"))
             }
             _ => ToolRegistry::execute(backend, &call.name, &arguments),
+        };
+        let intercepted = match execute(backend) {
+            Err(BloraError::ApprovalRequired(summary)) if options.interactive => {
+                if self.await_approval(session_id, run_id, turn_id, &call.name, &summary, cancel)? {
+                    let granted = LocalBackend::new(backend.policy().granting());
+                    execute(&granted)
+                } else {
+                    Err(BloraError::Policy(summary))
+                }
+            }
+            other => other,
         };
         match intercepted {
             Ok(text) => {
@@ -541,17 +592,52 @@ impl Runtime {
     }
 }
 
+fn is_retryable(err: &BloraError) -> bool {
+    let text = err.to_string().to_ascii_lowercase();
+    text.contains("429")
+        || text.contains("timeout")
+        || text.contains("temporar")
+        || text.contains("connection")
+}
+
 fn compile_messages(
     events: &[EventEnvelope],
     workspace: &str,
     mode: &str,
 ) -> Result<Vec<ChatMessage>> {
+    let compact_at = events
+        .iter()
+        .rposition(|event| event.event_type == "context.compaction.completed");
+    let (prefix, rest) = match compact_at {
+        Some(index) => {
+            let summary = events[index]
+                .decode_payload()
+                .ok()
+                .flatten()
+                .and_then(|payload| match payload {
+                    KnownPayload::ContextCompactionCompleted(done) => Some(done.summary),
+                    _ => None,
+                })
+                .unwrap_or_else(|| "(compacted)".to_owned());
+            (Some(summary), &events[index + 1..])
+        }
+        None => (None, events),
+    };
     let mut messages = vec![ChatMessage {
         role: "system".to_owned(),
         content: Some(system_prompt(workspace, mode)),
         tool_call_id: None,
         tool_calls: None,
     }];
+    if let Some(summary) = prefix {
+        messages.push(ChatMessage {
+            role: "system".to_owned(),
+            content: Some(format!("Prior context summary:\n{summary}")),
+            tool_call_id: None,
+            tool_calls: None,
+        });
+    }
+    let events = rest;
     let mut assistant_text = String::new();
     let mut tool_calls: Vec<ToolCall> = Vec::new();
 
@@ -750,6 +836,75 @@ mod tests {
         let projection = runtime.show_session(&session).unwrap();
         assert!(!projection.subagents.is_empty());
         assert_eq!(projection.subagents[0].status, "completed");
+    }
+
+    #[test]
+    fn compact_writes_summary_event() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let runtime = Runtime::new(store);
+        let session = runtime
+            .create_session(CreateSession {
+                title: None,
+                workspace_path: "/tmp".to_owned(),
+                mode: Mode::Code,
+                parent_session_id: None,
+            })
+            .unwrap();
+        runtime
+            .run_mock(
+                &session,
+                "hello",
+                &CancelToken::new(),
+                &MockRunOptions::default(),
+            )
+            .unwrap();
+        runtime.compact(&session).unwrap();
+        assert!(
+            runtime
+                .events(&session)
+                .unwrap()
+                .iter()
+                .any(|event| event.event_type == "context.compaction.completed")
+        );
+    }
+
+    #[test]
+    fn interactive_write_waits_for_approval() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open_in_memory().unwrap();
+        let runtime = Runtime::new(store);
+        let session = runtime
+            .create_session(CreateSession {
+                title: None,
+                workspace_path: dir.path().display().to_string(),
+                mode: Mode::Code,
+                parent_session_id: None,
+            })
+            .unwrap();
+        std::thread::scope(|scope| {
+            let session_for_run = session.clone();
+            scope.spawn(|| {
+                std::thread::sleep(std::time::Duration::from_millis(120));
+                let pending = runtime.pending_approvals(&session).unwrap();
+                assert!(!pending.is_empty());
+                runtime.resolve_approval(&pending[0].id, true).unwrap();
+            });
+            runtime
+                .run(
+                    &session_for_run,
+                    "WRITE_FILE please",
+                    &CancelToken::new(),
+                    &RunOptions {
+                        mock: true,
+                        interactive: true,
+                        auto_approve: false,
+                        ..RunOptions::default()
+                    },
+                )
+                .unwrap();
+        });
+        let written = std::fs::read_to_string(dir.path().join("ok.txt")).unwrap();
+        assert_eq!(written, "ok");
     }
 
     #[test]

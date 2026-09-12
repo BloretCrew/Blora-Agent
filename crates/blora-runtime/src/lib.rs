@@ -4,6 +4,8 @@
 //! In-process runtime shared by CLI, TUI, and Web.
 
 mod agents;
+mod approvals;
+mod compact;
 mod coordinator;
 mod work;
 

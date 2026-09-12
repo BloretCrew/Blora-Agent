@@ -143,6 +143,16 @@ impl Provider for MockProvider {
                 finish_reason: "stop".to_owned(),
                 ..Completion::default()
             }
+        } else if last_user.contains("WRITE_FILE") {
+            Completion {
+                tool_calls: vec![ToolCall {
+                    id: "call_mock_write".to_owned(),
+                    name: "write_file".to_owned(),
+                    arguments: json!({"path": "ok.txt", "contents": "ok"}).to_string(),
+                }],
+                finish_reason: "tool_calls".to_owned(),
+                ..Completion::default()
+            }
         } else if last_user.contains("[background-task]")
             || last_user.contains("[subagent:")
             || last_user.contains("Do not spawn another subagent")

@@ -94,6 +94,7 @@ impl Runtime {
             model: options.model.clone(),
             mock: options.mock,
             auto_approve: options.auto_approve,
+            interactive: options.interactive,
             max_turns: SUBAGENT_TURNS,
         };
         let child_prompt = format!("[subagent:{role}] {prompt}\nDo not spawn another subagent.");

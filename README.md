@@ -16,6 +16,7 @@
 - CLI、TUI、本地 Web UI（Blora Design）
 - Work 模式：可延迟后台任务、`blora task pump`、Web 服务每秒调度
 - Agent 模式：`delegate` 子代理，深度/并发预算限制
+- TUI/Web 交互审批、Git 只读工具、上下文压缩与 checkpoint
 
 ## 快速开始
 

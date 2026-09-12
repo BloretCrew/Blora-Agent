@@ -24,6 +24,10 @@
         <button type="button" class="blora-button" data-variant="primary" id="new-session">新建会话</button>
         <nav class="ba-session-list" id="session-list" aria-label="会话"></nav>
         <section class="ba-task-panel">
+          <h2>待审批</h2>
+          <div id="approval-list" class="ba-task-list"></div>
+        </section>
+        <section class="ba-task-panel">
           <h2>后台任务</h2>
           <div id="task-list" class="ba-task-list"></div>
         </section>
@@ -35,10 +39,13 @@
               <h1 id="session-title">选择一个会话</h1>
               <p class="ba-toolbar__path" id="session-path"></p>
             </div>
-            <label class="ba-check">
-              <input type="checkbox" id="auto-approve" />
-              自动批准写入/命令
-            </label>
+            <div class="ba-toolbar__actions">
+              <label class="ba-check">
+                <input type="checkbox" id="auto-approve" />
+                自动批准写入/命令
+              </label>
+              <button type="button" class="blora-button" id="compact">压缩上下文</button>
+            </div>
           </header>
           <section class="ba-meta" id="subagents" hidden></section>
           <section class="ba-thread" id="thread" aria-live="polite"></section>

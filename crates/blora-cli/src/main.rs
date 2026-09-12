@@ -111,6 +111,9 @@ enum SessionCommands {
     Replay {
         id: String,
     },
+    Compact {
+        id: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -294,6 +297,10 @@ fn dispatch(
             SessionCommands::Show { id } | SessionCommands::Replay { id } => {
                 print_projection(&runtime, &SessionId::parse(&id)?)?;
             }
+            SessionCommands::Compact { id } => {
+                let summary = runtime.compact(&SessionId::parse(&id)?)?;
+                println!("{summary}");
+            }
         },
         Commands::Run {
             session,
@@ -311,6 +318,7 @@ fn dispatch(
                     model: model.unwrap_or_default(),
                     mock,
                     auto_approve: yes,
+                    interactive: false,
                     max_turns: 12,
                 },
             )?;

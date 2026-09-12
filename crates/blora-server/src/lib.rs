@@ -19,7 +19,7 @@ use axum::routing::{get, post};
 use blora_runtime::{CancelToken, RunOptions, Runtime};
 use blora_session::TranscriptItem;
 use blora_storage::{CreateSession, CreateTask};
-use blora_types::{Mode, SessionId, TaskId};
+use blora_types::{ApprovalId, Mode, SessionId, TaskId};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
@@ -129,6 +129,9 @@ pub async fn serve(
         .route("/api/tasks", get(list_tasks).post(create_task))
         .route("/api/tasks/{id}/cancel", post(cancel_task))
         .route("/api/tasks/pump", post(pump_tasks))
+        .route("/api/approvals", get(list_approvals))
+        .route("/api/approvals/{id}/resolve", post(resolve_approval))
+        .route("/api/sessions/{id}/compact", post(compact_session))
         .layer(CorsLayer::permissive())
         .with_state(state);
     let listener = TcpListener::bind(bind)
@@ -228,6 +231,7 @@ async fn run_session(
             || (std::env::var("BLORA_API_KEY").is_err()
                 && std::env::var("OPENAI_API_KEY").is_err()),
         auto_approve: body.auto_approve,
+        interactive: !body.auto_approve,
         ..RunOptions::default()
     };
     tokio::task::spawn_blocking(move || {
@@ -343,6 +347,70 @@ async fn pump_tasks(State(state): State<AppState>) -> Result<Json<serde_json::Va
     Ok(Json(serde_json::json!({
         "pumped": finished.iter().map(ToString::to_string).collect::<Vec<_>>()
     })))
+}
+
+#[derive(Serialize)]
+struct ApprovalJson {
+    id: String,
+    summary: String,
+    status: String,
+    session_id: String,
+}
+
+#[derive(Deserialize)]
+struct ResolveBody {
+    allow: bool,
+}
+
+async fn list_approvals(
+    State(state): State<AppState>,
+    Query(query): Query<TaskQuery>,
+) -> Result<Json<Vec<ApprovalJson>>, ApiError> {
+    let Some(session) = query.session else {
+        return Ok(Json(Vec::new()));
+    };
+    let session_id = SessionId::parse(&session)?;
+    let rows = state
+        .runtime
+        .pending_approvals(&session_id)
+        .map_err(ApiError::from)?;
+    Ok(Json(
+        rows.into_iter()
+            .map(|row| ApprovalJson {
+                id: row.id.to_string(),
+                summary: row.summary,
+                status: row.status,
+                session_id: row.session_id.to_string(),
+            })
+            .collect(),
+    ))
+}
+
+async fn resolve_approval(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<ResolveBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    state
+        .runtime
+        .resolve_approval(&ApprovalId::parse(&id)?, body.allow)
+        .map_err(ApiError::from)?;
+    Ok(Json(
+        serde_json::json!({ "resolved": id, "allow": body.allow }),
+    ))
+}
+
+async fn compact_session(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let session_id = SessionId::parse(&id)?;
+    let runtime = state.runtime.clone();
+    let summary = tokio::task::spawn_blocking(move || runtime.compact(&session_id))
+        .await
+        .map_err(|err| ApiError(err.to_string()))?
+        .map_err(ApiError::from)?;
+    Ok(Json(serde_json::json!({ "summary": summary })))
 }
 
 fn task_json(task: blora_storage::TaskRecord) -> TaskJson {

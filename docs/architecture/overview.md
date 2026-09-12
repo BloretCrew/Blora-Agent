@@ -28,6 +28,8 @@ Blora Agent 是从零实现的本地优先 harness。第一阶段是单用户模
 - CLI、TUI、本地 Web UI（Blora Design）
 - Work：后台任务表、延迟调度、失败重试、session wakeup
 - Agent：`delegate` 子代理，深度 2 / 并发 3 / 子代理 6 turn 预算
+- 交互审批（TUI y/n，Web 允许/拒绝）
+- Git 只读工具、上下文压缩、checkpoint、provider 重试与工具死循环检测
 
 ```text
 cargo run -p blora-cli --       # TUI
