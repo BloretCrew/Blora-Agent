@@ -113,6 +113,19 @@ impl Provider for MockProvider {
             return Ok(scripted);
         }
         let last_role = request.messages.last().map(|message| message.role.as_str());
+        let system = request
+            .messages
+            .iter()
+            .find(|message| message.role == "system")
+            .and_then(|message| message.content.as_deref())
+            .unwrap_or_default();
+        let last_user = request
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == "user")
+            .and_then(|message| message.content.clone())
+            .unwrap_or_default();
         let completion = if last_role == Some("tool") {
             let listing = request
                 .messages
@@ -128,6 +141,51 @@ impl Provider for MockProvider {
             Completion {
                 text,
                 finish_reason: "stop".to_owned(),
+                ..Completion::default()
+            }
+        } else if last_user.contains("[background-task]")
+            || last_user.contains("[subagent:")
+            || last_user.contains("Do not spawn another subagent")
+        {
+            Completion {
+                tool_calls: vec![ToolCall {
+                    id: "call_mock_list".to_owned(),
+                    name: "list_dir".to_owned(),
+                    arguments: json!({"path": "."}).to_string(),
+                }],
+                finish_reason: "tool_calls".to_owned(),
+                ..Completion::default()
+            }
+        } else if system.contains("local agent harness")
+            || last_user.to_ascii_lowercase().contains("delegate")
+            || last_user.to_ascii_lowercase().contains("subagent")
+        {
+            Completion {
+                tool_calls: vec![ToolCall {
+                    id: "call_mock_delegate".to_owned(),
+                    name: "delegate".to_owned(),
+                    arguments: json!({
+                        "role": "worker",
+                        "prompt": last_user
+                    })
+                    .to_string(),
+                }],
+                finish_reason: "tool_calls".to_owned(),
+                ..Completion::default()
+            }
+        } else if system.contains("local work harness") {
+            Completion {
+                tool_calls: vec![ToolCall {
+                    id: "call_mock_schedule".to_owned(),
+                    name: "schedule_task".to_owned(),
+                    arguments: json!({
+                        "title": "follow-up",
+                        "prompt": last_user,
+                        "delay_seconds": 0
+                    })
+                    .to_string(),
+                }],
+                finish_reason: "tool_calls".to_owned(),
                 ..Completion::default()
             }
         } else {

@@ -20,7 +20,7 @@ pub use id::{
     WorkspaceId,
 };
 pub use mode::Mode;
-pub use status::{RunStatus, SessionStatus};
+pub use status::{RunStatus, SessionStatus, TaskStatus};
 pub use time::{Clock, FrozenClock, SystemClock};
 pub use visibility::Visibility;
 

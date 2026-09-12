@@ -23,6 +23,10 @@
         </header>
         <button type="button" class="blora-button" data-variant="primary" id="new-session">新建会话</button>
         <nav class="ba-session-list" id="session-list" aria-label="会话"></nav>
+        <section class="ba-task-panel">
+          <h2>后台任务</h2>
+          <div id="task-list" class="ba-task-list"></div>
+        </section>
       </blora-sidebar-layout-sidebar>
       <blora-sidebar-layout-content>
         <main class="ba-main">
@@ -36,7 +40,19 @@
               自动批准写入/命令
             </label>
           </header>
+          <section class="ba-meta" id="subagents" hidden></section>
           <section class="ba-thread" id="thread" aria-live="polite"></section>
+          <form class="ba-task-form" id="task-form">
+            <label class="blora-field">
+              <span class="blora-field__label">排队后台任务</span>
+              <input class="blora-input" id="task-title" placeholder="标题" required />
+            </label>
+            <label class="blora-field">
+              <span class="blora-field__label">延迟秒数</span>
+              <input class="blora-input" id="task-delay" type="number" min="0" value="0" />
+            </label>
+            <button type="submit" class="blora-button">排队</button>
+          </form>
           <form class="ba-composer" id="composer">
             <label class="blora-field">
               <span class="blora-field__label">向 Blora 发送</span>

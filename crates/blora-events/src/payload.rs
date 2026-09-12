@@ -153,6 +153,10 @@ pub struct PolicyDenied {
 pub struct TaskCreated {
     pub task_id: TaskId,
     pub title: String,
+    #[serde(default)]
+    pub prompt: Option<String>,
+    #[serde(default)]
+    pub delay_until: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -169,6 +173,8 @@ pub struct TaskProgress {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TaskCompleted {
     pub task_id: TaskId,
+    #[serde(default)]
+    pub summary: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -186,6 +192,10 @@ pub struct TaskWakeup {
 pub struct SubagentSpawned {
     pub agent_id: AgentId,
     pub role: String,
+    #[serde(default)]
+    pub child_session_id: Option<SessionId>,
+    #[serde(default)]
+    pub prompt: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -197,6 +207,8 @@ pub struct SubagentMessage {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SubagentCompleted {
     pub agent_id: AgentId,
+    #[serde(default)]
+    pub summary: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

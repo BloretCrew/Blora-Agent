@@ -11,15 +11,15 @@ use std::time::Duration;
 
 use axum::Json;
 use axum::Router;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use blora_runtime::{CancelToken, RunOptions, Runtime};
 use blora_session::TranscriptItem;
-use blora_storage::CreateSession;
-use blora_types::{Mode, SessionId};
+use blora_storage::{CreateSession, CreateTask};
+use blora_types::{Mode, SessionId, TaskId};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
@@ -60,6 +60,8 @@ struct SessionJson {
     mode: String,
     last_sequence: u64,
     transcript: Vec<TranscriptJson>,
+    tasks: Vec<TaskJson>,
+    subagents: Vec<SubagentJson>,
 }
 
 #[derive(Serialize)]
@@ -68,11 +70,51 @@ struct TranscriptJson {
     text: String,
 }
 
+#[derive(Serialize)]
+struct TaskJson {
+    id: String,
+    title: String,
+    status: String,
+    session_id: String,
+    attempt: u32,
+}
+
+#[derive(Serialize)]
+struct SubagentJson {
+    id: String,
+    role: String,
+    status: String,
+    summary: Option<String>,
+    child_session_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct TaskBody {
+    session_id: String,
+    title: String,
+    prompt: String,
+    #[serde(default)]
+    delay_seconds: u64,
+    #[serde(default)]
+    mock: bool,
+    #[serde(default)]
+    auto_approve: bool,
+}
+
 pub async fn serve(
     runtime: Arc<Runtime>,
     bind: SocketAddr,
     workspace: PathBuf,
 ) -> Result<(), String> {
+    let tick_runtime = runtime.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        loop {
+            interval.tick().await;
+            let runtime = tick_runtime.clone();
+            let _ = tokio::task::spawn_blocking(move || runtime.pump()).await;
+        }
+    });
     let state = AppState { runtime, workspace };
     let app = Router::new()
         .route("/", get(index))
@@ -84,6 +126,9 @@ pub async fn serve(
         .route("/api/sessions/{id}", get(show_session))
         .route("/api/sessions/{id}/run", post(run_session))
         .route("/api/sessions/{id}/events", get(session_events))
+        .route("/api/tasks", get(list_tasks).post(create_task))
+        .route("/api/tasks/{id}/cancel", post(cancel_task))
+        .route("/api/tasks/pump", post(pump_tasks))
         .layer(CorsLayer::permissive())
         .with_state(state);
     let listener = TcpListener::bind(bind)
@@ -233,6 +278,83 @@ async fn session_events(
     Ok(Sse::new(ReceiverStream::new(rx)).keep_alive(KeepAlive::default()))
 }
 
+#[derive(Deserialize)]
+struct TaskQuery {
+    session: Option<String>,
+}
+
+async fn list_tasks(
+    State(state): State<AppState>,
+    Query(query): Query<TaskQuery>,
+) -> Result<Json<Vec<TaskJson>>, ApiError> {
+    let session_id = query.session.as_deref().map(SessionId::parse).transpose()?;
+    let tasks = state
+        .runtime
+        .list_tasks(session_id.as_ref())
+        .map_err(ApiError::from)?;
+    Ok(Json(tasks.into_iter().map(task_json).collect()))
+}
+
+async fn create_task(
+    State(state): State<AppState>,
+    Json(body): Json<TaskBody>,
+) -> Result<Json<TaskJson>, ApiError> {
+    let delay_until = if body.delay_seconds == 0 {
+        None
+    } else {
+        Some(chrono::Utc::now() + chrono::Duration::seconds(body.delay_seconds as i64))
+    };
+    let mock = body.mock
+        || (std::env::var("BLORA_API_KEY").is_err() && std::env::var("OPENAI_API_KEY").is_err());
+    let id = state
+        .runtime
+        .create_task(CreateTask {
+            session_id: SessionId::parse(&body.session_id)?,
+            title: body.title,
+            prompt: body.prompt,
+            delay_until,
+            max_attempts: 3,
+            auto_approve: body.auto_approve,
+            mock,
+        })
+        .map_err(ApiError::from)?;
+    Ok(Json(task_json(
+        state.runtime.get_task(&id).map_err(ApiError::from)?,
+    )))
+}
+
+async fn cancel_task(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    state
+        .runtime
+        .cancel_task(&TaskId::parse(&id)?)
+        .map_err(ApiError::from)?;
+    Ok(Json(serde_json::json!({ "cancelled": id })))
+}
+
+async fn pump_tasks(State(state): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
+    let runtime = state.runtime.clone();
+    let finished = tokio::task::spawn_blocking(move || runtime.pump())
+        .await
+        .map_err(|err| ApiError(err.to_string()))?
+        .map_err(ApiError::from)?;
+    Ok(Json(serde_json::json!({
+        "pumped": finished.iter().map(ToString::to_string).collect::<Vec<_>>()
+    })))
+}
+
+fn task_json(task: blora_storage::TaskRecord) -> TaskJson {
+    TaskJson {
+        id: task.id.to_string(),
+        title: task.title,
+        status: task.status.as_str().to_owned(),
+        session_id: task.session_id.to_string(),
+        attempt: task.attempt,
+    }
+}
+
 fn to_json(state: &AppState, id: &SessionId) -> Result<SessionJson, ApiError> {
     let projection = state.runtime.show_session(id).map_err(ApiError::from)?;
     let session = projection
@@ -264,6 +386,28 @@ fn to_json(state: &AppState, id: &SessionId) -> Result<SessionJson, ApiError> {
                     kind: "system".to_owned(),
                     text: summary,
                 },
+            })
+            .collect(),
+        tasks: projection
+            .tasks
+            .into_iter()
+            .map(|task| TaskJson {
+                id: task.id.to_string(),
+                title: task.title,
+                status: task.status.as_str().to_owned(),
+                session_id: id.to_string(),
+                attempt: 0,
+            })
+            .collect(),
+        subagents: projection
+            .subagents
+            .into_iter()
+            .map(|agent| SubagentJson {
+                id: agent.id.to_string(),
+                role: agent.role,
+                status: agent.status,
+                summary: agent.summary,
+                child_session_id: agent.child_session_id.map(|value| value.to_string()),
             })
             .collect(),
     })

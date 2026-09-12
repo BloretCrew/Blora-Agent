@@ -4,5 +4,7 @@
 //! Local SQLite persistence. The event table is the source of truth.
 
 mod sqlite;
+mod tasks;
 
 pub use sqlite::{CreateSession, SessionSummary, SqliteStore};
+pub use tasks::{AgentRecord, CreateTask, TaskRecord};

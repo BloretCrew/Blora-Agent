@@ -3,7 +3,8 @@
 
 use blora_events::{EventEnvelope, KnownPayload};
 use blora_types::{
-    BloraError, EventId, Mode, Result, RunId, RunStatus, SessionId, SessionStatus, TurnId,
+    AgentId, BloraError, EventId, Mode, Result, RunId, RunStatus, SessionId, SessionStatus, TaskId,
+    TaskStatus, TurnId,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -56,11 +57,29 @@ pub enum TranscriptItem {
     },
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TaskView {
+    pub id: TaskId,
+    pub title: String,
+    pub status: TaskStatus,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SubagentView {
+    pub id: AgentId,
+    pub role: String,
+    pub child_session_id: Option<SessionId>,
+    pub status: String,
+    pub summary: Option<String>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SessionProjection {
     pub session: Option<SessionRecord>,
     pub runs: Vec<RunRecord>,
     pub transcript: Vec<TranscriptItem>,
+    pub tasks: Vec<TaskView>,
+    pub subagents: Vec<SubagentView>,
     pub last_sequence: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -196,6 +215,109 @@ pub fn apply_event(projection: &mut SessionProjection, event: &EventEnvelope) ->
         KnownPayload::UsageRecorded(usage) => {
             projection.input_tokens += usage.input_tokens;
             projection.output_tokens += usage.output_tokens;
+        }
+        KnownPayload::TaskCreated(task) => {
+            projection.tasks.push(TaskView {
+                id: task.task_id,
+                title: task.title.clone(),
+                status: if task.delay_until.is_some() {
+                    TaskStatus::Scheduled
+                } else {
+                    TaskStatus::Queued
+                },
+            });
+            projection.transcript.push(TranscriptItem::System {
+                summary: format!("task created: {}", task.title),
+                event_id: event.event_id.clone(),
+            });
+        }
+        KnownPayload::TaskStarted(task) => {
+            if let Some(view) = projection
+                .tasks
+                .iter_mut()
+                .find(|item| item.id == task.task_id)
+            {
+                view.status = TaskStatus::Running;
+            }
+        }
+        KnownPayload::TaskCompleted(task) => {
+            if let Some(view) = projection
+                .tasks
+                .iter_mut()
+                .find(|item| item.id == task.task_id)
+            {
+                view.status = TaskStatus::Completed;
+            }
+            projection.transcript.push(TranscriptItem::System {
+                summary: format!(
+                    "task completed: {}",
+                    task.summary.unwrap_or_else(|| task.task_id.to_string())
+                ),
+                event_id: event.event_id.clone(),
+            });
+        }
+        KnownPayload::TaskFailed(task) => {
+            if let Some(view) = projection
+                .tasks
+                .iter_mut()
+                .find(|item| item.id == task.task_id)
+            {
+                view.status = TaskStatus::Failed;
+            }
+            projection.transcript.push(TranscriptItem::System {
+                summary: format!("task failed: {}", task.error),
+                event_id: event.event_id.clone(),
+            });
+        }
+        KnownPayload::TaskWakeup(task) => {
+            projection.transcript.push(TranscriptItem::System {
+                summary: format!("task wakeup {}", task.task_id),
+                event_id: event.event_id.clone(),
+            });
+        }
+        KnownPayload::SubagentSpawned(spawned) => {
+            projection.subagents.push(SubagentView {
+                id: spawned.agent_id,
+                role: spawned.role.clone(),
+                child_session_id: spawned.child_session_id,
+                status: "running".to_owned(),
+                summary: None,
+            });
+            projection.transcript.push(TranscriptItem::System {
+                summary: format!("subagent spawned: {}", spawned.role),
+                event_id: event.event_id.clone(),
+            });
+        }
+        KnownPayload::SubagentCompleted(done) => {
+            if let Some(view) = projection
+                .subagents
+                .iter_mut()
+                .find(|item| item.id == done.agent_id)
+            {
+                view.status = "completed".to_owned();
+                view.summary.clone_from(&done.summary);
+            }
+            projection.transcript.push(TranscriptItem::System {
+                summary: format!(
+                    "subagent completed: {}",
+                    done.summary.unwrap_or_else(|| done.agent_id.to_string())
+                ),
+                event_id: event.event_id.clone(),
+            });
+        }
+        KnownPayload::SubagentFailed(failed) => {
+            if let Some(view) = projection
+                .subagents
+                .iter_mut()
+                .find(|item| item.id == failed.agent_id)
+            {
+                view.status = "failed".to_owned();
+                view.summary = Some(failed.error.clone());
+            }
+            projection.transcript.push(TranscriptItem::System {
+                summary: format!("subagent failed: {}", failed.error),
+                event_id: event.event_id.clone(),
+            });
         }
         other => {
             apply_run_transition(projection, event, &other)?;

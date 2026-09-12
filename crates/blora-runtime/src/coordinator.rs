@@ -14,7 +14,7 @@ use blora_model::{
 };
 use blora_policy::Policy;
 use blora_session::SessionProjection;
-use blora_storage::{CreateSession, SessionSummary, SqliteStore};
+use blora_storage::{CreateSession, CreateTask, SessionSummary, SqliteStore};
 use blora_tools::ToolRegistry;
 use blora_types::{BloraError, CancelToken, Mode, Result, RunId, SessionId, TurnId};
 use serde_json::Value;
@@ -54,7 +54,7 @@ impl Default for RunOptions {
 }
 
 pub struct Runtime {
-    store: SqliteStore,
+    pub(crate) store: SqliteStore,
 }
 
 impl Runtime {
@@ -346,7 +346,9 @@ impl Runtime {
                 if cancel.is_cancelled() {
                     return self.cancel_run(session_id, &run_id, &turn_id);
                 }
-                self.dispatch_tool(session_id, &run_id, &turn_id, &backend, &call)?;
+                self.dispatch_tool(
+                    session_id, &run_id, &turn_id, &backend, &call, options, cancel,
+                )?;
             }
         }
 
@@ -368,6 +370,8 @@ impl Runtime {
         turn_id: &TurnId,
         backend: &LocalBackend,
         call: &ToolCall,
+        options: &RunOptions,
+        cancel: &CancelToken,
     ) -> Result<()> {
         let arguments: Value = serde_json::from_str(&call.arguments)
             .unwrap_or_else(|_| serde_json::json!({ "raw": call.arguments }));
@@ -381,7 +385,52 @@ impl Runtime {
                 call_id: Some(call.id.clone()),
             }),
         )?;
-        match ToolRegistry::execute(backend, &call.name, &arguments) {
+        let intercepted = match call.name.as_str() {
+            "delegate" => {
+                let prompt = arguments
+                    .get("prompt")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let role = arguments
+                    .get("role")
+                    .and_then(Value::as_str)
+                    .unwrap_or("worker");
+                self.spawn_subagent(session_id, role, prompt, options, cancel)
+            }
+            "schedule_task" => {
+                let title = arguments
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .unwrap_or("scheduled")
+                    .to_owned();
+                let prompt = arguments
+                    .get("prompt")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let delay = arguments
+                    .get("delay_seconds")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let delay_until = if delay == 0 {
+                    None
+                } else {
+                    Some(chrono::Utc::now() + chrono::Duration::seconds(delay as i64))
+                };
+                self.create_task(CreateTask {
+                    session_id: session_id.clone(),
+                    title,
+                    prompt,
+                    delay_until,
+                    max_attempts: 3,
+                    auto_approve: options.auto_approve,
+                    mock: options.mock,
+                })
+                .map(|id| format!("queued {id}"))
+            }
+            _ => ToolRegistry::execute(backend, &call.name, &arguments),
+        };
+        match intercepted {
             Ok(text) => {
                 self.emit(
                     session_id,
@@ -473,7 +522,7 @@ impl Runtime {
         Err(BloraError::Cancelled)
     }
 
-    fn emit(
+    pub(crate) fn emit(
         &self,
         session_id: &SessionId,
         run_id: Option<&RunId>,
@@ -637,6 +686,70 @@ mod tests {
                 .any(|run| run.status.as_str() == "cancelled")
         );
         assert!(projection.runs.iter().all(|run| run.cancel_requested));
+    }
+
+    #[test]
+    fn pumps_due_background_task() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("hello.txt"), "hi").unwrap();
+        let store = SqliteStore::open_in_memory().unwrap();
+        let runtime = Runtime::new(store);
+        let session = runtime
+            .create_session(CreateSession {
+                title: None,
+                workspace_path: dir.path().display().to_string(),
+                mode: Mode::Work,
+                parent_session_id: None,
+            })
+            .unwrap();
+        let task_id = runtime
+            .create_task(CreateTask {
+                session_id: session.clone(),
+                title: "scan".to_owned(),
+                prompt: "list files".to_owned(),
+                delay_until: None,
+                max_attempts: 1,
+                auto_approve: true,
+                mock: true,
+            })
+            .unwrap();
+        let finished = runtime.pump().unwrap();
+        assert!(finished.contains(&task_id));
+        assert_eq!(
+            runtime.get_task(&task_id).unwrap().status.as_str(),
+            "completed"
+        );
+    }
+
+    #[test]
+    fn agent_mode_spawns_code_child() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("hello.txt"), "hi").unwrap();
+        let store = SqliteStore::open_in_memory().unwrap();
+        let runtime = Runtime::new(store);
+        let session = runtime
+            .create_session(CreateSession {
+                title: None,
+                workspace_path: dir.path().display().to_string(),
+                mode: Mode::Agent,
+                parent_session_id: None,
+            })
+            .unwrap();
+        runtime
+            .run(
+                &session,
+                "delegate a workspace listing",
+                &CancelToken::new(),
+                &RunOptions {
+                    mock: true,
+                    auto_approve: true,
+                    ..RunOptions::default()
+                },
+            )
+            .unwrap();
+        let projection = runtime.show_session(&session).unwrap();
+        assert!(!projection.subagents.is_empty());
+        assert_eq!(projection.subagents[0].status, "completed");
     }
 
     #[test]

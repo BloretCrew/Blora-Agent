@@ -9,8 +9,9 @@ use std::sync::Arc;
 
 use blora_runtime::{CancelToken, RunOptions, Runtime};
 use blora_session::TranscriptItem;
-use blora_storage::{CreateSession, SqliteStore};
-use blora_types::{Mode, SessionId};
+use blora_storage::{CreateSession, CreateTask, SqliteStore};
+use blora_types::{Mode, SessionId, TaskId};
+use chrono::{Duration, Utc};
 use clap::{Parser, Subcommand};
 
 const LICENSE_NOTICE: &str = "\
@@ -73,6 +74,11 @@ enum Commands {
         #[arg(long)]
         workspace: Option<PathBuf>,
     },
+    /// Durable background tasks.
+    Task {
+        #[command(subcommand)]
+        command: TaskCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -92,6 +98,37 @@ enum SessionCommands {
     Replay {
         id: String,
     },
+}
+
+#[derive(Subcommand)]
+enum TaskCommands {
+    Create {
+        #[arg(long)]
+        session: String,
+        #[arg(long)]
+        title: String,
+        #[arg(long)]
+        prompt: String,
+        /// Delay such as 10s, 5m, or 1h.
+        #[arg(long)]
+        r#in: Option<String>,
+        #[arg(long)]
+        mock: bool,
+        #[arg(long)]
+        yes: bool,
+    },
+    List {
+        #[arg(long)]
+        session: Option<String>,
+    },
+    Show {
+        id: String,
+    },
+    Cancel {
+        id: String,
+    },
+    /// Run due tasks once.
+    Pump,
 }
 
 fn main() {
@@ -132,6 +169,66 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 fn dispatch(runtime: Runtime, command: Commands) -> Result<(), Box<dyn std::error::Error>> {
     match command {
         Commands::License | Commands::Serve { .. } => unreachable!(),
+        Commands::Task { command } => match command {
+            TaskCommands::Create {
+                session,
+                title,
+                prompt,
+                r#in,
+                mock,
+                yes,
+            } => {
+                let delay_until = r#in.as_deref().map(parse_delay).transpose()?;
+                let id = runtime.create_task(CreateTask {
+                    session_id: SessionId::parse(&session)?,
+                    title,
+                    prompt,
+                    delay_until,
+                    max_attempts: 3,
+                    auto_approve: yes,
+                    mock,
+                })?;
+                println!("{id}");
+            }
+            TaskCommands::List { session } => {
+                let session_id = session.as_deref().map(SessionId::parse).transpose()?;
+                for task in runtime.list_tasks(session_id.as_ref())? {
+                    println!(
+                        "{}  {}  {}  attempt={}/{}",
+                        task.id,
+                        task.status.as_str(),
+                        task.title,
+                        task.attempt,
+                        task.max_attempts
+                    );
+                }
+            }
+            TaskCommands::Show { id } => {
+                let task = runtime.get_task(&TaskId::parse(&id)?)?;
+                println!(
+                    "{}  {}  session={}  delay={:?}\n{}",
+                    task.id,
+                    task.status.as_str(),
+                    task.session_id,
+                    task.delay_until,
+                    task.prompt
+                );
+            }
+            TaskCommands::Cancel { id } => {
+                runtime.cancel_task(&TaskId::parse(&id)?)?;
+                println!("cancelled {id}");
+            }
+            TaskCommands::Pump => {
+                let finished = runtime.pump()?;
+                if finished.is_empty() {
+                    println!("no due tasks");
+                } else {
+                    for id in finished {
+                        println!("pumped {id}");
+                    }
+                }
+            }
+        },
         Commands::Tui { workspace } => {
             let workspace = workspace.unwrap_or(std::env::current_dir()?);
             blora_tui::run(&runtime, &workspace)?;
@@ -209,6 +306,17 @@ fn print_projection(
             projection.last_sequence
         );
     }
+    for task in &projection.tasks {
+        println!(
+            "  task {}  {}  {}",
+            task.id,
+            task.status.as_str(),
+            task.title
+        );
+    }
+    for agent in &projection.subagents {
+        println!("  subagent {}  {}  {}", agent.id, agent.role, agent.status);
+    }
     for run in projection.runs {
         println!(
             "  run {}  status={}  cancel={}",
@@ -228,6 +336,23 @@ fn print_projection(
         }
     }
     Ok(())
+}
+
+fn parse_delay(spec: &str) -> Result<chrono::DateTime<Utc>, Box<dyn std::error::Error>> {
+    let amount = spec
+        .trim()
+        .trim_end_matches(|ch: char| ch.is_ascii_alphabetic())
+        .parse::<i64>()?;
+    let duration = if spec.ends_with('s') {
+        Duration::seconds(amount)
+    } else if spec.ends_with('m') {
+        Duration::minutes(amount)
+    } else if spec.ends_with('h') {
+        Duration::hours(amount)
+    } else {
+        return Err("delay must end with s, m, or h".into());
+    };
+    Ok(Utc::now() + duration)
 }
 
 fn open_store(home: Option<&std::path::Path>) -> Result<SqliteStore, Box<dyn std::error::Error>> {

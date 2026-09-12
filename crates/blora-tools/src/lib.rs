@@ -77,6 +77,31 @@ impl ToolRegistry {
                     "required": ["command"]
                 }),
             },
+            ToolSpec {
+                name: "schedule_task",
+                description: "Queue a durable background task on this session. delay_seconds=0 runs on the next scheduler tick.",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string"},
+                        "prompt": {"type": "string"},
+                        "delay_seconds": {"type": "integer", "minimum": 0}
+                    },
+                    "required": ["title", "prompt"]
+                }),
+            },
+            ToolSpec {
+                name: "delegate",
+                description: "Spawn a child agent with a limited turn budget. The child runs in Code mode and returns a summary.",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "role": {"type": "string"},
+                        "prompt": {"type": "string"}
+                    },
+                    "required": ["prompt"]
+                }),
+            },
         ]
     }
 

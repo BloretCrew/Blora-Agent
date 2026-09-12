@@ -26,6 +26,8 @@ Blora Agent 是从零实现的本地优先 harness。第一阶段是单用户模
 - 工作区路径沙箱；写入和 shell 默认需审批
 - Mock Provider 与 OpenAI 兼容流式 adapter
 - CLI、TUI、本地 Web UI（Blora Design）
+- Work：后台任务表、延迟调度、失败重试、session wakeup
+- Agent：`delegate` 子代理，深度 2 / 并发 3 / 子代理 6 turn 预算
 
 ```text
 cargo run -p blora-cli -- tui

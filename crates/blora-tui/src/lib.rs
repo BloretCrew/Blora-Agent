@@ -47,7 +47,14 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                 let title = projection
                     .as_ref()
                     .and_then(|p| p.session.as_ref())
-                    .map(|s| format!("Blora Agent  {}  {}", s.id, s.workspace_path))
+                    .map(|s| {
+                        let tasks = projection.as_ref().map(|p| p.tasks.len()).unwrap_or(0);
+                        let agents = projection.as_ref().map(|p| p.subagents.len()).unwrap_or(0);
+                        format!(
+                            "Blora Agent  {}  {}  tasks:{tasks}  agents:{agents}",
+                            s.id, s.workspace_path
+                        )
+                    })
                     .unwrap_or_else(|| "Blora Agent".to_owned());
                 frame.render_widget(
                     Paragraph::new(status.clone()).block(

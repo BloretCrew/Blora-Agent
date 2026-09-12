@@ -9,6 +9,8 @@ const title = document.querySelector("#session-title");
 const pathEl = document.querySelector("#session-path");
 const prompt = document.querySelector("#prompt");
 const autoApprove = document.querySelector("#auto-approve");
+const taskList = document.querySelector("#task-list");
+const subagents = document.querySelector("#subagents");
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -64,6 +66,8 @@ async function selectSession(id) {
   title.textContent = session.title || session.id;
   pathEl.textContent = session.workspace_path;
   renderTranscript(session.transcript);
+  renderSubagents(session.subagents);
+  await refreshTasks();
   await refreshSessions();
   if (state.source) {
     state.source.close();
@@ -106,6 +110,53 @@ document.querySelector("#composer").addEventListener("submit", async (event) => 
     }),
   });
   await selectSession(state.sessionId);
+});
+
+function renderSubagents(items) {
+  if (!items || items.length === 0) {
+    subagents.hidden = true;
+    subagents.replaceChildren();
+    return;
+  }
+  subagents.hidden = false;
+  subagents.replaceChildren();
+  for (const item of items) {
+    const row = document.createElement("p");
+    row.textContent = `子代理 ${item.role} · ${item.status}`;
+    subagents.append(row);
+  }
+}
+
+async function refreshTasks() {
+  const query = state.sessionId ? `?session=${state.sessionId}` : "";
+  const tasks = await api(`/api/tasks${query}`);
+  taskList.replaceChildren();
+  for (const task of tasks) {
+    const row = document.createElement("p");
+    row.textContent = `${task.title} · ${task.status}`;
+    taskList.append(row);
+  }
+}
+
+document.querySelector("#task-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!state.sessionId) {
+    return;
+  }
+  const titleInput = document.querySelector("#task-title");
+  const delayInput = document.querySelector("#task-delay");
+  await api("/api/tasks", {
+    method: "POST",
+    body: JSON.stringify({
+      session_id: state.sessionId,
+      title: titleInput.value.trim(),
+      prompt: titleInput.value.trim(),
+      delay_seconds: Number(delayInput.value || 0),
+      auto_approve: autoApprove.checked,
+    }),
+  });
+  titleInput.value = "";
+  await refreshTasks();
 });
 
 refreshSessions().catch((error) => {

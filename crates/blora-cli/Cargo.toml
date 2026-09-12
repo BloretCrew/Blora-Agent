@@ -18,6 +18,7 @@ blora-session.workspace = true
 blora-storage.workspace = true
 blora-tui.workspace = true
 blora-types.workspace = true
+chrono.workspace = true
 clap.workspace = true
 dirs.workspace = true
 tokio.workspace = true

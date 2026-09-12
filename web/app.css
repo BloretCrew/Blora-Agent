@@ -132,6 +132,35 @@ blora-sidebar-layout-sidebar {
   min-height: 40px;
 }
 
+.ba-task-panel {
+  margin-top: var(--blora-space-6, 32px);
+}
+
+.ba-task-panel h2,
+.ba-meta {
+  font-size: var(--blora-text-sm, 14px);
+  color: var(--blora-text-muted, #74717c);
+}
+
+.ba-task-list,
+.ba-meta {
+  display: grid;
+  gap: 8px;
+}
+
+.ba-task-form {
+  display: grid;
+  grid-template-columns: 1fr 120px auto;
+  gap: var(--blora-space-3, 12px);
+  align-items: end;
+}
+
+@media (max-width: 720px) {
+  .ba-task-form {
+    grid-template-columns: 1fr;
+  }
+}
+
 @media (max-width: 720px) {
   .ba-main {
     padding: var(--blora-space-4, 16px);

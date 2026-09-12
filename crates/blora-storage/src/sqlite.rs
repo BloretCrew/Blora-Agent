@@ -5,11 +5,12 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
+use crate::{AgentRecord, CreateTask, TaskRecord};
 use blora_events::{EventEnvelope, KnownPayload, NewEvent, SessionCreated};
 use blora_session::{SessionProjection, rebuild};
 use blora_types::{
-    Actor, BloraError, Clock, EventId, Mode, Result, RunId, SCHEMA_VERSION, SessionId,
-    SessionStatus, SystemClock, TurnId, Visibility,
+    Actor, AgentId, BloraError, Clock, EventId, Mode, Result, RunId, SCHEMA_VERSION, SessionId,
+    SessionStatus, SystemClock, TaskId, TaskStatus, TurnId, Visibility,
 };
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -64,9 +65,15 @@ impl SqliteStore {
         .map_err(BloraError::storage)?;
         conn.execute_batch(SCHEMA_SQL)
             .map_err(BloraError::storage)?;
+        let now = Utc::now().to_rfc3339();
         conn.execute(
             "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (1, ?1)",
-            params![Utc::now().to_rfc3339()],
+            params![now],
+        )
+        .map_err(BloraError::storage)?;
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (2, ?1)",
+            params![now],
         )
         .map_err(BloraError::storage)?;
         Ok(Self {
@@ -217,6 +224,386 @@ impl SqliteStore {
         }
         Ok(out)
     }
+
+    pub fn session_parent(&self, session_id: &SessionId) -> Result<Option<SessionId>> {
+        let conn = self.lock();
+        let parent: Option<Option<String>> = conn
+            .query_row(
+                "SELECT parent_session_id FROM sessions WHERE id = ?1",
+                params![session_id.as_str()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(BloraError::storage)?;
+        match parent.flatten() {
+            Some(id) => Ok(Some(SessionId::parse(&id)?)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn insert_task(&self, id: &TaskId, spec: &CreateTask, now: DateTime<Utc>) -> Result<()> {
+        let status = if spec.delay_until.is_some() {
+            TaskStatus::Scheduled
+        } else {
+            TaskStatus::Queued
+        };
+        let conn = self.lock();
+        conn.execute(
+            "INSERT INTO tasks (
+                id, session_id, title, prompt, status, run_id, delay_until,
+                attempt, max_attempts, auto_approve, mock, error, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, 0, ?7, ?8, ?9, NULL, ?10, ?11)",
+            params![
+                id.as_str(),
+                spec.session_id.as_str(),
+                spec.title,
+                spec.prompt,
+                status.as_str(),
+                spec.delay_until.map(|t| t.to_rfc3339()),
+                spec.max_attempts as i64,
+                i64::from(spec.auto_approve),
+                i64::from(spec.mock),
+                now.to_rfc3339(),
+                now.to_rfc3339(),
+            ],
+        )
+        .map_err(BloraError::storage)?;
+        Ok(())
+    }
+
+    pub fn get_task(&self, task_id: &TaskId) -> Result<TaskRecord> {
+        let conn = self.lock();
+        let row = conn
+            .query_row(
+                "SELECT id, session_id, title, prompt, status, run_id, delay_until,
+                        attempt, max_attempts, auto_approve, mock, error, created_at, updated_at
+                 FROM tasks WHERE id = ?1",
+                params![task_id.as_str()],
+                task_row,
+            )
+            .map_err(|err| match err {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    BloraError::Other(format!("task not found: {task_id}"))
+                }
+                other => BloraError::storage(other),
+            })?;
+        row_to_task(row)
+    }
+
+    pub fn list_tasks(&self, session_id: Option<&SessionId>) -> Result<Vec<TaskRecord>> {
+        let conn = self.lock();
+        let mut out = Vec::new();
+        if let Some(session_id) = session_id {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, session_id, title, prompt, status, run_id, delay_until,
+                            attempt, max_attempts, auto_approve, mock, error, created_at, updated_at
+                     FROM tasks WHERE session_id = ?1 ORDER BY created_at DESC",
+                )
+                .map_err(BloraError::storage)?;
+            let rows = stmt
+                .query_map(params![session_id.as_str()], task_row)
+                .map_err(BloraError::storage)?;
+            for row in rows {
+                out.push(row_to_task(row.map_err(BloraError::storage)?)?);
+            }
+        } else {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, session_id, title, prompt, status, run_id, delay_until,
+                            attempt, max_attempts, auto_approve, mock, error, created_at, updated_at
+                     FROM tasks ORDER BY created_at DESC",
+                )
+                .map_err(BloraError::storage)?;
+            let rows = stmt.query_map([], task_row).map_err(BloraError::storage)?;
+            for row in rows {
+                out.push(row_to_task(row.map_err(BloraError::storage)?)?);
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn claim_due_tasks(&self, now: DateTime<Utc>) -> Result<Vec<TaskRecord>> {
+        let due = self.list_due(now)?;
+        let mut claimed = Vec::new();
+        for task in due {
+            if self.cas_task_status(
+                &task.id,
+                &[TaskStatus::Queued, TaskStatus::Scheduled],
+                TaskStatus::Running,
+                now,
+                None,
+                None,
+            )? {
+                let mut running = self.get_task(&task.id)?;
+                running.attempt += 1;
+                self.set_task_attempt(&running.id, running.attempt, now)?;
+                claimed.push(self.get_task(&task.id)?);
+            }
+        }
+        Ok(claimed)
+    }
+
+    fn list_due(&self, now: DateTime<Utc>) -> Result<Vec<TaskRecord>> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, session_id, title, prompt, status, run_id, delay_until,
+                        attempt, max_attempts, auto_approve, mock, error, created_at, updated_at
+                 FROM tasks
+                 WHERE status IN ('queued', 'scheduled')
+                   AND (delay_until IS NULL OR delay_until <= ?1)
+                 ORDER BY created_at ASC",
+            )
+            .map_err(BloraError::storage)?;
+        let rows = stmt
+            .query_map(params![now.to_rfc3339()], task_row)
+            .map_err(BloraError::storage)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row_to_task(row.map_err(BloraError::storage)?)?);
+        }
+        Ok(out)
+    }
+
+    pub fn cas_task_status(
+        &self,
+        task_id: &TaskId,
+        from: &[TaskStatus],
+        to: TaskStatus,
+        now: DateTime<Utc>,
+        error: Option<&str>,
+        run_id: Option<&RunId>,
+    ) -> Result<bool> {
+        let placeholders = from
+            .iter()
+            .map(|status| format!("'{}'", status.as_str()))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "UPDATE tasks SET status = ?1, updated_at = ?2, error = ?3, run_id = COALESCE(?4, run_id)
+             WHERE id = ?5 AND status IN ({placeholders})"
+        );
+        let conn = self.lock();
+        let changed = conn
+            .execute(
+                &sql,
+                params![
+                    to.as_str(),
+                    now.to_rfc3339(),
+                    error,
+                    run_id.map(RunId::as_str),
+                    task_id.as_str(),
+                ],
+            )
+            .map_err(BloraError::storage)?;
+        Ok(changed > 0)
+    }
+
+    pub fn set_task_attempt(
+        &self,
+        task_id: &TaskId,
+        attempt: u32,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE tasks SET attempt = ?1, updated_at = ?2 WHERE id = ?3",
+            params![attempt as i64, now.to_rfc3339(), task_id.as_str()],
+        )
+        .map_err(BloraError::storage)?;
+        Ok(())
+    }
+
+    pub fn reschedule_task(
+        &self,
+        task_id: &TaskId,
+        delay_until: DateTime<Utc>,
+        now: DateTime<Utc>,
+        error: &str,
+    ) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE tasks SET status = 'scheduled', delay_until = ?1, updated_at = ?2, error = ?3
+             WHERE id = ?4",
+            params![
+                delay_until.to_rfc3339(),
+                now.to_rfc3339(),
+                error,
+                task_id.as_str()
+            ],
+        )
+        .map_err(BloraError::storage)?;
+        Ok(())
+    }
+
+    pub fn insert_agent(&self, record: &AgentRecord) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "INSERT INTO agents (
+                id, parent_session_id, child_session_id, role, depth, status,
+                budget_turns, summary, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                record.id.as_str(),
+                record.parent_session_id.as_str(),
+                record.child_session_id.as_str(),
+                record.role,
+                record.depth as i64,
+                record.status,
+                record.budget_turns as i64,
+                record.summary,
+                record.created_at.to_rfc3339(),
+                record.updated_at.to_rfc3339(),
+            ],
+        )
+        .map_err(BloraError::storage)?;
+        Ok(())
+    }
+
+    pub fn update_agent(
+        &self,
+        agent_id: &AgentId,
+        status: &str,
+        summary: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE agents SET status = ?1, summary = ?2, updated_at = ?3 WHERE id = ?4",
+            params![status, summary, now.to_rfc3339(), agent_id.as_str()],
+        )
+        .map_err(BloraError::storage)?;
+        Ok(())
+    }
+
+    pub fn running_child_count(&self, parent: &SessionId) -> Result<u32> {
+        let conn = self.lock();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM agents WHERE parent_session_id = ?1 AND status = 'running'",
+                params![parent.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(BloraError::storage)?;
+        Ok(u32::try_from(count).unwrap_or(0))
+    }
+
+    pub fn list_agents(&self, parent: &SessionId) -> Result<Vec<AgentRecord>> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, parent_session_id, child_session_id, role, depth, status,
+                        budget_turns, summary, created_at, updated_at
+                 FROM agents WHERE parent_session_id = ?1 ORDER BY created_at ASC",
+            )
+            .map_err(BloraError::storage)?;
+        let rows = stmt
+            .query_map(params![parent.as_str()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, String>(9)?,
+                ))
+            })
+            .map_err(BloraError::storage)?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, parent_id, child, role, depth, status, budget, summary, created, updated) =
+                row.map_err(BloraError::storage)?;
+            out.push(AgentRecord {
+                id: AgentId::parse(&id)?,
+                parent_session_id: SessionId::parse(&parent_id)?,
+                child_session_id: SessionId::parse(&child)?,
+                role,
+                depth: u32::try_from(depth).unwrap_or(0),
+                status,
+                budget_turns: u32::try_from(budget).unwrap_or(0),
+                summary,
+                created_at: parse_time(&created)?,
+                updated_at: parse_time(&updated)?,
+            });
+        }
+        Ok(out)
+    }
+}
+
+type TaskRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    i64,
+    i64,
+    i64,
+    i64,
+    Option<String>,
+    String,
+    String,
+);
+
+fn task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRow> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+        row.get(6)?,
+        row.get(7)?,
+        row.get(8)?,
+        row.get(9)?,
+        row.get(10)?,
+        row.get(11)?,
+        row.get(12)?,
+        row.get(13)?,
+    ))
+}
+
+fn row_to_task(row: TaskRow) -> Result<TaskRecord> {
+    let (
+        id,
+        session_id,
+        title,
+        prompt,
+        status,
+        run_id,
+        delay_until,
+        attempt,
+        max_attempts,
+        auto_approve,
+        mock,
+        error,
+        created_at,
+        updated_at,
+    ) = row;
+    Ok(TaskRecord {
+        id: TaskId::parse(&id)?,
+        session_id: SessionId::parse(&session_id)?,
+        title,
+        prompt,
+        status: TaskStatus::parse(&status)?,
+        run_id: run_id.as_deref().map(RunId::parse).transpose()?,
+        delay_until: delay_until.as_deref().map(parse_time).transpose()?,
+        attempt: u32::try_from(attempt).unwrap_or(0),
+        max_attempts: u32::try_from(max_attempts).unwrap_or(3),
+        auto_approve: auto_approve != 0,
+        mock: mock != 0,
+        error,
+        created_at: parse_time(&created_at)?,
+        updated_at: parse_time(&updated_at)?,
+    })
 }
 
 struct EventRow {
