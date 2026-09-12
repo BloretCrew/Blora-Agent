@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-Hans">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Blora Agent</title>
+    <script>
+      /* Theme boot before CSS to avoid a light flash. */
+      document.documentElement.dataset.theme = localStorage.getItem("blora-theme") || "system";
+    </script>
+    <link rel="stylesheet" href="/vendor/blora.css" />
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body class="blora-page blora-scope ba-shell">
+    <blora-sidebar-layout variant="seamless" sticky label="Blora Agent">
+      <blora-sidebar-layout-sidebar>
+        <header class="ba-brand">
+          <p class="ba-brand__mark">BA</p>
+          <div>
+            <p class="ba-brand__name">Blora Agent</p>
+            <p class="ba-brand__meta">本地 Code / Work / Agent</p>
+          </div>
+        </header>
+        <button type="button" class="blora-button" data-variant="primary" id="new-session">新建会话</button>
+        <nav class="ba-session-list" id="session-list" aria-label="会话"></nav>
+      </blora-sidebar-layout-sidebar>
+      <blora-sidebar-layout-content>
+        <main class="ba-main">
+          <header class="ba-toolbar">
+            <div>
+              <h1 id="session-title">选择一个会话</h1>
+              <p class="ba-toolbar__path" id="session-path"></p>
+            </div>
+            <label class="ba-check">
+              <input type="checkbox" id="auto-approve" />
+              自动批准写入/命令
+            </label>
+          </header>
+          <section class="ba-thread" id="thread" aria-live="polite"></section>
+          <form class="ba-composer" id="composer">
+            <label class="blora-field">
+              <span class="blora-field__label">向 Blora 发送</span>
+              <textarea class="blora-textarea" id="prompt" rows="3" required placeholder="描述你想在工作区完成的事"></textarea>
+            </label>
+            <button type="submit" class="blora-button" data-variant="primary" id="send">发送</button>
+          </form>
+        </main>
+      </blora-sidebar-layout-content>
+    </blora-sidebar-layout>
+    <script src="/vendor/blora.global.js"></script>
+    <script src="/app.js"></script>
+  </body>
+</html>

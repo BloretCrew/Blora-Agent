@@ -1,0 +1,65 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/blora-types",
+    "crates/blora-events",
+    "crates/blora-session",
+    "crates/blora-storage",
+    "crates/blora-policy",
+    "crates/blora-exec",
+    "crates/blora-tools",
+    "crates/blora-model",
+    "crates/blora-runtime",
+    "crates/blora-tui",
+    "crates/blora-server",
+    "crates/blora-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+rust-version = "1.85"
+authors = ["Blora Agent contributors"]
+homepage = "https://github.com/bloret-crew/blora-agent"
+repository = "https://github.com/bloret-crew/blora-agent"
+description = "Blora Agent: a local-first Code, Work, and Agent harness."
+
+[workspace.dependencies]
+blora-types = { path = "crates/blora-types" }
+blora-events = { path = "crates/blora-events" }
+blora-session = { path = "crates/blora-session" }
+blora-storage = { path = "crates/blora-storage" }
+blora-policy = { path = "crates/blora-policy" }
+blora-exec = { path = "crates/blora-exec" }
+blora-tools = { path = "crates/blora-tools" }
+blora-model = { path = "crates/blora-model" }
+blora-runtime = { path = "crates/blora-runtime" }
+blora-tui = { path = "crates/blora-tui" }
+blora-server = { path = "crates/blora-server" }
+axum = { version = "0.8", features = ["json"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
+clap = { version = "4", features = ["derive", "env"] }
+crossterm = "0.28"
+dirs = "6"
+ratatui = "0.29"
+regex = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time"] }
+tokio-stream = "0.1"
+tower-http = { version = "0.6", features = ["cors", "fs"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+ureq = { version = "2", features = ["json"] }
+uuid = { version = "1", features = ["v7", "serde"] }
+walkdir = "2"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }

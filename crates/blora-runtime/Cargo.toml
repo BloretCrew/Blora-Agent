@@ -1,0 +1,26 @@
+[package]
+name = "blora-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description = "Agent loop coordinator for Blora Agent."
+
+[dependencies]
+blora-events.workspace = true
+blora-exec.workspace = true
+blora-model.workspace = true
+blora-policy.workspace = true
+blora-session.workspace = true
+blora-storage.workspace = true
+blora-tools.workspace = true
+blora-types.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,17 @@
+[package]
+name = "blora-tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description = "Built-in coding tools for Blora Agent."
+
+[dependencies]
+blora-exec.workspace = true
+blora-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

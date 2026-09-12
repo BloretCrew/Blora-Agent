@@ -1,0 +1,19 @@
+[package]
+name = "blora-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description = "Terminal interface for Blora Agent."
+
+[dependencies]
+blora-runtime.workspace = true
+blora-session.workspace = true
+blora-storage.workspace = true
+blora-types.workspace = true
+crossterm.workspace = true
+ratatui.workspace = true
+
+[lints]
+workspace = true

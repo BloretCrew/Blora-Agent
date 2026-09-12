@@ -1,0 +1,28 @@
+[package]
+name = "blora-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description = "Command-line interface for Blora Agent."
+
+[[bin]]
+name = "blora"
+path = "src/main.rs"
+
+[dependencies]
+blora-runtime.workspace = true
+blora-server.workspace = true
+blora-session.workspace = true
+blora-storage.workspace = true
+blora-tui.workspace = true
+blora-types.workspace = true
+clap.workspace = true
+dirs.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

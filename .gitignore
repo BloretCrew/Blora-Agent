@@ -1,0 +1,12 @@
+/target
+**/*.rs.bk
+.blora/
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+.idea/
+.vscode/
+*.swp
+.DS_Store
+web/node_modules/

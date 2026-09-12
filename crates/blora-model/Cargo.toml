@@ -1,0 +1,17 @@
+[package]
+name = "blora-model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description = "Provider trait and OpenAI-compatible adapter for Blora Agent."
+
+[dependencies]
+blora-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ureq.workspace = true
+
+[lints]
+workspace = true

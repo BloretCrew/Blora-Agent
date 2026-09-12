@@ -1,0 +1,20 @@
+[package]
+name = "blora-exec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description = "Local execution backend for Blora Agent."
+
+[dependencies]
+blora-policy.workspace = true
+blora-types.workspace = true
+regex.workspace = true
+walkdir.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
