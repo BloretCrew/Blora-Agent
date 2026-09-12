@@ -14,19 +14,19 @@
 - 工作区路径沙箱，写入和命令默认需要 `--yes`
 - Mock Provider 与 OpenAI 兼容流式接口
 - CLI、TUI、本地 Web UI（Blora Design）
-- Work 模式：可延迟后台任务、`blora task pump`、serve 每秒调度
+- Work 模式：可延迟后台任务、`blora task pump`、Web 服务每秒调度
 - Agent 模式：`delegate` 子代理，深度/并发预算限制
 
 ## 快速开始
 
 ```bash
 cargo test --workspace
+cargo run -p blora-cli --                  # TUI
+cargo run -p blora-cli -- web              # Web UI，默认 http://127.0.0.1:8787
 cargo run -p blora-cli -- session create --workspace .
 cargo run -p blora-cli -- run --session ses_… --mock --yes "list files"
 cargo run -p blora-cli -- task create --session ses_… --title scan --prompt "list files" --mock --yes
 cargo run -p blora-cli -- task pump
-cargo run -p blora-cli -- tui
-cargo run -p blora-cli -- serve --bind 127.0.0.1:8787
 ```
 
 真实模型：

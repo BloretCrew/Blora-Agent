@@ -30,6 +30,6 @@ Blora Agent 是从零实现的本地优先 harness。第一阶段是单用户模
 - Agent：`delegate` 子代理，深度 2 / 并发 3 / 子代理 6 turn 预算
 
 ```text
-cargo run -p blora-cli -- tui
-cargo run -p blora-cli -- serve
+cargo run -p blora-cli --       # TUI
+cargo run -p blora-cli -- web   # Web
 ```

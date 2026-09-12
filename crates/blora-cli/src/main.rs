@@ -25,18 +25,22 @@ See LICENSE or https://www.gnu.org/licenses/ for details.";
 #[command(
     name = "blora",
     version,
-    about = "Blora Agent: a local-first Code, Work, and Agent harness.",
-    after_help = LICENSE_NOTICE
+    about = "Blora Agent. Run `blora` for the TUI, `blora web` for the browser UI.",
+    after_help = LICENSE_NOTICE,
+    args_conflicts_with_subcommands = true
 )]
 struct Cli {
     /// Override Blora home directory (default: $BLORA_HOME or ~/.blora).
     #[arg(long, global = true, env = "BLORA_HOME")]
     home: Option<PathBuf>,
+    /// Workspace for TUI or Web (default: current directory).
+    #[arg(long, global = true)]
+    workspace: Option<PathBuf>,
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum Commands {
     /// Print license information.
     License,
@@ -62,12 +66,21 @@ enum Commands {
         #[arg(long)]
         model: Option<String>,
     },
-    /// Open the terminal interface.
+    /// Open the local Web UI.
+    Web {
+        #[arg(long, default_value = "127.0.0.1:8787")]
+        bind: String,
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+    },
+    /// Alias for the default TUI entry. Prefer `blora`.
+    #[command(hide = true)]
     Tui {
         #[arg(long)]
         workspace: Option<PathBuf>,
     },
-    /// Start the local Web API and UI.
+    /// Alias for `blora web`.
+    #[command(hide = true)]
     Serve {
         #[arg(long, default_value = "127.0.0.1:8787")]
         bind: String,
@@ -81,7 +94,7 @@ enum Commands {
     },
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum SessionCommands {
     Create {
         #[arg(long)]
@@ -100,7 +113,7 @@ enum SessionCommands {
     },
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum TaskCommands {
     Create {
         #[arg(long)]
@@ -146,29 +159,43 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let cli = Cli::parse();
     match cli.command {
-        Commands::License => {
+        None => {
+            let runtime = Runtime::new(open_store(cli.home.as_deref())?);
+            let workspace = cli.workspace.unwrap_or(std::env::current_dir()?);
+            blora_tui::run(&runtime, &workspace)?;
+            Ok(())
+        }
+        Some(Commands::License) => {
             println!("{LICENSE_NOTICE}");
             Ok(())
         }
-        Commands::Serve { bind, workspace } => {
+        Some(Commands::Web { bind, workspace } | Commands::Serve { bind, workspace }) => {
             let runtime = Arc::new(Runtime::new(open_store(cli.home.as_deref())?));
-            let workspace = workspace.unwrap_or(std::env::current_dir()?);
+            let workspace = workspace
+                .or(cli.workspace)
+                .unwrap_or(std::env::current_dir()?);
             let addr: SocketAddr = bind.parse()?;
-            println!("Blora Agent web: http://{addr}");
+            let url = format!("http://{addr}");
+            println!("Blora Agent web: {url}");
+            open_browser(&url);
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(blora_server::serve(runtime, addr, workspace))?;
             Ok(())
         }
-        other => {
+        Some(other) => {
             let runtime = Runtime::new(open_store(cli.home.as_deref())?);
-            dispatch(runtime, other)
+            dispatch(runtime, other, cli.workspace)
         }
     }
 }
 
-fn dispatch(runtime: Runtime, command: Commands) -> Result<(), Box<dyn std::error::Error>> {
+fn dispatch(
+    runtime: Runtime,
+    command: Commands,
+    global_workspace: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
     match command {
-        Commands::License | Commands::Serve { .. } => unreachable!(),
+        Commands::License | Commands::Web { .. } | Commands::Serve { .. } => unreachable!(),
         Commands::Task { command } => match command {
             TaskCommands::Create {
                 session,
@@ -230,7 +257,9 @@ fn dispatch(runtime: Runtime, command: Commands) -> Result<(), Box<dyn std::erro
             }
         },
         Commands::Tui { workspace } => {
-            let workspace = workspace.unwrap_or(std::env::current_dir()?);
+            let workspace = workspace
+                .or(global_workspace)
+                .unwrap_or(std::env::current_dir()?);
             blora_tui::run(&runtime, &workspace)?;
         }
         Commands::Session { command } => match command {
@@ -338,6 +367,22 @@ fn print_projection(
     Ok(())
 }
 
+fn open_browser(url: &str) {
+    let candidates = ["xdg-open", "open", "gio"];
+    for command in candidates {
+        if std::process::Command::new(command)
+            .arg(url)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .is_ok()
+        {
+            return;
+        }
+    }
+}
+
 fn parse_delay(spec: &str) -> Result<chrono::DateTime<Utc>, Box<dyn std::error::Error>> {
     let amount = spec
         .trim()
@@ -366,4 +411,25 @@ fn open_store(home: Option<&std::path::Path>) -> Result<SqliteStore, Box<dyn std
         },
     };
     Ok(SqliteStore::open(home.join("state.sqlite"))?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn bare_blora_has_no_subcommand() {
+        let cli = Cli::try_parse_from(["blora"]).unwrap();
+        assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn web_subcommand_parses() {
+        let cli = Cli::try_parse_from(["blora", "web", "--bind", "127.0.0.1:9000"]).unwrap();
+        match cli.command {
+            Some(Commands::Web { bind, .. }) => assert_eq!(bind, "127.0.0.1:9000"),
+            other => panic!("expected web, got {other:?}"),
+        }
+    }
 }
