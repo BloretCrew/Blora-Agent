@@ -35,6 +35,7 @@ Blora Agent 是从零实现的本地优先 harness。第一阶段是单用户模
 - Git worktree 执行、后台 process 工具、`BLORA_HOOKS_DIR` 钩子、Web 任务/审批/工作区/设置页
 
 ```text
-cargo run -p blora-cli --       # TUI
-cargo run -p blora-cli -- web   # Web
+cargo run -p blora-cli --         # TUI
+cargo run -p blora-cli -- --web   # Web
+cargo run -p blora-cli -- web     # Web（子命令写法）
 ```

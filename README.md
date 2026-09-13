@@ -25,7 +25,8 @@
 ```bash
 cargo test --workspace
 cargo run -p blora-cli --                  # TUI
-cargo run -p blora-cli -- web              # Web UI，默认 http://127.0.0.1:8787
+cargo run -p blora-cli -- --web            # Web UI，默认 http://127.0.0.1:8787
+cargo run -p blora-cli -- web              # 同上
 cargo run -p blora-cli -- session create --workspace .
 cargo run -p blora-cli -- run --session ses_… --mock --yes "list files"
 cargo run -p blora-cli -- task create --session ses_… --title scan --prompt "list files" --cron "0 * * * *" --mock --yes

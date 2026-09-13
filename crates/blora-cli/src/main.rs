@@ -27,7 +27,7 @@ See LICENSE or https://www.gnu.org/licenses/ for details.";
 #[command(
     name = "blora",
     version,
-    about = "Blora Agent. Run `blora` for the TUI, `blora web` for the browser UI.",
+    about = "Blora Agent. Run `blora` for the TUI, `blora --web` or `blora web` for the browser UI.",
     after_help = LICENSE_NOTICE,
     args_conflicts_with_subcommands = true
 )]
@@ -38,6 +38,12 @@ struct Cli {
     /// Workspace for TUI or Web (default: current directory).
     #[arg(long, global = true)]
     workspace: Option<PathBuf>,
+    /// Open the local Web UI instead of the TUI.
+    #[arg(long)]
+    web: bool,
+    /// Bind address used with `--web` (default: 127.0.0.1:8787).
+    #[arg(long, default_value = "127.0.0.1:8787")]
+    bind: String,
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -193,6 +199,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let cli = Cli::parse();
     match cli.command {
+        None if cli.web => serve_web(cli.home.as_deref(), &cli.bind, cli.workspace),
         None => {
             let runtime = Runtime::new(open_store(cli.home.as_deref())?);
             let workspace = cli.workspace.unwrap_or(std::env::current_dir()?);
@@ -204,17 +211,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
         Some(Commands::Web { bind, workspace } | Commands::Serve { bind, workspace }) => {
-            let runtime = Arc::new(Runtime::new(open_store(cli.home.as_deref())?));
-            let workspace = workspace
-                .or(cli.workspace)
-                .unwrap_or(std::env::current_dir()?);
-            let addr: SocketAddr = bind.parse()?;
-            let url = format!("http://{addr}");
-            println!("Blora Agent web: {url}");
-            open_browser(&url);
-            let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(blora_server::serve(runtime, addr, workspace))?;
-            Ok(())
+            let workspace = workspace.or(cli.workspace);
+            serve_web(cli.home.as_deref(), &bind, workspace)
         }
         Some(Commands::Acp) => {
             let runtime = Runtime::new(open_store(cli.home.as_deref())?);
@@ -445,6 +443,22 @@ fn print_projection(
     Ok(())
 }
 
+fn serve_web(
+    home: Option<&std::path::Path>,
+    bind: &str,
+    workspace: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let runtime = Arc::new(Runtime::new(open_store(home)?));
+    let workspace = workspace.unwrap_or(std::env::current_dir()?);
+    let addr: SocketAddr = bind.parse()?;
+    let url = format!("http://{addr}");
+    println!("Blora Agent web: {url}");
+    open_browser(&url);
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(blora_server::serve(runtime, addr, workspace))?;
+    Ok(())
+}
+
 fn open_browser(url: &str) {
     let candidates = ["xdg-open", "open", "gio"];
     for command in candidates {
@@ -509,5 +523,20 @@ mod tests {
             Some(Commands::Web { bind, .. }) => assert_eq!(bind, "127.0.0.1:9000"),
             other => panic!("expected web, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn web_flag_parses() {
+        let cli = Cli::try_parse_from(["blora", "--web"]).unwrap();
+        assert!(cli.web);
+        assert!(cli.command.is_none());
+        assert_eq!(cli.bind, "127.0.0.1:8787");
+    }
+
+    #[test]
+    fn web_flag_accepts_bind() {
+        let cli = Cli::try_parse_from(["blora", "--web", "--bind", "127.0.0.1:9000"]).unwrap();
+        assert!(cli.web);
+        assert_eq!(cli.bind, "127.0.0.1:9000");
     }
 }
