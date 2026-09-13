@@ -67,6 +67,7 @@ impl Runtime {
             }),
         )?;
         self.checkpoint(session_id, None, Some("compaction"))?;
+        let _ = self.distill_memories(session_id);
         Ok(summary)
     }
 

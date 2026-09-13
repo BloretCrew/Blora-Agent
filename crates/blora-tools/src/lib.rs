@@ -73,7 +73,8 @@ impl ToolRegistry {
                     "type": "object",
                     "properties": {
                         "command": {"type": "string"},
-                        "background": {"type": "boolean"}
+                        "background": {"type": "boolean"},
+                        "pty": {"type": "boolean"}
                     },
                     "required": ["command"]
                 }),
@@ -231,6 +232,13 @@ impl ToolRegistry {
                     .unwrap_or(false)
                 {
                     backend.shell_background(command)
+                } else if arguments
+                    .get("pty")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                    || std::env::var("BLORA_PTY").ok().as_deref() == Some("1")
+                {
+                    backend.shell_pty(command)
                 } else {
                     backend.shell(command)
                 }

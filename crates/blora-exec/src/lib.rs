@@ -19,7 +19,7 @@ mod worktree;
 use regex::Regex;
 use walkdir::WalkDir;
 
-pub use isolation::Isolation;
+pub use isolation::{Isolation, remote_command, remote_host, remote_root};
 pub use process::ProcessInfo;
 pub use worktree::WorktreeHandle;
 
@@ -65,6 +65,9 @@ impl LocalBackend {
             &format!("read_file {path}"),
         )?;
         let path = self.policy.resolve(path)?;
+        if self.isolation == Isolation::Remote {
+            return self.remote_capture(&format!("cat {}", path.display()));
+        }
         let bytes = std::fs::read(&path).map_err(BloraError::exec)?;
         if bytes.len() > MAX_FILE_BYTES {
             return Err(BloraError::Exec(format!(
@@ -82,12 +85,18 @@ impl LocalBackend {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(BloraError::exec)?;
         }
+        if self.isolation == Isolation::Remote {
+            return self.remote_write(&path, contents);
+        }
         std::fs::write(&path, contents).map_err(BloraError::exec)
     }
 
     pub fn list_dir(&self, path: &str) -> Result<String> {
         self.policy.require(self.policy.file_read(), "list_dir")?;
         let path = self.policy.resolve(path)?;
+        if self.isolation == Isolation::Remote {
+            return self.remote_capture(&format!("ls -1a {}", path.display()));
+        }
         let mut names = Vec::new();
         let entries = std::fs::read_dir(&path).map_err(BloraError::exec)?;
         for entry in entries {
@@ -266,6 +275,56 @@ impl LocalBackend {
         }
         let updated = contents.replacen(old, new, 1);
         self.write_file(path, &updated)
+    }
+
+    pub fn shell_pty(&self, command: &str) -> Result<String> {
+        self.clone().with_isolation(Isolation::Pty).shell(command)
+    }
+
+    fn remote_capture(&self, command: &str) -> Result<String> {
+        let output = isolation::remote_command(self.policy.workspace(), command)?
+            .output()
+            .map_err(BloraError::exec)?;
+        let mut out = String::from_utf8_lossy(&output.stdout).into_owned();
+        if !output.stderr.is_empty() {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(&String::from_utf8_lossy(&output.stderr));
+        }
+        if !output.status.success() && out.is_empty() {
+            return Err(BloraError::Exec(format!(
+                "remote command failed: {command}"
+            )));
+        }
+        Ok(out)
+    }
+
+    fn remote_write(&self, path: &Path, contents: &str) -> Result<()> {
+        let mut child = isolation::remote_command(
+            self.policy.workspace(),
+            &format!("cat > {}", path.display()),
+        )?
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(BloraError::exec)?;
+        if let Some(mut stdin) = child.stdin.take() {
+            use std::io::Write;
+            stdin
+                .write_all(contents.as_bytes())
+                .map_err(BloraError::exec)?;
+        }
+        let status = child.wait().map_err(BloraError::exec)?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(BloraError::Exec(format!(
+                "remote write failed: {}",
+                path.display()
+            )))
+        }
     }
 
     fn git(&self, args: &[&str]) -> Result<String> {

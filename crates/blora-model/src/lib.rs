@@ -5,6 +5,7 @@
 
 mod anthropic;
 mod factory;
+mod gemini;
 mod openai;
 mod responses;
 
@@ -17,6 +18,7 @@ use serde_json::{Value, json};
 
 pub use anthropic::AnthropicProvider;
 pub use factory::{make_provider, make_providers};
+pub use gemini::GeminiProvider;
 pub use openai::OpenAiProvider;
 pub use responses::ResponsesProvider;
 

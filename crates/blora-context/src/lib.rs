@@ -43,6 +43,13 @@ pub fn context_prompt(workspace: &str, mode: &str) -> String {
         out.push_str("\n\nGit:\n");
         out.push_str(&git);
     }
+    if let Some(memory) = read_capped(
+        &std::path::Path::new(workspace).join(".blora/memory.md"),
+        3000,
+    ) {
+        out.push_str("\n\nMemories:\n");
+        out.push_str(&memory);
+    }
     out
 }
 

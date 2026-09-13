@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     mode TEXT NOT NULL,
     status TEXT NOT NULL,
     parent_session_id TEXT,
+    user_id TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -121,6 +122,13 @@ CREATE TABLE IF NOT EXISTS artifacts (
     content TEXT,
     created_at TEXT NOT NULL,
     FOREIGN KEY (session_id) REFERENCES sessions(id)
+);
+
+CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    token_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS workspaces (

@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Blora Agent contributors
 
-use crate::{AnthropicProvider, MockProvider, OpenAiProvider, Provider, ResponsesProvider};
+use crate::{
+    AnthropicProvider, GeminiProvider, MockProvider, OpenAiProvider, Provider, ResponsesProvider,
+};
 
 /// Build a provider from `BLORA_PROVIDER` or an explicit name.
 /// Comma-separated names become a fallback chain (`openai,anthropic`).
@@ -46,6 +48,9 @@ fn one(kind: &str) -> Box<dyn Provider> {
             .map(|provider| Box::new(provider) as Box<dyn Provider>)
             .unwrap_or_else(|_| Box::new(MockProvider::new())),
         "responses" => ResponsesProvider::from_env()
+            .map(|provider| Box::new(provider) as Box<dyn Provider>)
+            .unwrap_or_else(|_| Box::new(MockProvider::new())),
+        "gemini" | "google" => GeminiProvider::from_env()
             .map(|provider| Box::new(provider) as Box<dyn Provider>)
             .unwrap_or_else(|_| Box::new(MockProvider::new())),
         _ => OpenAiProvider::from_env()

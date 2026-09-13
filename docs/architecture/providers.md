@@ -8,6 +8,7 @@
 | openai | `BLORA_PROVIDER=openai` | Chat Completions | SSE | tool_calls | `crates/blora-model` |
 | responses | `BLORA_PROVIDER=responses` | OpenAI Responses | SSE | function_call | `responses.rs` |
 | anthropic | `BLORA_PROVIDER=anthropic` | Messages | SSE | tool_use | `anthropic.rs` |
+| gemini | `BLORA_PROVIDER=gemini` | Gemini generateContent | SSE | functionCall | `gemini.rs` |
 
 回退：`BLORA_PROVIDER=openai,anthropic`。认证失败不回退；429 / timeout / connection 可回退。
 

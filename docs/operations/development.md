@@ -15,4 +15,6 @@ TUI 快捷键见 [`tui.md`](tui.md)。Provider 矩阵见 [`../architecture/provi
 
 `BLORA_PROVIDER` 可写 `openai,anthropic`。`BLORA_NETWORK=1` 才允许 curl/ssh 等网络命令。`BLORA_MAX_WALL_SECS` 限制单次 run 墙钟（默认 900）。`BLORA_WORKTREE=1` 在 git worktree 中执行。`BLORA_HOOKS_DIR` 可放 `session-start` / `tool-before` / `tool-after` 可执行文件。`BLORA_MCP_COMMAND` 启动 stdio MCP。`BLORA_PLUGINS_DIR` 或 `{workspace}/.blora/plugins/*.json` 加载插件。`BLORA_EXEC=sandbox|container` 隔离 shell。`BLORA_MAX_TOKENS` 限制累计 token。`blora backup` / `blora restore` 复制 SQLite。
 
-`BLORA_HOME` 可指向临时目录做隔离测试。真实模型使用 `BLORA_API_KEY` / `BLORA_API_BASE` / `BLORA_MODEL`。
+`blora gateway --bind 0.0.0.0:8787` 开启 token 鉴权。`blora user add NAME` 生成 `blt_` token。`blora plugin list|install|remove`。`blora memory distill ses_…`。
+
+`BLORA_HOME` 可指向临时目录做隔离测试。真实模型使用 `BLORA_API_KEY` / `BLORA_API_BASE` / `BLORA_MODEL` / `GEMINI_API_KEY`。

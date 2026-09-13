@@ -15,6 +15,10 @@ pub enum Isolation {
     Sandbox,
     /// Run the command in a disposable container with the workspace mounted.
     Container,
+    /// Allocate a PTY via `script` so interactive programs see a terminal.
+    Pty,
+    /// Run commands on a remote host with `ssh` (`BLORA_REMOTE=user@host`).
+    Remote,
 }
 
 impl Isolation {
@@ -27,6 +31,8 @@ impl Isolation {
         {
             "sandbox" => Self::Sandbox,
             "container" | "docker" => Self::Container,
+            "pty" => Self::Pty,
+            "remote" | "ssh" => Self::Remote,
             _ => Self::Local,
         }
     }
@@ -40,6 +46,8 @@ impl Isolation {
             }
             Self::Sandbox => sandbox_command(workspace, command),
             Self::Container => container_command(workspace, command),
+            Self::Pty => pty_command(workspace, command),
+            Self::Remote => remote_command(workspace, command),
         }
     }
 }
@@ -99,6 +107,40 @@ fn container_command(workspace: &Path, command: &str) -> Result<Command> {
     Ok(cmd)
 }
 
+fn pty_command(workspace: &Path, command: &str) -> Result<Command> {
+    let mut cmd = Command::new("script");
+    cmd.args(["-qefc", command, "/dev/null"])
+        .current_dir(workspace);
+    Ok(cmd)
+}
+
+pub fn remote_host() -> Result<String> {
+    std::env::var("BLORA_REMOTE")
+        .map_err(|_| BloraError::Exec("set BLORA_REMOTE=user@host for remote execution".to_owned()))
+}
+
+pub fn remote_root(workspace: &Path) -> String {
+    std::env::var("BLORA_REMOTE_ROOT").unwrap_or_else(|_| workspace.display().to_string())
+}
+
+pub fn remote_command(workspace: &Path, command: &str) -> Result<Command> {
+    let host = remote_host()?;
+    let root = remote_root(workspace);
+    let script = format!("cd {root} && {command}");
+    let mut cmd = Command::new("ssh");
+    cmd.args([
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=8",
+        &host,
+        "sh",
+        "-lc",
+        &script,
+    ]);
+    Ok(cmd)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -115,5 +157,21 @@ mod tests {
             .shell_command(dir.path(), "true")
             .unwrap();
         assert!(cmd.get_program() == "unshare" || cmd.get_program() == "sh");
+    }
+
+    #[test]
+    fn pty_uses_script() {
+        let dir = tempfile::tempdir().unwrap();
+        let cmd = Isolation::Pty.shell_command(dir.path(), "echo hi").unwrap();
+        assert_eq!(cmd.get_program(), "script");
+    }
+
+    #[test]
+    fn remote_requires_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = Isolation::Remote
+            .shell_command(dir.path(), "true")
+            .unwrap_err();
+        assert!(err.to_string().contains("BLORA_REMOTE"));
     }
 }

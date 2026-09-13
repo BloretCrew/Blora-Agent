@@ -8,7 +8,8 @@
 - `WorktreeHandle`：在 `{workspace}/.blora/worktrees/{session}` 创建分离的 git worktree；`BLORA_WORKTREE=1` 或 `--worktree` 启用。
 - `BLORA_EXEC=sandbox`：清空环境，并在可用时用 `unshare -n` 去掉网络。
 - `BLORA_EXEC=container`：`docker run --rm --network=none` 挂载工作区；镜像由 `BLORA_CONTAINER_IMAGE` 指定。
-- 远程多租户执行仍为后续阶段。
+- `BLORA_EXEC=pty` 或工具参数 `pty: true`：通过 `script(1)` 分配伪终端。
+- `BLORA_EXEC=remote`：`ssh $BLORA_REMOTE` 在 `BLORA_REMOTE_ROOT` 执行。
 
 ## 工具
 

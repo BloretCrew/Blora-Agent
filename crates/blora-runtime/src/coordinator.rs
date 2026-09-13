@@ -146,6 +146,30 @@ impl Runtime {
         self.store.list_sessions()
     }
 
+    pub fn list_sessions_for_user(&self, user_id: Option<&str>) -> Result<Vec<SessionSummary>> {
+        self.store.list_sessions_for_user(user_id)
+    }
+
+    pub fn create_user(&self, name: &str) -> Result<(blora_storage::UserRecord, String)> {
+        self.store.create_user(name)
+    }
+
+    pub fn user_by_token(&self, token: &str) -> Result<Option<blora_storage::UserRecord>> {
+        self.store.user_by_token(token)
+    }
+
+    pub fn list_users(&self) -> Result<Vec<blora_storage::UserRecord>> {
+        self.store.list_users()
+    }
+
+    pub fn set_session_user(&self, session_id: &SessionId, user_id: &str) -> Result<()> {
+        self.store.set_session_user(session_id, user_id)
+    }
+
+    pub fn session_user_id(&self, session_id: &SessionId) -> Result<Option<String>> {
+        self.store.session_user_id(session_id)
+    }
+
     pub fn search_sessions(&self, query: &str) -> Result<Vec<SessionSummary>> {
         let needle = query.trim().to_ascii_lowercase();
         if needle.is_empty() {
@@ -554,6 +578,7 @@ impl Runtime {
                     }),
                 )?;
                 let _ = self.checkpoint(session_id, Some(&run_id), Some("run completed"));
+                let _ = self.distill_memories(session_id);
                 return Ok(run_id);
             }
 

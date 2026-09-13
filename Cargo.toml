@@ -39,7 +39,8 @@ blora-model = { path = "crates/blora-model" }
 blora-runtime = { path = "crates/blora-runtime" }
 blora-tui = { path = "crates/blora-tui" }
 blora-server = { path = "crates/blora-server" }
-axum = { version = "0.8", features = ["json"] }
+axum = { version = "0.8", features = ["json", "ws"] }
+sha2 = "0.10"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
 clap = { version = "4", features = ["derive", "env"] }
 crossterm = "0.28"

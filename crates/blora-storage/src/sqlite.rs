@@ -128,6 +128,12 @@ impl SqliteStore {
             params![now],
         )
         .map_err(BloraError::storage)?;
+        let _ = conn.execute("ALTER TABLE sessions ADD COLUMN user_id TEXT", []);
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (8, ?1)",
+            params![now],
+        )
+        .map_err(BloraError::storage)?;
         Ok(Self {
             conn: Mutex::new(conn),
             clock: SystemClock,

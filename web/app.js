@@ -92,8 +92,13 @@ async function api(path, options = {}) {
     loading.hidden = false;
   }
   try {
+    const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
+    const token = stored("blora-token");
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+    }
     const response = await fetch(path, {
-      headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+      headers,
       ...options,
     });
     if (!response.ok) {
@@ -609,7 +614,45 @@ async function refreshSettings() {
     model.value = stored("blora-model", info.model);
   }
   document.querySelector("#settings-meta").textContent =
-    `环境 provider=${info.provider} model=${info.model} exec=${info.exec} key=${info.has_api_key} mcp=${info.mcp} plugins=${(info.plugins || []).join(",") || "-"}`;
+    `环境 provider=${info.provider} model=${info.model} exec=${info.exec} gateway=${info.gateway} key=${info.has_api_key} mcp=${info.mcp} plugins=${(info.plugins || []).join(",") || "-"}`;
+  const tokenInput = fieldInput("#pref-token") || document.querySelector("#pref-token");
+  if (tokenInput && !tokenInput.value) {
+    tokenInput.value = stored("blora-token");
+  }
+  const market = await api("/api/marketplace");
+  const list = document.querySelector("#market-list");
+  if (list) {
+    list.replaceChildren();
+    for (const plugin of market.plugins || []) {
+      const item = document.createElement("div");
+      item.className = "blora-list__item";
+      const meta = document.createElement("div");
+      meta.className = "blora-list__meta";
+      const name = document.createElement("div");
+      name.className = "blora-list__title";
+      name.textContent = plugin.name;
+      const desc = document.createElement("div");
+      desc.className = "blora-list__desc";
+      desc.textContent = plugin.description || "";
+      meta.append(name, desc);
+      const install = document.createElement("button");
+      install.type = "button";
+      install.className = "blora-button";
+      install.dataset.variant = "secondary";
+      install.dataset.size = "sm";
+      install.textContent = "安装";
+      install.addEventListener("click", async () => {
+        await api("/api/marketplace", {
+          method: "POST",
+          body: JSON.stringify({ name: plugin.name }),
+        });
+        await refreshSettings();
+      });
+      item.append(meta, install);
+      list.append(item);
+    }
+    enhance();
+  }
 }
 
 document.querySelector("#compact").addEventListener("click", async () => {
@@ -674,6 +717,16 @@ if (prefProvider) {
 }
 if (prefModel) {
   prefModel.addEventListener("change", () => store("blora-model", prefModel.value));
+}
+const prefToken = fieldInput("#pref-token") || document.querySelector("#pref-token");
+if (prefToken) {
+  prefToken.addEventListener("change", () => store("blora-token", prefToken.value));
+}
+try {
+  const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
+  window.bloraSocket = ws;
+} catch (err) {
+  /* optional control channel */
 }
 
 const searchBox = fieldInput("#session-search") || document.querySelector("#session-search");

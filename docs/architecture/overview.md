@@ -38,7 +38,8 @@ Blora Agent 是从零实现的本地优先 harness。第一阶段是单用户模
 - 会话搜索、事件时间线、artifact 列表、工作区只读文件、TUI `/search`/`/tools`
 - 权限能力（网络默认拒绝、密钥路径、Git 破坏性操作）、墙钟超时、tool.started/completed、workspaces 表
 - 文档：OpenAPI、TUI 快捷键、Provider 矩阵
-- 第一阶段明确不做：多用户 Gateway、远程集群、完整 PTY、插件市场、Gemini 及其他未列协议
+- Gemini provider、PTY（`script` / `pty: true`）、SSH 远程执行（`BLORA_EXEC=remote` + `BLORA_REMOTE`）
+- 多用户 Gateway（`blora gateway` + `blora user add`）、WebSocket 控制、插件市场、自动记忆蒸馏
 
 ```text
 cargo run -p blora-cli --         # TUI

@@ -1,0 +1,27 @@
+{
+  "name": "Blora Agent plugin marketplace",
+  "plugins": [
+    {
+      "name": "echo",
+      "description": "Echo text with printf.",
+      "command": "printf %s {text}",
+      "parameters": {
+        "type": "object",
+        "properties": { "text": { "type": "string" } },
+        "required": ["text"]
+      }
+    },
+    {
+      "name": "utcdate",
+      "description": "Print the current UTC date.",
+      "command": "date -u",
+      "parameters": { "type": "object", "properties": {} }
+    },
+    {
+      "name": "whoami",
+      "description": "Print the process user name.",
+      "command": "id -un",
+      "parameters": { "type": "object", "properties": {} }
+    }
+  ]
+}

@@ -6,10 +6,10 @@ use std::path::Path;
 use blora_exec::LocalBackend;
 use blora_model::ToolDeclaration;
 use blora_types::{BloraError, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PluginSpec {
     pub name: String,
     pub description: String,

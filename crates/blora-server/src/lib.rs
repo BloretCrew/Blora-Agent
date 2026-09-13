@@ -12,7 +12,9 @@ use std::time::Duration;
 
 use axum::Json;
 use axum::Router;
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
+use axum::http::HeaderMap as HttpHeaderMap;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
@@ -36,6 +38,7 @@ struct AppState {
     runtime: Arc<Runtime>,
     workspace: PathBuf,
     cancels: Arc<Mutex<HashMap<String, CancelToken>>>,
+    require_auth: bool,
 }
 
 #[derive(Deserialize)]
@@ -119,6 +122,7 @@ pub async fn serve(
     runtime: Arc<Runtime>,
     bind: SocketAddr,
     workspace: PathBuf,
+    require_auth: bool,
 ) -> Result<(), String> {
     let tick_runtime = runtime.clone();
     tokio::spawn(async move {
@@ -133,6 +137,7 @@ pub async fn serve(
         runtime,
         workspace,
         cancels: Arc::new(Mutex::new(HashMap::new())),
+        require_auth,
     };
     let listener = TcpListener::bind(bind)
         .await
@@ -174,6 +179,12 @@ fn app(state: AppState) -> Router {
         .route("/api/workspace", get(workspace_snapshot))
         .route("/api/workspace/file", get(workspace_file))
         .route("/api/settings", get(settings))
+        .route("/api/login", post(login))
+        .route(
+            "/api/marketplace",
+            get(marketplace).post(install_market_plugin),
+        )
+        .route("/ws", get(ws_upgrade))
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
@@ -257,12 +268,18 @@ struct SessionListQuery {
 
 async fn list_sessions(
     State(state): State<AppState>,
+    headers: HttpHeaderMap,
     Query(query): Query<SessionListQuery>,
 ) -> Result<Json<Vec<SessionJson>>, ApiError> {
+    let user = current_user(&state, &headers)?;
+    let user_id = user.as_ref().map(|item| item.id.as_str());
     let sessions = if let Some(q) = query.q.filter(|value| !value.trim().is_empty()) {
         state.runtime.search_sessions(&q).map_err(ApiError::from)?
     } else {
-        state.runtime.list_sessions().map_err(ApiError::from)?
+        state
+            .runtime
+            .list_sessions_for_user(user_id)
+            .map_err(ApiError::from)?
     };
     let mut out = Vec::new();
     for session in sessions {
@@ -273,6 +290,7 @@ async fn list_sessions(
 
 async fn create_session(
     State(state): State<AppState>,
+    headers: HttpHeaderMap,
     Json(body): Json<CreateBody>,
 ) -> Result<Json<SessionJson>, ApiError> {
     let workspace = body
@@ -294,23 +312,33 @@ async fn create_session(
             parent_session_id: None,
         })
         .map_err(ApiError::from)?;
+    if let Some(user) = current_user(&state, &headers)? {
+        state
+            .runtime
+            .set_session_user(&id, &user.id)
+            .map_err(ApiError::from)?;
+    }
     to_json(&state, &id).map(Json)
 }
 
 async fn show_session(
     State(state): State<AppState>,
+    headers: HttpHeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<SessionJson>, ApiError> {
     let session_id = SessionId::parse(&id).map_err(ApiError::from)?;
+    ensure_session(&state, &headers, &session_id)?;
     to_json(&state, &session_id).map(Json)
 }
 
 async fn run_session(
     State(state): State<AppState>,
+    headers: HttpHeaderMap,
     Path(id): Path<String>,
     Json(body): Json<RunBody>,
 ) -> Result<Json<SessionJson>, ApiError> {
     let session_id = SessionId::parse(&id).map_err(ApiError::from)?;
+    ensure_session(&state, &headers, &session_id)?;
     let runtime = state.runtime.clone();
     let prompt = body.prompt;
     let cancel = CancelToken::new();
@@ -323,7 +351,8 @@ async fn run_session(
         mock: body.mock
             || (std::env::var("BLORA_API_KEY").is_err()
                 && std::env::var("OPENAI_API_KEY").is_err()
-                && std::env::var("ANTHROPIC_API_KEY").is_err()),
+                && std::env::var("ANTHROPIC_API_KEY").is_err()
+                && std::env::var("GEMINI_API_KEY").is_err()),
         auto_approve: body.auto_approve,
         interactive: !body.auto_approve,
         provider: body.provider.unwrap_or_default(),
@@ -697,11 +726,14 @@ async fn settings(State(state): State<AppState>) -> Json<serde_json::Value> {
         "model": std::env::var("BLORA_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_owned()),
         "has_api_key": std::env::var("BLORA_API_KEY").is_ok()
             || std::env::var("OPENAI_API_KEY").is_ok()
-            || std::env::var("ANTHROPIC_API_KEY").is_ok(),
+            || std::env::var("ANTHROPIC_API_KEY").is_ok()
+            || std::env::var("GEMINI_API_KEY").is_ok(),
         "mcp": std::env::var("BLORA_MCP_COMMAND").is_ok(),
         "worktree": std::env::var("BLORA_WORKTREE").is_ok(),
         "exec": std::env::var("BLORA_EXEC").unwrap_or_else(|_| "local".to_owned()),
         "max_tokens": std::env::var("BLORA_MAX_TOKENS").ok(),
+        "gateway": state.require_auth,
+        "remote": std::env::var("BLORA_REMOTE").ok(),
         "plugins": plugins.iter().map(|plugin| plugin.name.clone()).collect::<Vec<_>>(),
     }))
 }
@@ -779,7 +811,169 @@ fn to_json(state: &AppState, id: &SessionId) -> Result<SessionJson, ApiError> {
     })
 }
 
+fn bearer_token(headers: &HttpHeaderMap) -> String {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .unwrap_or("")
+        .to_owned()
+}
+
+fn current_user(
+    state: &AppState,
+    headers: &HttpHeaderMap,
+) -> Result<Option<blora_storage::UserRecord>, ApiError> {
+    if !state.require_auth {
+        return Ok(None);
+    }
+    let token = bearer_token(headers);
+    if token.is_empty() {
+        return Err(ApiError::unauthorized());
+    }
+    let user = state
+        .runtime
+        .user_by_token(&token)
+        .map_err(ApiError::from)?
+        .ok_or_else(ApiError::unauthorized)?;
+    Ok(Some(user))
+}
+
+fn ensure_session(
+    state: &AppState,
+    headers: &HttpHeaderMap,
+    session_id: &SessionId,
+) -> Result<(), ApiError> {
+    let Some(user) = current_user(state, headers)? else {
+        return Ok(());
+    };
+    match state
+        .runtime
+        .session_user_id(session_id)
+        .map_err(ApiError::from)?
+    {
+        Some(owner) if owner != user.id => Err(ApiError::forbidden()),
+        _ => Ok(()),
+    }
+}
+
+#[derive(Deserialize)]
+struct LoginBody {
+    token: String,
+}
+
+async fn login(
+    State(state): State<AppState>,
+    Json(body): Json<LoginBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let user = state
+        .runtime
+        .user_by_token(&body.token)
+        .map_err(ApiError::from)?
+        .ok_or_else(ApiError::unauthorized)?;
+    Ok(Json(
+        serde_json::json!({"ok": true, "id": user.id, "name": user.name}),
+    ))
+}
+
+async fn marketplace() -> Result<Json<serde_json::Value>, ApiError> {
+    let market = blora_runtime::load_index().map_err(ApiError::from)?;
+    Ok(Json(serde_json::json!({
+        "name": market.name,
+        "plugins": market.plugins.iter().map(|plugin| serde_json::json!({
+            "name": plugin.name,
+            "description": plugin.description,
+        })).collect::<Vec<_>>(),
+    })))
+}
+
+#[derive(Deserialize)]
+struct InstallBody {
+    name: String,
+}
+
+async fn install_market_plugin(
+    State(state): State<AppState>,
+    Json(body): Json<InstallBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let path =
+        blora_runtime::install_plugin(&state.workspace, &body.name).map_err(ApiError::from)?;
+    Ok(Json(
+        serde_json::json!({"installed": body.name, "path": path.display().to_string()}),
+    ))
+}
+
+async fn ws_upgrade(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
+    ws.on_upgrade(move |socket| ws_loop(socket, state))
+}
+
+async fn ws_loop(mut socket: WebSocket, state: AppState) {
+    while let Some(Ok(message)) = socket.recv().await {
+        let Message::Text(text) = message else {
+            continue;
+        };
+        let value: serde_json::Value =
+            serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
+        let op = value
+            .get("op")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let reply = match op {
+            "cancel" => {
+                if let Some(id) = value.get("session_id").and_then(serde_json::Value::as_str) {
+                    if let Some(token) = state
+                        .cancels
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .get(id)
+                    {
+                        token.cancel();
+                    }
+                }
+                serde_json::json!({"ok": true, "op": "cancel"})
+            }
+            "approve" => {
+                let id = value
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                let allow = value
+                    .get("allow")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                let runtime = state.runtime.clone();
+                let parsed = blora_types::ApprovalId::parse(id);
+                let result = tokio::task::spawn_blocking(move || {
+                    parsed
+                        .ok()
+                        .and_then(|id| runtime.resolve_approval(&id, allow).ok())
+                })
+                .await;
+                serde_json::json!({"ok": result.ok().flatten().is_some(), "op": "approve"})
+            }
+            _ => serde_json::json!({"error": format!("unknown op {op}")}),
+        };
+        if socket
+            .send(Message::Text(reply.to_string().into()))
+            .await
+            .is_err()
+        {
+            break;
+        }
+    }
+}
+
 struct ApiError(String);
+
+impl ApiError {
+    fn unauthorized() -> Self {
+        Self("unauthorized".to_owned())
+    }
+
+    fn forbidden() -> Self {
+        Self("forbidden".to_owned())
+    }
+}
 
 impl From<blora_types::BloraError> for ApiError {
     fn from(value: blora_types::BloraError) -> Self {
@@ -789,7 +983,12 @@ impl From<blora_types::BloraError> for ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (StatusCode::BAD_REQUEST, self.0).into_response()
+        let status = match self.0.as_str() {
+            "unauthorized" => StatusCode::UNAUTHORIZED,
+            "forbidden" => StatusCode::FORBIDDEN,
+            _ => StatusCode::BAD_REQUEST,
+        };
+        (status, self.0).into_response()
     }
 }
 
@@ -866,6 +1065,7 @@ mod tests {
             runtime,
             workspace: dir.path().to_path_buf(),
             cancels: Arc::new(Mutex::new(HashMap::new())),
+            require_auth: false,
         };
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();

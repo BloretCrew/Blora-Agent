@@ -117,6 +117,46 @@ enum Commands {
         #[arg(long)]
         session: Option<String>,
     },
+    /// Multi-user gateway (token auth required for /api).
+    Gateway {
+        #[arg(long, default_value = "0.0.0.0:8787")]
+        bind: String,
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+    },
+    /// Gateway users.
+    User {
+        #[command(subcommand)]
+        command: UserCommands,
+    },
+    /// Plugin marketplace.
+    Plugin {
+        #[command(subcommand)]
+        command: PluginCommands,
+    },
+    /// Distill long-term memories from a session.
+    Memory {
+        #[command(subcommand)]
+        command: MemoryCommands,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum UserCommands {
+    Add { name: String },
+    List,
+}
+
+#[derive(Debug, Subcommand)]
+enum PluginCommands {
+    List,
+    Install { name: String },
+    Remove { name: String },
+}
+
+#[derive(Debug, Subcommand)]
+enum MemoryCommands {
+    Distill { session: String },
 }
 
 #[derive(Debug, Subcommand)]
@@ -211,7 +251,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let cli = Cli::parse();
     match cli.command {
-        None if cli.web => serve_web(cli.home.as_deref(), &cli.bind, cli.workspace),
+        None if cli.web => serve_web(cli.home.as_deref(), &cli.bind, cli.workspace, false),
         None => {
             let runtime = Runtime::new(open_store(cli.home.as_deref())?);
             let workspace = cli.workspace.unwrap_or(std::env::current_dir()?);
@@ -224,7 +264,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some(Commands::Web { bind, workspace } | Commands::Serve { bind, workspace }) => {
             let workspace = workspace.or(cli.workspace);
-            serve_web(cli.home.as_deref(), &bind, workspace)
+            serve_web(cli.home.as_deref(), &bind, workspace, false)
+        }
+        Some(Commands::Gateway { bind, workspace }) => {
+            let workspace = workspace.or(cli.workspace);
+            serve_web(cli.home.as_deref(), &bind, workspace, true)
         }
         Some(Commands::Acp) => {
             let runtime = Runtime::new(open_store(cli.home.as_deref())?);
@@ -233,6 +277,51 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some(Commands::Backup { path }) => backup_state(cli.home.as_deref(), path),
         Some(Commands::Restore { path }) => restore_state(cli.home.as_deref(), &path),
+        Some(Commands::User { command }) => {
+            let runtime = Runtime::new(open_store(cli.home.as_deref())?);
+            match command {
+                UserCommands::Add { name } => {
+                    let (user, token) = runtime.create_user(&name)?;
+                    println!("{}  token={token}", user.id);
+                }
+                UserCommands::List => {
+                    for user in runtime.list_users()? {
+                        println!("{}  {}", user.id, user.name);
+                    }
+                }
+            }
+            Ok(())
+        }
+        Some(Commands::Plugin { command }) => {
+            let workspace = cli.workspace.unwrap_or(std::env::current_dir()?);
+            match command {
+                PluginCommands::List => {
+                    let market = blora_runtime::load_index()?;
+                    for plugin in market.plugins {
+                        println!("{}  {}", plugin.name, plugin.description);
+                    }
+                }
+                PluginCommands::Install { name } => {
+                    let path = blora_runtime::install_plugin(&workspace, &name)?;
+                    println!("installed {}", path.display());
+                }
+                PluginCommands::Remove { name } => {
+                    blora_runtime::uninstall_plugin(&workspace, &name)?;
+                    println!("removed {name}");
+                }
+            }
+            Ok(())
+        }
+        Some(Commands::Memory { command }) => {
+            let runtime = Runtime::new(open_store(cli.home.as_deref())?);
+            match command {
+                MemoryCommands::Distill { session } => {
+                    let count = runtime.distill_memories(&SessionId::parse(&session)?)?;
+                    println!("stored {count} memories");
+                }
+            }
+            Ok(())
+        }
         Some(Commands::Usage { session }) => {
             let runtime = Runtime::new(open_store(cli.home.as_deref())?);
             let session_id = session.as_deref().map(SessionId::parse).transpose()?;
@@ -262,7 +351,11 @@ fn dispatch(
         | Commands::Acp
         | Commands::Backup { .. }
         | Commands::Restore { .. }
-        | Commands::Usage { .. } => unreachable!(),
+        | Commands::Usage { .. }
+        | Commands::Gateway { .. }
+        | Commands::User { .. }
+        | Commands::Plugin { .. }
+        | Commands::Memory { .. } => unreachable!(),
         Commands::Task { command } => match command {
             TaskCommands::Create {
                 session,
@@ -485,15 +578,20 @@ fn serve_web(
     home: Option<&std::path::Path>,
     bind: &str,
     workspace: Option<PathBuf>,
+    require_auth: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let runtime = Arc::new(Runtime::new(open_store(home)?));
     let workspace = workspace.unwrap_or(std::env::current_dir()?);
     let addr: SocketAddr = bind.parse()?;
     let url = format!("http://{addr}");
-    println!("Blora Agent web: {url}");
-    open_browser(&url);
+    if require_auth {
+        println!("Blora Agent gateway: {url}  (token auth required)");
+    } else {
+        println!("Blora Agent web: {url}");
+        open_browser(&url);
+    }
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(blora_server::serve(runtime, addr, workspace))?;
+    rt.block_on(blora_server::serve(runtime, addr, workspace, require_auth))?;
     Ok(())
 }
 
