@@ -5,31 +5,55 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Blora Agent</title>
     <script>
-      /* Theme boot before CSS to avoid a light flash. */
-      document.documentElement.dataset.theme = localStorage.getItem("blora-theme") || "system";
+      (function () {
+        var r = document.documentElement,
+          t = ["coral", "forest", "ocean", "sunset", "violet", "slate"],
+          s = "coral",
+          c = "light";
+        try {
+          var saved = localStorage.getItem("blora-theme");
+          if (saved && t.indexOf(saved) !== -1) s = saved;
+          var storedScheme = localStorage.getItem("blora-color-scheme");
+          if (storedScheme === "dark" || storedScheme === "light") c = storedScheme;
+        } catch (e) {}
+        r.setAttribute("data-blora-theme", s);
+        r.setAttribute("data-blora-color-scheme", c);
+        r.style.colorScheme = c;
+      })();
     </script>
     <link rel="stylesheet" href="/vendor/blora.css" />
+    <link rel="stylesheet" href="/vendor/tokens.dark.css" />
+    <link rel="stylesheet" href="/vendor/tokens.themes.css" />
+    <link rel="stylesheet" href="/vendor/layout.css" />
+    <link rel="stylesheet" href="/vendor/theming.css" />
     <link rel="stylesheet" href="/app.css" />
   </head>
-  <body class="blora-page blora-scope ba-shell">
-    <blora-sidebar-layout variant="seamless" sticky label="Blora Agent">
+  <body class="blora-page blora-scope">
+    <blora-sidebar-layout variant="seamless" sticky label="Blora Agent" toggle-label="打开导航">
       <blora-sidebar-layout-sidebar>
         <header class="ba-brand">
-          <p class="ba-brand__mark">BA</p>
+          <span class="blora-avatar" data-size="md" data-variant="primary">BA</span>
           <div>
-            <p class="ba-brand__name">Blora Agent</p>
+            <strong class="ba-brand__name">Blora Agent</strong>
             <p class="ba-brand__meta">本地 Code / Work / Agent</p>
           </div>
         </header>
-        <button type="button" class="blora-button" data-variant="primary" id="new-session">新建会话</button>
-        <nav class="ba-session-list" id="session-list" aria-label="会话"></nav>
-        <section class="ba-task-panel">
-          <h2>待审批</h2>
-          <div id="approval-list" class="ba-task-list"></div>
+        <button type="button" class="blora-button" data-variant="primary" data-icon="plus" id="new-session">
+          新建会话
+        </button>
+        <blora-sidebar-nav id="session-nav" label="会话">
+          <blora-sidebar-nav-group id="session-list" label="会话"></blora-sidebar-nav-group>
+        </blora-sidebar-nav>
+        <blora-empty id="session-empty" title="暂无会话" description="创建会话后会出现在这里。"></blora-empty>
+        <section class="ba-section" aria-labelledby="approvals-heading">
+          <h2 id="approvals-heading" class="ba-section__title">待审批</h2>
+          <div id="approval-list" class="blora-list"></div>
+          <blora-empty id="approval-empty" title="没有待审批" description="写入和命令会在这里请求确认。"></blora-empty>
         </section>
-        <section class="ba-task-panel">
-          <h2>后台任务</h2>
-          <div id="task-list" class="ba-task-list"></div>
+        <section class="ba-section" aria-labelledby="tasks-heading">
+          <h2 id="tasks-heading" class="ba-section__title">后台任务</h2>
+          <div id="task-list" class="blora-list"></div>
+          <blora-empty id="task-empty" title="没有后台任务" description="用下方表单排队一个任务。"></blora-empty>
         </section>
       </blora-sidebar-layout-sidebar>
       <blora-sidebar-layout-content>
@@ -40,37 +64,45 @@
               <p class="ba-toolbar__path" id="session-path"></p>
             </div>
             <div class="ba-toolbar__actions">
-              <label class="ba-check">
-                <input type="checkbox" id="auto-approve" />
-                自动批准写入/命令
-              </label>
-              <button type="button" class="blora-button" id="compact">压缩上下文</button>
+              <blora-switch id="auto-approve" name="auto_approve" value="on">自动批准写入/命令</blora-switch>
+              <button type="button" class="blora-button" data-variant="ghost" data-icon="minimize-2" id="compact">
+                压缩上下文
+              </button>
             </div>
           </header>
-          <section class="ba-meta" id="subagents" hidden></section>
-          <section class="ba-thread" id="thread" aria-live="polite"></section>
+          <blora-alert id="page-alert" variant="danger" hidden></blora-alert>
+          <div id="subagents" class="ba-tags" hidden></div>
+          <section class="ba-thread" id="thread" aria-live="polite">
+            <blora-empty
+              id="thread-empty"
+              title="还没有消息"
+              description="从左侧打开会话，或直接在下方发送第一条。"
+            ></blora-empty>
+          </section>
           <form class="ba-task-form" id="task-form">
-            <label class="blora-field">
-              <span class="blora-field__label">排队后台任务</span>
-              <input class="blora-input" id="task-title" placeholder="标题" required />
-            </label>
-            <label class="blora-field">
-              <span class="blora-field__label">延迟秒数</span>
-              <input class="blora-input" id="task-delay" type="number" min="0" value="0" />
-            </label>
-            <button type="submit" class="blora-button">排队</button>
+            <blora-field label="排队后台任务" name="title" required>
+              <input class="blora-input" id="task-title" maxlength="80" />
+            </blora-field>
+            <blora-number-input id="task-delay" name="delay" label="延迟秒数" min="0" value="0"></blora-number-input>
+            <button type="submit" class="blora-button" data-variant="secondary">排队</button>
           </form>
           <form class="ba-composer" id="composer">
-            <label class="blora-field">
-              <span class="blora-field__label">向 Blora 发送</span>
-              <textarea class="blora-textarea" id="prompt" rows="3" required placeholder="描述你想在工作区完成的事"></textarea>
-            </label>
-            <button type="submit" class="blora-button" data-variant="primary" id="send">发送</button>
+            <blora-field label="向 Blora 发送" name="prompt" required>
+              <textarea
+                class="blora-textarea"
+                id="prompt"
+                rows="3"
+                placeholder="描述你想在工作区完成的事"
+              ></textarea>
+            </blora-field>
+            <button type="submit" class="blora-button" data-variant="primary" data-icon="send" id="send">发送</button>
           </form>
         </main>
       </blora-sidebar-layout-content>
     </blora-sidebar-layout>
     <script src="/vendor/blora.global.js"></script>
+    <script src="/vendor/layout.global.js"></script>
+    <script src="/vendor/theming.global.js"></script>
     <script src="/app.js"></script>
   </body>
 </html>

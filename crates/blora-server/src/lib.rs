@@ -120,8 +120,7 @@ pub async fn serve(
         .route("/", get(index))
         .route("/app.js", get(app_js))
         .route("/app.css", get(app_css))
-        .route("/vendor/blora.css", get(blora_css))
-        .route("/vendor/blora.global.js", get(blora_js))
+        .route("/vendor/{file}", get(vendor_asset))
         .route("/api/sessions", get(list_sessions).post(create_session))
         .route("/api/sessions/{id}", get(show_session))
         .route("/api/sessions/{id}/run", post(run_session))
@@ -155,23 +154,28 @@ async fn app_css() -> Response {
     css(APP_CSS)
 }
 
-async fn blora_css() -> Response {
+async fn vendor_asset(Path(file): Path<String>) -> Response {
+    let relative = match file.as_str() {
+        "blora.css" => "packages/blora-design/dist/blora.css",
+        "tokens.dark.css" => "packages/blora-design/dist/tokens.dark.css",
+        "tokens.themes.css" => "packages/blora-design/dist/tokens.themes.css",
+        "blora.global.js" => "packages/blora-design/dist/blora.global.js",
+        "layout.css" => "addons/layout/dist/layout.css",
+        "layout.global.js" => "addons/layout/dist/layout.global.js",
+        "theming.css" => "addons/theming/dist/theming.css",
+        "theming.global.js" => "addons/theming/dist/theming.global.js",
+        _ => return StatusCode::NOT_FOUND.into_response(),
+    };
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../blora-design/packages/blora-design/dist/blora.css");
-    match std::fs::read_to_string(path) {
-        Ok(body) => css_owned(body),
-        Err(_) => css(
+        .join("../../blora-design")
+        .join(relative);
+    match std::fs::read_to_string(&path) {
+        Ok(body) if file.ends_with(".css") => css_owned(body),
+        Ok(body) => js_owned(body),
+        Err(_) if file == "blora.css" => css(
             ":root { --blora-background:#faf7f8; --blora-text:#2a1f24; --blora-primary:#9f5964; }",
         ),
-    }
-}
-
-async fn blora_js() -> Response {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../blora-design/packages/blora-design/dist/blora.global.js");
-    match std::fs::read_to_string(path) {
-        Ok(body) => js_owned(body),
-        Err(_) => js("window.Blora = window.Blora || {};"),
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
     }
 }
 
