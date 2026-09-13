@@ -19,4 +19,4 @@ TUI 快捷键见 [`tui.md`](tui.md)。Provider 矩阵见 [`../architecture/provi
 
 `BLORA_HOME` 可指向临时目录做隔离测试。真实模型使用 `BLORA_API_KEY` / `BLORA_API_BASE` / `BLORA_MODEL` / `GEMINI_API_KEY`。
 
-首次启动 TUI 或 Web 时会通过 Bloret PassPort 登录：App ID 和 App Secret 使用内置应用配置，也可通过 `BLORA_PASSPORT_APP_ID`、`BLORA_PASSPORT_APP_SECRET` 覆盖；另可设置 `BLORA_PASSPORT_URL` 和 `BLORA_PUBLIC_URL`。TUI 会在本机打开回调端口并启动浏览器授权，Web 使用 `/auth/start` 和 `/auth/callback`。授权码和 `apptoken` 只在服务端处理。
+首次启动 TUI 或 Web 时会通过 Bloret PassPort 登录：App ID 和 App Secret 使用内置应用配置，也可通过 `BLORA_PASSPORT_APP_ID`、`BLORA_PASSPORT_APP_SECRET` 覆盖；另可设置 `BLORA_PASSPORT_URL` 和 `BLORA_PUBLIC_URL`。TUI 会先进入界面，在状态区显示登录链接，然后再打开浏览器授权；Web 先显示 Blora 页面中的登录入口和链接，点击后才进入 Passport。两者都使用 `/auth/start` 和 `/auth/callback`。授权码和 `apptoken` 只在服务端处理。

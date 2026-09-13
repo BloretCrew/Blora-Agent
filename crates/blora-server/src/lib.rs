@@ -17,7 +17,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap as HttpHeaderMap;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::response::{Html, IntoResponse, Redirect, Response};
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use blora_auth::PassportConfig;
 use blora_runtime::{CancelToken, RunOptions, Runtime};
@@ -159,6 +159,7 @@ fn app(state: AppState) -> Router {
         .route("/favicon.svg", get(favicon))
         .route("/favicon.ico", get(favicon))
         .route("/auth/start", get(passport_start))
+        .route("/api/auth/url", get(passport_url))
         .route("/auth/callback", get(passport_callback))
         .route("/api/auth/me", get(auth_me))
         .route("/api/sessions", get(list_sessions).post(create_session))
@@ -194,11 +195,8 @@ fn app(state: AppState) -> Router {
         .with_state(state)
 }
 
-async fn index(State(state): State<AppState>, headers: HttpHeaderMap) -> Response {
-    if state.passport.is_some() && cookie_value(&headers, "blora_passport_user").is_none() {
-        return Redirect::to("/auth/start").into_response();
-    }
-    Html(INDEX_HTML).into_response()
+async fn index() -> Html<&'static str> {
+    Html(INDEX_HTML)
 }
 
 fn passport_config() -> Option<PassportConfig> {
@@ -211,7 +209,7 @@ fn passport_config() -> Option<PassportConfig> {
     }
 }
 
-async fn passport_start(State(state): State<AppState>) -> Response {
+async fn passport_start(State(state): State<AppState>, headers: HttpHeaderMap) -> Response {
     let Some(config) = state.passport else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -219,7 +217,22 @@ async fn passport_start(State(state): State<AppState>) -> Response {
         )
             .into_response();
     };
-    let url = config.authorize_url(&format!("{}/auth/callback", public_base_url()));
+    let callback_host = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("127.0.0.1:8787");
+    let scheme = if headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("https"))
+    {
+        "https"
+    } else {
+        "http"
+    };
+    let base =
+        std::env::var("BLORA_PUBLIC_URL").unwrap_or_else(|_| format!("{scheme}://{callback_host}"));
+    let url = config.authorize_url(&format!("{base}/auth/callback"));
     (
         [(
             header::LOCATION,
@@ -228,6 +241,22 @@ async fn passport_start(State(state): State<AppState>) -> Response {
         StatusCode::FOUND,
     )
         .into_response()
+}
+
+async fn passport_url(
+    State(state): State<AppState>,
+    headers: HttpHeaderMap,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Some(config) = state.passport else {
+        return Err(ApiError("Passport login is not configured".to_owned()));
+    };
+    let host = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("127.0.0.1:8787");
+    let base = std::env::var("BLORA_PUBLIC_URL").unwrap_or_else(|_| format!("http://{host}"));
+    let url = config.authorize_url(&format!("{base}/auth/callback"));
+    Ok(Json(serde_json::json!({"url": url})))
 }
 
 async fn passport_callback(
@@ -311,10 +340,6 @@ fn cookie_value(headers: &HttpHeaderMap, name: &str) -> Option<String> {
             let (key, value) = part.trim().split_once('=')?;
             (key == name).then(|| value.to_owned())
         })
-}
-
-fn public_base_url() -> String {
-    std::env::var("BLORA_PUBLIC_URL").unwrap_or_else(|_| "http://127.0.0.1:8787".to_owned())
 }
 
 async fn app_js() -> Response {

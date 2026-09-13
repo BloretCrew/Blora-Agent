@@ -27,57 +27,68 @@ use crossterm::terminal::{
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
-pub fn ensure_passport_login(
-    runtime: &Runtime,
-) -> std::result::Result<(), Box<dyn std::error::Error>> {
-    if runtime
-        .list_users()?
-        .iter()
-        .any(|user| user.passport_username.is_some())
-    {
-        return Ok(());
-    }
-    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
-    let address = listener.local_addr()?;
+fn start_passport_login()
+-> Result<Option<(String, std::sync::mpsc::Receiver<blora_auth::PassportUser>)>> {
+    let config = match blora_auth::PassportConfig::from_env() {
+        Ok(config) => config,
+        Err(_) => return Ok(None),
+    };
+    let listener =
+        std::net::TcpListener::bind("127.0.0.1:0").map_err(blora_types::BloraError::exec)?;
+    let address = listener
+        .local_addr()
+        .map_err(blora_types::BloraError::exec)?;
     let redirect = format!("http://{address}/callback");
-    let config = blora_auth::PassportConfig::from_env()?;
     let url = config.authorize_url(&redirect);
-    let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
-    let _ = std::process::Command::new("open").arg(&url).spawn();
-    eprintln!("Bloret PassPort login opened in your browser: {url}");
-    let (mut stream, _) = listener.accept()?;
-    stream.set_read_timeout(Some(std::time::Duration::from_secs(300)))?;
-    use std::io::{Read, Write};
-    let mut buffer = [0_u8; 8192];
-    let count = stream.read(&mut buffer)?;
-    let request = String::from_utf8_lossy(&buffer[..count]);
-    let code = request
-        .split_whitespace()
-        .nth(1)
-        .and_then(|path| path.split_once("?"))
-        .and_then(|(_, query)| query.split('&').find_map(|pair| pair.strip_prefix("code=")))
-        .map(|value| value.replace("%20", " "))
-        .ok_or("Passport did not return an authorization code")?;
-    let user = config.verify_code(&code)?;
-    runtime.upsert_passport_user(
-        &user.username,
-        user.nickname.as_deref(),
-        user.avatar.as_deref(),
-        user.email.as_deref(),
-        user.apptoken.as_deref(),
-    )?;
-    let body = format!("登录成功，欢迎 {}。可以关闭此窗口。", user.display_name());
-    let response = format!(
-        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\n\r\n{}",
-        body.len(),
-        body
-    );
-    stream.write_all(response.as_bytes())?;
-    eprintln!("Bloret PassPort login succeeded for {}", user.username);
-    Ok(())
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let Ok((mut stream, _)) = listener.accept() else {
+            return;
+        };
+        use std::io::{Read, Write};
+        let mut buffer = [0_u8; 8192];
+        let Ok(count) = stream.read(&mut buffer) else {
+            return;
+        };
+        let request = String::from_utf8_lossy(&buffer[..count]);
+        let Some(code) = request
+            .split_whitespace()
+            .nth(1)
+            .and_then(|path| path.split_once("?"))
+            .and_then(|(_, query)| query.split('&').find_map(|pair| pair.strip_prefix("code=")))
+            .map(|value| value.replace("%20", " "))
+        else {
+            return;
+        };
+        let Ok(user) = config.verify_code(&code) else {
+            return;
+        };
+        let body = format!("登录成功，欢迎 {}。可以关闭此窗口。", user.display_name());
+        let response = format!(
+            "HTTP/1.1 200 OK\\r\\nContent-Length: {}\\r\\nContent-Type: text/plain; charset=utf-8\\r\\nConnection: close\\r\\n\\r\\n{}",
+            body.len(),
+            body
+        );
+        let _ = stream.write_all(response.as_bytes());
+        let _ = sender.send(user);
+    });
+    Ok(Some((url, receiver)))
 }
 
 pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
+    let mut passport_url = None;
+    let mut passport_receiver = None;
+    let mut passport_browser_opened = false;
+    if let Ok(users) = runtime.list_users()
+        && !users.iter().any(|user| user.passport_username.is_some())
+    {
+        if let Some((url, receiver)) = start_passport_login()? {
+            eprintln!("需要登录 Bloret PassPort");
+            eprintln!("登录链接：{url}");
+            passport_url = Some(url);
+            passport_receiver = Some(receiver);
+        }
+    }
     let mut sessions = runtime.list_sessions()?;
     if sessions.is_empty() {
         let id = runtime.create_session(CreateSession {
@@ -119,6 +130,19 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
         let mut job: Option<thread::ScopedJoinHandle<'_, Result<blora_types::RunId>>> = None;
         loop {
             refresh_sessions(runtime, &mut sessions, &mut index);
+            if let Some(receiver) = passport_receiver.as_ref()
+                && let Ok(user) = receiver.try_recv()
+            {
+                runtime.upsert_passport_user(
+                    &user.username,
+                    user.nickname.as_deref(),
+                    user.avatar.as_deref(),
+                    user.email.as_deref(),
+                    user.apptoken.as_deref(),
+                )?;
+                passport_receiver = None;
+                status = format!("PassPort 登录成功：{}", user.display_name());
+            }
             let session_id = sessions.get(index).map(|item| item.id.clone());
             let projection = session_id
                 .as_ref()
@@ -159,7 +183,13 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             projection: projection.as_ref(),
                             pending: &pending,
                             input: &input,
-                            status: &status,
+                            status: if let Some(url) = passport_url.as_deref()
+                                && passport_receiver.is_some()
+                            {
+                                url
+                            } else {
+                                &status
+                            },
                             notice: notice.as_deref(),
                             slash_hits: &slash_hits,
                             slash_selected,
@@ -176,6 +206,14 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                     );
                 })
                 .map_err(blora_types::BloraError::exec)?;
+            if !passport_browser_opened
+                && passport_receiver.is_some()
+                && let Some(url) = passport_url.as_deref()
+            {
+                let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+                let _ = std::process::Command::new("open").arg(url).spawn();
+                passport_browser_opened = true;
+            }
 
             if let Some(handle) =
                 job.take_if(|handle: &mut thread::ScopedJoinHandle<'_, _>| handle.is_finished())

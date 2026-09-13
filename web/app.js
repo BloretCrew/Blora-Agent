@@ -31,6 +31,11 @@ async function refreshPassport() {
   } catch (_) {
     passportLogin.hidden = false;
     passportUser.hidden = true;
+    const payload = await fetch("/api/auth/url").then((response) => response.json());
+    if (payload.url) {
+      passportLogin.href = payload.url;
+      passportLogin.textContent = "打开 Bloret PassPort 登录";
+    }
   }
 }
 
