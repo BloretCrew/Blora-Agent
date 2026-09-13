@@ -27,6 +27,57 @@ use crossterm::terminal::{
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
+pub fn ensure_passport_login(
+    runtime: &Runtime,
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    if std::env::var_os("BLORA_PASSPORT_APP_SECRET").is_none()
+        || runtime
+            .list_users()?
+            .iter()
+            .any(|user| user.passport_username.is_some())
+    {
+        return Ok(());
+    }
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let address = listener.local_addr()?;
+    let redirect = format!("http://{address}/callback");
+    let config = blora_auth::PassportConfig::from_env()?;
+    let url = config.authorize_url(&redirect);
+    let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
+    let _ = std::process::Command::new("open").arg(&url).spawn();
+    eprintln!("Bloret PassPort login opened in your browser: {url}");
+    let (mut stream, _) = listener.accept()?;
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(300)))?;
+    use std::io::{Read, Write};
+    let mut buffer = [0_u8; 8192];
+    let count = stream.read(&mut buffer)?;
+    let request = String::from_utf8_lossy(&buffer[..count]);
+    let code = request
+        .split_whitespace()
+        .nth(1)
+        .and_then(|path| path.split_once("?"))
+        .and_then(|(_, query)| query.split('&').find_map(|pair| pair.strip_prefix("code=")))
+        .map(|value| value.replace("%20", " "))
+        .ok_or("Passport did not return an authorization code")?;
+    let user = config.verify_code(&code)?;
+    runtime.upsert_passport_user(
+        &user.username,
+        user.nickname.as_deref(),
+        user.avatar.as_deref(),
+        user.email.as_deref(),
+        user.apptoken.as_deref(),
+    )?;
+    let body = format!("登录成功，欢迎 {}。可以关闭此窗口。", user.display_name());
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    stream.write_all(response.as_bytes())?;
+    eprintln!("Bloret PassPort login succeeded for {}", user.username);
+    Ok(())
+}
+
 pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut sessions = runtime.list_sessions()?;
     if sessions.is_empty() {

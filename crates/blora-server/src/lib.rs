@@ -17,8 +17,9 @@ use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap as HttpHeaderMap;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
+use blora_auth::PassportConfig;
 use blora_runtime::{CancelToken, RunOptions, Runtime};
 use blora_session::TranscriptItem;
 use blora_storage::{CreateSession, CreateTask};
@@ -32,13 +33,13 @@ use tower_http::cors::CorsLayer;
 const INDEX_HTML: &str = include_str!("../../../web/index.html");
 const APP_JS: &str = include_str!("../../../web/app.js");
 const APP_CSS: &str = include_str!("../../../web/app.css");
-
 #[derive(Clone)]
 struct AppState {
     runtime: Arc<Runtime>,
     workspace: PathBuf,
     cancels: Arc<Mutex<HashMap<String, CancelToken>>>,
     require_auth: bool,
+    passport: Option<PassportConfig>,
 }
 
 #[derive(Deserialize)]
@@ -138,6 +139,7 @@ pub async fn serve(
         workspace,
         cancels: Arc::new(Mutex::new(HashMap::new())),
         require_auth,
+        passport: passport_config(),
     };
     let listener = TcpListener::bind(bind)
         .await
@@ -156,6 +158,9 @@ fn app(state: AppState) -> Router {
         .route("/vendor/{*path}", get(vendor_asset))
         .route("/favicon.svg", get(favicon))
         .route("/favicon.ico", get(favicon))
+        .route("/auth/start", get(passport_start))
+        .route("/auth/callback", get(passport_callback))
+        .route("/api/auth/me", get(auth_me))
         .route("/api/sessions", get(list_sessions).post(create_session))
         .route("/api/sessions/{id}", get(show_session))
         .route("/api/sessions/{id}/run", post(run_session))
@@ -189,8 +194,127 @@ fn app(state: AppState) -> Router {
         .with_state(state)
 }
 
-async fn index() -> Html<&'static str> {
-    Html(INDEX_HTML)
+async fn index(State(state): State<AppState>, headers: HttpHeaderMap) -> Response {
+    if state.passport.is_some() && cookie_value(&headers, "blora_passport_user").is_none() {
+        return Redirect::to("/auth/start").into_response();
+    }
+    Html(INDEX_HTML).into_response()
+}
+
+fn passport_config() -> Option<PassportConfig> {
+    match PassportConfig::from_env() {
+        Ok(config) => Some(config),
+        Err(err) => {
+            tracing::debug!("Passport login unavailable: {err}");
+            None
+        }
+    }
+}
+
+async fn passport_start(State(state): State<AppState>) -> Response {
+    let Some(config) = state.passport else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Passport login is not configured",
+        )
+            .into_response();
+    };
+    let url = config.authorize_url(&format!("{}/auth/callback", public_base_url()));
+    (
+        [(
+            header::LOCATION,
+            HeaderValue::from_str(&url).unwrap_or_else(|_| HeaderValue::from_static("/")),
+        )],
+        StatusCode::FOUND,
+    )
+        .into_response()
+}
+
+async fn passport_callback(
+    State(state): State<AppState>,
+    Query(query): Query<HashMap<String, String>>,
+    _headers: HttpHeaderMap,
+) -> Response {
+    let Some(config) = state.passport else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Passport login is not configured",
+        )
+            .into_response();
+    };
+    let Some(code) = query.get("code").cloned() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            "Passport did not return an authorization code",
+        )
+            .into_response();
+    };
+    let result = tokio::task::spawn_blocking(move || config.verify_code(&code)).await;
+    let user = match result {
+        Ok(Ok(user)) => user,
+        Ok(Err(err)) => return (StatusCode::UNAUTHORIZED, err.to_string()).into_response(),
+        Err(err) => return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+    };
+    if let Err(err) = state.runtime.upsert_passport_user(
+        &user.username,
+        user.nickname.as_deref(),
+        user.avatar.as_deref(),
+        user.email.as_deref(),
+        user.apptoken.as_deref(),
+    ) {
+        return ApiError::from(err).into_response();
+    }
+    let cookie = format!(
+        "blora_passport_user={}; HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000",
+        user.username
+    );
+    (
+        [
+            (header::LOCATION, HeaderValue::from_static("/")),
+            (
+                header::SET_COOKIE,
+                HeaderValue::from_str(&cookie).unwrap_or_else(|_| HeaderValue::from_static("")),
+            ),
+        ],
+        StatusCode::FOUND,
+    )
+        .into_response()
+}
+
+async fn auth_me(
+    State(state): State<AppState>,
+    headers: HttpHeaderMap,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let username =
+        cookie_value(&headers, "blora_passport_user").ok_or_else(ApiError::unauthorized)?;
+    let user = state
+        .runtime
+        .user_by_passport_username(&username)
+        .map_err(ApiError::from)?
+        .ok_or_else(ApiError::unauthorized)?;
+    Ok(Json(serde_json::json!({
+        "authenticated": true,
+        "id": user.id,
+        "username": user.passport_username,
+        "name": user.passport_nickname.unwrap_or(user.name),
+        "avatar": user.passport_avatar
+    })))
+}
+
+fn cookie_value(headers: &HttpHeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(header::COOKIE)?
+        .to_str()
+        .ok()?
+        .split(';')
+        .find_map(|part| {
+            let (key, value) = part.trim().split_once('=')?;
+            (key == name).then(|| value.to_owned())
+        })
+}
+
+fn public_base_url() -> String {
+    std::env::var("BLORA_PUBLIC_URL").unwrap_or_else(|_| "http://127.0.0.1:8787".to_owned())
 }
 
 async fn app_js() -> Response {
@@ -824,19 +948,29 @@ fn current_user(
     state: &AppState,
     headers: &HttpHeaderMap,
 ) -> Result<Option<blora_storage::UserRecord>, ApiError> {
-    if !state.require_auth {
-        return Ok(None);
+    if state.require_auth {
+        let token = bearer_token(headers);
+        if token.is_empty() {
+            return Err(ApiError::unauthorized());
+        }
+        let user = state
+            .runtime
+            .user_by_token(&token)
+            .map_err(ApiError::from)?
+            .ok_or_else(ApiError::unauthorized)?;
+        return Ok(Some(user));
     }
-    let token = bearer_token(headers);
-    if token.is_empty() {
-        return Err(ApiError::unauthorized());
+    if state.passport.is_some() {
+        if let Some(username) = cookie_value(headers, "blora_passport_user") {
+            let user = state
+                .runtime
+                .user_by_passport_username(&username)
+                .map_err(ApiError::from)?
+                .ok_or_else(ApiError::unauthorized)?;
+            return Ok(Some(user));
+        }
     }
-    let user = state
-        .runtime
-        .user_by_token(&token)
-        .map_err(ApiError::from)?
-        .ok_or_else(ApiError::unauthorized)?;
-    Ok(Some(user))
+    Ok(None)
 }
 
 fn ensure_session(
@@ -1066,6 +1200,7 @@ mod tests {
             workspace: dir.path().to_path_buf(),
             cancels: Arc::new(Mutex::new(HashMap::new())),
             require_auth: false,
+            passport: None,
         };
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();

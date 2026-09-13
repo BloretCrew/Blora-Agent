@@ -158,6 +158,25 @@ impl Runtime {
         self.store.user_by_token(token)
     }
 
+    pub fn upsert_passport_user(
+        &self,
+        username: &str,
+        nickname: Option<&str>,
+        avatar: Option<&str>,
+        email: Option<&str>,
+        app_token: Option<&str>,
+    ) -> Result<blora_storage::UserRecord> {
+        self.store
+            .upsert_passport_user(username, nickname, avatar, email, app_token)
+    }
+
+    pub fn user_by_passport_username(
+        &self,
+        username: &str,
+    ) -> Result<Option<blora_storage::UserRecord>> {
+        self.store.user_by_passport_username(username)
+    }
+
     pub fn list_users(&self) -> Result<Vec<blora_storage::UserRecord>> {
         self.store.list_users()
     }

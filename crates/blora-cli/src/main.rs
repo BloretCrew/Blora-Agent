@@ -255,6 +255,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         None => {
             let runtime = Runtime::new(open_store(cli.home.as_deref())?);
             let workspace = cli.workspace.unwrap_or(std::env::current_dir()?);
+            if let Err(err) = blora_tui::ensure_passport_login(&runtime) {
+                tracing::debug!("Passport login unavailable: {err}");
+            }
             blora_tui::run(&runtime, &workspace)?;
             Ok(())
         }

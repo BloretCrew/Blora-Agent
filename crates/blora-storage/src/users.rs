@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Blora Agent contributors
 
 use blora_types::{BloraError, Result, SessionId};
+
 use chrono::{DateTime, Utc};
 use rusqlite::{OptionalExtension, params};
 use sha2::{Digest, Sha256};
@@ -14,6 +15,11 @@ pub struct UserRecord {
     pub name: String,
     pub token_hash: String,
     pub created_at: DateTime<Utc>,
+    pub passport_username: Option<String>,
+    pub passport_nickname: Option<String>,
+    pub passport_avatar: Option<String>,
+    pub passport_email: Option<String>,
+    pub passport_app_token: Option<String>,
 }
 
 #[must_use]
@@ -23,6 +29,103 @@ pub fn hash_token(token: &str) -> String {
 }
 
 impl SqliteStore {
+    pub fn upsert_passport_user(
+        &self,
+        username: &str,
+        nickname: Option<&str>,
+        avatar: Option<&str>,
+        email: Option<&str>,
+        app_token: Option<&str>,
+    ) -> Result<UserRecord> {
+        let username = username.trim();
+        if username.is_empty() {
+            return Err(BloraError::Other("Passport username is empty".to_owned()));
+        }
+        let now = Utc::now();
+        let conn = self.lock();
+        let existing = conn
+            .query_row(
+                "SELECT id, name, token_hash, created_at FROM users WHERE passport_username = ?1",
+                params![username],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(BloraError::storage)?;
+        let id = existing
+            .as_ref()
+            .map(|row| row.0.clone())
+            .unwrap_or_else(|| format!("usr_{}", uuid::Uuid::now_v7().simple()));
+        let name = nickname
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(username);
+        let token_hash = existing
+            .as_ref()
+            .map(|row| row.2.clone())
+            .unwrap_or_else(|| {
+                hash_token(&format!("passport:{username}:{}", uuid::Uuid::now_v7()))
+            });
+        let created_at = existing
+            .as_ref()
+            .map(|row| row.3.clone())
+            .unwrap_or_else(|| now.to_rfc3339());
+        conn.execute(
+            "INSERT INTO users (id, name, token_hash, created_at, passport_username, passport_nickname, passport_avatar, passport_email, passport_app_token)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(passport_username) DO UPDATE SET name=excluded.name, passport_nickname=excluded.passport_nickname, passport_avatar=excluded.passport_avatar, passport_email=excluded.passport_email, passport_app_token=excluded.passport_app_token",
+            params![id, name, token_hash, created_at, username, nickname, avatar, email, app_token],
+        )
+        .map_err(BloraError::storage)?;
+        self.user_by_passport_username(username)?
+            .ok_or_else(|| BloraError::Other("Passport user was not stored".to_owned()))
+    }
+
+    pub fn user_by_passport_username(&self, username: &str) -> Result<Option<UserRecord>> {
+        let conn = self.lock();
+        let row = conn.query_row(
+            "SELECT id, name, token_hash, created_at, passport_username, passport_nickname, passport_avatar, passport_email, passport_app_token FROM users WHERE passport_username = ?1",
+            params![username],
+            |row| Ok((
+                row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?, row.get::<_, Option<String>>(5)?, row.get::<_, Option<String>>(6)?, row.get::<_, Option<String>>(7)?, row.get::<_, Option<String>>(8)?,
+            )),
+        ).optional().map_err(BloraError::storage)?;
+        row.map(
+            |(
+                id,
+                name,
+                token_hash,
+                created,
+                passport_username,
+                passport_nickname,
+                passport_avatar,
+                passport_email,
+                passport_app_token,
+            )| {
+                Ok(UserRecord {
+                    id,
+                    name,
+                    token_hash,
+                    created_at: DateTime::parse_from_rfc3339(&created)
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .map_err(BloraError::storage)?,
+                    passport_username,
+                    passport_nickname,
+                    passport_avatar,
+                    passport_email,
+                    passport_app_token,
+                })
+            },
+        )
+        .transpose()
+    }
+
     pub fn create_user(&self, name: &str) -> Result<(UserRecord, String)> {
         let name = name.trim();
         if name.is_empty() {
@@ -44,6 +147,11 @@ impl SqliteStore {
                 name: name.to_owned(),
                 token_hash,
                 created_at: now,
+                passport_username: None,
+                passport_nickname: None,
+                passport_avatar: None,
+                passport_email: None,
+                passport_app_token: None,
             },
             token,
         ))
@@ -54,7 +162,7 @@ impl SqliteStore {
         let conn = self.lock();
         let row = conn
             .query_row(
-                "SELECT id, name, token_hash, created_at FROM users WHERE token_hash = ?1",
+                "SELECT id, name, token_hash, created_at, passport_username, passport_nickname, passport_avatar, passport_email, passport_app_token FROM users WHERE token_hash = ?1",
                 params![hash],
                 |row| {
                     Ok((
@@ -62,28 +170,50 @@ impl SqliteStore {
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
                         row.get::<_, String>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, Option<String>>(6)?,
+                        row.get::<_, Option<String>>(7)?,
+                        row.get::<_, Option<String>>(8)?,
                     ))
                 },
             )
             .optional()
             .map_err(BloraError::storage)?;
-        row.map(|(id, name, token_hash, created)| {
-            Ok(UserRecord {
+        row.map(
+            |(
                 id,
                 name,
                 token_hash,
-                created_at: DateTime::parse_from_rfc3339(&created)
-                    .map(|dt| dt.with_timezone(&Utc))
-                    .map_err(BloraError::storage)?,
-            })
-        })
+                created,
+                passport_username,
+                passport_nickname,
+                passport_avatar,
+                passport_email,
+                passport_app_token,
+            )| {
+                Ok(UserRecord {
+                    id,
+                    name,
+                    token_hash,
+                    created_at: DateTime::parse_from_rfc3339(&created)
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .map_err(BloraError::storage)?,
+                    passport_username,
+                    passport_nickname,
+                    passport_avatar,
+                    passport_email,
+                    passport_app_token,
+                })
+            },
+        )
         .transpose()
     }
 
     pub fn list_users(&self) -> Result<Vec<UserRecord>> {
         let conn = self.lock();
         let mut stmt = conn
-            .prepare("SELECT id, name, token_hash, created_at FROM users ORDER BY created_at ASC")
+            .prepare("SELECT id, name, token_hash, created_at, passport_username, passport_nickname, passport_avatar, passport_email, passport_app_token FROM users ORDER BY created_at ASC")
             .map_err(BloraError::storage)?;
         let rows = stmt
             .query_map([], |row| {
@@ -92,12 +222,27 @@ impl SqliteStore {
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, Option<String>>(8)?,
                 ))
             })
             .map_err(BloraError::storage)?;
         let mut out = Vec::new();
         for row in rows {
-            let (id, name, token_hash, created) = row.map_err(BloraError::storage)?;
+            let (
+                id,
+                name,
+                token_hash,
+                created,
+                passport_username,
+                passport_nickname,
+                passport_avatar,
+                passport_email,
+                passport_app_token,
+            ) = row.map_err(BloraError::storage)?;
             out.push(UserRecord {
                 id,
                 name,
@@ -105,6 +250,11 @@ impl SqliteStore {
                 created_at: DateTime::parse_from_rfc3339(&created)
                     .map(|dt| dt.with_timezone(&Utc))
                     .map_err(BloraError::storage)?,
+                passport_username,
+                passport_nickname,
+                passport_avatar,
+                passport_email,
+                passport_app_token,
             });
         }
         Ok(out)

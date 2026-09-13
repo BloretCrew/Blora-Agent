@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/blora-types",
+    "crates/blora-auth",
     "crates/blora-events",
     "crates/blora-session",
     "crates/blora-storage",
@@ -28,6 +29,8 @@ description = "Blora Agent: a local-first Code, Work, and Agent harness."
 
 [workspace.dependencies]
 blora-types = { path = "crates/blora-types" }
+blora-auth = { path = "crates/blora-auth" }
+blora-server = { path = "crates/blora-server" }
 blora-events = { path = "crates/blora-events" }
 blora-context = { path = "crates/blora-context" }
 blora-session = { path = "crates/blora-session" }
@@ -38,7 +41,6 @@ blora-tools = { path = "crates/blora-tools" }
 blora-model = { path = "crates/blora-model" }
 blora-runtime = { path = "crates/blora-runtime" }
 blora-tui = { path = "crates/blora-tui" }
-blora-server = { path = "crates/blora-server" }
 axum = { version = "0.8", features = ["json", "ws"] }
 sha2 = "0.10"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }

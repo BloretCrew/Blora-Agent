@@ -18,6 +18,21 @@ const subagents = document.querySelector("#subagents");
 const approvalList = document.querySelector("#approval-list");
 const approvalEmpty = document.querySelector("#approval-empty");
 const pageAlert = document.querySelector("#page-alert");
+const passportLogin = document.querySelector("#passport-login");
+const passportUser = document.querySelector("#passport-user");
+
+async function refreshPassport() {
+  if (!passportLogin || !passportUser) return;
+  try {
+    const user = await api("/api/auth/me");
+    passportLogin.hidden = true;
+    passportUser.hidden = false;
+    passportUser.textContent = `已登录 · ${user.name || user.username}`;
+  } catch (_) {
+    passportLogin.hidden = false;
+    passportUser.hidden = true;
+  }
+}
 
 function enhance() {
   if (typeof Blora !== "undefined" && typeof Blora.enhanceButtons === "function") {
@@ -738,6 +753,7 @@ if (searchBox) {
 }
 
 enhance();
+refreshPassport();
 applyRoute().catch((error) => {
   showAlert(error.message);
 });

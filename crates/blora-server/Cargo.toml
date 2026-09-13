@@ -9,6 +9,7 @@ description = "Local HTTP and SSE server for Blora Agent."
 
 [dependencies]
 axum.workspace = true
+blora-auth.workspace = true
 chrono.workspace = true
 blora-runtime.workspace = true
 blora-session.workspace = true

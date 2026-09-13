@@ -134,6 +134,25 @@ impl SqliteStore {
             params![now],
         )
         .map_err(BloraError::storage)?;
+        for statement in [
+            "ALTER TABLE users ADD COLUMN passport_username TEXT",
+            "ALTER TABLE users ADD COLUMN passport_nickname TEXT",
+            "ALTER TABLE users ADD COLUMN passport_avatar TEXT",
+            "ALTER TABLE users ADD COLUMN passport_email TEXT",
+            "ALTER TABLE users ADD COLUMN passport_app_token TEXT",
+        ] {
+            let _ = conn.execute(statement, []);
+        }
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_passport_username ON users(passport_username)",
+            [],
+        )
+        .map_err(BloraError::storage)?;
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (9, ?1)",
+            params![now],
+        )
+        .map_err(BloraError::storage)?;
         Ok(Self {
             conn: Mutex::new(conn),
             clock: SystemClock,

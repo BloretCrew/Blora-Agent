@@ -128,7 +128,12 @@ CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,
     token_hash TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    passport_username TEXT UNIQUE,
+    passport_nickname TEXT,
+    passport_avatar TEXT,
+    passport_email TEXT,
+    passport_app_token TEXT
 );
 
 CREATE TABLE IF NOT EXISTS workspaces (
