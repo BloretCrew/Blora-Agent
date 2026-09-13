@@ -30,8 +30,10 @@ fn lock_registry() -> std::sync::MutexGuard<'static, BTreeMap<u32, ProcessInfo>>
 
 impl LocalBackend {
     pub fn shell_background(&self, command: &str) -> Result<String> {
-        self.policy()
-            .require(self.policy().shell(), &format!("shell {command}"))?;
+        self.policy().require(
+            self.policy().shell_command(command),
+            &format!("shell {command}"),
+        )?;
         if command.trim().is_empty() {
             return Err(BloraError::Exec("empty command".to_owned()));
         }

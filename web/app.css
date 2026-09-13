@@ -1,5 +1,15 @@
 /* Page composition only. Component chrome comes from Blora CSS. */
 
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+}
+
 .ba-brand {
   display: flex;
   gap: var(--blora-space-4);

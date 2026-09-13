@@ -62,6 +62,7 @@ impl Runtime {
                 approval_id: approval_id.clone(),
                 capability: capability.to_owned(),
                 summary: summary.to_owned(),
+                policy_version: blora_policy::POLICY_VERSION,
             }),
         )?;
         loop {

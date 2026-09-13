@@ -123,6 +123,11 @@ impl SqliteStore {
             params![now],
         )
         .map_err(BloraError::storage)?;
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (7, ?1)",
+            params![now],
+        )
+        .map_err(BloraError::storage)?;
         Ok(Self {
             conn: Mutex::new(conn),
             clock: SystemClock,
@@ -170,6 +175,13 @@ impl SqliteStore {
             &self.clock,
         )?;
         insert_event(&tx, &envelope)?;
+        tx.execute(
+            "INSERT INTO workspaces (path, last_session_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?3)
+             ON CONFLICT(path) DO UPDATE SET last_session_id = excluded.last_session_id, updated_at = excluded.updated_at",
+            params![spec.workspace_path, session_id.as_str(), now.to_rfc3339()],
+        )
+        .map_err(BloraError::storage)?;
         tx.commit().map_err(BloraError::storage)?;
         Ok(session_id)
     }

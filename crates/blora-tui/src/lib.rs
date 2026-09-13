@@ -77,12 +77,14 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                         .and_then(|p| p.session.as_ref())
                         .map(|s| {
                             format!(
-                                "Blora Agent  {}/{}  {}  tasks:{}  agents:{}",
+                                "Blora Agent  {}/{}  {}  tasks:{}  agents:{}  tok:{}/{}",
                                 index + 1,
                                 sessions.len().max(1),
                                 s.id,
                                 projection.as_ref().map(|p| p.tasks.len()).unwrap_or(0),
-                                projection.as_ref().map(|p| p.subagents.len()).unwrap_or(0)
+                                projection.as_ref().map(|p| p.subagents.len()).unwrap_or(0),
+                                projection.as_ref().map(|p| p.input_tokens).unwrap_or(0),
+                                projection.as_ref().map(|p| p.output_tokens).unwrap_or(0)
                             )
                         })
                         .unwrap_or_else(|| "Blora Agent".to_owned());
@@ -308,9 +310,10 @@ fn slash(
     }
     match cmd {
         "/help" => {
-            "/new /compact /tasks /yes /model /cancel /fork /resume /export /permissions /mode /search /tools"
+            "/new /compact /tasks /yes /model /cancel /fork /resume /export /permissions /mode /search /tools /copy"
                 .to_owned()
         }
+        "/copy" => copy_last_assistant(runtime, session_id),
         "/tools" => {
             *hide_tools = !*hide_tools;
             format!("hide-tools={hide_tools}")
@@ -386,6 +389,49 @@ fn slash(
             .unwrap_or_else(|| "unknown".to_owned()),
         _ => format!("unknown command {cmd}"),
     }
+}
+
+fn copy_last_assistant(runtime: &Runtime, session_id: &SessionId) -> String {
+    let text = runtime
+        .show_session(session_id)
+        .ok()
+        .and_then(|projection| {
+            projection.transcript.into_iter().rev().find_map(|item| {
+                if let TranscriptItem::Assistant { text, .. } = item {
+                    Some(text)
+                } else {
+                    None
+                }
+            })
+        })
+        .unwrap_or_default();
+    if text.is_empty() {
+        return "nothing to copy".to_owned();
+    }
+    for (program, args) in [
+        ("wl-copy", &[] as &[&str]),
+        ("xclip", &["-selection", "clipboard"] as &[&str]),
+        ("pbcopy", &[] as &[&str]),
+    ] {
+        if let Ok(mut child) = std::process::Command::new(program)
+            .args(args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            if let Some(mut stdin) = child.stdin.take() {
+                use std::io::Write;
+                let _ = stdin.write_all(text.as_bytes());
+            }
+            let _ = child.wait();
+            return format!("copied {} chars", text.chars().count());
+        }
+    }
+    format!(
+        "no clipboard tool; last reply is {} chars",
+        text.chars().count()
+    )
 }
 
 fn render_transcript(

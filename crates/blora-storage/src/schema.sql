@@ -123,6 +123,13 @@ CREATE TABLE IF NOT EXISTS artifacts (
     FOREIGN KEY (session_id) REFERENCES sessions(id)
 );
 
+CREATE TABLE IF NOT EXISTS workspaces (
+    path TEXT PRIMARY KEY,
+    last_session_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS memories (
     workspace_path TEXT NOT NULL,
     key TEXT NOT NULL,

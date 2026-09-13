@@ -1,0 +1,121 @@
+openapi: 3.0.3
+info:
+  title: Blora Agent Local API
+  version: 0.1.0
+  description: Local-first HTTP API served by `blora --web`.
+servers:
+  - url: http://127.0.0.1:8787
+paths:
+  /api/sessions:
+    get:
+      summary: List or search sessions
+      parameters:
+        - in: query
+          name: q
+          schema: { type: string }
+      responses:
+        "200": { description: Session list }
+    post:
+      summary: Create a session
+      responses:
+        "200": { description: Created session }
+  /api/sessions/{id}:
+    get:
+      summary: Session projection
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: Session }
+  /api/sessions/{id}/run:
+    post:
+      summary: Start a run
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: Updated session }
+  /api/sessions/{id}/events:
+    get:
+      summary: SSE event stream
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: text/event-stream }
+  /api/sessions/{id}/export:
+    get:
+      summary: Canonical event log as JSON
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: Event array }
+  /api/sessions/{id}/cancel:
+    post:
+      summary: Cancel the in-flight run
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: Cancelled }
+  /api/tasks:
+    get:
+      summary: List tasks
+      responses:
+        "200": { description: Tasks }
+    post:
+      summary: Queue a task
+      responses:
+        "200": { description: Created }
+  /api/approvals:
+    get:
+      summary: Pending approvals
+      responses:
+        "200": { description: Approvals }
+  /api/workspace:
+    get:
+      summary: Git and file snapshot
+      responses:
+        "200": { description: Workspace info }
+  /api/workspace/file:
+    get:
+      summary: Read a workspace file
+      parameters:
+        - in: query
+          name: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: File contents }
+  /api/artifacts:
+    get:
+      summary: List artifacts
+      responses:
+        "200": { description: Artifacts }
+  /api/settings:
+    get:
+      summary: Non-secret runtime settings
+      responses:
+        "200": { description: Settings }
+  /vendor/{path}:
+    get:
+      summary: Blora Design assets
+      parameters:
+        - in: path
+          name: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: CSS or JS }
+        "404": { description: Unknown asset }

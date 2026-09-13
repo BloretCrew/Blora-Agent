@@ -7,7 +7,7 @@ use blora_events::{
     ModelRequested, ModelResponseCompleted, NewEvent, ProviderChanged, RetryStarted,
     RunCancelRequested, RunCancelled, RunCompleted, RunCreated, RunFailed, RunStarted,
     SessionArchived, SessionResumed, ToolCompleted, ToolFailed, ToolOutput, ToolRequested,
-    UsageRecorded, UserInput,
+    ToolStarted, UsageRecorded, UserInput,
 };
 use blora_exec::{Isolation, LocalBackend, WorktreeHandle};
 use blora_model::{CompletionRequest, StreamEvent, ToolCall, ToolDeclaration, make_providers};
@@ -346,6 +346,7 @@ impl Runtime {
 
         let run_id = RunId::generate();
         let turn_id = TurnId::generate();
+        let wall_started = std::time::Instant::now();
         self.emit(
             session_id,
             Some(&run_id),
@@ -405,6 +406,17 @@ impl Runtime {
         for turn in 0..options.max_turns {
             if cancel.is_cancelled() {
                 return self.cancel_run(session_id, &run_id, &turn_id);
+            }
+            if wall_clock_exceeded(wall_started) {
+                self.emit(
+                    session_id,
+                    Some(&run_id),
+                    Some(&turn_id),
+                    KnownPayload::RunFailed(RunFailed {
+                        error: "wall-clock budget exceeded".to_owned(),
+                    }),
+                )?;
+                return Err(BloraError::Other("wall-clock budget exceeded".to_owned()));
             }
             let mut events = self.store.load_events(session_id)?;
             if should_auto_compact(&events) {
@@ -650,6 +662,14 @@ impl Runtime {
             )?;
             return Ok(());
         }
+        self.emit(
+            session_id,
+            Some(run_id),
+            Some(turn_id),
+            KnownPayload::ToolStarted(ToolStarted {
+                tool: call.name.clone(),
+            }),
+        )?;
         let execute = |backend: &LocalBackend| match call.name.as_str() {
             "delegate" => {
                 let prompt = arguments
@@ -885,6 +905,14 @@ fn should_auto_compact(events: &[EventEnvelope]) -> bool {
         None => true,
         Some(index) => events.len() - index > 32,
     }
+}
+
+fn wall_clock_exceeded(started: std::time::Instant) -> bool {
+    let max = std::env::var("BLORA_MAX_WALL_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(900);
+    max > 0 && started.elapsed().as_secs() > max
 }
 
 fn token_budget_exceeded(used: u64) -> bool {

@@ -45,7 +45,7 @@ export BLORA_MODEL=gpt-4o-mini                    # 可选
 cargo run -p blora-cli -- run --session ses_… --yes "fix the failing test"
 ```
 
-数据目录：`$BLORA_HOME`，默认 `~/.blora/state.sqlite`。
+数据目录：`$BLORA_HOME`，默认 `~/.blora/state.sqlite`。网络命令默认拒绝，设置 `BLORA_NETWORK=1` 后才可审批执行。
 
 ## 仓库结构
 

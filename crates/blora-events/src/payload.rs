@@ -135,6 +135,12 @@ pub struct ApprovalRequested {
     pub approval_id: ApprovalId,
     pub capability: String,
     pub summary: String,
+    #[serde(default = "default_policy_version")]
+    pub policy_version: u32,
+}
+
+fn default_policy_version() -> u32 {
+    1
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

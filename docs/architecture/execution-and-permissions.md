@@ -16,4 +16,6 @@
 
 ## 权限
 
-结果只有 `allow`、`deny`、`ask`。默认 fail-closed。写入、shell、worktree add、process kill 需要审批，除非 `--yes` / 自动批准。审批事件记录 capability、摘要、决定。
+结果只有 `allow`、`deny`、`ask`。默认 fail-closed。写入、shell、worktree add、process kill 需要审批，除非 `--yes` / 自动批准。
+
+能力：文件读取默认允许，`.env` / 密钥文件名需审批；网络默认拒绝（`BLORA_NETWORK=1` 后才 Ask/Allow）；Git commit/push/reset/clean/rebase 为破坏性操作需审批。审批事件记录 capability、摘要、决定和 `policy_version`（当前 1）。单次 run 还受 turn 上限、`BLORA_MAX_TOKENS`、`BLORA_MAX_WALL_SECS`（默认 900）约束。

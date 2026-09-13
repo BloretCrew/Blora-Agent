@@ -60,7 +60,10 @@ impl LocalBackend {
     }
 
     pub fn read_file(&self, path: &str) -> Result<String> {
-        self.policy.require(self.policy.file_read(), "read_file")?;
+        self.policy.require(
+            self.policy.file_read_path(path),
+            &format!("read_file {path}"),
+        )?;
         let path = self.policy.resolve(path)?;
         let bytes = std::fs::read(&path).map_err(BloraError::exec)?;
         if bytes.len() > MAX_FILE_BYTES {
@@ -141,8 +144,10 @@ impl LocalBackend {
     }
 
     pub fn shell(&self, command: &str) -> Result<String> {
-        self.policy
-            .require(self.policy.shell(), &format!("shell {command}"))?;
+        self.policy.require(
+            self.policy.shell_command(command),
+            &format!("shell {command}"),
+        )?;
         if command.trim().is_empty() {
             return Err(BloraError::Exec("empty command".to_owned()));
         }

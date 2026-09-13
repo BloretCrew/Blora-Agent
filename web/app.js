@@ -87,17 +87,27 @@ function store(key, value) {
 }
 
 async function api(path, options = {}) {
-  const response = await fetch(path, {
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
-    ...options,
-  });
-  if (!response.ok) {
-    throw new Error(await response.text());
+  const loading = document.querySelector("#page-loading");
+  if (loading) {
+    loading.hidden = false;
   }
-  if (response.status === 204) {
-    return null;
+  try {
+    const response = await fetch(path, {
+      headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+      ...options,
+    });
+    if (!response.ok) {
+      throw new Error(await response.text());
+    }
+    if (response.status === 204) {
+      return null;
+    }
+    return response.json();
+  } finally {
+    if (loading) {
+      loading.hidden = true;
+    }
   }
-  return response.json();
 }
 
 function parseHash() {
