@@ -265,7 +265,6 @@ async fn passport_device(
     Ok(Json(serde_json::json!({
         "user_code": device.user_code,
         "verification_uri": device.verification_uri,
-        "device_code": config.device_code(&device),
         "expires_in": device.expires_in,
         "interval": device.interval
     })))
