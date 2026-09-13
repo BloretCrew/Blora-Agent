@@ -16,7 +16,10 @@ use blora_runtime::{CancelToken, RunOptions, Runtime};
 use blora_session::TranscriptItem;
 use blora_storage::{CreateSession, CreateTask};
 use blora_types::{Mode, Result, SessionId, TaskId};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+    MouseButton, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -39,7 +42,8 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut index = 0usize;
     enable_raw_mode().map_err(blora_types::BloraError::exec)?;
     let mut stdout = stdout();
-    execute!(stdout, EnterAlternateScreen).map_err(blora_types::BloraError::exec)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
+        .map_err(blora_types::BloraError::exec)?;
     if std::env::var_os("NO_COLOR").is_none() {
         let _ = write!(stdout, "{}", theme::CURSOR_ROSE);
         let _ = stdout.flush();
@@ -58,6 +62,8 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut provider_override = String::new();
     let mut notice: Option<String> = None;
     let mut tick = 0u64;
+    let mut pointer: Option<(u16, u16)> = None;
+    let mut hits = view::HitMap::default();
     let mut cancel = CancelToken::new();
     let result = thread::scope(|scope| -> Result<()> {
         let mut job: Option<thread::ScopedJoinHandle<'_, Result<blora_types::RunId>>> = None;
@@ -94,7 +100,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
             };
             terminal
                 .draw(|frame| {
-                    view::draw(
+                    hits = view::draw(
                         frame,
                         &view::FrameModel {
                             workspace,
@@ -115,6 +121,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             provider,
                             running: job.is_some(),
                             tick,
+                            pointer,
                         },
                     );
                 })
@@ -297,6 +304,228 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             _ => {}
                         }
                     }
+                    Event::Mouse(mouse) => {
+                        pointer = Some((mouse.column, mouse.row));
+                        match mouse.kind {
+                            MouseEventKind::ScrollUp => {
+                                if hits.over_slash(mouse.column, mouse.row) {
+                                    slash_selected = slash_selected.saturating_sub(1);
+                                } else {
+                                    scroll = scroll.saturating_add(3);
+                                }
+                            }
+                            MouseEventKind::ScrollDown => {
+                                if hits.over_slash(mouse.column, mouse.row) {
+                                    if !slash_hits.is_empty() {
+                                        slash_selected =
+                                            (slash_selected + 1).min(slash_hits.len() - 1);
+                                    }
+                                } else {
+                                    scroll = scroll.saturating_sub(3);
+                                }
+                            }
+                            MouseEventKind::Moved => {
+                                if let Some(view::Hit::Slash(idx)) =
+                                    hits.hit(mouse.column, mouse.row)
+                                {
+                                    slash_selected = idx;
+                                }
+                            }
+                            MouseEventKind::Down(MouseButton::Left) => {
+                                let hit = hits.hit(mouse.column, mouse.row);
+                                if let Some(view::Hit::Slash(idx)) = hit {
+                                    slash_selected = idx;
+                                    if let Some(cmd) = slash_hits.get(idx) {
+                                        if slash::needs_args(cmd) {
+                                            input = slash::complete(cmd);
+                                            slash_selected = 0;
+                                        } else if let Some(id) = session_id.as_ref() {
+                                            let command = format!("/{}", cmd.name);
+                                            input.clear();
+                                            slash_selected = 0;
+                                            if apply_slash(
+                                                slash(
+                                                    runtime,
+                                                    &command,
+                                                    id,
+                                                    &mut auto_approve,
+                                                    &mut sessions,
+                                                    &mut index,
+                                                    workspace,
+                                                    &cancel,
+                                                    &mut search,
+                                                    &mut hide_tools,
+                                                    &mut model_override,
+                                                    &mut provider_override,
+                                                ),
+                                                &cancel,
+                                                &mut notice,
+                                                &mut status,
+                                            ) {
+                                                break Ok(());
+                                            }
+                                        }
+                                    }
+                                } else if matches!(
+                                    hit,
+                                    Some(
+                                        view::Hit::Allow | view::Hit::Hint(view::HintAction::Allow)
+                                    )
+                                ) {
+                                    if let Some(first) = pending.first() {
+                                        let _ = runtime.resolve_approval(&first.id, true);
+                                    }
+                                } else if matches!(
+                                    hit,
+                                    Some(view::Hit::Deny | view::Hit::Hint(view::HintAction::Deny))
+                                ) {
+                                    if let Some(first) = pending.first() {
+                                        let _ = runtime.resolve_approval(&first.id, false);
+                                    }
+                                } else if hit == Some(view::Hit::PrevSession) {
+                                    index = index.saturating_sub(1);
+                                } else if matches!(
+                                    hit,
+                                    Some(
+                                        view::Hit::NextSession
+                                            | view::Hit::Hint(view::HintAction::SessionNext)
+                                    )
+                                ) {
+                                    if index + 1 < sessions.len() {
+                                        index += 1;
+                                    }
+                                } else if hit == Some(view::Hit::CancelRun) {
+                                    cancel.cancel();
+                                    status = "cancel requested".to_owned();
+                                } else if hit == Some(view::Hit::ToggleApprove) {
+                                    auto_approve = !auto_approve;
+                                    status = format!("auto-approve={auto_approve}");
+                                } else if hit == Some(view::Hit::Notice)
+                                    || hit == Some(view::Hit::Hint(view::HintAction::Close))
+                                {
+                                    notice = None;
+                                    if slash::is_open(&input) {
+                                        input.clear();
+                                        slash_selected = 0;
+                                    }
+                                } else if hit == Some(view::Hit::Hint(view::HintAction::Commands)) {
+                                    if input.is_empty() {
+                                        input.push('/');
+                                        slash_selected = 0;
+                                    }
+                                } else if hit == Some(view::Hit::Hint(view::HintAction::New)) {
+                                    match create_session(
+                                        runtime,
+                                        workspace,
+                                        blora_types::Mode::Code,
+                                        None,
+                                    ) {
+                                        Ok(id) => {
+                                            refresh_sessions(runtime, &mut sessions, &mut index);
+                                            if let Some(found) =
+                                                sessions.iter().position(|item| item.id == id)
+                                            {
+                                                index = found;
+                                            }
+                                            status = format!("session {id}");
+                                        }
+                                        Err(err) => status = err.to_string(),
+                                    }
+                                } else if hit == Some(view::Hit::Hint(view::HintAction::Complete)) {
+                                    if let Some(cmd) = slash_hits.get(slash_selected) {
+                                        input = slash::complete(cmd);
+                                        slash_selected = 0;
+                                    }
+                                } else if hit == Some(view::Hit::Hint(view::HintAction::Run))
+                                    || hit == Some(view::Hit::Hint(view::HintAction::Send))
+                                {
+                                    // Reuse Enter: inject a synthetic submit by falling through
+                                    // to the same slash/send paths via a small helper.
+                                    if input.starts_with('/') {
+                                        if slash::is_open(&input) {
+                                            if let Some(cmd) = slash_hits.get(slash_selected) {
+                                                if slash::needs_args(cmd) {
+                                                    input = slash::complete(cmd);
+                                                    slash_selected = 0;
+                                                    continue;
+                                                }
+                                            }
+                                        }
+                                        let mut command = input.clone();
+                                        if slash::is_open(&command) {
+                                            if let Some(cmd) = slash_hits.get(slash_selected) {
+                                                command = format!("/{}", cmd.name);
+                                            }
+                                        }
+                                        input.clear();
+                                        slash_selected = 0;
+                                        if let Some(id) = session_id.as_ref() {
+                                            if apply_slash(
+                                                slash(
+                                                    runtime,
+                                                    &command,
+                                                    id,
+                                                    &mut auto_approve,
+                                                    &mut sessions,
+                                                    &mut index,
+                                                    workspace,
+                                                    &cancel,
+                                                    &mut search,
+                                                    &mut hide_tools,
+                                                    &mut model_override,
+                                                    &mut provider_override,
+                                                ),
+                                                &cancel,
+                                                &mut notice,
+                                                &mut status,
+                                            ) {
+                                                break Ok(());
+                                            }
+                                        }
+                                    } else if !input.trim().is_empty() {
+                                        if job.is_some() {
+                                            status = "a run is already in progress".to_owned();
+                                            continue;
+                                        }
+                                        let Some(id) = session_id.clone() else {
+                                            continue;
+                                        };
+                                        let prompt = input.clone();
+                                        input.clear();
+                                        notice = None;
+                                        status = "running…".to_owned();
+                                        let options = RunOptions {
+                                            mock: std::env::var("BLORA_API_KEY").is_err()
+                                                && std::env::var("OPENAI_API_KEY").is_err()
+                                                && std::env::var("GEMINI_API_KEY").is_err(),
+                                            auto_approve,
+                                            interactive: true,
+                                            model: model_override.clone(),
+                                            provider: provider_override.clone(),
+                                            ..RunOptions::default()
+                                        };
+                                        let cancel_clone = cancel.clone();
+                                        job = Some(scope.spawn(move || {
+                                            runtime.run(&id, &prompt, &cancel_clone, &options)
+                                        }));
+                                    }
+                                } else if hit == Some(view::Hit::Hint(view::HintAction::Quit)) {
+                                    cancel.cancel();
+                                    break Ok(());
+                                } else if slash::is_open(&input)
+                                    && !matches!(hit, Some(view::Hit::Composer))
+                                {
+                                    input.clear();
+                                    slash_selected = 0;
+                                } else if notice.is_some()
+                                    && !matches!(hit, Some(view::Hit::Composer))
+                                {
+                                    notice = None;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -304,7 +533,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     });
 
     disable_raw_mode().ok();
-    execute!(io::stdout(), LeaveAlternateScreen).ok();
+    execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen).ok();
     if std::env::var_os("NO_COLOR").is_none() {
         let _ = write!(io::stdout(), "{}", theme::CURSOR_RESET);
         let _ = io::stdout().flush();
@@ -345,6 +574,30 @@ enum SlashOutcome {
     Status(String),
     Panel { status: String, body: String },
     Quit,
+}
+
+fn apply_slash(
+    outcome: SlashOutcome,
+    cancel: &CancelToken,
+    notice: &mut Option<String>,
+    status: &mut String,
+) -> bool {
+    match outcome {
+        SlashOutcome::Quit => {
+            cancel.cancel();
+            true
+        }
+        SlashOutcome::Status(text) => {
+            *notice = None;
+            *status = text;
+            false
+        }
+        SlashOutcome::Panel { status: text, body } => {
+            *status = text;
+            *notice = Some(body);
+            false
+        }
+    }
 }
 
 fn clip_text(text: &str, max_lines: usize) -> String {

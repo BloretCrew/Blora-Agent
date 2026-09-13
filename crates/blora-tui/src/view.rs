@@ -39,9 +39,123 @@ pub struct FrameModel<'a> {
     pub provider: &'a str,
     pub running: bool,
     pub tick: u64,
+    pub pointer: Option<(u16, u16)>,
 }
 
-pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) {
+/// A clickable region from the last painted frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hit {
+    Transcript,
+    Composer,
+    Slash(usize),
+    Allow,
+    Deny,
+    PrevSession,
+    NextSession,
+    CancelRun,
+    ToggleApprove,
+    Hint(HintAction),
+    Notice,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HintAction {
+    Send,
+    Commands,
+    SessionNext,
+    New,
+    Quit,
+    Allow,
+    Deny,
+    Close,
+    Complete,
+    Run,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct HitMap {
+    pub transcript: Rect,
+    pub composer: Rect,
+    pub overlay: Option<Rect>,
+    pub notice: bool,
+    pub slash_open: bool,
+    pub slash_rows: Vec<(Rect, usize)>,
+    pub allow: Option<Rect>,
+    pub deny: Option<Rect>,
+    pub prev_session: Option<Rect>,
+    pub next_session: Option<Rect>,
+    pub cancel_run: Option<Rect>,
+    pub toggle_approve: Option<Rect>,
+    pub hints: Vec<(Rect, HintAction)>,
+}
+
+impl HitMap {
+    #[must_use]
+    pub fn hit(&self, col: u16, row: u16) -> Option<Hit> {
+        for (rect, idx) in &self.slash_rows {
+            if contains(*rect, col, row) {
+                return Some(Hit::Slash(*idx));
+            }
+        }
+        if self.notice && self.overlay.is_some_and(|rect| contains(rect, col, row)) {
+            return Some(Hit::Notice);
+        }
+        if self.allow.is_some_and(|rect| contains(rect, col, row)) {
+            return Some(Hit::Allow);
+        }
+        if self.deny.is_some_and(|rect| contains(rect, col, row)) {
+            return Some(Hit::Deny);
+        }
+        for (rect, action) in &self.hints {
+            if contains(*rect, col, row) {
+                return Some(Hit::Hint(*action));
+            }
+        }
+        if self
+            .toggle_approve
+            .is_some_and(|rect| contains(rect, col, row))
+        {
+            return Some(Hit::ToggleApprove);
+        }
+        if self.cancel_run.is_some_and(|rect| contains(rect, col, row)) {
+            return Some(Hit::CancelRun);
+        }
+        if self
+            .prev_session
+            .is_some_and(|rect| contains(rect, col, row))
+        {
+            return Some(Hit::PrevSession);
+        }
+        if self
+            .next_session
+            .is_some_and(|rect| contains(rect, col, row))
+        {
+            return Some(Hit::NextSession);
+        }
+        if contains(self.composer, col, row) {
+            return Some(Hit::Composer);
+        }
+        if contains(self.transcript, col, row) {
+            return Some(Hit::Transcript);
+        }
+        None
+    }
+
+    #[must_use]
+    pub fn over_slash(&self, col: u16, row: u16) -> bool {
+        self.overlay
+            .is_some_and(|rect| self.slash_open && contains(rect, col, row))
+    }
+}
+
+fn contains(rect: Rect, col: u16, row: u16) -> bool {
+    col >= rect.x
+        && col < rect.x.saturating_add(rect.width)
+        && row >= rect.y
+        && row < rect.y.saturating_add(rect.height)
+}
+
+pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
     let theme = Theme::current();
     let area = frame.area();
     frame.render_widget(Block::default().style(theme.base()), area);
@@ -100,22 +214,31 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) {
     i += 1;
     let hints = chunks[i];
 
-    render_header(frame, header, model, &theme);
+    let mut hits = HitMap {
+        transcript: inset(transcript),
+        composer: inset(composer),
+        overlay: overlay.map(inset),
+        notice: show_notice,
+        slash_open: show_slash,
+        ..HitMap::default()
+    };
+    render_header(frame, header, model, &theme, &mut hits);
     render_rule(frame, rule, &theme);
     render_transcript(frame, transcript, model, &theme);
     if let Some(rect) = approval {
-        render_approval(frame, rect, model, &theme);
+        render_approval(frame, rect, model, &theme, &mut hits);
     }
     if let Some(rect) = overlay {
         if show_slash {
-            render_slash(frame, rect, model, &theme);
+            render_slash(frame, rect, model, &theme, &mut hits);
         } else if let Some(body) = model.notice {
             render_notice(frame, rect, body, &theme);
         }
     }
-    render_composer(frame, composer, model, &theme);
+    render_composer(frame, composer, model, &theme, &mut hits);
     render_status(frame, status, model, &theme);
-    render_hints(frame, hints, model, &theme);
+    render_hints(frame, hints, model, &theme, &mut hits);
+    hits
 }
 
 fn inset(area: Rect) -> Rect {
@@ -128,7 +251,13 @@ fn inset(area: Rect) -> Rect {
     }
 }
 
-fn render_header(frame: &mut Frame<'_>, area: Rect, model: &FrameModel<'_>, theme: &Theme) {
+fn render_header(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    model: &FrameModel<'_>,
+    theme: &Theme,
+    hits: &mut HitMap,
+) {
     let inner = inset(area);
     let session = model
         .projection
@@ -141,18 +270,39 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, model: &FrameModel<'_>, them
         .and_then(|item| item.title.clone())
         .filter(|text| !text.is_empty())
         .unwrap_or_else(|| id.clone());
+    let counter = format!("{}/{}", model.index + 1, model.sessions.len().max(1));
     let left = Line::from(vec![
         Span::styled("blora", theme.rose_bold()),
         Span::styled("  ·  ", theme.mute()),
         Span::styled(mode, theme.fg(theme.sage)),
         Span::styled("  ·  ", theme.mute()),
-        Span::styled(
-            format!("{}/{}", model.index + 1, model.sessions.len().max(1)),
-            theme.dim(),
-        ),
+        Span::styled("‹ ", theme.dim()),
+        Span::styled(counter.clone(), theme.dim()),
+        Span::styled(" ›", theme.dim()),
         Span::styled("  ", theme.mute()),
         Span::styled(ellipsize(&title, 28), theme.dim()),
     ]);
+    let mut x = inner.x
+        + u16::try_from("blora".width() + "  ·  ".width() + mode.width() + "  ·  ".width())
+            .unwrap_or(0);
+    hits.prev_session = Some(Rect {
+        x,
+        y: inner.y,
+        width: 1,
+        height: 1,
+    });
+    x = x.saturating_add(2);
+    x = x.saturating_add(
+        u16::try_from(counter.width())
+            .unwrap_or(0)
+            .saturating_add(1),
+    );
+    hits.next_session = Some(Rect {
+        x,
+        y: inner.y,
+        width: 1,
+        height: 1,
+    });
     let tokens = model
         .projection
         .map(|projection| {
@@ -177,6 +327,9 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, model: &FrameModel<'_>, them
             width,
             height: 1,
         };
+        if model.running {
+            hits.cancel_run = Some(rect);
+        }
         let style = if model.running {
             theme.fg(theme.sage)
         } else {
@@ -374,21 +527,42 @@ fn highlight_spans(text: &str, needle: Option<&str>, theme: &Theme) -> Vec<Span<
     spans
 }
 
-fn render_approval(frame: &mut Frame<'_>, area: Rect, model: &FrameModel<'_>, theme: &Theme) {
+fn render_approval(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    model: &FrameModel<'_>,
+    theme: &Theme,
+    hits: &mut HitMap,
+) {
     let inner = inset(area);
     let Some(first) = model.pending.first() else {
         return;
     };
+    let summary = ellipsize(&first.summary, inner.width.saturating_sub(22) as usize);
+    let allow_text = "y allow";
+    let deny_text = "n deny";
+    let mut x =
+        inner.x + u16::try_from("!  ".width() + summary.width() + "   ".width()).unwrap_or(0);
+    hits.allow = Some(Rect {
+        x,
+        y: inner.y,
+        width: u16::try_from(allow_text.width()).unwrap_or(7),
+        height: 1,
+    });
+    x = x.saturating_add(u16::try_from(allow_text.width() + "   ".width()).unwrap_or(10));
+    hits.deny = Some(Rect {
+        x,
+        y: inner.y,
+        width: u16::try_from(deny_text.width()).unwrap_or(6),
+        height: 1,
+    });
     let line = Line::from(vec![
         Span::styled("!  ", theme.fg(theme.amber).add_modifier(Modifier::BOLD)),
-        Span::styled(
-            ellipsize(&first.summary, inner.width.saturating_sub(22) as usize),
-            theme.fg(theme.amber),
-        ),
-        Span::styled("   y ", theme.sage_bold()),
-        Span::styled("allow", theme.dim()),
-        Span::styled("   n ", theme.fg(theme.rust).add_modifier(Modifier::BOLD)),
-        Span::styled("deny", theme.dim()),
+        Span::styled(summary, theme.fg(theme.amber)),
+        Span::styled("   ", theme.mute()),
+        Span::styled(allow_text, theme.sage_bold()),
+        Span::styled("   ", theme.mute()),
+        Span::styled(deny_text, theme.fg(theme.rust).add_modifier(Modifier::BOLD)),
     ]);
     frame.render_widget(
         Paragraph::new(line).style(Style::default().bg(theme.bg_raised)),
@@ -396,7 +570,13 @@ fn render_approval(frame: &mut Frame<'_>, area: Rect, model: &FrameModel<'_>, th
     );
 }
 
-fn render_slash(frame: &mut Frame<'_>, area: Rect, model: &FrameModel<'_>, theme: &Theme) {
+fn render_slash(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    model: &FrameModel<'_>,
+    theme: &Theme,
+    hits: &mut HitMap,
+) {
     let inner = inset(area);
     let start = model
         .slash_selected
@@ -414,6 +594,13 @@ fn render_slash(frame: &mut Frame<'_>, area: Rect, model: &FrameModel<'_>, theme
         .unwrap_or(8)
         .min((inner.width as usize).saturating_mul(3) / 5)
         .max(6);
+    let hover_row = model.pointer.and_then(|(col, row)| {
+        if contains(inner, col, row) {
+            Some(usize::from(row.saturating_sub(inner.y)))
+        } else {
+            None
+        }
+    });
     let items: Vec<ListItem> = if visible.is_empty() {
         vec![ListItem::new(Span::styled(
             "  no matching command",
@@ -424,16 +611,32 @@ fn render_slash(frame: &mut Frame<'_>, area: Rect, model: &FrameModel<'_>, theme
             .iter()
             .enumerate()
             .map(|(idx, cmd)| {
-                let selected = start + idx == model.slash_selected;
+                let abs = start + idx;
+                let selected = abs == model.slash_selected;
+                let hovered = hover_row == Some(idx);
                 let prefix = if selected { "❯ " } else { "  " };
                 let label = pad_right(&slash_label(cmd), label_w);
+                hits.slash_rows.push((
+                    Rect {
+                        x: inner.x,
+                        y: inner.y.saturating_add(u16::try_from(idx).unwrap_or(0)),
+                        width: inner.width,
+                        height: 1,
+                    },
+                    abs,
+                ));
+                let bg = if selected || hovered {
+                    theme.bg_select
+                } else {
+                    theme.bg_raised
+                };
                 ListItem::new(Line::from(vec![
                     Span::styled(
                         format!("{prefix}{label}"),
-                        theme.fg(theme.sage).add_modifier(Modifier::BOLD),
+                        theme.fg(theme.sage).add_modifier(Modifier::BOLD).bg(bg),
                     ),
-                    Span::raw("  "),
-                    Span::styled(cmd.about, theme.mute()),
+                    Span::styled("  ", Style::default().bg(bg)),
+                    Span::styled(cmd.about, theme.mute().bg(bg)),
                 ]))
             })
             .collect()
@@ -482,7 +685,13 @@ fn render_notice(frame: &mut Frame<'_>, area: Rect, body: &str, theme: &Theme) {
     );
 }
 
-fn render_composer(frame: &mut Frame<'_>, area: Rect, model: &FrameModel<'_>, theme: &Theme) {
+fn render_composer(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    model: &FrameModel<'_>,
+    theme: &Theme,
+    hits: &mut HitMap,
+) {
     let inner = inset(area);
     let prompt = Rect {
         x: inner.x,
@@ -522,6 +731,13 @@ fn render_composer(frame: &mut Frame<'_>, area: Rect, model: &FrameModel<'_>, th
     } else {
         model.provider
     };
+    let perm_x = inner.x + u16::try_from(2 + model_name.width() + "  ·  ".width()).unwrap_or(8);
+    hits.toggle_approve = Some(Rect {
+        x: perm_x,
+        y: info.y,
+        width: u16::try_from(perm.width()).unwrap_or(4),
+        height: 1,
+    });
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("  ", theme.base()),
@@ -556,34 +772,58 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, model: &FrameModel<'_>, them
     frame.render_widget(Paragraph::new(left).style(theme.mute()), inner);
 }
 
-fn render_hints(frame: &mut Frame<'_>, area: Rect, model: &FrameModel<'_>, theme: &Theme) {
+fn render_hints(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    model: &FrameModel<'_>,
+    theme: &Theme,
+    hits: &mut HitMap,
+) {
     let inner = inset(area);
-    let items: &[(&str, &str)] = if slash::is_open(model.input) {
+    let items: &[(&str, &str, HintAction)] = if slash::is_open(model.input) {
         &[
-            ("tab", "complete"),
-            ("↑↓", "select"),
-            ("⏎", "run"),
-            ("esc", "close"),
+            ("tab", "complete", HintAction::Complete),
+            ("↑↓", "select", HintAction::Run),
+            ("⏎", "run", HintAction::Run),
+            ("esc", "close", HintAction::Close),
         ]
     } else if !model.pending.is_empty() && model.input.is_empty() {
-        &[("y", "allow"), ("n", "deny"), ("esc", "quit")]
+        &[
+            ("y", "allow", HintAction::Allow),
+            ("n", "deny", HintAction::Deny),
+            ("esc", "quit", HintAction::Quit),
+        ]
     } else {
         &[
-            ("⏎", "send"),
-            ("/", "commands"),
-            ("[ ]", "session"),
-            ("^n", "new"),
-            ("^c", "quit"),
+            ("⏎", "send", HintAction::Send),
+            ("/", "commands", HintAction::Commands),
+            ("‹ ›", "session", HintAction::SessionNext),
+            ("^n", "new", HintAction::New),
+            ("^c", "quit", HintAction::Quit),
         ]
     };
     let mut spans = Vec::new();
-    for (i, (key, label)) in items.iter().enumerate() {
+    let mut x = inner.x;
+    for (i, (key, label, action)) in items.iter().enumerate() {
         if i > 0 {
             spans.push(Span::styled("   ", theme.mute()));
+            x = x.saturating_add(3);
         }
+        let text = format!("{key} {label}");
+        let width = u16::try_from(text.width()).unwrap_or(1);
+        hits.hints.push((
+            Rect {
+                x,
+                y: inner.y,
+                width,
+                height: 1,
+            },
+            *action,
+        ));
         spans.push(Span::styled((*key).to_owned(), theme.dim()));
         spans.push(Span::raw(" "));
         spans.push(Span::styled((*label).to_owned(), theme.mute()));
+        x = x.saturating_add(width);
     }
     frame.render_widget(Paragraph::new(Line::from(spans)).style(theme.base()), inner);
 }
@@ -738,5 +978,24 @@ mod tests {
         let (shown, col) = visible_input("ab", 8);
         assert_eq!(shown, "ab");
         assert_eq!(col, 2);
+    }
+
+    #[test]
+    fn hitmap_prefers_slash_then_buttons() {
+        let mut hits = HitMap {
+            transcript: Rect::new(0, 0, 80, 20),
+            composer: Rect::new(0, 21, 80, 2),
+            slash_open: true,
+            overlay: Some(Rect::new(2, 10, 40, 4)),
+            ..HitMap::default()
+        };
+        hits.slash_rows.push((Rect::new(2, 11, 40, 1), 3));
+        hits.allow = Some(Rect::new(40, 9, 7, 1));
+        assert_eq!(hits.hit(5, 11), Some(Hit::Slash(3)));
+        assert_eq!(hits.hit(42, 9), Some(Hit::Allow));
+        assert_eq!(hits.hit(4, 4), Some(Hit::Transcript));
+        assert_eq!(hits.hit(4, 21), Some(Hit::Composer));
+        assert!(hits.over_slash(5, 11));
+        assert!(!hits.over_slash(4, 4));
     }
 }
