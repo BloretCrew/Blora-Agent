@@ -54,11 +54,15 @@ if (passportLogout) {
 async function pollPassportDevice() {
   if (!passportDevice) return;
   try {
-    await api("/api/auth/device/poll", {
+    const result = await api("/api/auth/device/poll", {
       method: "POST",
       body: JSON.stringify(passportDevice),
     });
-    await refreshPassport();
+    passportDevice = null;
+    passportLogin.hidden = true;
+    passportUser.hidden = false;
+    passportUser.textContent = `已登录 · ${result.name || result.username}`;
+    if (passportLogout) passportLogout.hidden = false;
   } catch (error) {
     if (error.message.includes("authorization_pending")) {
       setTimeout(pollPassportDevice, Math.max(1000, Number(passportDevice.interval || 5) * 1000));

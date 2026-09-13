@@ -274,7 +274,7 @@ async fn passport_device(
 async fn passport_device_poll(
     State(state): State<AppState>,
     Json(_body): Json<DevicePollBody>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Response, ApiError> {
     let config = state
         .passport
         .ok_or_else(|| ApiError("Passport login is not configured".to_owned()))?;
@@ -299,9 +299,22 @@ async fn passport_device_poll(
             user.apptoken.as_deref(),
         )
         .map_err(ApiError::from)?;
-    Ok(Json(
-        serde_json::json!({"authenticated": true, "username": user.username, "name": user.display_name()}),
-    ))
+    let cookie = format!(
+        "blora_passport_user={}; HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000",
+        user.username
+    );
+    Ok((
+        [(
+            header::SET_COOKIE,
+            HeaderValue::from_str(&cookie).unwrap_or_else(|_| HeaderValue::from_static("")),
+        )],
+        Json(serde_json::json!({
+            "authenticated": true,
+            "username": user.username,
+            "name": user.display_name()
+        })),
+    )
+        .into_response())
 }
 
 #[derive(Deserialize)]
