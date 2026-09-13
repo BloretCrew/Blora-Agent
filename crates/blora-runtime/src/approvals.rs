@@ -16,6 +16,10 @@ impl Runtime {
         self.store.list_pending_approvals(session_id)
     }
 
+    pub fn pending_approvals_all(&self) -> Result<Vec<ApprovalRecord>> {
+        self.store.list_all_pending_approvals()
+    }
+
     pub fn resolve_approval(&self, approval_id: &ApprovalId, allow: bool) -> Result<()> {
         let decision = if allow { "allow" } else { "deny" };
         if !self

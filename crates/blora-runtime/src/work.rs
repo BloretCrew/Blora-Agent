@@ -40,6 +40,40 @@ impl Runtime {
         self.store.get_task(task_id)
     }
 
+    pub fn pause_task(&self, task_id: &TaskId) -> Result<()> {
+        let now = Utc::now();
+        if !self.store.cas_task_status(
+            task_id,
+            &[TaskStatus::Queued, TaskStatus::Scheduled],
+            TaskStatus::Paused,
+            now,
+            Some("paused"),
+            None,
+        )? {
+            return Err(BloraError::Other(format!(
+                "task {task_id} cannot be paused"
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn resume_task(&self, task_id: &TaskId) -> Result<()> {
+        let now = Utc::now();
+        if !self.store.cas_task_status(
+            task_id,
+            &[TaskStatus::Paused],
+            TaskStatus::Queued,
+            now,
+            None,
+            None,
+        )? {
+            return Err(BloraError::Other(format!(
+                "task {task_id} cannot be resumed"
+            )));
+        }
+        Ok(())
+    }
+
     pub fn cancel_task(&self, task_id: &TaskId) -> Result<()> {
         let task = self.store.get_task(task_id)?;
         if task.status.is_terminal() {
@@ -52,6 +86,7 @@ impl Runtime {
                 TaskStatus::Queued,
                 TaskStatus::Scheduled,
                 TaskStatus::Running,
+                TaskStatus::Paused,
             ],
             TaskStatus::Cancelled,
             now,
@@ -95,6 +130,16 @@ impl Runtime {
         match self.run(&task.session_id, &prompt, &CancelToken::new(), &options) {
             Ok(run_id) => {
                 self.finish_task(task, TaskStatus::Completed, None, Some(&run_id))?;
+                if let Some(cron) = &task.cron {
+                    if let Ok(next) = crate::next_cron(cron, Utc::now()) {
+                        let _ = self.store.reschedule_task(
+                            &task.id,
+                            next,
+                            Utc::now(),
+                            "cron next fire",
+                        );
+                    }
+                }
                 Ok(())
             }
             Err(BloraError::Cancelled) => {

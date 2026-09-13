@@ -80,8 +80,26 @@
 }
 
 .ba-task-form {
-  grid-template-columns: 1fr minmax(8rem, 10rem) auto;
+  grid-template-columns: 1fr minmax(8rem, 10rem) minmax(8rem, 12rem) auto;
   align-items: end;
+}
+
+.ba-pre {
+  margin: 0;
+  padding: var(--blora-space-4);
+  overflow: auto;
+  white-space: pre-wrap;
+  color: var(--blora-color-text);
+  background: var(--blora-color-surface);
+  border: var(--blora-border-width) solid var(--blora-color-border);
+  border-radius: var(--blora-radius-md);
+  font-size: var(--blora-text-sm);
+}
+
+.ba-settings {
+  display: grid;
+  gap: var(--blora-space-5);
+  max-width: 32rem;
 }
 
 @media (max-width: 720px) {

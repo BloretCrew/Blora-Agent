@@ -12,8 +12,14 @@ use std::time::Duration;
 
 use blora_policy::Policy;
 use blora_types::{BloraError, Result};
+mod process;
+mod worktree;
+
 use regex::Regex;
 use walkdir::WalkDir;
+
+pub use process::ProcessInfo;
+pub use worktree::WorktreeHandle;
 
 const MAX_FILE_BYTES: usize = 1_000_000;
 const MAX_SEARCH_MATCHES: usize = 80;
@@ -196,6 +202,51 @@ impl LocalBackend {
         self.git(&["log", "-8", "--oneline"])
     }
 
+    pub fn git_branch(&self) -> Result<String> {
+        self.policy.require(self.policy.file_read(), "git_branch")?;
+        self.git(&["branch", "-vv"])
+    }
+
+    pub fn git_worktree(&self, action: &str, path: Option<&str>) -> Result<String> {
+        match action {
+            "list" | "" => {
+                self.policy
+                    .require(self.policy.file_read(), "git_worktree")?;
+                self.git(&["worktree", "list"])
+            }
+            "add" => {
+                let path =
+                    path.ok_or_else(|| BloraError::Exec("worktree add needs path".to_owned()))?;
+                self.policy.require(
+                    self.policy.file_write(),
+                    &format!("git worktree add {path}"),
+                )?;
+                let resolved = self.resolve_for_write(path)?;
+                self.git(&[
+                    "worktree",
+                    "add",
+                    "--detach",
+                    &resolved.display().to_string(),
+                    "HEAD",
+                ])
+            }
+            other => Err(BloraError::Exec(format!(
+                "unknown git_worktree action: {other}"
+            ))),
+        }
+    }
+
+    pub fn apply_patch(&self, path: &str, old: &str, new: &str) -> Result<()> {
+        let contents = self.read_file(path)?;
+        if !contents.contains(old) {
+            return Err(BloraError::Exec(format!(
+                "patch target not found in {path}"
+            )));
+        }
+        let updated = contents.replacen(old, new, 1);
+        self.write_file(path, &updated)
+    }
+
     fn git(&self, args: &[&str]) -> Result<String> {
         let output = Command::new("git")
             .args(args)
@@ -319,5 +370,7 @@ mod tests {
         assert_eq!(backend.read_file("notes.txt").unwrap(), "hello");
         assert!(backend.list_dir(".").unwrap().contains("notes.txt"));
         assert!(backend.search("hello", None).unwrap().contains("notes.txt"));
+        backend.apply_patch("notes.txt", "hello", "hallo").unwrap();
+        assert_eq!(backend.read_file("notes.txt").unwrap(), "hallo");
     }
 }

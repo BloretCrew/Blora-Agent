@@ -81,6 +81,17 @@ impl SqliteStore {
             params![now],
         )
         .map_err(BloraError::storage)?;
+        let _ = conn.execute("ALTER TABLE tasks ADD COLUMN cron TEXT", []);
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (4, ?1)",
+            params![now],
+        )
+        .map_err(BloraError::storage)?;
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (5, ?1)",
+            params![now],
+        )
+        .map_err(BloraError::storage)?;
         Ok(Self {
             conn: Mutex::new(conn),
             clock: SystemClock,
@@ -256,8 +267,8 @@ impl SqliteStore {
         conn.execute(
             "INSERT INTO tasks (
                 id, session_id, title, prompt, status, run_id, delay_until,
-                attempt, max_attempts, auto_approve, mock, error, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, 0, ?7, ?8, ?9, NULL, ?10, ?11)",
+                attempt, max_attempts, auto_approve, mock, cron, error, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, 0, ?7, ?8, ?9, ?10, NULL, ?11, ?12)",
             params![
                 id.as_str(),
                 spec.session_id.as_str(),
@@ -268,6 +279,7 @@ impl SqliteStore {
                 spec.max_attempts as i64,
                 i64::from(spec.auto_approve),
                 i64::from(spec.mock),
+                spec.cron,
                 now.to_rfc3339(),
                 now.to_rfc3339(),
             ],
@@ -281,7 +293,7 @@ impl SqliteStore {
         let row = conn
             .query_row(
                 "SELECT id, session_id, title, prompt, status, run_id, delay_until,
-                        attempt, max_attempts, auto_approve, mock, error, created_at, updated_at
+                        attempt, max_attempts, auto_approve, mock, error, created_at, updated_at, cron
                  FROM tasks WHERE id = ?1",
                 params![task_id.as_str()],
                 task_row,
@@ -302,7 +314,7 @@ impl SqliteStore {
             let mut stmt = conn
                 .prepare(
                     "SELECT id, session_id, title, prompt, status, run_id, delay_until,
-                            attempt, max_attempts, auto_approve, mock, error, created_at, updated_at
+                            attempt, max_attempts, auto_approve, mock, error, created_at, updated_at, cron
                      FROM tasks WHERE session_id = ?1 ORDER BY created_at DESC",
                 )
                 .map_err(BloraError::storage)?;
@@ -316,7 +328,7 @@ impl SqliteStore {
             let mut stmt = conn
                 .prepare(
                     "SELECT id, session_id, title, prompt, status, run_id, delay_until,
-                            attempt, max_attempts, auto_approve, mock, error, created_at, updated_at
+                            attempt, max_attempts, auto_approve, mock, error, created_at, updated_at, cron
                      FROM tasks ORDER BY created_at DESC",
                 )
                 .map_err(BloraError::storage)?;
@@ -354,7 +366,7 @@ impl SqliteStore {
         let mut stmt = conn
             .prepare(
                 "SELECT id, session_id, title, prompt, status, run_id, delay_until,
-                        attempt, max_attempts, auto_approve, mock, error, created_at, updated_at
+                        attempt, max_attempts, auto_approve, mock, error, created_at, updated_at, cron
                  FROM tasks
                  WHERE status IN ('queued', 'scheduled')
                    AND (delay_until IS NULL OR delay_until <= ?1)
@@ -494,30 +506,87 @@ impl SqliteStore {
         Ok(u32::try_from(count).unwrap_or(0))
     }
 
-    pub fn list_agents(&self, parent: &SessionId) -> Result<Vec<AgentRecord>> {
+    pub fn get_agent(&self, agent_id: &AgentId) -> Result<AgentRecord> {
+        let agents = self.list_agents_filtered(Some(agent_id), None)?;
+        agents
+            .into_iter()
+            .next()
+            .ok_or_else(|| BloraError::Other(format!("agent not found: {agent_id}")))
+    }
+
+    pub fn archive_session(&self, session_id: &SessionId, now: DateTime<Utc>) -> Result<()> {
+        let conn = self.lock();
+        let changed = conn
+            .execute(
+                "UPDATE sessions SET status = 'archived', updated_at = ?1 WHERE id = ?2",
+                params![now.to_rfc3339(), session_id.as_str()],
+            )
+            .map_err(BloraError::storage)?;
+        if changed == 0 {
+            return Err(BloraError::SessionNotFound(session_id.to_string()));
+        }
+        Ok(())
+    }
+
+    pub fn insert_artifact(
+        &self,
+        id: &blora_types::ArtifactId,
+        session_id: &SessionId,
+        kind: &str,
+        path: Option<&str>,
+        content: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "INSERT INTO artifacts (id, session_id, kind, path, content, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                id.as_str(),
+                session_id.as_str(),
+                kind,
+                path,
+                content,
+                now.to_rfc3339()
+            ],
+        )
+        .map_err(BloraError::storage)?;
+        Ok(())
+    }
+
+    fn list_agents_filtered(
+        &self,
+        agent_id: Option<&AgentId>,
+        parent: Option<&SessionId>,
+    ) -> Result<Vec<AgentRecord>> {
         let conn = self.lock();
         let mut stmt = conn
             .prepare(
                 "SELECT id, parent_session_id, child_session_id, role, depth, status,
                         budget_turns, summary, created_at, updated_at
-                 FROM agents WHERE parent_session_id = ?1 ORDER BY created_at ASC",
+                 FROM agents
+                 WHERE (?1 IS NULL OR id = ?1) AND (?2 IS NULL OR parent_session_id = ?2)
+                 ORDER BY created_at ASC",
             )
             .map_err(BloraError::storage)?;
         let rows = stmt
-            .query_map(params![parent.as_str()], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, i64>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, i64>(6)?,
-                    row.get::<_, Option<String>>(7)?,
-                    row.get::<_, String>(8)?,
-                    row.get::<_, String>(9)?,
-                ))
-            })
+            .query_map(
+                params![agent_id.map(AgentId::as_str), parent.map(SessionId::as_str)],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, i64>(6)?,
+                        row.get::<_, Option<String>>(7)?,
+                        row.get::<_, String>(8)?,
+                        row.get::<_, String>(9)?,
+                    ))
+                },
+            )
             .map_err(BloraError::storage)?;
         let mut out = Vec::new();
         for row in rows {
@@ -538,6 +607,10 @@ impl SqliteStore {
         }
         Ok(out)
     }
+
+    pub fn list_agents(&self, parent: &SessionId) -> Result<Vec<AgentRecord>> {
+        self.list_agents_filtered(None, Some(parent))
+    }
 }
 
 type TaskRow = (
@@ -555,6 +628,7 @@ type TaskRow = (
     Option<String>,
     String,
     String,
+    Option<String>,
 );
 
 fn task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRow> {
@@ -573,6 +647,7 @@ fn task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRow> {
         row.get(11)?,
         row.get(12)?,
         row.get(13)?,
+        row.get(14)?,
     ))
 }
 
@@ -592,6 +667,7 @@ fn row_to_task(row: TaskRow) -> Result<TaskRecord> {
         error,
         created_at,
         updated_at,
+        cron,
     ) = row;
     Ok(TaskRecord {
         id: TaskId::parse(&id)?,
@@ -605,6 +681,7 @@ fn row_to_task(row: TaskRow) -> Result<TaskRecord> {
         max_attempts: u32::try_from(max_attempts).unwrap_or(3),
         auto_approve: auto_approve != 0,
         mock: mock != 0,
+        cron: cron.filter(|value| !value.is_empty()),
         error,
         created_at: parse_time(&created_at)?,
         updated_at: parse_time(&updated_at)?,
@@ -717,6 +794,34 @@ fn apply_denormalized(tx: &rusqlite::Transaction<'_>, event: &EventEnvelope) -> 
         params![event.timestamp.to_rfc3339(), event.session_id.as_str()],
     )
     .map_err(BloraError::storage)?;
+
+    if let Some(payload) = event.decode_payload()? {
+        match payload {
+            KnownPayload::SessionArchived(_) => {
+                tx.execute(
+                    "UPDATE sessions SET status = 'archived', updated_at = ?1 WHERE id = ?2",
+                    params![event.timestamp.to_rfc3339(), event.session_id.as_str()],
+                )
+                .map_err(BloraError::storage)?;
+            }
+            KnownPayload::UsageRecorded(usage) => {
+                tx.execute(
+                    "INSERT INTO provider_usage (session_id, run_id, input_tokens, output_tokens, cached_tokens, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        event.session_id.as_str(),
+                        event.run_id.as_ref().map(RunId::as_str),
+                        usage.input_tokens as i64,
+                        usage.output_tokens as i64,
+                        usage.cached_tokens as i64,
+                        event.timestamp.to_rfc3339(),
+                    ],
+                )
+                .map_err(BloraError::storage)?;
+            }
+            _ => {}
+        }
+    }
 
     if let Some(KnownPayload::RunCreated(created)) = event.decode_payload()? {
         let run_id = event

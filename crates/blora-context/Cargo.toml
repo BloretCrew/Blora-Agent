@@ -1,0 +1,17 @@
+[package]
+name = "blora-context"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description = "Stable/context/volatile compiler for Blora Agent."
+
+[dependencies]
+blora-events.workspace = true
+blora-model.workspace = true
+blora-types.workspace = true
+chrono.workspace = true
+
+[lints]
+workspace = true

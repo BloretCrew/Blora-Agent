@@ -8,6 +8,7 @@ authors.workspace = true
 description = "Agent loop coordinator for Blora Agent."
 
 [dependencies]
+blora-context.workspace = true
 blora-events.workspace = true
 blora-exec.workspace = true
 blora-model.workspace = true

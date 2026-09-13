@@ -72,20 +72,22 @@ impl ToolRegistry {
                 parameters: json!({
                     "type": "object",
                     "properties": {
-                        "command": {"type": "string"}
+                        "command": {"type": "string"},
+                        "background": {"type": "boolean"}
                     },
                     "required": ["command"]
                 }),
             },
             ToolSpec {
                 name: "schedule_task",
-                description: "Queue a durable background task on this session. delay_seconds=0 runs on the next scheduler tick.",
+                description: "Queue a durable background task on this session. delay_seconds=0 runs on the next scheduler tick. Optional 5-field cron.",
                 parameters: json!({
                     "type": "object",
                     "properties": {
                         "title": {"type": "string"},
                         "prompt": {"type": "string"},
-                        "delay_seconds": {"type": "integer", "minimum": 0}
+                        "delay_seconds": {"type": "integer", "minimum": 0},
+                        "cron": {"type": "string", "description": "5-field cron, for example 0 * * * *"}
                     },
                     "required": ["title", "prompt"]
                 }),
@@ -106,8 +108,49 @@ impl ToolRegistry {
                 parameters: json!({"type": "object", "properties": {}}),
             },
             ToolSpec {
+                name: "git_branch",
+                description: "Show git branches for the workspace.",
+                parameters: json!({"type": "object", "properties": {}}),
+            },
+            ToolSpec {
+                name: "git_worktree",
+                description: "List or add a git worktree inside the workspace.",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": ["list", "add"]},
+                        "path": {"type": "string"}
+                    }
+                }),
+            },
+            ToolSpec {
+                name: "process",
+                description: "List or kill background processes started by Blora.",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": ["list", "kill"]},
+                        "pid": {"type": "integer"}
+                    },
+                    "required": ["action"]
+                }),
+            },
+            ToolSpec {
+                name: "apply_patch",
+                description: "Replace old_string with new_string in a workspace file.",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "old_string": {"type": "string"},
+                        "new_string": {"type": "string"}
+                    },
+                    "required": ["path", "old_string", "new_string"]
+                }),
+            },
+            ToolSpec {
                 name: "delegate",
-                description: "Spawn a child agent with a limited turn budget. The child runs in Code mode and returns a summary.",
+                description: "Spawn a child agent with a limited turn budget. Roles: research, review, plan (read-only), code.",
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -115,6 +158,18 @@ impl ToolRegistry {
                         "prompt": {"type": "string"}
                     },
                     "required": ["prompt"]
+                }),
+            },
+            ToolSpec {
+                name: "handoff",
+                description: "Return a structured summary to the parent agent.",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "summary": {"type": "string"},
+                        "files": {"type": "string"}
+                    },
+                    "required": ["summary"]
                 }),
             },
         ]
@@ -135,10 +190,49 @@ impl ToolRegistry {
                 required_str(arguments, "pattern")?,
                 optional_str(arguments, "path"),
             ),
-            "shell" => backend.shell(required_str(arguments, "command")?),
+            "shell" => {
+                let command = required_str(arguments, "command")?;
+                if arguments
+                    .get("background")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    backend.shell_background(command)
+                } else {
+                    backend.shell(command)
+                }
+            }
             "git_status" => backend.git_status(),
             "git_diff" => backend.git_diff(),
             "git_log" => backend.git_log(),
+            "git_branch" => backend.git_branch(),
+            "git_worktree" => backend.git_worktree(
+                optional_str(arguments, "action").unwrap_or("list"),
+                optional_str(arguments, "path"),
+            ),
+            "process" => match optional_str(arguments, "action").unwrap_or("list") {
+                "kill" => {
+                    let pid = arguments
+                        .get("pid")
+                        .and_then(Value::as_u64)
+                        .ok_or_else(|| BloraError::Other("process kill needs pid".to_owned()))?;
+                    backend.process_kill(u32::try_from(pid).unwrap_or(0))
+                }
+                _ => backend.process_list(),
+            },
+            "handoff" => {
+                let summary = required_str(arguments, "summary")?;
+                let files = optional_str(arguments, "files").unwrap_or("");
+                Ok(format!("HANDOFF\n{summary}\n{files}"))
+            }
+            "apply_patch" => {
+                backend.apply_patch(
+                    required_str(arguments, "path")?,
+                    required_str(arguments, "old_string")?,
+                    required_str(arguments, "new_string")?,
+                )?;
+                Ok("patched file".to_owned())
+            }
             other => Err(BloraError::Other(format!("unknown tool: {other}"))),
         }
     }

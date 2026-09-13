@@ -2,10 +2,11 @@
 // Copyright (C) 2026 Blora Agent contributors
 
 use blora_events::{
-    CheckpointCreated, ContextCompactionCompleted, ContextCompactionStarted, KnownPayload,
+    ArtifactCreated, CheckpointCreated, ContextCompactionCompleted, ContextCompactionStarted,
+    KnownPayload,
 };
 use blora_session::TranscriptItem;
-use blora_types::{Result, SessionId};
+use blora_types::{ArtifactId, Result, SessionId};
 use chrono::Utc;
 
 use crate::Runtime;
@@ -44,6 +45,25 @@ impl Runtime {
             None,
             KnownPayload::ContextCompactionCompleted(ContextCompactionCompleted {
                 summary: summary.clone(),
+            }),
+        )?;
+        let artifact_id = ArtifactId::generate();
+        self.store.insert_artifact(
+            &artifact_id,
+            session_id,
+            "compaction",
+            None,
+            Some(&summary),
+            Utc::now(),
+        )?;
+        self.emit(
+            session_id,
+            None,
+            None,
+            KnownPayload::ArtifactCreated(ArtifactCreated {
+                artifact_id,
+                kind: "compaction".to_owned(),
+                path: "sqlite:artifacts".to_owned(),
             }),
         )?;
         self.checkpoint(session_id, None, Some("compaction"))?;

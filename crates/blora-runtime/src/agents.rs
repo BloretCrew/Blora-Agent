@@ -59,6 +59,7 @@ impl Runtime {
             .show_session(parent_session)?
             .session
             .ok_or_else(|| BloraError::SessionNotFound(parent_session.to_string()))?;
+        let (budget, read_only) = role_limits(role);
         let child_session = self.create_session(CreateSession {
             title: Some(format!("subagent:{role}")),
             workspace_path: parent.workspace_path,
@@ -74,7 +75,7 @@ impl Runtime {
             role: role.to_owned(),
             depth,
             status: "running".to_owned(),
-            budget_turns: SUBAGENT_TURNS,
+            budget_turns: budget,
             summary: None,
             created_at: now,
             updated_at: now,
@@ -93,9 +94,12 @@ impl Runtime {
         let child_options = RunOptions {
             model: options.model.clone(),
             mock: options.mock,
-            auto_approve: options.auto_approve,
+            auto_approve: options.auto_approve && !read_only,
             interactive: options.interactive,
-            max_turns: SUBAGENT_TURNS,
+            max_turns: budget,
+            provider: options.provider.clone(),
+            read_only,
+            worktree: false,
         };
         let child_prompt = format!("[subagent:{role}] {prompt}\nDo not spawn another subagent.");
         let result = self.run(&child_session, &child_prompt, cancel, &child_options);
@@ -143,5 +147,32 @@ impl Runtime {
                 Err(err)
             }
         }
+    }
+
+    pub fn cancel_subagent(&self, agent_id: &AgentId) -> Result<()> {
+        let agent = self.store.get_agent(agent_id)?;
+        if agent.status != "running" {
+            return Ok(());
+        }
+        self.store
+            .update_agent(agent_id, "cancelled", Some("cancelled"), Utc::now())?;
+        self.emit(
+            &agent.parent_session_id,
+            None,
+            None,
+            KnownPayload::SubagentFailed(SubagentFailed {
+                agent_id: agent_id.clone(),
+                error: "cancelled".to_owned(),
+            }),
+        )
+    }
+}
+
+fn role_limits(role: &str) -> (u32, bool) {
+    match role {
+        "research" | "review" => (6, true),
+        "plan" => (4, true),
+        "code" => (8, false),
+        _ => (SUBAGENT_TURNS, false),
     }
 }

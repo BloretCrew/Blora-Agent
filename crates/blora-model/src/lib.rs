@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Blora Agent contributors
 
-//! Provider-independent completion types plus mock and OpenAI-compatible adapters.
+//! Provider-independent completion types plus protocol adapters.
 
+mod anthropic;
+mod factory;
 mod openai;
+mod responses;
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -12,7 +15,10 @@ use blora_types::{BloraError, CancelToken, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+pub use anthropic::AnthropicProvider;
+pub use factory::{make_provider, make_providers};
 pub use openai::OpenAiProvider;
+pub use responses::ResponsesProvider;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChatMessage {

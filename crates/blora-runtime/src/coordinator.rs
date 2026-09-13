@@ -1,17 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Blora Agent contributors
 
+use blora_context::compile_messages;
 use blora_events::{
     AssistantDelta, AssistantMessageCompleted, ContextSnapshotCreated, EventEnvelope, KnownPayload,
-    ModelRequested, ModelResponseCompleted, NewEvent, RetryStarted, RunCancelRequested,
-    RunCancelled, RunCompleted, RunCreated, RunFailed, RunStarted, ToolCompleted, ToolFailed,
-    ToolOutput, ToolRequested, UsageRecorded, UserInput,
+    ModelRequested, ModelResponseCompleted, NewEvent, ProviderChanged, RetryStarted,
+    RunCancelRequested, RunCancelled, RunCompleted, RunCreated, RunFailed, RunStarted,
+    SessionArchived, SessionResumed, ToolCompleted, ToolFailed, ToolOutput, ToolRequested,
+    UsageRecorded, UserInput,
 };
-use blora_exec::LocalBackend;
-use blora_model::{
-    ChatMessage, CompletionRequest, MockProvider, OpenAiProvider, Provider, StreamEvent, ToolCall,
-    ToolDeclaration, system_prompt,
-};
+use blora_exec::{LocalBackend, WorktreeHandle};
+use blora_model::{CompletionRequest, StreamEvent, ToolCall, ToolDeclaration, make_providers};
 use blora_policy::Policy;
 use blora_session::SessionProjection;
 use blora_storage::{CreateSession, CreateTask, SessionSummary, SqliteStore};
@@ -34,6 +33,16 @@ impl Default for MockRunOptions {
     }
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct WorkspaceInfo {
+    pub path: String,
+    pub files: String,
+    pub git_status: String,
+    pub git_diff: String,
+    pub git_log: String,
+    pub git_branch: String,
+}
+
 #[derive(Clone, Debug)]
 pub struct RunOptions {
     pub model: String,
@@ -41,6 +50,9 @@ pub struct RunOptions {
     pub auto_approve: bool,
     pub interactive: bool,
     pub max_turns: u32,
+    pub provider: String,
+    pub read_only: bool,
+    pub worktree: bool,
 }
 
 impl Default for RunOptions {
@@ -51,6 +63,9 @@ impl Default for RunOptions {
             auto_approve: false,
             interactive: false,
             max_turns: 12,
+            provider: String::new(),
+            read_only: false,
+            worktree: false,
         }
     }
 }
@@ -66,7 +81,49 @@ impl Runtime {
     }
 
     pub fn create_session(&self, spec: CreateSession) -> Result<SessionId> {
-        self.store.create_session(spec)
+        let id = self.store.create_session(spec)?;
+        crate::hooks::fire("session-start", id.as_str());
+        Ok(id)
+    }
+
+    pub fn archive_session(&self, session_id: &SessionId) -> Result<()> {
+        self.emit(
+            session_id,
+            None,
+            None,
+            KnownPayload::SessionArchived(SessionArchived {
+                reason: Some("user".to_owned()),
+            }),
+        )
+    }
+
+    pub fn resume_session(&self, session_id: &SessionId) -> Result<()> {
+        self.emit(
+            session_id,
+            None,
+            None,
+            KnownPayload::SessionResumed(SessionResumed {
+                reason: Some("user".to_owned()),
+            }),
+        )
+    }
+
+    pub fn export_session(&self, session_id: &SessionId) -> Result<serde_json::Value> {
+        let events = self.events(session_id)?;
+        serde_json::to_value(events).map_err(|err| BloraError::event(err.to_string()))
+    }
+
+    pub fn workspace_info(&self, path: &std::path::Path) -> Result<WorkspaceInfo> {
+        let policy = Policy::new(path, true)?;
+        let backend = LocalBackend::new(policy);
+        Ok(WorkspaceInfo {
+            path: path.display().to_string(),
+            files: backend.list_dir(".").unwrap_or_default(),
+            git_status: backend.git_status().unwrap_or_else(|err| err.to_string()),
+            git_diff: backend.git_diff().unwrap_or_else(|err| err.to_string()),
+            git_log: backend.git_log().unwrap_or_else(|err| err.to_string()),
+            git_branch: backend.git_branch().unwrap_or_else(|err| err.to_string()),
+        })
     }
 
     pub fn list_sessions(&self) -> Result<Vec<SessionSummary>> {
@@ -83,6 +140,31 @@ impl Runtime {
 
     pub fn events(&self, session_id: &SessionId) -> Result<Vec<EventEnvelope>> {
         self.store.load_events(session_id)
+    }
+
+    pub fn fork_session(&self, source: &SessionId) -> Result<SessionId> {
+        let projection = self.show_session(source)?;
+        let session = projection
+            .session
+            .ok_or_else(|| BloraError::SessionNotFound(source.to_string()))?;
+        let child = self.create_session(CreateSession {
+            title: session
+                .title
+                .map(|title| format!("{title} (fork)"))
+                .or_else(|| Some("fork".to_owned())),
+            workspace_path: session.workspace_path,
+            mode: session.mode,
+            parent_session_id: Some(source.clone()),
+        })?;
+        self.emit(
+            &child,
+            None,
+            None,
+            KnownPayload::SessionForked(blora_events::SessionForked {
+                source_session_id: source.clone(),
+            }),
+        )?;
+        Ok(child)
     }
 
     pub fn run_mock(
@@ -174,18 +256,22 @@ impl Runtime {
             .ok_or_else(|| BloraError::SessionNotFound(session_id.to_string()))?;
         let workspace = session.workspace_path.clone();
         let mode = session.mode;
-        let policy = Policy::new(&workspace, options.auto_approve)?;
-        let backend = LocalBackend::new(policy);
-        let provider: Box<dyn Provider> = if options.mock {
-            Box::new(MockProvider::new())
+        let worktree = if options.worktree || env_flag("BLORA_WORKTREE") {
+            WorktreeHandle::create(&workspace, session_id.as_str()).ok()
         } else {
-            match OpenAiProvider::from_env() {
-                Ok(provider) => Box::new(provider),
-                Err(_) => Box::new(MockProvider::new()),
-            }
+            None
         };
+        let exec_root = worktree
+            .as_ref()
+            .map(|handle| handle.path().display().to_string())
+            .unwrap_or_else(|| workspace.clone());
+        let _keep_worktree = worktree;
+        let policy = Policy::new(&exec_root, options.auto_approve)?;
+        let backend = LocalBackend::new(policy);
+        let providers = make_providers(options.mock, &options.provider);
+        let mut provider_index = 0;
         let model = if options.model.is_empty() {
-            if options.mock || provider.name() == "mock" {
+            if options.mock || providers[provider_index].name() == "mock" {
                 "mock".to_owned()
             } else {
                 std::env::var("BLORA_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_owned())
@@ -229,11 +315,14 @@ impl Runtime {
             Some(&run_id),
             Some(&turn_id),
             KnownPayload::ContextSnapshotCreated(ContextSnapshotCreated {
-                snapshot_id: workspace.clone(),
+                snapshot_id: exec_root.clone(),
             }),
         )?;
 
-        let tools = ToolRegistry::specs()
+        let mcp = std::env::var("BLORA_MCP_COMMAND")
+            .ok()
+            .and_then(|command| crate::mcp::McpClient::connect(&command).ok());
+        let mut tools = ToolRegistry::specs()
             .into_iter()
             .map(|spec| ToolDeclaration {
                 name: spec.name.to_owned(),
@@ -241,26 +330,31 @@ impl Runtime {
                 parameters: spec.parameters,
             })
             .collect::<Vec<_>>();
+        if let Some(client) = &mcp {
+            if let Ok(extra) = client.list_tools() {
+                tools.extend(extra);
+            }
+        }
 
         for turn in 0..options.max_turns {
             if cancel.is_cancelled() {
                 return self.cancel_run(session_id, &run_id, &turn_id);
             }
             let events = self.store.load_events(session_id)?;
-            let messages = compile_messages(&events, &workspace, mode.as_str())?;
+            let messages = compile_messages(&events, &exec_root, mode.as_str())?;
             self.emit(
                 session_id,
                 Some(&run_id),
                 Some(&turn_id),
                 KnownPayload::ModelRequested(ModelRequested {
-                    provider: provider.name().to_owned(),
+                    provider: providers[provider_index].name().to_owned(),
                     model: model.clone(),
                 }),
             )?;
             let mut streamed = String::new();
             let mut attempt = 0;
             let completion = loop {
-                match provider.complete(
+                match providers[provider_index].complete(
                     &CompletionRequest {
                         model: model.clone(),
                         messages: messages.clone(),
@@ -283,6 +377,19 @@ impl Runtime {
                     Ok(completion) => break completion,
                     Err(BloraError::Cancelled) => {
                         return self.cancel_run(session_id, &run_id, &turn_id);
+                    }
+                    Err(err) if provider_index + 1 < providers.len() && is_retryable(&err) => {
+                        provider_index += 1;
+                        attempt += 1;
+                        self.emit(
+                            session_id,
+                            Some(&run_id),
+                            Some(&turn_id),
+                            KnownPayload::ProviderChanged(ProviderChanged {
+                                provider: providers[provider_index].name().to_owned(),
+                                model: model.clone(),
+                            }),
+                        )?;
                     }
                     Err(err) if attempt < 1 && is_retryable(&err) => {
                         attempt += 1;
@@ -387,7 +494,14 @@ impl Runtime {
                     ));
                 }
                 self.dispatch_tool(
-                    session_id, &run_id, &turn_id, &backend, &call, options, cancel,
+                    session_id,
+                    &run_id,
+                    &turn_id,
+                    &backend,
+                    &call,
+                    options,
+                    cancel,
+                    mcp.as_ref(),
                 )?;
             }
         }
@@ -412,6 +526,7 @@ impl Runtime {
         call: &ToolCall,
         options: &RunOptions,
         cancel: &CancelToken,
+        mcp: Option<&crate::mcp::McpClient>,
     ) -> Result<()> {
         let arguments: Value = serde_json::from_str(&call.arguments)
             .unwrap_or_else(|_| serde_json::json!({ "raw": call.arguments }));
@@ -425,6 +540,39 @@ impl Runtime {
                 call_id: Some(call.id.clone()),
             }),
         )?;
+        crate::hooks::fire("tool-before", &format!("{} {}", call.name, call.arguments));
+        if options.read_only
+            && matches!(
+                call.name.as_str(),
+                "write_file"
+                    | "shell"
+                    | "apply_patch"
+                    | "delegate"
+                    | "schedule_task"
+                    | "git_worktree"
+                    | "process"
+            )
+        {
+            self.emit(
+                session_id,
+                Some(run_id),
+                Some(turn_id),
+                KnownPayload::ToolFailed(ToolFailed {
+                    tool: call.name.clone(),
+                    error: format!("{} blocked in read-only role", call.name),
+                }),
+            )?;
+            self.emit(
+                session_id,
+                Some(run_id),
+                Some(turn_id),
+                KnownPayload::ToolOutput(ToolOutput {
+                    text: format!("{} blocked in read-only role", call.name),
+                    call_id: Some(call.id.clone()),
+                }),
+            )?;
+            return Ok(());
+        }
         let execute = |backend: &LocalBackend| match call.name.as_str() {
             "delegate" => {
                 let prompt = arguments
@@ -465,9 +613,16 @@ impl Runtime {
                     max_attempts: 3,
                     auto_approve: options.auto_approve,
                     mock: options.mock,
+                    cron: arguments
+                        .get("cron")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned),
                 })
                 .map(|id| format!("queued {id}"))
             }
+            name if name.starts_with("mcp__") => mcp
+                .ok_or_else(|| BloraError::Other("MCP client is not connected".to_owned()))
+                .and_then(|client| client.call(name, &arguments)),
             _ => ToolRegistry::execute(backend, &call.name, &arguments),
         };
         let intercepted = match execute(backend) {
@@ -481,6 +636,7 @@ impl Runtime {
             }
             other => other,
         };
+        crate::hooks::fire("tool-after", &format!("{} {}", call.name, call.arguments));
         match intercepted {
             Ok(text) => {
                 self.emit(
@@ -600,112 +756,10 @@ fn is_retryable(err: &BloraError) -> bool {
         || text.contains("connection")
 }
 
-fn compile_messages(
-    events: &[EventEnvelope],
-    workspace: &str,
-    mode: &str,
-) -> Result<Vec<ChatMessage>> {
-    let compact_at = events
-        .iter()
-        .rposition(|event| event.event_type == "context.compaction.completed");
-    let (prefix, rest) = match compact_at {
-        Some(index) => {
-            let summary = events[index]
-                .decode_payload()
-                .ok()
-                .flatten()
-                .and_then(|payload| match payload {
-                    KnownPayload::ContextCompactionCompleted(done) => Some(done.summary),
-                    _ => None,
-                })
-                .unwrap_or_else(|| "(compacted)".to_owned());
-            (Some(summary), &events[index + 1..])
-        }
-        None => (None, events),
-    };
-    let mut messages = vec![ChatMessage {
-        role: "system".to_owned(),
-        content: Some(system_prompt(workspace, mode)),
-        tool_call_id: None,
-        tool_calls: None,
-    }];
-    if let Some(summary) = prefix {
-        messages.push(ChatMessage {
-            role: "system".to_owned(),
-            content: Some(format!("Prior context summary:\n{summary}")),
-            tool_call_id: None,
-            tool_calls: None,
-        });
-    }
-    let events = rest;
-    let mut assistant_text = String::new();
-    let mut tool_calls: Vec<ToolCall> = Vec::new();
-
-    let flush_assistant = |messages: &mut Vec<ChatMessage>,
-                           assistant_text: &mut String,
-                           tool_calls: &mut Vec<ToolCall>| {
-        if assistant_text.is_empty() && tool_calls.is_empty() {
-            return;
-        }
-        messages.push(ChatMessage {
-            role: "assistant".to_owned(),
-            content: if assistant_text.is_empty() {
-                None
-            } else {
-                Some(std::mem::take(assistant_text))
-            },
-            tool_call_id: None,
-            tool_calls: if tool_calls.is_empty() {
-                None
-            } else {
-                Some(std::mem::take(tool_calls))
-            },
-        });
-    };
-
-    for event in events {
-        let Some(payload) = event.decode_payload()? else {
-            continue;
-        };
-        match payload {
-            KnownPayload::UserInput(input) => {
-                flush_assistant(&mut messages, &mut assistant_text, &mut tool_calls);
-                messages.push(ChatMessage {
-                    role: "user".to_owned(),
-                    content: Some(input.text),
-                    tool_call_id: None,
-                    tool_calls: None,
-                });
-            }
-            KnownPayload::AssistantDelta(delta) => assistant_text.push_str(&delta.text),
-            KnownPayload::AssistantMessageCompleted(completed) => {
-                if assistant_text.is_empty() {
-                    assistant_text = completed.text;
-                }
-            }
-            KnownPayload::ToolRequested(requested) => {
-                tool_calls.push(ToolCall {
-                    id: requested
-                        .call_id
-                        .unwrap_or_else(|| format!("call_{}", requested.tool)),
-                    name: requested.tool,
-                    arguments: requested.arguments.to_string(),
-                });
-            }
-            KnownPayload::ToolOutput(output) => {
-                flush_assistant(&mut messages, &mut assistant_text, &mut tool_calls);
-                messages.push(ChatMessage {
-                    role: "tool".to_owned(),
-                    content: Some(output.text),
-                    tool_call_id: output.call_id,
-                    tool_calls: None,
-                });
-            }
-            _ => {}
-        }
-    }
-    flush_assistant(&mut messages, &mut assistant_text, &mut tool_calls);
-    Ok(messages)
+fn env_flag(name: &str) -> bool {
+    std::env::var(name).ok().is_some_and(|value| {
+        value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("yes")
+    })
 }
 
 #[cfg(test)]
@@ -797,6 +851,7 @@ mod tests {
                 max_attempts: 1,
                 auto_approve: true,
                 mock: true,
+                cron: None,
             })
             .unwrap();
         let finished = runtime.pump().unwrap();
@@ -804,6 +859,27 @@ mod tests {
         assert_eq!(
             runtime.get_task(&task_id).unwrap().status.as_str(),
             "completed"
+        );
+    }
+
+    #[test]
+    fn forks_session() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let runtime = Runtime::new(store);
+        let session = runtime
+            .create_session(CreateSession {
+                title: Some("src".to_owned()),
+                workspace_path: "/tmp".to_owned(),
+                mode: Mode::Code,
+                parent_session_id: None,
+            })
+            .unwrap();
+        let fork = runtime.fork_session(&session).unwrap();
+        assert_ne!(fork, session);
+        let projection = runtime.show_session(&fork).unwrap();
+        assert_eq!(
+            projection.session.unwrap().parent_session_id.as_ref(),
+            Some(&session)
         );
     }
 
@@ -945,5 +1021,72 @@ mod tests {
                 .iter()
                 .any(|run| run.status.as_str() == "completed")
         );
+    }
+
+    #[test]
+    fn exports_and_archives_session() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let runtime = Runtime::new(store);
+        let session = runtime
+            .create_session(CreateSession {
+                title: Some("exp".to_owned()),
+                workspace_path: "/tmp".to_owned(),
+                mode: Mode::Code,
+                parent_session_id: None,
+            })
+            .unwrap();
+        let exported = runtime.export_session(&session).unwrap();
+        assert!(exported.as_array().unwrap().iter().any(|event| {
+            event.get("type").and_then(|value| value.as_str()) == Some("session.created")
+        }));
+        runtime.archive_session(&session).unwrap();
+        assert_eq!(
+            runtime
+                .show_session(&session)
+                .unwrap()
+                .session
+                .unwrap()
+                .status
+                .as_str(),
+            "archived"
+        );
+    }
+
+    #[test]
+    fn pause_and_resume_task() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let runtime = Runtime::new(store);
+        let session = runtime
+            .create_session(CreateSession {
+                title: None,
+                workspace_path: "/tmp".to_owned(),
+                mode: Mode::Work,
+                parent_session_id: None,
+            })
+            .unwrap();
+        let task_id = runtime
+            .create_task(CreateTask {
+                session_id: session,
+                title: "later".to_owned(),
+                prompt: "wait".to_owned(),
+                delay_until: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+                max_attempts: 1,
+                auto_approve: true,
+                mock: true,
+                cron: None,
+            })
+            .unwrap();
+        runtime.pause_task(&task_id).unwrap();
+        assert_eq!(
+            runtime.get_task(&task_id).unwrap().status.as_str(),
+            "paused"
+        );
+        runtime.resume_task(&task_id).unwrap();
+        assert_eq!(
+            runtime.get_task(&task_id).unwrap().status.as_str(),
+            "queued"
+        );
+        let listed = runtime.list_tasks(None).unwrap();
+        assert_eq!(listed[0].id, task_id);
     }
 }

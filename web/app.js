@@ -1,5 +1,6 @@
 const state = {
   sessionId: null,
+  view: "session",
   source: null,
 };
 
@@ -53,8 +54,7 @@ function numberValue(el) {
   if (!el) {
     return 0;
   }
-  const value = el.value;
-  const parsed = Number(value);
+  const parsed = Number(el.value);
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
@@ -69,6 +69,22 @@ function fieldInput(id) {
   return host.querySelector("input, textarea");
 }
 
+function stored(key, fallback = "") {
+  try {
+    return localStorage.getItem(key) || fallback;
+  } catch (err) {
+    return fallback;
+  }
+}
+
+function store(key, value) {
+  try {
+    localStorage.setItem(key, value);
+  } catch (err) {
+    /* ignore quota */
+  }
+}
+
 async function api(path, options = {}) {
   const response = await fetch(path, {
     headers: { "Content-Type": "application/json", ...(options.headers || {}) },
@@ -81,6 +97,37 @@ async function api(path, options = {}) {
     return null;
   }
   return response.json();
+}
+
+function parseHash() {
+  const raw = (location.hash || "#/session").replace(/^#/, "");
+  const parts = raw.split("/").filter(Boolean);
+  if (parts[0] === "session" && parts[1]) {
+    return { view: "session", sessionId: parts[1] };
+  }
+  if (parts[0] === "tasks") {
+    return { view: "tasks" };
+  }
+  if (parts[0] === "approvals") {
+    return { view: "approvals" };
+  }
+  if (parts[0] === "workspace") {
+    return { view: "workspace" };
+  }
+  if (parts[0] === "settings") {
+    return { view: "settings" };
+  }
+  return { view: "session", sessionId: parts[1] || state.sessionId };
+}
+
+function setView(view) {
+  state.view = view;
+  for (const id of ["session", "tasks", "approvals", "workspace", "settings"]) {
+    const el = document.querySelector(`#view-${id}`);
+    if (el) {
+      el.hidden = id !== view;
+    }
+  }
 }
 
 function renderTranscript(items) {
@@ -115,9 +162,30 @@ function renderSessions(sessions) {
   const previous = document.querySelector("#session-nav");
   const nav = document.createElement("blora-sidebar-nav");
   nav.id = "session-nav";
-  nav.setAttribute("label", "会话");
-  if (state.sessionId) {
+  nav.setAttribute("label", "导航");
+  if (state.view === "session" && state.sessionId) {
     nav.setAttribute("value", state.sessionId);
+  } else {
+    nav.setAttribute("value", state.view);
+  }
+  const desk = document.createElement("blora-sidebar-nav-group");
+  desk.setAttribute("label", "工作台");
+  const pages = [
+    ["会话", "session", "#/session"],
+    ["任务", "tasks", "#/tasks"],
+    ["审批", "approvals", "#/approvals"],
+    ["工作区", "workspace", "#/workspace"],
+    ["设置", "settings", "#/settings"],
+  ];
+  for (const [label, value, href] of pages) {
+    const link = document.createElement("blora-sidebar-nav-link");
+    link.setAttribute("label", label);
+    link.setAttribute("value", value);
+    link.setAttribute("href", href);
+    if (state.view === value) {
+      link.setAttribute("current", "");
+    }
+    desk.append(link);
   }
   const group = document.createElement("blora-sidebar-nav-group");
   group.setAttribute("label", "会话");
@@ -125,13 +193,13 @@ function renderSessions(sessions) {
     const link = document.createElement("blora-sidebar-nav-link");
     link.setAttribute("label", session.title || session.id);
     link.setAttribute("value", session.id);
-    link.setAttribute("href", `#session/${session.id}`);
-    if (session.id === state.sessionId) {
+    link.setAttribute("href", `#/session/${session.id}`);
+    if (session.id === state.sessionId && state.view === "session") {
       link.setAttribute("current", "");
     }
     group.append(link);
   }
-  nav.append(group);
+  nav.append(desk, group);
   previous.replaceWith(nav);
   sessionEmpty.hidden = Boolean(sessions && sessions.length);
 }
@@ -139,7 +207,7 @@ function renderSessions(sessions) {
 async function refreshSessions() {
   const sessions = await api("/api/sessions");
   renderSessions(sessions);
-  if (!state.sessionId && sessions[0]) {
+  if (!state.sessionId && sessions[0] && state.view === "session") {
     await selectSession(sessions[0].id);
   }
 }
@@ -149,7 +217,7 @@ async function selectSession(id) {
   hideAlert();
   const session = await api(`/api/sessions/${id}`);
   title.textContent = session.title || session.id;
-  pathEl.textContent = session.workspace_path;
+  pathEl.textContent = `${session.workspace_path} · ${session.status} · ${session.input_tokens}/${session.output_tokens} tokens`;
   renderTranscript(session.transcript);
   renderSubagents(session.subagents);
   await refreshApprovals();
@@ -164,7 +232,29 @@ async function selectSession(id) {
     renderTranscript(latest.transcript);
     renderSubagents(latest.subagents);
     await refreshApprovals();
+    await refreshTasks();
   };
+}
+
+async function applyRoute() {
+  const parsed = parseHash();
+  setView(parsed.view);
+  if (parsed.sessionId && parsed.sessionId !== state.sessionId) {
+    await selectSession(parsed.sessionId);
+  }
+  if (parsed.view === "tasks") {
+    await refreshTaskPage();
+  }
+  if (parsed.view === "approvals") {
+    await refreshApprovalPage();
+  }
+  if (parsed.view === "workspace") {
+    await refreshWorkspace();
+  }
+  if (parsed.view === "settings") {
+    await refreshSettings();
+  }
+  await refreshSessions();
 }
 
 document.addEventListener("blora-change", (event) => {
@@ -172,9 +262,24 @@ document.addEventListener("blora-change", (event) => {
     return;
   }
   const value = event.detail?.value;
-  if (value && value !== state.sessionId) {
-    selectSession(value);
+  if (!value) {
+    return;
   }
+  if (value === "tasks" || value === "approvals" || value === "workspace" || value === "settings") {
+    location.hash = `#/${value}`;
+    return;
+  }
+  if (value === "session") {
+    location.hash = state.sessionId ? `#/session/${state.sessionId}` : "#/session";
+    return;
+  }
+  if (value !== state.sessionId) {
+    location.hash = `#/session/${value}`;
+  }
+});
+
+window.addEventListener("hashchange", () => {
+  applyRoute().catch((error) => showAlert(error.message));
 });
 
 document.querySelector("#new-session").addEventListener("click", async () => {
@@ -183,8 +288,7 @@ document.querySelector("#new-session").addEventListener("click", async () => {
     method: "POST",
     body: JSON.stringify({ title: "web" }),
   });
-  await refreshSessions();
-  await selectSession(session.id);
+  location.hash = `#/session/${session.id}`;
 });
 
 document.querySelector("#composer").addEventListener("submit", async (event) => {
@@ -208,6 +312,9 @@ document.querySelector("#composer").addEventListener("submit", async (event) => 
     body: JSON.stringify({
       prompt: text,
       auto_approve: isChecked(autoApprove),
+      provider: stored("blora-provider"),
+      model: stored("blora-model"),
+      worktree: isChecked(document.querySelector("#pref-worktree")),
     }),
   });
   await selectSession(state.sessionId);
@@ -235,31 +342,122 @@ function listOrEmpty(list, empty, count) {
   list.hidden = count === 0;
 }
 
+function taskItem(task, actions) {
+  const item = document.createElement("div");
+  item.className = "blora-list__item";
+  const meta = document.createElement("div");
+  meta.className = "blora-list__meta";
+  const name = document.createElement("div");
+  name.className = "blora-list__title";
+  name.textContent = task.title;
+  const desc = document.createElement("div");
+  desc.className = "blora-list__desc";
+  desc.textContent = `${task.status} · ${task.attempt}${task.cron ? ` · ${task.cron}` : ""}`;
+  meta.append(name, desc);
+  const badge = document.createElement("span");
+  badge.className = "blora-badge";
+  badge.dataset.shape = "pill";
+  badge.dataset.variant = task.status === "completed" ? "success" : "neutral";
+  badge.textContent = task.status;
+  item.append(meta, badge);
+  if (actions) {
+    item.append(actions);
+  }
+  return item;
+}
+
 async function refreshTasks() {
   const query = state.sessionId ? `?session=${state.sessionId}` : "";
   const tasks = await api(`/api/tasks${query}`);
   taskList.replaceChildren();
   listOrEmpty(taskList, taskEmpty, tasks.length);
   for (const task of tasks) {
-    const item = document.createElement("div");
-    item.className = "blora-list__item";
-    const meta = document.createElement("div");
-    meta.className = "blora-list__meta";
-    const name = document.createElement("div");
-    name.className = "blora-list__title";
-    name.textContent = task.title;
-    const desc = document.createElement("div");
-    desc.className = "blora-list__desc";
-    desc.textContent = `${task.status} · ${task.attempt}`;
-    meta.append(name, desc);
-    const badge = document.createElement("span");
-    badge.className = "blora-badge";
-    badge.dataset.shape = "pill";
-    badge.dataset.variant = task.status === "completed" ? "success" : "neutral";
-    badge.textContent = task.status;
-    item.append(meta, badge);
-    taskList.append(item);
+    taskList.append(taskItem(task));
   }
+}
+
+async function refreshTaskPage() {
+  const list = document.querySelector("#task-page-list");
+  const empty = document.querySelector("#task-page-empty");
+  const tasks = await api("/api/tasks");
+  list.replaceChildren();
+  listOrEmpty(list, empty, tasks.length);
+  for (const task of tasks) {
+    const actions = document.createElement("div");
+    actions.className = "ba-toolbar__actions";
+    const pause = document.createElement("button");
+    pause.type = "button";
+    pause.className = "blora-button";
+    pause.dataset.variant = "ghost";
+    pause.dataset.size = "sm";
+    pause.textContent = "暂停";
+    pause.addEventListener("click", async () => {
+      await api(`/api/tasks/${task.id}/pause`, { method: "POST", body: "{}" });
+      await refreshTaskPage();
+    });
+    const resume = document.createElement("button");
+    resume.type = "button";
+    resume.className = "blora-button";
+    resume.dataset.variant = "ghost";
+    resume.dataset.size = "sm";
+    resume.textContent = "恢复";
+    resume.addEventListener("click", async () => {
+      await api(`/api/tasks/${task.id}/resume`, { method: "POST", body: "{}" });
+      await refreshTaskPage();
+    });
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "blora-button";
+    cancel.dataset.variant = "ghost";
+    cancel.dataset.size = "sm";
+    cancel.textContent = "取消";
+    cancel.addEventListener("click", async () => {
+      await api(`/api/tasks/${task.id}/cancel`, { method: "POST", body: "{}" });
+      await refreshTaskPage();
+    });
+    actions.append(pause, resume, cancel);
+    list.append(taskItem(task, actions));
+  }
+  enhance();
+}
+
+function approvalItem(row, onDone) {
+  const item = document.createElement("div");
+  item.className = "blora-list__item";
+  const meta = document.createElement("div");
+  meta.className = "blora-list__meta";
+  const name = document.createElement("div");
+  name.className = "blora-list__title";
+  name.textContent = row.summary;
+  meta.append(name);
+  const allow = document.createElement("button");
+  allow.type = "button";
+  allow.className = "blora-button";
+  allow.dataset.variant = "primary";
+  allow.dataset.size = "sm";
+  allow.textContent = "允许";
+  allow.addEventListener("click", async () => {
+    await api(`/api/approvals/${row.id}/resolve`, {
+      method: "POST",
+      body: JSON.stringify({ allow: true }),
+    });
+    await onDone();
+  });
+  const deny = document.createElement("button");
+  deny.type = "button";
+  deny.className = "blora-button";
+  deny.dataset.variant = "ghost";
+  deny.dataset.size = "sm";
+  deny.textContent = "拒绝";
+  deny.addEventListener("click", async () => {
+    await api(`/api/approvals/${row.id}/resolve`, {
+      method: "POST",
+      body: JSON.stringify({ allow: false }),
+    });
+    await onDone();
+  });
+  item.append(meta, allow, deny);
+  return item;
 }
 
 async function refreshApprovals() {
@@ -272,44 +470,43 @@ async function refreshApprovals() {
   approvalList.replaceChildren();
   listOrEmpty(approvalList, approvalEmpty, rows.length);
   for (const row of rows) {
-    const item = document.createElement("div");
-    item.className = "blora-list__item";
-    const meta = document.createElement("div");
-    meta.className = "blora-list__meta";
-    const name = document.createElement("div");
-    name.className = "blora-list__title";
-    name.textContent = row.summary;
-    meta.append(name);
-    const allow = document.createElement("button");
-    allow.type = "button";
-    allow.className = "blora-button";
-    allow.dataset.variant = "primary";
-    allow.dataset.size = "sm";
-    allow.textContent = "允许";
-    allow.addEventListener("click", async () => {
-      await api(`/api/approvals/${row.id}/resolve`, {
-        method: "POST",
-        body: JSON.stringify({ allow: true }),
-      });
-      await refreshApprovals();
-    });
-    const deny = document.createElement("button");
-    deny.type = "button";
-    deny.className = "blora-button";
-    deny.dataset.variant = "ghost";
-    deny.dataset.size = "sm";
-    deny.textContent = "拒绝";
-    deny.addEventListener("click", async () => {
-      await api(`/api/approvals/${row.id}/resolve`, {
-        method: "POST",
-        body: JSON.stringify({ allow: false }),
-      });
-      await refreshApprovals();
-    });
-    item.append(meta, allow, deny);
-    approvalList.append(item);
+    approvalList.append(approvalItem(row, refreshApprovals));
   }
   enhance();
+}
+
+async function refreshApprovalPage() {
+  const list = document.querySelector("#approval-page-list");
+  const empty = document.querySelector("#approval-page-empty");
+  const rows = await api("/api/approvals");
+  list.replaceChildren();
+  listOrEmpty(list, empty, rows.length);
+  for (const row of rows) {
+    list.append(approvalItem(row, refreshApprovalPage));
+  }
+  enhance();
+}
+
+async function refreshWorkspace() {
+  const info = await api("/api/workspace");
+  document.querySelector("#workspace-path").textContent = info.path;
+  document.querySelector("#workspace-git").textContent =
+    [info.git_branch, info.git_status, info.git_log, info.git_diff].join("\n\n");
+  document.querySelector("#workspace-files").textContent = info.files;
+}
+
+async function refreshSettings() {
+  const info = await api("/api/settings");
+  const provider = fieldInput("#pref-provider") || document.querySelector("#pref-provider");
+  const model = fieldInput("#pref-model") || document.querySelector("#pref-model");
+  if (provider && !provider.value) {
+    provider.value = stored("blora-provider", info.provider);
+  }
+  if (model && !model.value) {
+    model.value = stored("blora-model", info.model);
+  }
+  document.querySelector("#settings-meta").textContent =
+    `环境 provider=${info.provider} model=${info.model} key=${info.has_api_key} mcp=${info.mcp}`;
 }
 
 document.querySelector("#compact").addEventListener("click", async () => {
@@ -321,6 +518,15 @@ document.querySelector("#compact").addEventListener("click", async () => {
   await selectSession(state.sessionId);
 });
 
+document.querySelector("#fork").addEventListener("click", async () => {
+  if (!state.sessionId) {
+    return;
+  }
+  hideAlert();
+  const child = await api(`/api/sessions/${state.sessionId}/fork`, { method: "POST", body: "{}" });
+  location.hash = `#/session/${child.id}`;
+});
+
 document.querySelector("#task-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   if (!state.sessionId) {
@@ -328,6 +534,7 @@ document.querySelector("#task-form").addEventListener("submit", async (event) =>
   }
   const titleInput = fieldInput("#task-title") || document.querySelector("#task-title");
   const delayInput = document.querySelector("#task-delay");
+  const cronInput = fieldInput("#task-cron") || document.querySelector("#task-cron");
   await api("/api/tasks", {
     method: "POST",
     body: JSON.stringify({
@@ -335,6 +542,7 @@ document.querySelector("#task-form").addEventListener("submit", async (event) =>
       title: (titleInput?.value || "").trim(),
       prompt: (titleInput?.value || "").trim(),
       delay_seconds: numberValue(delayInput),
+      cron: (cronInput?.value || "").trim() || null,
       auto_approve: isChecked(autoApprove),
     }),
   });
@@ -344,7 +552,16 @@ document.querySelector("#task-form").addEventListener("submit", async (event) =>
   await refreshTasks();
 });
 
+const prefProvider = fieldInput("#pref-provider") || document.querySelector("#pref-provider");
+const prefModel = fieldInput("#pref-model") || document.querySelector("#pref-model");
+if (prefProvider) {
+  prefProvider.addEventListener("change", () => store("blora-provider", prefProvider.value));
+}
+if (prefModel) {
+  prefModel.addEventListener("change", () => store("blora-model", prefModel.value));
+}
+
 enhance();
-refreshSessions().catch((error) => {
+applyRoute().catch((error) => {
   showAlert(error.message);
 });

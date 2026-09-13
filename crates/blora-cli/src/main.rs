@@ -3,6 +3,8 @@
 
 //! Blora Agent command-line interface.
 
+mod acp;
+
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -65,7 +67,15 @@ enum Commands {
         /// Model name override.
         #[arg(long)]
         model: Option<String>,
+        /// Provider: openai, responses, anthropic, or mock.
+        #[arg(long)]
+        provider: Option<String>,
+        /// Run tools in a detached git worktree.
+        #[arg(long)]
+        worktree: bool,
     },
+    /// Agent Client Protocol over stdin/stdout.
+    Acp,
     /// Open the local Web UI.
     Web {
         #[arg(long, default_value = "127.0.0.1:8787")]
@@ -114,6 +124,18 @@ enum SessionCommands {
     Compact {
         id: String,
     },
+    Fork {
+        id: String,
+    },
+    Export {
+        id: String,
+    },
+    Archive {
+        id: String,
+    },
+    Resume {
+        id: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -128,6 +150,9 @@ enum TaskCommands {
         /// Delay such as 10s, 5m, or 1h.
         #[arg(long)]
         r#in: Option<String>,
+        /// 5-field cron expression, for example `0 * * * *`.
+        #[arg(long)]
+        cron: Option<String>,
         #[arg(long)]
         mock: bool,
         #[arg(long)]
@@ -141,6 +166,12 @@ enum TaskCommands {
         id: String,
     },
     Cancel {
+        id: String,
+    },
+    Pause {
+        id: String,
+    },
+    Resume {
         id: String,
     },
     /// Run due tasks once.
@@ -185,6 +216,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             rt.block_on(blora_server::serve(runtime, addr, workspace))?;
             Ok(())
         }
+        Some(Commands::Acp) => {
+            let runtime = Runtime::new(open_store(cli.home.as_deref())?);
+            let workspace = cli.workspace.unwrap_or(std::env::current_dir()?);
+            acp::serve(&runtime, &workspace)
+        }
         Some(other) => {
             let runtime = Runtime::new(open_store(cli.home.as_deref())?);
             dispatch(runtime, other, cli.workspace)
@@ -198,13 +234,16 @@ fn dispatch(
     global_workspace: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match command {
-        Commands::License | Commands::Web { .. } | Commands::Serve { .. } => unreachable!(),
+        Commands::License | Commands::Web { .. } | Commands::Serve { .. } | Commands::Acp => {
+            unreachable!()
+        }
         Commands::Task { command } => match command {
             TaskCommands::Create {
                 session,
                 title,
                 prompt,
                 r#in,
+                cron,
                 mock,
                 yes,
             } => {
@@ -217,6 +256,7 @@ fn dispatch(
                     max_attempts: 3,
                     auto_approve: yes,
                     mock,
+                    cron,
                 })?;
                 println!("{id}");
             }
@@ -247,6 +287,14 @@ fn dispatch(
             TaskCommands::Cancel { id } => {
                 runtime.cancel_task(&TaskId::parse(&id)?)?;
                 println!("cancelled {id}");
+            }
+            TaskCommands::Pause { id } => {
+                runtime.pause_task(&TaskId::parse(&id)?)?;
+                println!("paused {id}");
+            }
+            TaskCommands::Resume { id } => {
+                runtime.resume_task(&TaskId::parse(&id)?)?;
+                println!("resumed {id}");
             }
             TaskCommands::Pump => {
                 let finished = runtime.pump()?;
@@ -286,8 +334,9 @@ fn dispatch(
             SessionCommands::List => {
                 for session in runtime.list_sessions()? {
                     println!(
-                        "{}  {}  {}  seq={}",
+                        "{}  {}  {}  {}  seq={}",
                         session.id,
+                        session.status.as_str(),
                         session.mode.as_str(),
                         session.title.as_deref().unwrap_or("-"),
                         session.last_sequence
@@ -301,6 +350,22 @@ fn dispatch(
                 let summary = runtime.compact(&SessionId::parse(&id)?)?;
                 println!("{summary}");
             }
+            SessionCommands::Fork { id } => {
+                let child = runtime.fork_session(&SessionId::parse(&id)?)?;
+                println!("{child}");
+            }
+            SessionCommands::Export { id } => {
+                let value = runtime.export_session(&SessionId::parse(&id)?)?;
+                println!("{}", serde_json::to_string_pretty(&value)?);
+            }
+            SessionCommands::Archive { id } => {
+                runtime.archive_session(&SessionId::parse(&id)?)?;
+                println!("archived {id}");
+            }
+            SessionCommands::Resume { id } => {
+                runtime.resume_session(&SessionId::parse(&id)?)?;
+                println!("resumed {id}");
+            }
         },
         Commands::Run {
             session,
@@ -308,6 +373,8 @@ fn dispatch(
             mock,
             yes,
             model,
+            provider,
+            worktree,
         } => {
             let session_id = SessionId::parse(&session)?;
             let run_id = runtime.run(
@@ -320,6 +387,9 @@ fn dispatch(
                     auto_approve: yes,
                     interactive: false,
                     max_turns: 12,
+                    provider: provider.unwrap_or_default(),
+                    read_only: false,
+                    worktree,
                 },
             )?;
             println!("run {run_id}");

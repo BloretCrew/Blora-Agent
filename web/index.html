@@ -41,7 +41,14 @@
         <button type="button" class="blora-button" data-variant="primary" data-icon="plus" id="new-session">
           新建会话
         </button>
-        <blora-sidebar-nav id="session-nav" label="会话">
+        <blora-sidebar-nav id="session-nav" label="导航">
+          <blora-sidebar-nav-group label="工作台">
+            <blora-sidebar-nav-link label="会话" value="session" href="#/session"></blora-sidebar-nav-link>
+            <blora-sidebar-nav-link label="任务" value="tasks" href="#/tasks"></blora-sidebar-nav-link>
+            <blora-sidebar-nav-link label="审批" value="approvals" href="#/approvals"></blora-sidebar-nav-link>
+            <blora-sidebar-nav-link label="工作区" value="workspace" href="#/workspace"></blora-sidebar-nav-link>
+            <blora-sidebar-nav-link label="设置" value="settings" href="#/settings"></blora-sidebar-nav-link>
+          </blora-sidebar-nav-group>
           <blora-sidebar-nav-group id="session-list" label="会话"></blora-sidebar-nav-group>
         </blora-sidebar-nav>
         <blora-empty id="session-empty" title="暂无会话" description="创建会话后会出现在这里。"></blora-empty>
@@ -65,38 +72,79 @@
             </div>
             <div class="ba-toolbar__actions">
               <blora-switch id="auto-approve" name="auto_approve" value="on">自动批准写入/命令</blora-switch>
+              <button type="button" class="blora-button" data-variant="ghost" data-icon="git-branch" id="fork">
+                派生会话
+              </button>
               <button type="button" class="blora-button" data-variant="ghost" data-icon="minimize-2" id="compact">
                 压缩上下文
               </button>
             </div>
           </header>
           <blora-alert id="page-alert" variant="danger" hidden></blora-alert>
-          <div id="subagents" class="ba-tags" hidden></div>
-          <section class="ba-thread" id="thread" aria-live="polite">
-            <blora-empty
-              id="thread-empty"
-              title="还没有消息"
-              description="从左侧打开会话，或直接在下方发送第一条。"
-            ></blora-empty>
+          <section id="view-session">
+            <div id="subagents" class="ba-tags" hidden></div>
+            <section class="ba-thread" id="thread" aria-live="polite">
+              <blora-empty
+                id="thread-empty"
+                title="还没有消息"
+                description="从左侧打开会话，或直接在下方发送第一条。"
+              ></blora-empty>
+            </section>
+            <form class="ba-task-form" id="task-form">
+              <blora-field label="排队后台任务" name="title" required>
+                <input class="blora-input" id="task-title" maxlength="80" />
+              </blora-field>
+              <blora-number-input id="task-delay" name="delay" label="延迟秒数" min="0" value="0"></blora-number-input>
+              <blora-field label="Cron（可选）" name="cron">
+                <input class="blora-input" id="task-cron" placeholder="0 * * * *" />
+              </blora-field>
+              <button type="submit" class="blora-button" data-variant="secondary">排队</button>
+            </form>
+            <form class="ba-composer" id="composer">
+              <blora-field label="向 Blora 发送" name="prompt" required>
+                <textarea
+                  class="blora-textarea"
+                  id="prompt"
+                  rows="3"
+                  placeholder="描述你想在工作区完成的事"
+                ></textarea>
+              </blora-field>
+              <button type="submit" class="blora-button" data-variant="primary" data-icon="send" id="send">发送</button>
+            </form>
           </section>
-          <form class="ba-task-form" id="task-form">
-            <blora-field label="排队后台任务" name="title" required>
-              <input class="blora-input" id="task-title" maxlength="80" />
-            </blora-field>
-            <blora-number-input id="task-delay" name="delay" label="延迟秒数" min="0" value="0"></blora-number-input>
-            <button type="submit" class="blora-button" data-variant="secondary">排队</button>
-          </form>
-          <form class="ba-composer" id="composer">
-            <blora-field label="向 Blora 发送" name="prompt" required>
-              <textarea
-                class="blora-textarea"
-                id="prompt"
-                rows="3"
-                placeholder="描述你想在工作区完成的事"
-              ></textarea>
-            </blora-field>
-            <button type="submit" class="blora-button" data-variant="primary" data-icon="send" id="send">发送</button>
-          </form>
+          <section id="view-tasks" hidden>
+            <div id="task-page-list" class="blora-list"></div>
+            <blora-empty id="task-page-empty" title="没有任务" description="从会话页排队后台任务。"></blora-empty>
+          </section>
+          <section id="view-approvals" hidden>
+            <div id="approval-page-list" class="blora-list"></div>
+            <blora-empty id="approval-page-empty" title="没有待审批" description="写入和命令会在这里列出。"></blora-empty>
+          </section>
+          <section id="view-workspace" hidden>
+            <p class="ba-toolbar__path" id="workspace-path"></p>
+            <h2 class="ba-section__title">Git</h2>
+            <pre class="ba-pre" id="workspace-git"></pre>
+            <h2 class="ba-section__title">文件</h2>
+            <pre class="ba-pre" id="workspace-files"></pre>
+          </section>
+          <section id="view-settings" hidden>
+            <div class="ba-settings">
+              <blora-field label="主题">
+                <blora-palette-picker></blora-palette-picker>
+              </blora-field>
+              <blora-field label="明暗">
+                <blora-color-scheme-toggle></blora-color-scheme-toggle>
+              </blora-field>
+              <blora-field label="Provider 名称" name="provider">
+                <input class="blora-input" id="pref-provider" placeholder="openai,responses" />
+              </blora-field>
+              <blora-field label="模型" name="model">
+                <input class="blora-input" id="pref-model" placeholder="gpt-4o-mini" />
+              </blora-field>
+              <blora-switch id="pref-worktree" name="worktree" value="on">在 git worktree 中执行</blora-switch>
+              <p class="ba-toolbar__path" id="settings-meta"></p>
+            </div>
+          </section>
         </main>
       </blora-sidebar-layout-content>
     </blora-sidebar-layout>

@@ -46,6 +46,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut status =
         "Enter send  /help  [ ] session  Ctrl+N new  y/n approve  Ctrl+C quit".to_owned();
     let mut auto_approve = false;
+    let mut scroll = 0usize;
     let mut cancel = CancelToken::new();
     let result = thread::scope(|scope| -> Result<()> {
         let mut job: Option<thread::ScopedJoinHandle<'_, Result<blora_types::RunId>>> = None;
@@ -99,7 +100,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                     );
                     let lines = projection
                         .as_ref()
-                        .map(render_transcript)
+                        .map(|projection| render_transcript(projection, scroll))
                         .unwrap_or_default();
                     frame.render_widget(
                         Paragraph::new(lines)
@@ -165,6 +166,14 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     index += 1;
                                 }
                             }
+                            KeyCode::PageUp if input.is_empty() => {
+                                scroll = scroll.saturating_add(8);
+                            }
+                            KeyCode::PageDown if input.is_empty() => {
+                                scroll = scroll.saturating_sub(8);
+                            }
+                            KeyCode::Home if input.is_empty() => scroll = usize::MAX / 4,
+                            KeyCode::End if input.is_empty() => scroll = 0,
                             KeyCode::Char('y') if input.is_empty() && !pending.is_empty() => {
                                 let _ = runtime.resolve_approval(&pending[0].id, true);
                             }
@@ -269,7 +278,10 @@ fn slash(
 ) -> String {
     let cmd = command.trim();
     match cmd {
-        "/help" => "/new /compact /tasks /yes /model /cancel  [ ] switch session".to_owned(),
+        "/help" => {
+            "/new /compact /tasks /yes /model /cancel /fork /resume /export /permissions /mode"
+                .to_owned()
+        }
         "/new" => match create_session(runtime, workspace) {
             Ok(id) => {
                 refresh_sessions(runtime, sessions, index);
@@ -309,16 +321,54 @@ fn slash(
             cancel.cancel();
             "cancel requested".to_owned()
         }
+        "/fork" => runtime
+            .fork_session(session_id)
+            .map(|id| {
+                refresh_sessions(runtime, sessions, index);
+                if let Some(found) = sessions.iter().position(|item| item.id == id) {
+                    *index = found;
+                }
+                format!("forked {id}")
+            })
+            .unwrap_or_else(|err| err.to_string()),
+        "/resume" => runtime
+            .resume_session(session_id)
+            .map(|()| "resumed".to_owned())
+            .unwrap_or_else(|err| err.to_string()),
+        "/export" => runtime
+            .export_session(session_id)
+            .map(|value| {
+                format!(
+                    "exported {} events",
+                    value.as_array().map(Vec::len).unwrap_or(0)
+                )
+            })
+            .unwrap_or_else(|err| err.to_string()),
+        "/permissions" => format!("auto-approve={auto_approve}"),
+        "/mode" => runtime
+            .show_session(session_id)
+            .ok()
+            .and_then(|projection| projection.session)
+            .map(|session| session.mode.as_str().to_owned())
+            .unwrap_or_else(|| "unknown".to_owned()),
         _ => format!("unknown command {cmd}"),
     }
 }
 
-fn render_transcript(projection: &blora_session::SessionProjection) -> Vec<Line<'static>> {
+fn render_transcript(
+    projection: &blora_session::SessionProjection,
+    scroll: usize,
+) -> Vec<Line<'static>> {
+    let total = projection.transcript.len();
+    let skip = scroll.min(total.saturating_sub(1));
     projection
         .transcript
         .iter()
         .rev()
+        .skip(skip)
         .take(80)
+        .collect::<Vec<_>>()
+        .into_iter()
         .rev()
         .map(|item| match item {
             TranscriptItem::User { text, .. } => Line::from(vec![

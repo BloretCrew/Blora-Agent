@@ -10,13 +10,15 @@
 
 - Canonical Event Log + SQLite 追加写存储
 - 可恢复 Session / Run 状态机
-- 本地工具：`read_file`、`write_file`、`list_dir`、`search`、`shell`
+- 本地工具：`read_file`、`write_file`、`list_dir`、`search`、`shell`、`apply_patch`、`process`
 - 工作区路径沙箱，写入和命令默认需要 `--yes`
-- Mock Provider 与 OpenAI 兼容流式接口
-- CLI、TUI、本地 Web UI（Blora Design）
-- Work 模式：可延迟后台任务、`blora task pump`、Web 服务每秒调度
-- Agent 模式：`delegate` 子代理，深度/并发预算限制
-- TUI/Web 交互审批、Git 只读工具、上下文压缩与 checkpoint
+- Mock Provider 与 OpenAI Chat / Responses / Anthropic 流式接口
+- CLI、TUI、本地 Web UI（Blora Design；会话 / 任务 / 审批 / 工作区 / 设置）
+- Work 模式：延迟任务、cron、暂停/恢复、`blora task pump`
+- Agent 模式：`delegate` / `handoff`，深度/并发预算；research/review/plan 只读
+- TUI/Web 交互审批、Git 工具、worktree 执行、上下文压缩、checkpoint、artifact
+- Provider：`openai` / `responses` / `anthropic` / `mock`，逗号分隔回退
+- `blora session fork|export|archive`、MCP（`BLORA_MCP_COMMAND`）、`blora acp`、`BLORA_HOOKS_DIR`
 
 ## 快速开始
 
@@ -26,8 +28,9 @@ cargo run -p blora-cli --                  # TUI
 cargo run -p blora-cli -- web              # Web UI，默认 http://127.0.0.1:8787
 cargo run -p blora-cli -- session create --workspace .
 cargo run -p blora-cli -- run --session ses_… --mock --yes "list files"
-cargo run -p blora-cli -- task create --session ses_… --title scan --prompt "list files" --mock --yes
+cargo run -p blora-cli -- task create --session ses_… --title scan --prompt "list files" --cron "0 * * * *" --mock --yes
 cargo run -p blora-cli -- task pump
+cargo run -p blora-cli -- acp
 ```
 
 真实模型：

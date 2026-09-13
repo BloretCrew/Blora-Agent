@@ -13,6 +13,7 @@ pub struct CreateTask {
     pub max_attempts: u32,
     pub auto_approve: bool,
     pub mock: bool,
+    pub cron: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -28,6 +29,7 @@ pub struct TaskRecord {
     pub max_attempts: u32,
     pub auto_approve: bool,
     pub mock: bool,
+    pub cron: Option<String>,
     pub error: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,

@@ -63,6 +63,35 @@ impl SqliteStore {
         .and_then(row_to_approval)
     }
 
+    pub fn list_all_pending_approvals(&self) -> Result<Vec<ApprovalRecord>> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, session_id, run_id, capability, summary, status, created_at, updated_at
+                 FROM approvals WHERE status = 'pending' ORDER BY created_at ASC",
+            )
+            .map_err(BloraError::storage)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                ))
+            })
+            .map_err(BloraError::storage)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row_to_approval(row.map_err(BloraError::storage)?)?);
+        }
+        Ok(out)
+    }
+
     pub fn list_pending_approvals(&self, session_id: &SessionId) -> Result<Vec<ApprovalRecord>> {
         let conn = self.lock();
         let mut stmt = conn

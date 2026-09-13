@@ -50,6 +50,12 @@ struct RunBody {
     mock: bool,
     #[serde(default)]
     auto_approve: bool,
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    worktree: bool,
 }
 
 #[derive(Serialize)]
@@ -58,7 +64,10 @@ struct SessionJson {
     title: Option<String>,
     workspace_path: String,
     mode: String,
+    status: String,
     last_sequence: u64,
+    input_tokens: u64,
+    output_tokens: u64,
     transcript: Vec<TranscriptJson>,
     tasks: Vec<TaskJson>,
     subagents: Vec<SubagentJson>,
@@ -77,6 +86,7 @@ struct TaskJson {
     status: String,
     session_id: String,
     attempt: u32,
+    cron: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -99,6 +109,8 @@ struct TaskBody {
     mock: bool,
     #[serde(default)]
     auto_approve: bool,
+    #[serde(default)]
+    cron: Option<String>,
 }
 
 pub async fn serve(
@@ -125,12 +137,20 @@ pub async fn serve(
         .route("/api/sessions/{id}", get(show_session))
         .route("/api/sessions/{id}/run", post(run_session))
         .route("/api/sessions/{id}/events", get(session_events))
+        .route("/api/sessions/{id}/fork", post(fork_session))
+        .route("/api/sessions/{id}/export", get(export_session))
+        .route("/api/sessions/{id}/archive", post(archive_session))
+        .route("/api/sessions/{id}/resume", post(resume_session))
+        .route("/api/sessions/{id}/compact", post(compact_session))
         .route("/api/tasks", get(list_tasks).post(create_task))
         .route("/api/tasks/{id}/cancel", post(cancel_task))
+        .route("/api/tasks/{id}/pause", post(pause_task))
+        .route("/api/tasks/{id}/resume", post(resume_task))
         .route("/api/tasks/pump", post(pump_tasks))
         .route("/api/approvals", get(list_approvals))
         .route("/api/approvals/{id}/resolve", post(resolve_approval))
-        .route("/api/sessions/{id}/compact", post(compact_session))
+        .route("/api/workspace", get(workspace_snapshot))
+        .route("/api/settings", get(settings))
         .layer(CorsLayer::permissive())
         .with_state(state);
     let listener = TcpListener::bind(bind)
@@ -233,9 +253,13 @@ async fn run_session(
     let options = RunOptions {
         mock: body.mock
             || (std::env::var("BLORA_API_KEY").is_err()
-                && std::env::var("OPENAI_API_KEY").is_err()),
+                && std::env::var("OPENAI_API_KEY").is_err()
+                && std::env::var("ANTHROPIC_API_KEY").is_err()),
         auto_approve: body.auto_approve,
         interactive: !body.auto_approve,
+        provider: body.provider.unwrap_or_default(),
+        model: body.model.unwrap_or_default(),
+        worktree: body.worktree,
         ..RunOptions::default()
     };
     tokio::task::spawn_blocking(move || {
@@ -324,6 +348,7 @@ async fn create_task(
             max_attempts: 3,
             auto_approve: body.auto_approve,
             mock,
+            cron: body.cron,
         })
         .map_err(ApiError::from)?;
     Ok(Json(task_json(
@@ -370,14 +395,18 @@ async fn list_approvals(
     State(state): State<AppState>,
     Query(query): Query<TaskQuery>,
 ) -> Result<Json<Vec<ApprovalJson>>, ApiError> {
-    let Some(session) = query.session else {
-        return Ok(Json(Vec::new()));
+    let rows = if let Some(session) = query.session {
+        let session_id = SessionId::parse(&session)?;
+        state
+            .runtime
+            .pending_approvals(&session_id)
+            .map_err(ApiError::from)?
+    } else {
+        state
+            .runtime
+            .pending_approvals_all()
+            .map_err(ApiError::from)?
     };
-    let session_id = SessionId::parse(&session)?;
-    let rows = state
-        .runtime
-        .pending_approvals(&session_id)
-        .map_err(ApiError::from)?;
     Ok(Json(
         rows.into_iter()
             .map(|row| ApprovalJson {
@@ -417,6 +446,101 @@ async fn compact_session(
     Ok(Json(serde_json::json!({ "summary": summary })))
 }
 
+async fn fork_session(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<SessionJson>, ApiError> {
+    let child = state
+        .runtime
+        .fork_session(&SessionId::parse(&id)?)
+        .map_err(ApiError::from)?;
+    to_json(&state, &child).map(Json)
+}
+
+async fn export_session(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    state
+        .runtime
+        .export_session(&SessionId::parse(&id)?)
+        .map(Json)
+        .map_err(ApiError::from)
+}
+
+async fn archive_session(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    state
+        .runtime
+        .archive_session(&SessionId::parse(&id)?)
+        .map_err(ApiError::from)?;
+    Ok(Json(serde_json::json!({ "archived": id })))
+}
+
+async fn resume_session(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    state
+        .runtime
+        .resume_session(&SessionId::parse(&id)?)
+        .map_err(ApiError::from)?;
+    Ok(Json(serde_json::json!({ "resumed": id })))
+}
+
+async fn pause_task(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    state
+        .runtime
+        .pause_task(&TaskId::parse(&id)?)
+        .map_err(ApiError::from)?;
+    Ok(Json(serde_json::json!({ "paused": id })))
+}
+
+async fn resume_task(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    state
+        .runtime
+        .resume_task(&TaskId::parse(&id)?)
+        .map_err(ApiError::from)?;
+    Ok(Json(serde_json::json!({ "resumed": id })))
+}
+
+async fn workspace_snapshot(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let info = state
+        .runtime
+        .workspace_info(&state.workspace)
+        .map_err(ApiError::from)?;
+    Ok(Json(serde_json::json!({
+        "path": info.path,
+        "files": info.files,
+        "git_status": info.git_status,
+        "git_diff": info.git_diff,
+        "git_log": info.git_log,
+        "git_branch": info.git_branch,
+    })))
+}
+
+async fn settings() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "provider": std::env::var("BLORA_PROVIDER").unwrap_or_else(|_| "openai".to_owned()),
+        "model": std::env::var("BLORA_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_owned()),
+        "has_api_key": std::env::var("BLORA_API_KEY").is_ok()
+            || std::env::var("OPENAI_API_KEY").is_ok()
+            || std::env::var("ANTHROPIC_API_KEY").is_ok(),
+        "mcp": std::env::var("BLORA_MCP_COMMAND").is_ok(),
+        "worktree": std::env::var("BLORA_WORKTREE").is_ok(),
+    }))
+}
+
 fn task_json(task: blora_storage::TaskRecord) -> TaskJson {
     TaskJson {
         id: task.id.to_string(),
@@ -424,6 +548,7 @@ fn task_json(task: blora_storage::TaskRecord) -> TaskJson {
         status: task.status.as_str().to_owned(),
         session_id: task.session_id.to_string(),
         attempt: task.attempt,
+        cron: task.cron,
     }
 }
 
@@ -437,7 +562,10 @@ fn to_json(state: &AppState, id: &SessionId) -> Result<SessionJson, ApiError> {
         title: session.title,
         workspace_path: session.workspace_path,
         mode: session.mode.as_str().to_owned(),
+        status: session.status.as_str().to_owned(),
         last_sequence: projection.last_sequence,
+        input_tokens: projection.input_tokens,
+        output_tokens: projection.output_tokens,
         transcript: projection
             .transcript
             .into_iter()
@@ -469,6 +597,7 @@ fn to_json(state: &AppState, id: &SessionId) -> Result<SessionJson, ApiError> {
                 status: task.status.as_str().to_owned(),
                 session_id: id.to_string(),
                 attempt: 0,
+                cron: None,
             })
             .collect(),
         subagents: projection

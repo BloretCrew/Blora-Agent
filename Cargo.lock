@@ -183,9 +183,20 @@ dependencies = [
  "chrono",
  "clap",
  "dirs",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "blora-context"
+version = "0.1.0"
+dependencies = [
+ "blora-events",
+ "blora-model",
+ "blora-types",
+ "chrono",
 ]
 
 [[package]]
@@ -231,6 +242,7 @@ dependencies = [
 name = "blora-runtime"
 version = "0.1.0"
 dependencies = [
+ "blora-context",
  "blora-events",
  "blora-exec",
  "blora-model",

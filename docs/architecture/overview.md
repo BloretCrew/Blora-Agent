@@ -29,7 +29,10 @@ Blora Agent 是从零实现的本地优先 harness。第一阶段是单用户模
 - Work：后台任务表、延迟调度、失败重试、session wakeup
 - Agent：`delegate` 子代理，深度 2 / 并发 3 / 子代理 6 turn 预算
 - 交互审批（TUI y/n，Web 允许/拒绝）
-- Git 只读工具、上下文压缩、checkpoint、provider 重试与工具死循环检测
+- Git 只读工具、apply_patch、上下文压缩、checkpoint、provider 重试与工具死循环检测
+- Provider：Chat Completions、Responses、Anthropic；`BLORA_PROVIDER` 可用逗号做回退链
+- Work cron（含列表/范围）、session fork/export/archive、MCP stdio（`BLORA_MCP_COMMAND`）、`blora acp`
+- Git worktree 执行、后台 process 工具、`BLORA_HOOKS_DIR` 钩子、Web 任务/审批/工作区/设置页
 
 ```text
 cargo run -p blora-cli --       # TUI

@@ -5,6 +5,7 @@ members = [
     "crates/blora-events",
     "crates/blora-session",
     "crates/blora-storage",
+    "crates/blora-context",
     "crates/blora-policy",
     "crates/blora-exec",
     "crates/blora-tools",
@@ -28,6 +29,7 @@ description = "Blora Agent: a local-first Code, Work, and Agent harness."
 [workspace.dependencies]
 blora-types = { path = "crates/blora-types" }
 blora-events = { path = "crates/blora-events" }
+blora-context = { path = "crates/blora-context" }
 blora-session = { path = "crates/blora-session" }
 blora-storage = { path = "crates/blora-storage" }
 blora-policy = { path = "crates/blora-policy" }
