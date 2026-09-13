@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Component, Path as FsPath, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -138,7 +138,9 @@ pub async fn serve(
         .route("/", get(index))
         .route("/app.js", get(app_js))
         .route("/app.css", get(app_css))
-        .route("/vendor/{file}", get(vendor_asset))
+        .route("/vendor/{*path}", get(vendor_asset))
+        .route("/favicon.svg", get(favicon))
+        .route("/favicon.ico", get(favicon))
         .route("/api/sessions", get(list_sessions).post(create_session))
         .route("/api/sessions/{id}", get(show_session))
         .route("/api/sessions/{id}/run", post(run_session))
@@ -183,29 +185,62 @@ async fn app_css() -> Response {
     css(APP_CSS)
 }
 
-async fn vendor_asset(Path(file): Path<String>) -> Response {
-    let relative = match file.as_str() {
-        "blora.css" => "packages/blora-design/dist/blora.css",
-        "tokens.dark.css" => "packages/blora-design/dist/tokens.dark.css",
-        "tokens.themes.css" => "packages/blora-design/dist/tokens.themes.css",
-        "blora.global.js" => "packages/blora-design/dist/blora.global.js",
-        "layout.css" => "addons/layout/dist/layout.css",
-        "layout.global.js" => "addons/layout/dist/layout.global.js",
-        "theming.css" => "addons/theming/dist/theming.css",
-        "theming.global.js" => "addons/theming/dist/theming.global.js",
-        _ => return StatusCode::NOT_FOUND.into_response(),
+async fn vendor_asset(Path(path): Path<String>) -> Response {
+    let Some(disk) = resolve_vendor(&path) else {
+        return StatusCode::NOT_FOUND.into_response();
     };
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../blora-design")
-        .join(relative);
-    match std::fs::read_to_string(&path) {
-        Ok(body) if file.ends_with(".css") => css_owned(body),
+    match std::fs::read_to_string(&disk) {
+        Ok(body) if path.ends_with(".css") => css_owned(body),
         Ok(body) => js_owned(body),
-        Err(_) if file == "blora.css" => css(
+        Err(_) if path == "blora.css" => css(
             ":root { --blora-background:#faf7f8; --blora-text:#2a1f24; --blora-primary:#9f5964; }",
         ),
         Err(_) => StatusCode::NOT_FOUND.into_response(),
     }
+}
+
+const FAVICON_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="8" fill="#9f5964"/><text x="16" y="22" text-anchor="middle" font-size="14" font-family="system-ui,sans-serif" fill="#faf7f8">BA</text></svg>"##;
+
+async fn favicon() -> Response {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("image/svg+xml; charset=utf-8"),
+    );
+    (headers, FAVICON_SVG).into_response()
+}
+
+fn vendor_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../blora-design")
+}
+
+fn resolve_vendor(request: &str) -> Option<PathBuf> {
+    let request = request.trim_start_matches('/');
+    if request.is_empty() {
+        return None;
+    }
+    let path = FsPath::new(request);
+    if path.components().any(|component| {
+        matches!(
+            component,
+            Component::ParentDir | Component::Prefix(_) | Component::RootDir
+        )
+    }) {
+        return None;
+    }
+    let ext = path.extension()?.to_str()?;
+    if !matches!(ext, "css" | "js") {
+        return None;
+    }
+    let root = vendor_root();
+    let disk = match request {
+        "layout.css" | "layout.global.js" => root.join("addons/layout/dist").join(path.file_name()?),
+        "theming.css" | "theming.global.js" => {
+            root.join("addons/theming/dist").join(path.file_name()?)
+        }
+        _ => root.join("packages/blora-design/dist").join(path),
+    };
+    disk.is_file().then_some(disk)
 }
 
 async fn list_sessions(State(state): State<AppState>) -> Result<Json<Vec<SessionJson>>, ApiError> {
@@ -726,4 +761,46 @@ fn js_owned(body: String) -> Response {
         HeaderValue::from_static("text/javascript; charset=utf-8"),
     );
     (headers, body).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serves_nested_component_css() {
+        let path = resolve_vendor("components/alert/alert.css").expect("alert.css");
+        assert!(path.ends_with("alert.css"));
+        assert!(std::fs::read_to_string(path).unwrap().contains("blora"));
+    }
+
+    #[test]
+    fn serves_foundation_imports_and_addons() {
+        assert!(resolve_vendor("tokens.css").is_some());
+        assert!(resolve_vendor("foundations/reset.css").is_some());
+        assert!(resolve_vendor("foundations/base.css").is_some());
+        assert!(resolve_vendor("foundations/layout.css").is_some());
+        assert!(resolve_vendor("layout.css")
+            .unwrap()
+            .to_string_lossy()
+            .contains("addons/layout"));
+        assert!(resolve_vendor("../secret.css").is_none());
+        assert!(resolve_vendor("components/alert/alert.rs").is_none());
+    }
+
+    #[test]
+    fn blora_css_imports_are_on_disk() {
+        let css = std::fs::read_to_string(resolve_vendor("blora.css").unwrap()).unwrap();
+        for line in css.lines() {
+            let Some(rest) = line.trim().strip_prefix("@import \"") else {
+                continue;
+            };
+            let href = rest.split('"').next().unwrap_or_default();
+            let href = href.trim_start_matches("./");
+            assert!(
+                resolve_vendor(href).is_some(),
+                "missing vendor file for @import {href}"
+            );
+        }
+    }
 }
