@@ -6,7 +6,9 @@
 
 - `LocalBackend`：本机文件、搜索、shell、git 只读子集、apply_patch、后台进程登记。
 - `WorktreeHandle`：在 `{workspace}/.blora/worktrees/{session}` 创建分离的 git worktree；`BLORA_WORKTREE=1` 或 `--worktree` 启用。
-- Sandbox / Container / Remote 仍为后续阶段。
+- `BLORA_EXEC=sandbox`：清空环境，并在可用时用 `unshare -n` 去掉网络。
+- `BLORA_EXEC=container`：`docker run --rm --network=none` 挂载工作区；镜像由 `BLORA_CONTAINER_IMAGE` 指定。
+- 远程多租户执行仍为后续阶段。
 
 ## 工具
 

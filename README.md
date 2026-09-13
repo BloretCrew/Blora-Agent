@@ -19,6 +19,7 @@
 - TUI/Web 交互审批、Git 工具、worktree 执行、上下文压缩、checkpoint、artifact
 - Provider：`openai` / `responses` / `anthropic` / `mock`，逗号分隔回退
 - `blora session fork|export|archive`、MCP（`BLORA_MCP_COMMAND`）、`blora acp`、`BLORA_HOOKS_DIR`
+- 插件 JSON、显式记忆、sandbox/container 执行、`blora backup` / `usage`
 
 ## 快速开始
 

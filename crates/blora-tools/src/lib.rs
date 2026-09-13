@@ -161,6 +161,39 @@ impl ToolRegistry {
                 }),
             },
             ToolSpec {
+                name: "remember",
+                description: "Store an explicit memory for this workspace.",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "key": {"type": "string"},
+                        "value": {"type": "string"}
+                    },
+                    "required": ["key", "value"]
+                }),
+            },
+            ToolSpec {
+                name: "recall",
+                description: "Read stored memories. Omit key to list all.",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "key": {"type": "string"}
+                    }
+                }),
+            },
+            ToolSpec {
+                name: "forget",
+                description: "Delete a stored memory by key.",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "key": {"type": "string"}
+                    },
+                    "required": ["key"]
+                }),
+            },
+            ToolSpec {
                 name: "handoff",
                 description: "Return a structured summary to the parent agent.",
                 parameters: json!({

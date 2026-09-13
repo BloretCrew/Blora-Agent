@@ -22,15 +22,96 @@ pub fn stable_prompt(mode: &str) -> String {
 /// Workspace and environment facts that may change between sessions.
 #[must_use]
 pub fn context_prompt(workspace: &str, mode: &str) -> String {
-    format!(
+    let mut out = format!(
         "Workspace: {workspace}\n\
          Mode: {mode}\n\
          OS: {}\n\
          Date: {}\n\
-         Tools: read_file, write_file, list_dir, search, shell, apply_patch, git_status, git_diff, git_log, git_branch, git_worktree, process, schedule_task, delegate, handoff.",
+         Tools: read_file, write_file, list_dir, search, shell, apply_patch, git_status, git_diff, git_log, git_branch, git_worktree, process, schedule_task, delegate, handoff, remember, recall, forget.",
         std::env::consts::OS,
         chrono::Utc::now().date_naive()
-    )
+    );
+    if let Some(rules) = project_rules(workspace) {
+        out.push_str("\n\nProject rules:\n");
+        out.push_str(&rules);
+    }
+    if let Some(skills) = skill_summaries(workspace) {
+        out.push_str("\n\nSkills:\n");
+        out.push_str(&skills);
+    }
+    if let Some(git) = git_snapshot(workspace) {
+        out.push_str("\n\nGit:\n");
+        out.push_str(&git);
+    }
+    out
+}
+
+fn read_capped(path: &std::path::Path, max: usize) -> Option<String> {
+    let bytes = std::fs::read(path).ok()?;
+    let mut text = String::from_utf8_lossy(&bytes).into_owned();
+    if text.len() > max {
+        text.truncate(max);
+        text.push('…');
+    }
+    Some(text)
+}
+
+fn project_rules(workspace: &str) -> Option<String> {
+    let root = std::path::Path::new(workspace);
+    let mut chunks = Vec::new();
+    for name in ["AGENTS.md", "CLAUDE.md", ".blora/rules.md"] {
+        if let Some(text) = read_capped(&root.join(name), 4000) {
+            chunks.push(format!("# {name}\n{text}"));
+        }
+    }
+    if chunks.is_empty() {
+        None
+    } else {
+        Some(chunks.join("\n\n"))
+    }
+}
+
+fn skill_summaries(workspace: &str) -> Option<String> {
+    let dir = std::path::Path::new(workspace).join(".blora/skills");
+    let entries = std::fs::read_dir(&dir).ok()?;
+    let mut chunks = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
+            continue;
+        }
+        if let Some(text) = read_capped(&path, 1500) {
+            chunks.push(format!(
+                "# {}\n{text}",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            ));
+        }
+        if chunks.len() >= 8 {
+            break;
+        }
+    }
+    if chunks.is_empty() {
+        None
+    } else {
+        Some(chunks.join("\n\n"))
+    }
+}
+
+fn git_snapshot(workspace: &str) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["status", "--short", "--branch"])
+        .current_dir(workspace)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text.chars().take(800).collect())
+    }
 }
 
 #[must_use]
@@ -161,6 +242,15 @@ mod tests {
         assert!(stable.contains("Blora Agent"));
         assert!(!stable.contains("Date:"));
         assert!(context_prompt("/tmp", "code").contains("Date:"));
+    }
+
+    #[test]
+    fn includes_project_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "prefer tests").unwrap();
+        let prompt = context_prompt(dir.path().to_str().unwrap(), "code");
+        assert!(prompt.contains("prefer tests"));
+        assert!(prompt.contains("AGENTS.md"));
     }
 
     #[test]

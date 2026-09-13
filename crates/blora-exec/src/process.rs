@@ -35,10 +35,9 @@ impl LocalBackend {
         if command.trim().is_empty() {
             return Err(BloraError::Exec("empty command".to_owned()));
         }
-        let mut child = Command::new("sh")
-            .arg("-c")
-            .arg(command)
-            .current_dir(self.policy().workspace())
+        let mut child = self
+            .isolation()
+            .shell_command(self.policy().workspace(), command)?
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

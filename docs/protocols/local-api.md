@@ -13,6 +13,7 @@ GET    /api/sessions/:id/export
 POST   /api/sessions/:id/archive
 POST   /api/sessions/:id/resume
 POST   /api/sessions/:id/compact
+POST   /api/sessions/:id/cancel
 GET    /api/tasks
 POST   /api/tasks
 POST   /api/tasks/:id/cancel
@@ -23,6 +24,8 @@ GET    /api/approvals
 POST   /api/approvals/:id/resolve
 GET    /api/workspace
 GET    /api/settings
+GET    /api/usage
+GET    /api/plugins
 ```
 
 事件流使用 SSE。密钥不会出现在 `/api/settings` 中。

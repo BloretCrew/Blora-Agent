@@ -197,6 +197,7 @@ dependencies = [
  "blora-model",
  "blora-types",
  "chrono",
+ "tempfile",
 ]
 
 [[package]]
@@ -252,6 +253,7 @@ dependencies = [
  "blora-tools",
  "blora-types",
  "chrono",
+ "serde",
  "serde_json",
  "tempfile",
  "tracing",

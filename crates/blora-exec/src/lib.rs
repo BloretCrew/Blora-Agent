@@ -12,12 +12,14 @@ use std::time::Duration;
 
 use blora_policy::Policy;
 use blora_types::{BloraError, Result};
+mod isolation;
 mod process;
 mod worktree;
 
 use regex::Regex;
 use walkdir::WalkDir;
 
+pub use isolation::Isolation;
 pub use process::ProcessInfo;
 pub use worktree::WorktreeHandle;
 
@@ -29,17 +31,32 @@ const DEFAULT_SHELL_TIMEOUT: Duration = Duration::from_secs(30);
 #[derive(Clone, Debug)]
 pub struct LocalBackend {
     policy: Policy,
+    isolation: Isolation,
 }
 
 impl LocalBackend {
     #[must_use]
     pub fn new(policy: Policy) -> Self {
-        Self { policy }
+        Self {
+            policy,
+            isolation: Isolation::Local,
+        }
+    }
+
+    #[must_use]
+    pub fn with_isolation(mut self, isolation: Isolation) -> Self {
+        self.isolation = isolation;
+        self
     }
 
     #[must_use]
     pub fn policy(&self) -> &Policy {
         &self.policy
+    }
+
+    #[must_use]
+    pub fn isolation(&self) -> Isolation {
+        self.isolation
     }
 
     pub fn read_file(&self, path: &str) -> Result<String> {
@@ -129,10 +146,9 @@ impl LocalBackend {
         if command.trim().is_empty() {
             return Err(BloraError::Exec("empty command".to_owned()));
         }
-        let mut child = Command::new("sh")
-            .arg("-c")
-            .arg(command)
-            .current_dir(self.policy.workspace())
+        let mut child = self
+            .isolation
+            .shell_command(self.policy.workspace(), command)?
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

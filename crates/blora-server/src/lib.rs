@@ -3,10 +3,11 @@
 
 //! Local HTTP API. The Web UI only talks to this surface.
 
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::Json;
@@ -34,6 +35,7 @@ const APP_CSS: &str = include_str!("../../../web/app.css");
 struct AppState {
     runtime: Arc<Runtime>,
     workspace: PathBuf,
+    cancels: Arc<Mutex<HashMap<String, CancelToken>>>,
 }
 
 #[derive(Deserialize)]
@@ -127,7 +129,11 @@ pub async fn serve(
             let _ = tokio::task::spawn_blocking(move || runtime.pump()).await;
         }
     });
-    let state = AppState { runtime, workspace };
+    let state = AppState {
+        runtime,
+        workspace,
+        cancels: Arc::new(Mutex::new(HashMap::new())),
+    };
     let app = Router::new()
         .route("/", get(index))
         .route("/app.js", get(app_js))
@@ -142,6 +148,9 @@ pub async fn serve(
         .route("/api/sessions/{id}/archive", post(archive_session))
         .route("/api/sessions/{id}/resume", post(resume_session))
         .route("/api/sessions/{id}/compact", post(compact_session))
+        .route("/api/sessions/{id}/cancel", post(cancel_session))
+        .route("/api/usage", get(usage))
+        .route("/api/plugins", get(plugins))
         .route("/api/tasks", get(list_tasks).post(create_task))
         .route("/api/tasks/{id}/cancel", post(cancel_task))
         .route("/api/tasks/{id}/pause", post(pause_task))
@@ -250,6 +259,12 @@ async fn run_session(
     let session_id = SessionId::parse(&id).map_err(ApiError::from)?;
     let runtime = state.runtime.clone();
     let prompt = body.prompt;
+    let cancel = CancelToken::new();
+    state
+        .cancels
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(id.clone(), cancel.clone());
     let options = RunOptions {
         mock: body.mock
             || (std::env::var("BLORA_API_KEY").is_err()
@@ -262,12 +277,16 @@ async fn run_session(
         worktree: body.worktree,
         ..RunOptions::default()
     };
-    tokio::task::spawn_blocking(move || {
-        runtime.run(&session_id, &prompt, &CancelToken::new(), &options)
-    })
-    .await
-    .map_err(|err| ApiError(err.to_string()))?
-    .map_err(ApiError::from)?;
+    let result =
+        tokio::task::spawn_blocking(move || runtime.run(&session_id, &prompt, &cancel, &options))
+            .await
+            .map_err(|err| ApiError(err.to_string()))?;
+    state
+        .cancels
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&id);
+    result.map_err(ApiError::from)?;
     let session_id = SessionId::parse(&id).map_err(ApiError::from)?;
     to_json(&state, &session_id).map(Json)
 }
@@ -529,7 +548,49 @@ async fn workspace_snapshot(
     })))
 }
 
-async fn settings() -> Json<serde_json::Value> {
+async fn cancel_session(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let found = state
+        .cancels
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&id)
+        .cloned();
+    if let Some(token) = found {
+        token.cancel();
+        Ok(Json(serde_json::json!({ "cancelled": id })))
+    } else {
+        Err(ApiError("no running turn for this session".to_owned()))
+    }
+}
+
+async fn usage(
+    State(state): State<AppState>,
+    Query(query): Query<TaskQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let session_id = query.session.as_deref().map(SessionId::parse).transpose()?;
+    let totals = state
+        .runtime
+        .usage(session_id.as_ref())
+        .map_err(ApiError::from)?;
+    Ok(Json(serde_json::json!({
+        "input_tokens": totals.input_tokens,
+        "output_tokens": totals.output_tokens,
+        "cached_tokens": totals.cached_tokens,
+    })))
+}
+
+async fn plugins(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let plugins = state.runtime.list_plugins(&state.workspace);
+    Json(serde_json::json!({
+        "plugins": plugins.iter().map(|plugin| plugin.name.clone()).collect::<Vec<_>>(),
+    }))
+}
+
+async fn settings(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let plugins = state.runtime.list_plugins(&state.workspace);
     Json(serde_json::json!({
         "provider": std::env::var("BLORA_PROVIDER").unwrap_or_else(|_| "openai".to_owned()),
         "model": std::env::var("BLORA_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_owned()),
@@ -538,6 +599,9 @@ async fn settings() -> Json<serde_json::Value> {
             || std::env::var("ANTHROPIC_API_KEY").is_ok(),
         "mcp": std::env::var("BLORA_MCP_COMMAND").is_ok(),
         "worktree": std::env::var("BLORA_WORKTREE").is_ok(),
+        "exec": std::env::var("BLORA_EXEC").unwrap_or_else(|_| "local".to_owned()),
+        "max_tokens": std::env::var("BLORA_MAX_TOKENS").ok(),
+        "plugins": plugins.iter().map(|plugin| plugin.name.clone()).collect::<Vec<_>>(),
     }))
 }
 

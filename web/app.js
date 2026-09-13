@@ -506,7 +506,7 @@ async function refreshSettings() {
     model.value = stored("blora-model", info.model);
   }
   document.querySelector("#settings-meta").textContent =
-    `环境 provider=${info.provider} model=${info.model} key=${info.has_api_key} mcp=${info.mcp}`;
+    `环境 provider=${info.provider} model=${info.model} exec=${info.exec} key=${info.has_api_key} mcp=${info.mcp} plugins=${(info.plugins || []).join(",") || "-"}`;
 }
 
 document.querySelector("#compact").addEventListener("click", async () => {
@@ -516,6 +516,18 @@ document.querySelector("#compact").addEventListener("click", async () => {
   hideAlert();
   await api(`/api/sessions/${state.sessionId}/compact`, { method: "POST", body: "{}" });
   await selectSession(state.sessionId);
+});
+
+document.querySelector("#cancel-run").addEventListener("click", async () => {
+  if (!state.sessionId) {
+    return;
+  }
+  hideAlert();
+  try {
+    await api(`/api/sessions/${state.sessionId}/cancel`, { method: "POST", body: "{}" });
+  } catch (error) {
+    showAlert(error.message);
+  }
 });
 
 document.querySelector("#fork").addEventListener("click", async () => {

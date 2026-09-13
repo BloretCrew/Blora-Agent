@@ -33,6 +33,8 @@ Blora Agent 是从零实现的本地优先 harness。第一阶段是单用户模
 - Provider：Chat Completions、Responses、Anthropic；`BLORA_PROVIDER` 可用逗号做回退链
 - Work cron（含列表/范围）、session fork/export/archive、MCP stdio（`BLORA_MCP_COMMAND`）、`blora acp`
 - Git worktree 执行、后台 process 工具、`BLORA_HOOKS_DIR` 钩子、Web 任务/审批/工作区/设置页
+- 项目规则/技能进上下文、显式记忆、插件 JSON、自动压缩、token 预算
+- `BLORA_EXEC=sandbox|container` 隔离执行、`blora backup`/`restore`/`usage`、运行取消 API
 
 ```text
 cargo run -p blora-cli --         # TUI

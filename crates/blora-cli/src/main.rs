@@ -108,6 +108,15 @@ enum Commands {
         #[command(subcommand)]
         command: TaskCommands,
     },
+    /// Copy the SQLite state file (and WAL) to a backup path.
+    Backup { path: Option<PathBuf> },
+    /// Restore state from a backup SQLite file.
+    Restore { path: PathBuf },
+    /// Show recorded token usage.
+    Usage {
+        #[arg(long)]
+        session: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -219,6 +228,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let workspace = cli.workspace.unwrap_or(std::env::current_dir()?);
             acp::serve(&runtime, &workspace)
         }
+        Some(Commands::Backup { path }) => backup_state(cli.home.as_deref(), path),
+        Some(Commands::Restore { path }) => restore_state(cli.home.as_deref(), &path),
+        Some(Commands::Usage { session }) => {
+            let runtime = Runtime::new(open_store(cli.home.as_deref())?);
+            let session_id = session.as_deref().map(SessionId::parse).transpose()?;
+            let totals = runtime.usage(session_id.as_ref())?;
+            println!(
+                "input={} output={} cached={}",
+                totals.input_tokens, totals.output_tokens, totals.cached_tokens
+            );
+            Ok(())
+        }
         Some(other) => {
             let runtime = Runtime::new(open_store(cli.home.as_deref())?);
             dispatch(runtime, other, cli.workspace)
@@ -232,9 +253,13 @@ fn dispatch(
     global_workspace: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match command {
-        Commands::License | Commands::Web { .. } | Commands::Serve { .. } | Commands::Acp => {
-            unreachable!()
-        }
+        Commands::License
+        | Commands::Web { .. }
+        | Commands::Serve { .. }
+        | Commands::Acp
+        | Commands::Backup { .. }
+        | Commands::Restore { .. }
+        | Commands::Usage { .. } => unreachable!(),
         Commands::Task { command } => match command {
             TaskCommands::Create {
                 session,
@@ -492,8 +517,59 @@ fn parse_delay(spec: &str) -> Result<chrono::DateTime<Utc>, Box<dyn std::error::
     Ok(Utc::now() + duration)
 }
 
-fn open_store(home: Option<&std::path::Path>) -> Result<SqliteStore, Box<dyn std::error::Error>> {
-    let home = match home {
+fn backup_state(
+    home: Option<&std::path::Path>,
+    dest: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let home = resolve_home(home)?;
+    let src = home.join("state.sqlite");
+    if !src.exists() {
+        return Err("no state.sqlite to back up".into());
+    }
+    let dest = dest.unwrap_or_else(|| {
+        home.join("backups").join(format!(
+            "state-{}.sqlite",
+            Utc::now().format("%Y%m%dT%H%M%SZ")
+        ))
+    });
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    copy_sqlite(&src, &dest)?;
+    println!("{}", dest.display());
+    Ok(())
+}
+
+fn restore_state(
+    home: Option<&std::path::Path>,
+    src: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dest = resolve_home(home)?.join("state.sqlite");
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    copy_sqlite(src, &dest)?;
+    println!("restored {}", dest.display());
+    Ok(())
+}
+
+fn copy_sqlite(
+    src: &std::path::Path,
+    dest: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    std::fs::copy(src, dest)?;
+    for suffix in ["-wal", "-shm"] {
+        let extra = PathBuf::from(format!("{}{suffix}", src.display()));
+        if extra.exists() {
+            let target = PathBuf::from(format!("{}{suffix}", dest.display()));
+            std::fs::copy(extra, target)?;
+        }
+    }
+    Ok(())
+}
+
+fn resolve_home(home: Option<&std::path::Path>) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    Ok(match home {
         Some(path) => path.to_path_buf(),
         None => match std::env::var_os("BLORA_HOME") {
             Some(value) => PathBuf::from(value),
@@ -501,8 +577,11 @@ fn open_store(home: Option<&std::path::Path>) -> Result<SqliteStore, Box<dyn std
                 .ok_or("cannot determine home directory")?
                 .join(".blora"),
         },
-    };
-    Ok(SqliteStore::open(home.join("state.sqlite"))?)
+    })
+}
+
+fn open_store(home: Option<&std::path::Path>) -> Result<SqliteStore, Box<dyn std::error::Error>> {
+    Ok(SqliteStore::open(resolve_home(home)?.join("state.sqlite"))?)
 }
 
 #[cfg(test)]
@@ -538,5 +617,16 @@ mod tests {
         let cli = Cli::try_parse_from(["blora", "--web", "--bind", "127.0.0.1:9000"]).unwrap();
         assert!(cli.web);
         assert_eq!(cli.bind, "127.0.0.1:9000");
+    }
+
+    #[test]
+    fn backup_command_parses() {
+        let cli = Cli::try_parse_from(["blora", "backup", "/tmp/state.sqlite"]).unwrap();
+        match cli.command {
+            Some(Commands::Backup { path }) => {
+                assert_eq!(path.unwrap(), PathBuf::from("/tmp/state.sqlite"));
+            }
+            other => panic!("expected backup, got {other:?}"),
+        }
     }
 }

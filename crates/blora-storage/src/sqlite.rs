@@ -26,6 +26,21 @@ pub struct CreateSession {
 }
 
 #[derive(Clone, Debug)]
+pub struct MemoryRecord {
+    pub workspace_path: String,
+    pub key: String,
+    pub value: String,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct UsageTotals {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cached_tokens: u64,
+}
+
+#[derive(Clone, Debug)]
 pub struct SessionSummary {
     pub id: SessionId,
     pub title: Option<String>,
@@ -89,6 +104,11 @@ impl SqliteStore {
         .map_err(BloraError::storage)?;
         conn.execute(
             "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (5, ?1)",
+            params![now],
+        )
+        .map_err(BloraError::storage)?;
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (6, ?1)",
             params![now],
         )
         .map_err(BloraError::storage)?;
@@ -526,6 +546,99 @@ impl SqliteStore {
             return Err(BloraError::SessionNotFound(session_id.to_string()));
         }
         Ok(())
+    }
+
+    pub fn upsert_memory(
+        &self,
+        workspace_path: &str,
+        key: &str,
+        value: &str,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "INSERT INTO memories (workspace_path, key, value, updated_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(workspace_path, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            params![workspace_path, key, value, now.to_rfc3339()],
+        )
+        .map_err(BloraError::storage)?;
+        Ok(())
+    }
+
+    pub fn list_memories(&self, workspace_path: &str) -> Result<Vec<MemoryRecord>> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT workspace_path, key, value, updated_at FROM memories
+                 WHERE workspace_path = ?1 ORDER BY key ASC",
+            )
+            .map_err(BloraError::storage)?;
+        let rows = stmt
+            .query_map(params![workspace_path], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .map_err(BloraError::storage)?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (workspace_path, key, value, updated_at) = row.map_err(BloraError::storage)?;
+            out.push(MemoryRecord {
+                workspace_path,
+                key,
+                value,
+                updated_at: parse_time(&updated_at)?,
+            });
+        }
+        Ok(out)
+    }
+
+    pub fn get_memory(&self, workspace_path: &str, key: &str) -> Result<Option<MemoryRecord>> {
+        Ok(self
+            .list_memories(workspace_path)?
+            .into_iter()
+            .find(|item| item.key == key))
+    }
+
+    pub fn delete_memory(&self, workspace_path: &str, key: &str) -> Result<bool> {
+        let conn = self.lock();
+        let changed = conn
+            .execute(
+                "DELETE FROM memories WHERE workspace_path = ?1 AND key = ?2",
+                params![workspace_path, key],
+            )
+            .map_err(BloraError::storage)?;
+        Ok(changed > 0)
+    }
+
+    pub fn usage_totals(&self, session_id: Option<&SessionId>) -> Result<UsageTotals> {
+        let conn = self.lock();
+        let (input, output, cached): (i64, i64, i64) = if let Some(session_id) = session_id {
+            conn.query_row(
+                "SELECT COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0), COALESCE(SUM(cached_tokens),0)
+                 FROM provider_usage WHERE session_id = ?1",
+                params![session_id.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(BloraError::storage)?
+        } else {
+            conn.query_row(
+                "SELECT COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0), COALESCE(SUM(cached_tokens),0)
+                 FROM provider_usage",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(BloraError::storage)?
+        };
+        Ok(UsageTotals {
+            input_tokens: u64::try_from(input).unwrap_or(0),
+            output_tokens: u64::try_from(output).unwrap_or(0),
+            cached_tokens: u64::try_from(cached).unwrap_or(0),
+        })
     }
 
     pub fn insert_artifact(

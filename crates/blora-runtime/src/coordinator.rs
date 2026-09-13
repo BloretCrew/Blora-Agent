@@ -9,7 +9,7 @@ use blora_events::{
     SessionArchived, SessionResumed, ToolCompleted, ToolFailed, ToolOutput, ToolRequested,
     UsageRecorded, UserInput,
 };
-use blora_exec::{LocalBackend, WorktreeHandle};
+use blora_exec::{Isolation, LocalBackend, WorktreeHandle};
 use blora_model::{CompletionRequest, StreamEvent, ToolCall, ToolDeclaration, make_providers};
 use blora_policy::Policy;
 use blora_session::SessionProjection;
@@ -111,6 +111,14 @@ impl Runtime {
     pub fn export_session(&self, session_id: &SessionId) -> Result<serde_json::Value> {
         let events = self.events(session_id)?;
         serde_json::to_value(events).map_err(|err| BloraError::event(err.to_string()))
+    }
+
+    pub fn list_plugins(&self, workspace: &std::path::Path) -> Vec<crate::plugins::PluginSpec> {
+        crate::plugins::load(workspace)
+    }
+
+    pub fn usage(&self, session_id: Option<&SessionId>) -> Result<blora_storage::UsageTotals> {
+        self.store.usage_totals(session_id)
     }
 
     pub fn workspace_info(&self, path: &std::path::Path) -> Result<WorkspaceInfo> {
@@ -266,8 +274,12 @@ impl Runtime {
             .map(|handle| handle.path().display().to_string())
             .unwrap_or_else(|| workspace.clone());
         let _keep_worktree = worktree;
+        let used = projection.input_tokens + projection.output_tokens;
+        if token_budget_exceeded(used) {
+            return Err(BloraError::Other(format!("token budget exceeded ({used})")));
+        }
         let policy = Policy::new(&exec_root, options.auto_approve)?;
-        let backend = LocalBackend::new(policy);
+        let backend = LocalBackend::new(policy).with_isolation(Isolation::from_env());
         let providers = make_providers(options.mock, &options.provider);
         let mut provider_index = 0;
         let model = if options.model.is_empty() {
@@ -335,12 +347,18 @@ impl Runtime {
                 tools.extend(extra);
             }
         }
+        let plugins = crate::plugins::load(std::path::Path::new(&exec_root));
+        tools.extend(plugins.iter().map(crate::plugins::PluginSpec::declaration));
 
         for turn in 0..options.max_turns {
             if cancel.is_cancelled() {
                 return self.cancel_run(session_id, &run_id, &turn_id);
             }
-            let events = self.store.load_events(session_id)?;
+            let mut events = self.store.load_events(session_id)?;
+            if should_auto_compact(&events) {
+                let _ = self.compact(session_id);
+                events = self.store.load_events(session_id)?;
+            }
             let messages = compile_messages(&events, &exec_root, mode.as_str())?;
             self.emit(
                 session_id,
@@ -502,6 +520,8 @@ impl Runtime {
                     options,
                     cancel,
                     mcp.as_ref(),
+                    &plugins,
+                    &exec_root,
                 )?;
             }
         }
@@ -517,6 +537,7 @@ impl Runtime {
         Err(BloraError::Other("maximum model turns reached".to_owned()))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn dispatch_tool(
         &self,
         session_id: &SessionId,
@@ -527,6 +548,8 @@ impl Runtime {
         options: &RunOptions,
         cancel: &CancelToken,
         mcp: Option<&crate::mcp::McpClient>,
+        plugins: &[crate::plugins::PluginSpec],
+        workspace: &str,
     ) -> Result<()> {
         let arguments: Value = serde_json::from_str(&call.arguments)
             .unwrap_or_else(|_| serde_json::json!({ "raw": call.arguments }));
@@ -542,7 +565,7 @@ impl Runtime {
         )?;
         crate::hooks::fire("tool-before", &format!("{} {}", call.name, call.arguments));
         if options.read_only
-            && matches!(
+            && (matches!(
                 call.name.as_str(),
                 "write_file"
                     | "shell"
@@ -551,7 +574,9 @@ impl Runtime {
                     | "schedule_task"
                     | "git_worktree"
                     | "process"
-            )
+                    | "remember"
+                    | "forget"
+            ) || call.name.starts_with("plugin__"))
         {
             self.emit(
                 session_id,
@@ -623,12 +648,61 @@ impl Runtime {
             name if name.starts_with("mcp__") => mcp
                 .ok_or_else(|| BloraError::Other("MCP client is not connected".to_owned()))
                 .and_then(|client| client.call(name, &arguments)),
+            name if name.starts_with("plugin__") => {
+                crate::plugins::execute(backend, plugins, name, &arguments)
+            }
+            "remember" => {
+                let key = arguments
+                    .get("key")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let value = arguments
+                    .get("value")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if key.is_empty() {
+                    Err(BloraError::Other("remember needs key".to_owned()))
+                } else {
+                    self.store
+                        .upsert_memory(workspace, key, value, chrono::Utc::now())?;
+                    Ok(format!("remembered {key}"))
+                }
+            }
+            "recall" => {
+                if let Some(key) = arguments.get("key").and_then(Value::as_str) {
+                    Ok(self
+                        .store
+                        .get_memory(workspace, key)?
+                        .map(|row| row.value)
+                        .unwrap_or_else(|| "(missing)".to_owned()))
+                } else {
+                    let rows = self.store.list_memories(workspace)?;
+                    if rows.is_empty() {
+                        Ok("(no memories)".to_owned())
+                    } else {
+                        Ok(rows
+                            .into_iter()
+                            .map(|row| format!("{}={}", row.key, row.value))
+                            .collect::<Vec<_>>()
+                            .join("\n"))
+                    }
+                }
+            }
+            "forget" => {
+                let key = arguments
+                    .get("key")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                self.store.delete_memory(workspace, key)?;
+                Ok(format!("forgot {key}"))
+            }
             _ => ToolRegistry::execute(backend, &call.name, &arguments),
         };
         let intercepted = match execute(backend) {
             Err(BloraError::ApprovalRequired(summary)) if options.interactive => {
                 if self.await_approval(session_id, run_id, turn_id, &call.name, &summary, cancel)? {
-                    let granted = LocalBackend::new(backend.policy().granting());
+                    let granted = LocalBackend::new(backend.policy().granting())
+                        .with_isolation(backend.isolation());
                     execute(&granted)
                 } else {
                     Err(BloraError::Policy(summary))
@@ -746,6 +820,26 @@ impl Runtime {
         self.store.append(event)?;
         Ok(())
     }
+}
+
+fn should_auto_compact(events: &[EventEnvelope]) -> bool {
+    if events.len() < 48 {
+        return false;
+    }
+    match events
+        .iter()
+        .rposition(|event| event.event_type == "context.compaction.completed")
+    {
+        None => true,
+        Some(index) => events.len() - index > 32,
+    }
+}
+
+fn token_budget_exceeded(used: u64) -> bool {
+    std::env::var("BLORA_MAX_TOKENS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .is_some_and(|max| max > 0 && used > max)
 }
 
 fn is_retryable(err: &BloraError) -> bool {
@@ -1088,5 +1182,22 @@ mod tests {
         );
         let listed = runtime.list_tasks(None).unwrap();
         assert_eq!(listed[0].id, task_id);
+    }
+
+    #[test]
+    fn remembers_and_recalls() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open_in_memory().unwrap();
+        let runtime = Runtime::new(store);
+        runtime
+            .store
+            .upsert_memory(dir.path().to_str().unwrap(), "k", "v", chrono::Utc::now())
+            .unwrap();
+        let row = runtime
+            .store
+            .get_memory(dir.path().to_str().unwrap(), "k")
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.value, "v");
     }
 }

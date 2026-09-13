@@ -13,5 +13,8 @@ blora-model.workspace = true
 blora-types.workspace = true
 chrono.workspace = true
 
+[dev-dependencies]
+tempfile.workspace = true
+
 [lints]
 workspace = true
