@@ -40,6 +40,7 @@ struct AppState {
     cancels: Arc<Mutex<HashMap<String, CancelToken>>>,
     require_auth: bool,
     passport: Option<PassportConfig>,
+    device_code: Arc<Mutex<Option<blora_auth::DeviceCode>>>,
 }
 
 #[derive(Deserialize)]
@@ -140,6 +141,7 @@ pub async fn serve(
         cancels: Arc::new(Mutex::new(HashMap::new())),
         require_auth,
         passport: passport_config(),
+        device_code: Arc::new(Mutex::new(None)),
     };
     let listener = TcpListener::bind(bind)
         .await
@@ -160,6 +162,8 @@ fn app(state: AppState) -> Router {
         .route("/favicon.ico", get(favicon))
         .route("/auth/start", get(passport_start))
         .route("/api/auth/url", get(passport_url))
+        .route("/api/auth/device", get(passport_device))
+        .route("/api/auth/device/poll", post(passport_device_poll))
         .route("/auth/callback", get(passport_callback))
         .route("/api/auth/me", get(auth_me))
         .route("/api/sessions", get(list_sessions).post(create_session))
@@ -241,6 +245,73 @@ async fn passport_start(State(state): State<AppState>, headers: HttpHeaderMap) -
         StatusCode::FOUND,
     )
         .into_response()
+}
+
+async fn passport_device(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let config = state
+        .passport
+        .ok_or_else(|| ApiError("Passport login is not configured".to_owned()))?;
+    let request_config = config.clone();
+    let device = tokio::task::spawn_blocking(move || request_config.request_device_code())
+        .await
+        .map_err(|err| ApiError(err.to_string()))?
+        .map_err(|err| ApiError::from(blora_types::BloraError::Other(err.to_string())))?;
+    *state
+        .device_code
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(device.clone());
+    Ok(Json(serde_json::json!({
+        "user_code": device.user_code,
+        "verification_uri": device.verification_uri,
+        "device_code": config.device_code(&device),
+        "expires_in": device.expires_in,
+        "interval": device.interval
+    })))
+}
+
+async fn passport_device_poll(
+    State(state): State<AppState>,
+    Json(_body): Json<DevicePollBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let config = state
+        .passport
+        .ok_or_else(|| ApiError("Passport login is not configured".to_owned()))?;
+    let device = state
+        .device_code
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+        .ok_or_else(|| ApiError("device code is not initialized".to_owned()))?;
+    let result = tokio::task::spawn_blocking(move || config.poll_device(&device))
+        .await
+        .map_err(|err| ApiError(err.to_string()))?;
+    let user =
+        result.map_err(|err| ApiError::from(blora_types::BloraError::Other(err.to_string())))?;
+    state
+        .runtime
+        .upsert_passport_user(
+            &user.username,
+            user.nickname.as_deref(),
+            user.avatar.as_deref(),
+            user.email.as_deref(),
+            user.apptoken.as_deref(),
+        )
+        .map_err(ApiError::from)?;
+    Ok(Json(
+        serde_json::json!({"authenticated": true, "username": user.username, "name": user.display_name()}),
+    ))
+}
+
+#[derive(Deserialize)]
+#[allow(dead_code)]
+struct DevicePollBody {
+    device_code: String,
+    user_code: String,
+    verification_uri: String,
+    expires_in: u64,
+    interval: u64,
 }
 
 async fn passport_url(
@@ -1226,6 +1297,7 @@ mod tests {
             cancels: Arc::new(Mutex::new(HashMap::new())),
             require_auth: false,
             passport: None,
+            device_code: Arc::new(Mutex::new(None)),
         };
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();

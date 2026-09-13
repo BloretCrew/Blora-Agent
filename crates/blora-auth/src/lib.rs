@@ -6,6 +6,7 @@
 //! The default app credential is only used for the server-side verification request;
 //! it is never placed in authorization URLs or browser-facing values.
 
+use std::thread;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -68,6 +69,128 @@ impl PassportConfig {
         )
     }
 
+    pub fn request_device_code(&self) -> Result<DeviceCode, AuthError> {
+        let body = format!(
+            "client_id={}&scope={}",
+            encode_form(&self.app_id),
+            encode_form("user:name user:head user:email app:usertoken"),
+        );
+        let response = ureq::post(&format!("{}/oauth/device/code", self.base_url))
+            .set("Content-Type", "application/x-www-form-urlencoded")
+            .set("Accept", "application/json")
+            .timeout(Duration::from_secs(20))
+            .send_string(&body)
+            .map_err(|err| AuthError::Network(err.to_string()))?;
+        let status = response.status();
+        let value: Value = response
+            .into_json()
+            .map_err(|err| AuthError::Protocol(err.to_string()))?;
+        if !(200..300).contains(&status) {
+            return Err(AuthError::Rejected(error_message(&value, status)));
+        }
+        let device_code = value
+            .get("device_code")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                AuthError::Protocol("Passport response has no device_code".to_owned())
+            })?;
+        let user_code = value
+            .get("user_code")
+            .and_then(Value::as_str)
+            .ok_or_else(|| AuthError::Protocol("Passport response has no user_code".to_owned()))?;
+        let verification_uri = value
+            .get("verification_uri_complete")
+            .or_else(|| value.get("verification_uri"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                AuthError::Protocol("Passport response has no verification_uri".to_owned())
+            })?;
+        Ok(DeviceCode {
+            device_code: device_code.to_owned(),
+            user_code: user_code.to_owned(),
+            verification_uri: verification_uri.to_owned(),
+            expires_in: value
+                .get("expires_in")
+                .and_then(Value::as_u64)
+                .unwrap_or(600),
+            interval: value.get("interval").and_then(Value::as_u64).unwrap_or(5),
+        })
+    }
+
+    pub fn device_code<'a>(&self, device: &'a DeviceCode) -> &'a str {
+        &device.device_code
+    }
+
+    pub fn verification_uri<'a>(&self, device: &'a DeviceCode) -> &'a str {
+        &device.verification_uri
+    }
+
+    pub fn poll_device(&self, device: &DeviceCode) -> Result<PassportUser, AuthError> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(device.expires_in);
+        let mut interval = device.interval.max(1);
+        loop {
+            if std::time::Instant::now() >= deadline {
+                return Err(AuthError::Rejected("expired_token".to_owned()));
+            }
+            thread::sleep(Duration::from_secs(interval));
+            let body = format!(
+                "client_id={}&grant_type={}&device_code={}",
+                encode_form(&self.app_id),
+                encode_form("urn:ietf:params:oauth:grant-type:device_code"),
+                encode_form(&device.device_code),
+            );
+            let response = ureq::post(&format!("{}/oauth/token", self.base_url))
+                .set("Content-Type", "application/x-www-form-urlencoded")
+                .set("Accept", "application/json")
+                .timeout(Duration::from_secs(20))
+                .send_string(&body)
+                .map_err(|err| AuthError::Network(err.to_string()))?;
+            let status = response.status();
+            let value: Value = response
+                .into_json()
+                .map_err(|err| AuthError::Protocol(err.to_string()))?;
+            if let Some(access_token) = value.get("access_token").and_then(Value::as_str) {
+                return self.userinfo(access_token);
+            }
+            let error = value.get("error").and_then(Value::as_str).unwrap_or("");
+            match error {
+                "authorization_pending" => continue,
+                "slow_down" => {
+                    interval = interval.saturating_add(5);
+                }
+                "access_denied" | "expired_token" | "invalid_client" | "invalid_scope" => {
+                    return Err(AuthError::Rejected(error_message(&value, status)));
+                }
+                _ if !(200..300).contains(&status) => {
+                    return Err(AuthError::Rejected(error_message(&value, status)));
+                }
+                _ => {
+                    return Err(AuthError::Protocol(
+                        "Passport token response has no access_token".to_owned(),
+                    ));
+                }
+            }
+        }
+    }
+
+    fn userinfo(&self, access_token: &str) -> Result<PassportUser, AuthError> {
+        let response = ureq::get(&format!("{}/oauth/userinfo", self.base_url))
+            .set("Accept", "application/json")
+            .set("Authorization", &format!("Bearer {access_token}"))
+            .timeout(Duration::from_secs(20))
+            .call()
+            .map_err(|err| AuthError::Network(err.to_string()))?;
+        let status = response.status();
+        let value: Value = response
+            .into_json()
+            .map_err(|err| AuthError::Protocol(err.to_string()))?;
+        if !(200..300).contains(&status) {
+            return Err(AuthError::Rejected(error_message(&value, status)));
+        }
+        parse_user(value)
+    }
+
     pub fn verify_code(&self, code: &str) -> Result<PassportUser, AuthError> {
         if code.trim().is_empty() {
             return Err(AuthError::Protocol(
@@ -91,6 +214,34 @@ impl PassportConfig {
             return Err(AuthError::Rejected(error_message(&value, status)));
         }
         parse_user(value)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeviceCode {
+    pub(crate) device_code: String,
+    pub user_code: String,
+    pub verification_uri: String,
+    pub expires_in: u64,
+    pub interval: u64,
+}
+
+impl DeviceCode {
+    #[must_use]
+    pub fn from_public(
+        device_code: &str,
+        user_code: &str,
+        verification_uri: &str,
+        expires_in: u64,
+        interval: u64,
+    ) -> Self {
+        Self {
+            device_code: device_code.to_owned(),
+            user_code: user_code.to_owned(),
+            verification_uri: verification_uri.to_owned(),
+            expires_in,
+            interval,
+        }
     }
 }
 
@@ -154,6 +305,17 @@ fn error_message(value: &Value, status: u16) -> String {
         .and_then(Value::as_str)
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| format!("HTTP {status}"))
+}
+
+fn encode_form(value: &str) -> String {
+    value.bytes().fold(String::new(), |mut out, byte| {
+        if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
+            out.push(char::from(byte));
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+        out
+    })
 }
 
 fn encode(value: &str) -> String {

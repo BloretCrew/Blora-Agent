@@ -27,52 +27,27 @@ use crossterm::terminal::{
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
-fn start_passport_login()
--> Result<Option<(String, std::sync::mpsc::Receiver<blora_auth::PassportUser>)>> {
+fn start_passport_login() -> Result<
+    Option<(
+        blora_auth::DeviceCode,
+        std::sync::mpsc::Receiver<blora_auth::PassportUser>,
+    )>,
+> {
     let config = match blora_auth::PassportConfig::from_env() {
         Ok(config) => config,
         Err(_) => return Ok(None),
     };
-    let listener =
-        std::net::TcpListener::bind("127.0.0.1:0").map_err(blora_types::BloraError::exec)?;
-    let address = listener
-        .local_addr()
-        .map_err(blora_types::BloraError::exec)?;
-    let redirect = format!("http://{address}/callback");
-    let url = config.authorize_url(&redirect);
+    let device = config
+        .request_device_code()
+        .map_err(|err| blora_types::BloraError::Other(err.to_string()))?;
     let (sender, receiver) = std::sync::mpsc::channel();
+    let polling_device = device.clone();
     std::thread::spawn(move || {
-        let Ok((mut stream, _)) = listener.accept() else {
-            return;
-        };
-        use std::io::{Read, Write};
-        let mut buffer = [0_u8; 8192];
-        let Ok(count) = stream.read(&mut buffer) else {
-            return;
-        };
-        let request = String::from_utf8_lossy(&buffer[..count]);
-        let Some(code) = request
-            .split_whitespace()
-            .nth(1)
-            .and_then(|path| path.split_once("?"))
-            .and_then(|(_, query)| query.split('&').find_map(|pair| pair.strip_prefix("code=")))
-            .map(|value| value.replace("%20", " "))
-        else {
-            return;
-        };
-        let Ok(user) = config.verify_code(&code) else {
-            return;
-        };
-        let body = format!("登录成功，欢迎 {}。可以关闭此窗口。", user.display_name());
-        let response = format!(
-            "HTTP/1.1 200 OK\\r\\nContent-Length: {}\\r\\nContent-Type: text/plain; charset=utf-8\\r\\nConnection: close\\r\\n\\r\\n{}",
-            body.len(),
-            body
-        );
-        let _ = stream.write_all(response.as_bytes());
-        let _ = sender.send(user);
+        if let Ok(user) = config.poll_device(&polling_device) {
+            let _ = sender.send(user);
+        }
     });
-    Ok(Some((url, receiver)))
+    Ok(Some((device, receiver)))
 }
 
 pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
@@ -82,10 +57,11 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     if let Ok(users) = runtime.list_users()
         && !users.iter().any(|user| user.passport_username.is_some())
     {
-        if let Some((url, receiver)) = start_passport_login()? {
+        if let Some((device, receiver)) = start_passport_login()? {
             eprintln!("需要登录 Bloret PassPort");
-            eprintln!("登录链接：{url}");
-            passport_url = Some(url);
+            eprintln!("设备码：{}", device.user_code);
+            eprintln!("登录链接：{}", device.verification_uri);
+            passport_url = Some(device.verification_uri.clone());
             passport_receiver = Some(receiver);
         }
     }

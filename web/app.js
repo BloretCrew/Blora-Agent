@@ -20,6 +20,7 @@ const approvalEmpty = document.querySelector("#approval-empty");
 const pageAlert = document.querySelector("#page-alert");
 const passportLogin = document.querySelector("#passport-login");
 const passportUser = document.querySelector("#passport-user");
+let passportDevice = null;
 
 async function refreshPassport() {
   if (!passportLogin || !passportUser) return;
@@ -31,10 +32,30 @@ async function refreshPassport() {
   } catch (_) {
     passportLogin.hidden = false;
     passportUser.hidden = true;
-    const payload = await fetch("/api/auth/url").then((response) => response.json());
-    if (payload.url) {
-      passportLogin.href = payload.url;
-      passportLogin.textContent = "打开 Bloret PassPort 登录";
+    const payload = await fetch("/api/auth/device").then((response) => response.json());
+    passportDevice = payload;
+    passportLogin.href = payload.verification_uri;
+    passportLogin.textContent = `设备码 ${payload.user_code} · 打开 PassPort`;
+    pollPassportDevice();
+  }
+}
+
+async function pollPassportDevice() {
+  if (!passportDevice) return;
+  try {
+    await api("/api/auth/device/poll", {
+      method: "POST",
+      body: JSON.stringify(passportDevice),
+    });
+    await refreshPassport();
+  } catch (error) {
+    if (error.message.includes("authorization_pending")) {
+      setTimeout(pollPassportDevice, Math.max(1000, Number(passportDevice.interval || 5) * 1000));
+    } else if (error.message.includes("slow_down")) {
+      passportDevice.interval = Number(passportDevice.interval || 5) + 5;
+      setTimeout(pollPassportDevice, passportDevice.interval * 1000);
+    } else {
+      showAlert(error.message);
     }
   }
 }
