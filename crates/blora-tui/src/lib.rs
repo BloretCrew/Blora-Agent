@@ -4,8 +4,10 @@
 //! Terminal UI. Renders session projections, never provider payloads.
 
 mod slash;
+mod theme;
+mod view;
 
-use std::io::{self, stdout};
+use std::io::{self, Write, stdout};
 use std::path::Path;
 use std::thread;
 use std::time::Duration;
@@ -21,10 +23,6 @@ use crossterm::terminal::{
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout};
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 
 pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut sessions = runtime.list_sessions()?;
@@ -42,12 +40,14 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     enable_raw_mode().map_err(blora_types::BloraError::exec)?;
     let mut stdout = stdout();
     execute!(stdout, EnterAlternateScreen).map_err(blora_types::BloraError::exec)?;
+    if std::env::var_os("NO_COLOR").is_none() {
+        let _ = write!(stdout, "{}", theme::CURSOR_ROSE);
+        let _ = stdout.flush();
+    }
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).map_err(blora_types::BloraError::exec)?;
     let mut input = String::new();
-    let mut status =
-        "Enter send  / commands  Tab complete  Ctrl+P menu  [ ] session  Ctrl+N new  y/n  Ctrl+C quit"
-            .to_owned();
+    let mut status = String::new();
     let mut auto_approve = false;
     let mut scroll = 0usize;
     let mut search: Option<String> = None;
@@ -57,6 +57,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut model_override = String::new();
     let mut provider_override = String::new();
     let mut notice: Option<String> = None;
+    let mut tick = 0u64;
     let mut cancel = CancelToken::new();
     let result = thread::scope(|scope| -> Result<()> {
         let mut job: Option<thread::ScopedJoinHandle<'_, Result<blora_types::RunId>>> = None;
@@ -78,188 +79,43 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
             if !slash_hits.is_empty() {
                 slash_selected = slash_selected.min(slash_hits.len() - 1);
             }
+            tick = tick.wrapping_add(1);
+            let env_model = std::env::var("BLORA_MODEL").unwrap_or_default();
+            let env_provider = std::env::var("BLORA_PROVIDER").unwrap_or_default();
+            let model = if model_override.is_empty() {
+                env_model.as_str()
+            } else {
+                model_override.as_str()
+            };
+            let provider = if provider_override.is_empty() {
+                env_provider.as_str()
+            } else {
+                provider_override.as_str()
+            };
             terminal
                 .draw(|frame| {
-                    let show_slash = slash::is_open(&input);
-                    let show_notice = !show_slash && notice.is_some();
-                    let extra_h = if show_slash {
-                        u16::try_from(slash_hits.len().clamp(1, slash::MAX_VISIBLE) + 2)
-                            .unwrap_or(4)
-                    } else if show_notice {
-                        let lines = notice.as_deref().map(count_lines).unwrap_or(1);
-                        u16::try_from(lines.clamp(1, 14) + 2).unwrap_or(4)
-                    } else {
-                        0
-                    };
-                    let chunks = Layout::default()
-                        .direction(Direction::Vertical)
-                        .constraints(if show_slash || show_notice {
-                            vec![
-                                Constraint::Length(3),
-                                Constraint::Min(4),
-                                Constraint::Length(extra_h),
-                                Constraint::Length(3),
-                            ]
-                        } else {
-                            vec![
-                                Constraint::Length(3),
-                                Constraint::Min(4),
-                                Constraint::Length(3),
-                            ]
-                        })
-                        .split(frame.area());
-                    let prompt_chunk = if show_slash || show_notice {
-                        chunks[3]
-                    } else {
-                        chunks[2]
-                    };
-                    let title = projection
-                        .as_ref()
-                        .and_then(|p| p.session.as_ref())
-                        .map(|s| {
-                            format!(
-                                "Blora Agent  {}/{}  {}  tasks:{}  agents:{}  tok:{}/{}",
-                                index + 1,
-                                sessions.len().max(1),
-                                s.id,
-                                projection.as_ref().map(|p| p.tasks.len()).unwrap_or(0),
-                                projection.as_ref().map(|p| p.subagents.len()).unwrap_or(0),
-                                projection.as_ref().map(|p| p.input_tokens).unwrap_or(0),
-                                projection.as_ref().map(|p| p.output_tokens).unwrap_or(0)
-                            )
-                        })
-                        .unwrap_or_else(|| "Blora Agent".to_owned());
-                    let running_tasks = projection
-                        .as_ref()
-                        .map(|item| {
-                            item.tasks
-                                .iter()
-                                .filter(|task| task.status.as_str() == "running")
-                                .count()
-                        })
-                        .unwrap_or(0);
-                    let banner = if let Some(first) = pending.first() {
-                        format!("APPROVE {}  y/n  {}", first.id, first.summary)
-                    } else if running_tasks > 0 {
-                        format!("task running ({running_tasks})  {status}")
-                    } else {
-                        status.clone()
-                    };
-                    frame.render_widget(
-                        Paragraph::new(banner).block(
-                            Block::default()
-                                .title(title)
-                                .borders(Borders::ALL)
-                                .border_style(Style::default().fg(Color::Rgb(159, 89, 100))),
-                        ),
-                        chunks[0],
-                    );
-                    let lines = projection
-                        .as_ref()
-                        .map(|projection| {
-                            render_transcript(projection, scroll, search.as_deref(), hide_tools)
-                        })
-                        .unwrap_or_default();
-                    frame.render_widget(
-                        Paragraph::new(lines)
-                            .wrap(Wrap { trim: false })
-                            .block(Block::default().title("session").borders(Borders::ALL)),
-                        chunks[1],
-                    );
-                    if show_slash {
-                        let start =
-                            slash_selected.saturating_sub(slash::MAX_VISIBLE.saturating_sub(1));
-                        let end = slash_hits.len().min(start + slash::MAX_VISIBLE);
-                        let visible = if slash_hits.is_empty() {
-                            &[][..]
-                        } else {
-                            &slash_hits[start..end]
-                        };
-                        let items: Vec<ListItem> = if slash_hits.is_empty() {
-                            vec![ListItem::new(Span::styled(
-                                "no matching command",
-                                Style::default().fg(Color::DarkGray),
-                            ))]
-                        } else {
-                            visible
-                                .iter()
-                                .map(|cmd| {
-                                    let hint = if cmd.hint.is_empty() {
-                                        String::new()
-                                    } else {
-                                        format!(" {}", cmd.hint)
-                                    };
-                                    let alias = if cmd.aliases.is_empty() {
-                                        String::new()
-                                    } else {
-                                        format!("  {}", cmd.aliases.join(", "))
-                                    };
-                                    ListItem::new(Line::from(vec![
-                                        Span::styled(
-                                            format!("/{}{hint}", cmd.name),
-                                            Style::default()
-                                                .fg(Color::Rgb(91, 117, 107))
-                                                .add_modifier(Modifier::BOLD),
-                                        ),
-                                        Span::styled(
-                                            alias,
-                                            Style::default().fg(Color::Rgb(140, 120, 126)),
-                                        ),
-                                        Span::raw("  "),
-                                        Span::styled(
-                                            cmd.about,
-                                            Style::default().fg(Color::DarkGray),
-                                        ),
-                                    ]))
-                                })
-                                .collect()
-                        };
-                        let mut state = ListState::default();
-                        if !slash_hits.is_empty() {
-                            state.select(Some(slash_selected.saturating_sub(start)));
-                        }
-                        frame.render_stateful_widget(
-                            List::new(items)
-                                .highlight_style(
-                                    Style::default()
-                                        .bg(Color::Rgb(42, 31, 36))
-                                        .fg(Color::Rgb(250, 247, 248))
-                                        .add_modifier(Modifier::BOLD),
-                                )
-                                .block(
-                                    Block::default()
-                                        .title("commands  Tab complete  ↑↓ select  Enter run")
-                                        .borders(Borders::ALL)
-                                        .border_style(
-                                            Style::default().fg(Color::Rgb(91, 117, 107)),
-                                        ),
-                                ),
-                            chunks[2],
-                            &mut state,
-                        );
-                    } else if show_notice {
-                        if let Some(body) = notice.as_deref() {
-                            frame.render_widget(
-                                Paragraph::new(body).wrap(Wrap { trim: false }).block(
-                                    Block::default()
-                                        .title("result  Esc dismiss")
-                                        .borders(Borders::ALL)
-                                        .border_style(
-                                            Style::default().fg(Color::Rgb(91, 117, 107)),
-                                        ),
-                                ),
-                                chunks[2],
-                            );
-                        }
-                    }
-                    frame.render_widget(
-                        Paragraph::new(input.as_str()).block(
-                            Block::default()
-                                .title(if show_slash { "prompt  /" } else { "prompt" })
-                                .borders(Borders::ALL)
-                                .border_style(Style::default().fg(Color::Rgb(159, 89, 100))),
-                        ),
-                        prompt_chunk,
+                    view::draw(
+                        frame,
+                        &view::FrameModel {
+                            workspace,
+                            sessions: &sessions,
+                            index,
+                            projection: projection.as_ref(),
+                            pending: &pending,
+                            input: &input,
+                            status: &status,
+                            notice: notice.as_deref(),
+                            slash_hits: &slash_hits,
+                            slash_selected,
+                            search: search.as_deref(),
+                            hide_tools,
+                            scroll,
+                            auto_approve,
+                            model,
+                            provider,
+                            running: job.is_some(),
+                            tick,
+                        },
                     );
                 })
                 .map_err(blora_types::BloraError::exec)?;
@@ -268,7 +124,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                 job.take_if(|handle: &mut thread::ScopedJoinHandle<'_, _>| handle.is_finished())
             {
                 match handle.join() {
-                    Ok(Ok(_)) => status = "completed".to_owned(),
+                    Ok(Ok(_)) => status = "done".to_owned(),
                     Ok(Err(err)) => status = err.to_string(),
                     Err(_) => status = "run thread panicked".to_owned(),
                 }
@@ -449,6 +305,10 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
 
     disable_raw_mode().ok();
     execute!(io::stdout(), LeaveAlternateScreen).ok();
+    if std::env::var_os("NO_COLOR").is_none() {
+        let _ = write!(io::stdout(), "{}", theme::CURSOR_RESET);
+        let _ = io::stdout().flush();
+    }
     result
 }
 
@@ -485,10 +345,6 @@ enum SlashOutcome {
     Status(String),
     Panel { status: String, body: String },
     Quit,
-}
-
-fn count_lines(text: &str) -> usize {
-    text.lines().count().max(1)
 }
 
 fn clip_text(text: &str, max_lines: usize) -> String {
@@ -1291,7 +1147,6 @@ fn copy_last_assistant(runtime: &Runtime, session_id: &SessionId) -> String {
             .spawn()
         {
             if let Some(mut stdin) = child.stdin.take() {
-                use std::io::Write;
                 let _ = stdin.write_all(text.as_bytes());
             }
             let _ = child.wait();
@@ -1302,77 +1157,4 @@ fn copy_last_assistant(runtime: &Runtime, session_id: &SessionId) -> String {
         "no clipboard tool; last reply is {} chars",
         text.chars().count()
     )
-}
-
-fn render_transcript(
-    projection: &blora_session::SessionProjection,
-    scroll: usize,
-    search: Option<&str>,
-    hide_tools: bool,
-) -> Vec<Line<'static>> {
-    let needle = search.map(str::to_ascii_lowercase);
-    let filtered: Vec<_> = projection
-        .transcript
-        .iter()
-        .filter(|item| {
-            if hide_tools {
-                !matches!(item, TranscriptItem::Tool { .. })
-            } else {
-                true
-            }
-        })
-        .filter(|item| {
-            let Some(needle) = needle.as_deref() else {
-                return true;
-            };
-            match item {
-                TranscriptItem::User { text, .. } | TranscriptItem::Assistant { text, .. } => {
-                    text.to_ascii_lowercase().contains(needle)
-                }
-                TranscriptItem::Tool { name, .. } => name.to_ascii_lowercase().contains(needle),
-                TranscriptItem::System { summary, .. } => {
-                    summary.to_ascii_lowercase().contains(needle)
-                }
-            }
-        })
-        .collect();
-    let total = filtered.len();
-    let skip = scroll.min(total.saturating_sub(1));
-    filtered
-        .into_iter()
-        .rev()
-        .skip(skip)
-        .take(80)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .map(|item| match item {
-            TranscriptItem::User { text, .. } => Line::from(vec![
-                Span::styled(
-                    "you  ",
-                    Style::default()
-                        .fg(Color::Rgb(159, 89, 100))
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(text.clone()),
-            ]),
-            TranscriptItem::Assistant { text, .. } => Line::from(vec![
-                Span::styled(
-                    "blora  ",
-                    Style::default()
-                        .fg(Color::Rgb(91, 117, 107))
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(text.clone()),
-            ]),
-            TranscriptItem::Tool { name, status, .. } => Line::from(Span::styled(
-                format!("tool {name} ({status})"),
-                Style::default().fg(Color::DarkGray),
-            )),
-            TranscriptItem::System { summary, .. } => Line::from(Span::styled(
-                summary.clone(),
-                Style::default().fg(Color::DarkGray),
-            )),
-        })
-        .collect()
 }

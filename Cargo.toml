@@ -59,6 +59,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ureq = { version = "2", features = ["json"] }
 uuid = { version = "1", features = ["v7", "serde"] }
+unicode-width = "0.2"
 walkdir = "2"
 
 [workspace.lints.rust]
