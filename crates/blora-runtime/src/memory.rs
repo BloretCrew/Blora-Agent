@@ -8,6 +8,26 @@ use chrono::Utc;
 use crate::Runtime;
 
 impl Runtime {
+    pub fn list_memories(&self, workspace: &str) -> Result<Vec<blora_storage::MemoryRecord>> {
+        self.store.list_memories(workspace)
+    }
+
+    pub fn remember(&self, workspace: &str, key: &str, value: &str) -> Result<()> {
+        self.store.upsert_memory(workspace, key, value, Utc::now())
+    }
+
+    pub fn recall(
+        &self,
+        workspace: &str,
+        key: &str,
+    ) -> Result<Option<blora_storage::MemoryRecord>> {
+        self.store.get_memory(workspace, key)
+    }
+
+    pub fn forget(&self, workspace: &str, key: &str) -> Result<bool> {
+        self.store.delete_memory(workspace, key)
+    }
+
     /// Extract durable memories from a session and write `.blora/memory.md`.
     pub fn distill_memories(&self, session_id: &SessionId) -> Result<u32> {
         let projection = self.show_session(session_id)?;

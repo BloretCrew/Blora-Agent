@@ -12,6 +12,7 @@ blora-runtime.workspace = true
 blora-session.workspace = true
 blora-storage.workspace = true
 blora-types.workspace = true
+chrono.workspace = true
 crossterm.workspace = true
 ratatui.workspace = true
 

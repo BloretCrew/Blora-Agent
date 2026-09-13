@@ -335,6 +335,7 @@ dependencies = [
  "blora-session",
  "blora-storage",
  "blora-types",
+ "chrono",
  "crossterm",
  "ratatui",
 ]

@@ -3,6 +3,8 @@
 
 //! Terminal UI. Renders session projections, never provider payloads.
 
+mod slash;
+
 use std::io::{self, stdout};
 use std::path::Path;
 use std::thread;
@@ -10,8 +12,8 @@ use std::time::Duration;
 
 use blora_runtime::{CancelToken, RunOptions, Runtime};
 use blora_session::TranscriptItem;
-use blora_storage::CreateSession;
-use blora_types::{Mode, Result, SessionId};
+use blora_storage::{CreateSession, CreateTask};
+use blora_types::{Mode, Result, SessionId, TaskId};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -22,7 +24,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 
 pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut sessions = runtime.list_sessions()?;
@@ -44,11 +46,17 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut terminal = Terminal::new(backend).map_err(blora_types::BloraError::exec)?;
     let mut input = String::new();
     let mut status =
-        "Enter send  /help  [ ] session  Ctrl+N new  y/n approve  Ctrl+C quit".to_owned();
+        "Enter send  / commands  Tab complete  Ctrl+P menu  [ ] session  Ctrl+N new  y/n  Ctrl+C quit"
+            .to_owned();
     let mut auto_approve = false;
     let mut scroll = 0usize;
     let mut search: Option<String> = None;
     let mut hide_tools = false;
+    let mut slash_selected = 0usize;
+    let mut last_slash_token = String::new();
+    let mut model_override = String::new();
+    let mut provider_override = String::new();
+    let mut notice: Option<String> = None;
     let mut cancel = CancelToken::new();
     let result = thread::scope(|scope| -> Result<()> {
         let mut job: Option<thread::ScopedJoinHandle<'_, Result<blora_types::RunId>>> = None;
@@ -62,16 +70,49 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                 .as_ref()
                 .and_then(|id| runtime.pending_approvals(id).ok())
                 .unwrap_or_default();
+            let slash_hits = slash::matches(&input);
+            if slash::command_token(&input).unwrap_or("") != last_slash_token {
+                last_slash_token = slash::command_token(&input).unwrap_or("").to_owned();
+                slash_selected = 0;
+            }
+            if !slash_hits.is_empty() {
+                slash_selected = slash_selected.min(slash_hits.len() - 1);
+            }
             terminal
                 .draw(|frame| {
+                    let show_slash = slash::is_open(&input);
+                    let show_notice = !show_slash && notice.is_some();
+                    let extra_h = if show_slash {
+                        u16::try_from(slash_hits.len().clamp(1, slash::MAX_VISIBLE) + 2)
+                            .unwrap_or(4)
+                    } else if show_notice {
+                        let lines = notice.as_deref().map(count_lines).unwrap_or(1);
+                        u16::try_from(lines.clamp(1, 14) + 2).unwrap_or(4)
+                    } else {
+                        0
+                    };
                     let chunks = Layout::default()
                         .direction(Direction::Vertical)
-                        .constraints([
-                            Constraint::Length(3),
-                            Constraint::Min(4),
-                            Constraint::Length(3),
-                        ])
+                        .constraints(if show_slash || show_notice {
+                            vec![
+                                Constraint::Length(3),
+                                Constraint::Min(4),
+                                Constraint::Length(extra_h),
+                                Constraint::Length(3),
+                            ]
+                        } else {
+                            vec![
+                                Constraint::Length(3),
+                                Constraint::Min(4),
+                                Constraint::Length(3),
+                            ]
+                        })
                         .split(frame.area());
+                    let prompt_chunk = if show_slash || show_notice {
+                        chunks[3]
+                    } else {
+                        chunks[2]
+                    };
                     let title = projection
                         .as_ref()
                         .and_then(|p| p.session.as_ref())
@@ -125,14 +166,100 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             .block(Block::default().title("session").borders(Borders::ALL)),
                         chunks[1],
                     );
+                    if show_slash {
+                        let start =
+                            slash_selected.saturating_sub(slash::MAX_VISIBLE.saturating_sub(1));
+                        let end = slash_hits.len().min(start + slash::MAX_VISIBLE);
+                        let visible = if slash_hits.is_empty() {
+                            &[][..]
+                        } else {
+                            &slash_hits[start..end]
+                        };
+                        let items: Vec<ListItem> = if slash_hits.is_empty() {
+                            vec![ListItem::new(Span::styled(
+                                "no matching command",
+                                Style::default().fg(Color::DarkGray),
+                            ))]
+                        } else {
+                            visible
+                                .iter()
+                                .map(|cmd| {
+                                    let hint = if cmd.hint.is_empty() {
+                                        String::new()
+                                    } else {
+                                        format!(" {}", cmd.hint)
+                                    };
+                                    let alias = if cmd.aliases.is_empty() {
+                                        String::new()
+                                    } else {
+                                        format!("  {}", cmd.aliases.join(", "))
+                                    };
+                                    ListItem::new(Line::from(vec![
+                                        Span::styled(
+                                            format!("/{}{hint}", cmd.name),
+                                            Style::default()
+                                                .fg(Color::Rgb(91, 117, 107))
+                                                .add_modifier(Modifier::BOLD),
+                                        ),
+                                        Span::styled(
+                                            alias,
+                                            Style::default().fg(Color::Rgb(140, 120, 126)),
+                                        ),
+                                        Span::raw("  "),
+                                        Span::styled(
+                                            cmd.about,
+                                            Style::default().fg(Color::DarkGray),
+                                        ),
+                                    ]))
+                                })
+                                .collect()
+                        };
+                        let mut state = ListState::default();
+                        if !slash_hits.is_empty() {
+                            state.select(Some(slash_selected.saturating_sub(start)));
+                        }
+                        frame.render_stateful_widget(
+                            List::new(items)
+                                .highlight_style(
+                                    Style::default()
+                                        .bg(Color::Rgb(42, 31, 36))
+                                        .fg(Color::Rgb(250, 247, 248))
+                                        .add_modifier(Modifier::BOLD),
+                                )
+                                .block(
+                                    Block::default()
+                                        .title("commands  Tab complete  ↑↓ select  Enter run")
+                                        .borders(Borders::ALL)
+                                        .border_style(
+                                            Style::default().fg(Color::Rgb(91, 117, 107)),
+                                        ),
+                                ),
+                            chunks[2],
+                            &mut state,
+                        );
+                    } else if show_notice {
+                        if let Some(body) = notice.as_deref() {
+                            frame.render_widget(
+                                Paragraph::new(body).wrap(Wrap { trim: false }).block(
+                                    Block::default()
+                                        .title("result  Esc dismiss")
+                                        .borders(Borders::ALL)
+                                        .border_style(
+                                            Style::default().fg(Color::Rgb(91, 117, 107)),
+                                        ),
+                                ),
+                                chunks[2],
+                            );
+                        }
+                    }
                     frame.render_widget(
                         Paragraph::new(input.as_str()).block(
                             Block::default()
-                                .title("prompt")
+                                .title(if show_slash { "prompt  /" } else { "prompt" })
                                 .borders(Borders::ALL)
                                 .border_style(Style::default().fg(Color::Rgb(159, 89, 100))),
                         ),
-                        chunks[2],
+                        prompt_chunk,
                     );
                 })
                 .map_err(blora_types::BloraError::exec)?;
@@ -160,7 +287,8 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                         if key.modifiers.contains(KeyModifiers::CONTROL)
                             && key.code == KeyCode::Char('n')
                         {
-                            match create_session(runtime, workspace) {
+                            match create_session(runtime, workspace, blora_types::Mode::Code, None)
+                            {
                                 Ok(id) => {
                                     refresh_sessions(runtime, &mut sessions, &mut index);
                                     if let Some(found) =
@@ -172,6 +300,14 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 }
                                 Err(err) => status = err.to_string(),
                             }
+                            continue;
+                        }
+                        if key.modifiers.contains(KeyModifiers::CONTROL)
+                            && key.code == KeyCode::Char('p')
+                            && input.is_empty()
+                        {
+                            input.push('/');
+                            slash_selected = 0;
                             continue;
                         }
                         match key.code {
@@ -197,12 +333,41 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             KeyCode::Char('n') if input.is_empty() && !pending.is_empty() => {
                                 let _ = runtime.resolve_approval(&pending[0].id, false);
                             }
+                            KeyCode::Up if slash::is_open(&input) => {
+                                slash_selected = slash_selected.saturating_sub(1);
+                            }
+                            KeyCode::Down if slash::is_open(&input) => {
+                                if !slash_hits.is_empty() {
+                                    slash_selected = (slash_selected + 1).min(slash_hits.len() - 1);
+                                }
+                            }
+                            KeyCode::Tab if slash::is_open(&input) => {
+                                if let Some(cmd) = slash_hits.get(slash_selected) {
+                                    input = slash::complete(cmd);
+                                    slash_selected = 0;
+                                }
+                            }
                             KeyCode::Enter => {
                                 if input.starts_with('/') {
-                                    let command = input.clone();
+                                    if slash::is_open(&input) {
+                                        if let Some(cmd) = slash_hits.get(slash_selected) {
+                                            if slash::needs_args(cmd) {
+                                                input = slash::complete(cmd);
+                                                slash_selected = 0;
+                                                continue;
+                                            }
+                                        }
+                                    }
+                                    let mut command = input.clone();
+                                    if slash::is_open(&command) {
+                                        if let Some(cmd) = slash_hits.get(slash_selected) {
+                                            command = format!("/{}", cmd.name);
+                                        }
+                                    }
                                     input.clear();
+                                    slash_selected = 0;
                                     if let Some(id) = session_id.as_ref() {
-                                        status = slash(
+                                        match slash(
                                             runtime,
                                             &command,
                                             id,
@@ -213,7 +378,22 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                             &cancel,
                                             &mut search,
                                             &mut hide_tools,
-                                        );
+                                            &mut model_override,
+                                            &mut provider_override,
+                                        ) {
+                                            SlashOutcome::Quit => {
+                                                cancel.cancel();
+                                                break Ok(());
+                                            }
+                                            SlashOutcome::Status(text) => {
+                                                notice = None;
+                                                status = text;
+                                            }
+                                            SlashOutcome::Panel { status: text, body } => {
+                                                status = text;
+                                                notice = Some(body);
+                                            }
+                                        }
                                     }
                                 } else if !input.trim().is_empty() {
                                     if job.is_some() {
@@ -225,12 +405,16 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     };
                                     let prompt = input.clone();
                                     input.clear();
+                                    notice = None;
                                     status = "running…".to_owned();
                                     let options = RunOptions {
                                         mock: std::env::var("BLORA_API_KEY").is_err()
-                                            && std::env::var("OPENAI_API_KEY").is_err(),
+                                            && std::env::var("OPENAI_API_KEY").is_err()
+                                            && std::env::var("GEMINI_API_KEY").is_err(),
                                         auto_approve,
                                         interactive: true,
+                                        model: model_override.clone(),
+                                        provider: provider_override.clone(),
                                         ..RunOptions::default()
                                     };
                                     let cancel_clone = cancel.clone();
@@ -243,6 +427,13 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 input.pop();
                             }
                             KeyCode::Char(ch) => input.push(ch),
+                            KeyCode::Esc if slash::is_open(&input) || input.starts_with('/') => {
+                                input.clear();
+                                slash_selected = 0;
+                            }
+                            KeyCode::Esc if notice.is_some() => {
+                                notice = None;
+                            }
                             KeyCode::Esc => {
                                 cancel.cancel();
                                 break Ok(());
@@ -276,13 +467,56 @@ fn refresh_sessions(
     }
 }
 
-fn create_session(runtime: &Runtime, workspace: &Path) -> Result<SessionId> {
+fn create_session(
+    runtime: &Runtime,
+    workspace: &Path,
+    mode: Mode,
+    title: Option<&str>,
+) -> Result<SessionId> {
     runtime.create_session(CreateSession {
-        title: Some("tui".to_owned()),
+        title: Some(title.unwrap_or("tui").to_owned()),
         workspace_path: workspace.display().to_string(),
-        mode: Mode::Code,
+        mode,
         parent_session_id: None,
     })
+}
+
+enum SlashOutcome {
+    Status(String),
+    Panel { status: String, body: String },
+    Quit,
+}
+
+fn count_lines(text: &str) -> usize {
+    text.lines().count().max(1)
+}
+
+fn clip_text(text: &str, max_lines: usize) -> String {
+    let mut lines: Vec<&str> = text.lines().collect();
+    if lines.len() > max_lines {
+        lines.truncate(max_lines);
+        lines.push("…");
+    }
+    lines.join("\n")
+}
+
+fn panel(status: impl Into<String>, body: impl Into<String>) -> SlashOutcome {
+    SlashOutcome::Panel {
+        status: status.into(),
+        body: clip_text(&body.into(), 40),
+    }
+}
+
+fn workspace_key(workspace: &Path) -> String {
+    workspace.display().to_string()
+}
+
+fn split_slash(input: &str) -> (&str, &str) {
+    let rest = input.trim().trim_start_matches('/');
+    match rest.split_once(char::is_whitespace) {
+        Some((name, args)) => (name, args.trim()),
+        None => (rest, ""),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -297,97 +531,733 @@ fn slash(
     cancel: &CancelToken,
     search: &mut Option<String>,
     hide_tools: &mut bool,
-) -> String {
-    let cmd = command.trim();
-    if let Some(query) = cmd.strip_prefix("/search") {
-        let query = query.trim();
-        if query.is_empty() {
-            *search = None;
-            return "search cleared".to_owned();
-        }
-        *search = Some(query.to_owned());
-        return format!("search {query}");
-    }
-    match cmd {
-        "/help" => {
-            "/new /compact /tasks /yes /model /cancel /fork /resume /export /permissions /mode /search /tools /copy"
-                .to_owned()
-        }
-        "/copy" => copy_last_assistant(runtime, session_id),
-        "/tools" => {
-            *hide_tools = !*hide_tools;
-            format!("hide-tools={hide_tools}")
-        }
-        "/new" => match create_session(runtime, workspace) {
-            Ok(id) => {
-                refresh_sessions(runtime, sessions, index);
-                if let Some(found) = sessions.iter().position(|item| item.id == id) {
-                    *index = found;
-                }
-                format!("created {id}")
+    model: &mut String,
+    provider: &mut String,
+) -> SlashOutcome {
+    let (raw, args) = split_slash(command);
+    let Some(spec) = slash::resolve(raw) else {
+        return SlashOutcome::Status(format!("unknown command /{raw}  try /help"));
+    };
+    match spec.name {
+        "help" => panel("help", slash::help_text(args)),
+        "keymap" => panel("keymap", slash::keymap_text()),
+        "new" => open_session(runtime, workspace, sessions, index, Mode::Code, "tui"),
+        "sessions" => panel("sessions", list_session_lines(sessions)),
+        "goto" => goto_session(sessions, index, args),
+        "status" => SlashOutcome::Status(session_status(runtime, session_id)),
+        "id" => SlashOutcome::Status(session_id.to_string()),
+        "context" => SlashOutcome::Status(
+            runtime
+                .show_session(session_id)
+                .map(|projection| {
+                    format!(
+                        "seq={}  in={}  out={}  ws={}",
+                        projection.last_sequence,
+                        projection.input_tokens,
+                        projection.output_tokens,
+                        projection
+                            .session
+                            .as_ref()
+                            .map(|session| session.workspace_path.as_str())
+                            .unwrap_or("-")
+                    )
+                })
+                .unwrap_or_else(|err| err.to_string()),
+        ),
+        "compact" => SlashOutcome::Status(
+            runtime
+                .compact(session_id)
+                .map(|_| {
+                    if args.is_empty() {
+                        "compacted".to_owned()
+                    } else {
+                        format!("compacted ({args})")
+                    }
+                })
+                .unwrap_or_else(|err| err.to_string()),
+        ),
+        "checkpoint" => SlashOutcome::Status(
+            runtime
+                .checkpoint(session_id, None, Some("manual"))
+                .map(|()| "checkpointed".to_owned())
+                .unwrap_or_else(|err| err.to_string()),
+        ),
+        "search" => {
+            if args.is_empty() {
+                *search = None;
+                SlashOutcome::Status("search cleared".to_owned())
+            } else {
+                *search = Some(args.to_owned());
+                SlashOutcome::Status(format!("search {args}"))
             }
-            Err(err) => err.to_string(),
-        },
-        "/compact" => runtime
-            .compact(session_id)
-            .map(|_| "compacted".to_owned())
-            .unwrap_or_else(|err| err.to_string()),
-        "/tasks" => runtime
-            .list_tasks(Some(session_id))
-            .map(|tasks| {
-                if tasks.is_empty() {
-                    "no tasks".to_owned()
-                } else {
-                    tasks
-                        .into_iter()
-                        .map(|task| format!("{} {}", task.status.as_str(), task.title))
-                        .collect::<Vec<_>>()
-                        .join(" · ")
+        }
+        "find" => {
+            if args.is_empty() {
+                SlashOutcome::Status("usage: /find <query>".to_owned())
+            } else {
+                match runtime.search_sessions(args) {
+                    Ok(rows) if rows.is_empty() => {
+                        SlashOutcome::Status(format!("no sessions matching {args}"))
+                    }
+                    Ok(rows) => panel("find", list_session_lines(&rows)),
+                    Err(err) => SlashOutcome::Status(err.to_string()),
                 }
-            })
-            .unwrap_or_else(|err| err.to_string()),
-        "/yes" => {
-            *auto_approve = !*auto_approve;
-            format!("auto-approve={}", *auto_approve)
+            }
         }
-        "/model" => {
-            std::env::var("BLORA_MODEL").unwrap_or_else(|_| "mock or gpt-4o-mini".to_owned())
+        "clear" => {
+            *search = None;
+            SlashOutcome::Status("search cleared".to_owned())
         }
-        "/cancel" => {
+        "tools" => {
+            *hide_tools = !*hide_tools;
+            SlashOutcome::Status(format!("hide-tools={hide_tools}"))
+        }
+        "copy" => SlashOutcome::Status(copy_last_assistant(runtime, session_id)),
+        "cancel" => {
             cancel.cancel();
-            "cancel requested".to_owned()
+            SlashOutcome::Status("cancel requested".to_owned())
         }
-        "/fork" => runtime
-            .fork_session(session_id)
-            .map(|id| {
-                refresh_sessions(runtime, sessions, index);
-                if let Some(found) = sessions.iter().position(|item| item.id == id) {
-                    *index = found;
-                }
-                format!("forked {id}")
+        "yes" => {
+            *auto_approve = match args {
+                "off" | "false" | "0" | "no" => false,
+                "on" | "true" | "1" => true,
+                _ => !*auto_approve,
+            };
+            SlashOutcome::Status(format!("auto-approve={auto_approve}"))
+        }
+        "no" => {
+            *auto_approve = false;
+            SlashOutcome::Status("auto-approve=false".to_owned())
+        }
+        "permissions" => SlashOutcome::Status(format!(
+            "auto-approve={auto_approve}  network={}  exec={}  pty={}  worktree={}",
+            env_flag("BLORA_NETWORK", "0"),
+            env_flag("BLORA_EXEC", "local"),
+            env_flag("BLORA_PTY", "0"),
+            env_flag("BLORA_WORKTREE", "0"),
+        )),
+        "approvals" => match runtime.pending_approvals(session_id) {
+            Ok(rows) if rows.is_empty() => SlashOutcome::Status("no pending approvals".to_owned()),
+            Ok(rows) => panel(
+                "approvals",
+                rows.into_iter()
+                    .map(|row| format!("{}  {}", row.id, row.summary))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            Err(err) => SlashOutcome::Status(err.to_string()),
+        },
+        "model" => {
+            if !args.is_empty() {
+                *model = args.to_owned();
+            }
+            SlashOutcome::Status(if model.is_empty() {
+                env_flag("BLORA_MODEL", "mock or gpt-4o-mini")
+            } else {
+                model.clone()
             })
-            .unwrap_or_else(|err| err.to_string()),
-        "/resume" => runtime
-            .resume_session(session_id)
-            .map(|()| "resumed".to_owned())
-            .unwrap_or_else(|err| err.to_string()),
-        "/export" => runtime
-            .export_session(session_id)
-            .map(|value| {
-                format!(
-                    "exported {} events",
-                    value.as_array().map(Vec::len).unwrap_or(0)
+        }
+        "provider" => {
+            if !args.is_empty() {
+                *provider = args.to_owned();
+            }
+            SlashOutcome::Status(if provider.is_empty() {
+                env_flag("BLORA_PROVIDER", "openai")
+            } else {
+                provider.clone()
+            })
+        }
+        "mode" => {
+            if args.is_empty() {
+                SlashOutcome::Status(
+                    runtime
+                        .show_session(session_id)
+                        .ok()
+                        .and_then(|projection| projection.session)
+                        .map(|session| session.mode.as_str().to_owned())
+                        .unwrap_or_else(|| "unknown".to_owned()),
                 )
+            } else {
+                match Mode::parse(args) {
+                    Ok(mode) => {
+                        open_session(runtime, workspace, sessions, index, mode, mode.as_str())
+                    }
+                    Err(err) => SlashOutcome::Status(err.to_string()),
+                }
+            }
+        }
+        "code" => open_session(runtime, workspace, sessions, index, Mode::Code, "code"),
+        "work" => open_session(runtime, workspace, sessions, index, Mode::Work, "work"),
+        "agent" => open_session(runtime, workspace, sessions, index, Mode::Agent, "agent"),
+        "plan" => open_session(runtime, workspace, sessions, index, Mode::Agent, "plan"),
+        "exec" => SlashOutcome::Status(env_flag("BLORA_EXEC", "local")),
+        "worktree" => SlashOutcome::Status(format!(
+            "BLORA_WORKTREE={}",
+            env_flag("BLORA_WORKTREE", "0")
+        )),
+        "tasks" => match runtime.list_tasks(Some(session_id)) {
+            Ok(tasks) if tasks.is_empty() => SlashOutcome::Status("no tasks".to_owned()),
+            Ok(tasks) => panel(
+                "tasks",
+                tasks
+                    .into_iter()
+                    .map(|task| format!("{}  {}  {}", task.id, task.status.as_str(), task.title))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            Err(err) => SlashOutcome::Status(err.to_string()),
+        },
+        "task" => queue_task(runtime, session_id, auto_approve, args, None, None),
+        "cron" => queue_cron(runtime, session_id, auto_approve, args),
+        "loop" => queue_loop(runtime, session_id, auto_approve, args),
+        "pause" => mutate_task(args, |id| runtime.pause_task(id).map(|()| "paused")),
+        "unpause" => mutate_task(args, |id| runtime.resume_task(id).map(|()| "resumed")),
+        "cancel-task" => mutate_task(args, |id| runtime.cancel_task(id).map(|()| "cancelled")),
+        "pump" => SlashOutcome::Status(
+            runtime
+                .pump()
+                .map(|ids| {
+                    if ids.is_empty() {
+                        "no due tasks".to_owned()
+                    } else {
+                        format!("pumped {}", ids.len())
+                    }
+                })
+                .unwrap_or_else(|err| err.to_string()),
+        ),
+        "fork" => match runtime.fork_session(session_id) {
+            Ok(id) => {
+                select_session(runtime, sessions, index, &id);
+                SlashOutcome::Status(format!("forked {id}"))
+            }
+            Err(err) => SlashOutcome::Status(err.to_string()),
+        },
+        "resume" => SlashOutcome::Status(
+            runtime
+                .resume_session(session_id)
+                .map(|()| "resumed".to_owned())
+                .unwrap_or_else(|err| err.to_string()),
+        ),
+        "archive" => SlashOutcome::Status(
+            runtime
+                .archive_session(session_id)
+                .map(|()| "archived".to_owned())
+                .unwrap_or_else(|err| err.to_string()),
+        ),
+        "export" => SlashOutcome::Status(
+            runtime
+                .export_session(session_id)
+                .map(|value| {
+                    format!(
+                        "exported {} events",
+                        value.as_array().map(Vec::len).unwrap_or(0)
+                    )
+                })
+                .unwrap_or_else(|err| err.to_string()),
+        ),
+        "timeline" => match runtime.events(session_id) {
+            Ok(events) if events.is_empty() => SlashOutcome::Status("no events".to_owned()),
+            Ok(events) => panel(
+                "timeline",
+                events
+                    .iter()
+                    .rev()
+                    .take(24)
+                    .map(|event| format!("{}  {}", event.sequence, event.event_type))
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            Err(err) => SlashOutcome::Status(err.to_string()),
+        },
+        "usage" => SlashOutcome::Status(
+            runtime
+                .usage(Some(session_id))
+                .map(|totals| {
+                    format!(
+                        "in={} out={} cached={}",
+                        totals.input_tokens, totals.output_tokens, totals.cached_tokens
+                    )
+                })
+                .unwrap_or_else(|err| err.to_string()),
+        ),
+        "memory" => memory_panel(runtime, workspace),
+        "remember" => remember_cmd(runtime, workspace, args),
+        "recall" => recall_cmd(runtime, workspace, args),
+        "forget" => {
+            if args.is_empty() {
+                SlashOutcome::Status("usage: /forget <key>".to_owned())
+            } else {
+                match runtime.forget(&workspace_key(workspace), args) {
+                    Ok(true) => SlashOutcome::Status(format!("forgot {args}")),
+                    Ok(false) => SlashOutcome::Status(format!("no memory {args}")),
+                    Err(err) => SlashOutcome::Status(err.to_string()),
+                }
+            }
+        }
+        "distill" => SlashOutcome::Status(
+            runtime
+                .distill_memories(session_id)
+                .map(|count| format!("stored {count} memories"))
+                .unwrap_or_else(|err| err.to_string()),
+        ),
+        "plugins" => {
+            let plugins = runtime.list_plugins(workspace);
+            if plugins.is_empty() {
+                SlashOutcome::Status("no plugins installed".to_owned())
+            } else {
+                panel(
+                    "plugins",
+                    plugins
+                        .into_iter()
+                        .map(|plugin| format!("{}  {}", plugin.name, plugin.description))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                )
+            }
+        }
+        "marketplace" => match blora_runtime::load_index() {
+            Ok(market) if market.plugins.is_empty() => {
+                SlashOutcome::Status("marketplace is empty".to_owned())
+            }
+            Ok(market) => panel(
+                "marketplace",
+                market
+                    .plugins
+                    .into_iter()
+                    .map(|plugin| format!("{}  {}", plugin.name, plugin.description))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            Err(err) => SlashOutcome::Status(err.to_string()),
+        },
+        "install" => {
+            if args.is_empty() {
+                SlashOutcome::Status("usage: /install <name>".to_owned())
+            } else {
+                SlashOutcome::Status(
+                    blora_runtime::install_plugin(workspace, args)
+                        .map(|path| format!("installed {}", path.display()))
+                        .unwrap_or_else(|err| err.to_string()),
+                )
+            }
+        }
+        "uninstall" => {
+            if args.is_empty() {
+                SlashOutcome::Status("usage: /uninstall <name>".to_owned())
+            } else {
+                SlashOutcome::Status(
+                    blora_runtime::uninstall_plugin(workspace, args)
+                        .map(|()| format!("removed {args}"))
+                        .unwrap_or_else(|err| err.to_string()),
+                )
+            }
+        }
+        "skills" => panel("skills", list_skills(workspace)),
+        "mcp" => SlashOutcome::Status(format!(
+            "BLORA_MCP_COMMAND={}",
+            env_flag("BLORA_MCP_COMMAND", "(unset)")
+        )),
+        "agents" => match runtime.list_subagents(session_id) {
+            Ok(rows) if rows.is_empty() => SlashOutcome::Status("no subagents".to_owned()),
+            Ok(rows) => panel(
+                "agents",
+                rows.into_iter()
+                    .map(|row| format!("{}  {}  {}", row.id, row.role, row.status))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            Err(err) => SlashOutcome::Status(err.to_string()),
+        },
+        "git" => match runtime.workspace_info(workspace) {
+            Ok(info) => panel("git", format!("{}\n{}", info.git_branch, info.git_status)),
+            Err(err) => SlashOutcome::Status(err.to_string()),
+        },
+        "diff" => match runtime.workspace_info(workspace) {
+            Ok(info) => panel("diff", info.git_diff),
+            Err(err) => SlashOutcome::Status(err.to_string()),
+        },
+        "log" => match runtime.workspace_info(workspace) {
+            Ok(info) => panel("log", info.git_log),
+            Err(err) => SlashOutcome::Status(err.to_string()),
+        },
+        "files" => match runtime.workspace_info(workspace) {
+            Ok(info) => panel("files", info.files),
+            Err(err) => SlashOutcome::Status(err.to_string()),
+        },
+        "read" => {
+            if args.is_empty() {
+                SlashOutcome::Status("usage: /read <path>".to_owned())
+            } else {
+                match runtime.read_workspace_file(workspace, args) {
+                    Ok(text) => panel(format!("read {args}"), text),
+                    Err(err) => SlashOutcome::Status(err.to_string()),
+                }
+            }
+        }
+        "artifacts" => match runtime.list_artifacts(Some(session_id)) {
+            Ok(rows) if rows.is_empty() => SlashOutcome::Status("no artifacts".to_owned()),
+            Ok(rows) => panel(
+                "artifacts",
+                rows.into_iter()
+                    .map(|row| format!("{}  {}", row.kind, row.id))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            Err(err) => SlashOutcome::Status(err.to_string()),
+        },
+        "pwd" => SlashOutcome::Status(workspace.display().to_string()),
+        "doctor" => panel(
+            "doctor",
+            format!(
+                "provider={} (override={})\nmodel={} (override={})\nexec={}\nworktree={}\nnetwork={}\npty={}\nmcp={}\nhooks={}\nauto-approve={auto_approve}",
+                env_flag("BLORA_PROVIDER", "openai"),
+                if provider.is_empty() {
+                    "-"
+                } else {
+                    provider.as_str()
+                },
+                env_flag("BLORA_MODEL", "-"),
+                if model.is_empty() {
+                    "-"
+                } else {
+                    model.as_str()
+                },
+                env_flag("BLORA_EXEC", "local"),
+                env_flag("BLORA_WORKTREE", "0"),
+                env_flag("BLORA_NETWORK", "0"),
+                env_flag("BLORA_PTY", "0"),
+                env_flag("BLORA_MCP_COMMAND", "(unset)"),
+                env_flag("BLORA_HOOKS_DIR", "(unset)"),
+            ),
+        ),
+        "hooks" => SlashOutcome::Status(env_flag("BLORA_HOOKS_DIR", "(unset)")),
+        "init" => SlashOutcome::Status(write_rules(workspace)),
+        "users" => match runtime.list_users() {
+            Ok(rows) if rows.is_empty() => SlashOutcome::Status("no users".to_owned()),
+            Ok(rows) => panel(
+                "users",
+                rows.into_iter()
+                    .map(|row| format!("{}  {}", row.id, row.name))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            Err(err) => SlashOutcome::Status(err.to_string()),
+        },
+        "web" => SlashOutcome::Status(
+            "open with: blora --web   or   blora web --bind 127.0.0.1:8787".to_owned(),
+        ),
+        "reload" => {
+            refresh_sessions(runtime, sessions, index);
+            SlashOutcome::Status(format!("{} sessions", sessions.len()))
+        }
+        "next" => {
+            if *index + 1 < sessions.len() {
+                *index += 1;
+            }
+            SlashOutcome::Status(
+                sessions
+                    .get(*index)
+                    .map(|session| session.id.to_string())
+                    .unwrap_or_else(|| "no session".to_owned()),
+            )
+        }
+        "prev" => {
+            *index = index.saturating_sub(1);
+            SlashOutcome::Status(
+                sessions
+                    .get(*index)
+                    .map(|session| session.id.to_string())
+                    .unwrap_or_else(|| "no session".to_owned()),
+            )
+        }
+        "quit" => SlashOutcome::Quit,
+        other => SlashOutcome::Status(format!("unhandled /{other}")),
+    }
+}
+
+fn env_flag(name: &str, fallback: &str) -> String {
+    std::env::var(name).unwrap_or_else(|_| fallback.to_owned())
+}
+
+fn open_session(
+    runtime: &Runtime,
+    workspace: &Path,
+    sessions: &mut Vec<blora_storage::SessionSummary>,
+    index: &mut usize,
+    mode: Mode,
+    title: &str,
+) -> SlashOutcome {
+    match create_session(runtime, workspace, mode, Some(title)) {
+        Ok(id) => {
+            select_session(runtime, sessions, index, &id);
+            SlashOutcome::Status(format!("created {id} ({})", mode.as_str()))
+        }
+        Err(err) => SlashOutcome::Status(err.to_string()),
+    }
+}
+
+fn select_session(
+    runtime: &Runtime,
+    sessions: &mut Vec<blora_storage::SessionSummary>,
+    index: &mut usize,
+    id: &SessionId,
+) {
+    refresh_sessions(runtime, sessions, index);
+    if let Some(found) = sessions.iter().position(|item| item.id == *id) {
+        *index = found;
+    }
+}
+
+fn list_session_lines(sessions: &[blora_storage::SessionSummary]) -> String {
+    if sessions.is_empty() {
+        return "no sessions".to_owned();
+    }
+    sessions
+        .iter()
+        .map(|session| {
+            format!(
+                "{}  {}  {}",
+                session.id,
+                session.mode.as_str(),
+                session.title.as_deref().unwrap_or("-")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn session_status(runtime: &Runtime, session_id: &SessionId) -> String {
+    runtime
+        .show_session(session_id)
+        .ok()
+        .and_then(|projection| projection.session)
+        .map(|session| {
+            format!(
+                "{}  {}  {}",
+                session.id,
+                session.mode.as_str(),
+                session.status.as_str()
+            )
+        })
+        .unwrap_or_else(|| session_id.to_string())
+}
+
+fn goto_session(
+    sessions: &[blora_storage::SessionSummary],
+    index: &mut usize,
+    query: &str,
+) -> SlashOutcome {
+    if query.is_empty() {
+        return SlashOutcome::Status("usage: /goto <id|title>".to_owned());
+    }
+    let needle = query.to_ascii_lowercase();
+    match sessions.iter().position(|session| {
+        session.id.as_str().to_ascii_lowercase().contains(&needle)
+            || session
+                .title
+                .as_deref()
+                .unwrap_or("")
+                .to_ascii_lowercase()
+                .contains(&needle)
+    }) {
+        Some(found) => {
+            *index = found;
+            SlashOutcome::Status(sessions[found].id.to_string())
+        }
+        None => SlashOutcome::Status(format!("no session matching {query}")),
+    }
+}
+
+fn queue_task(
+    runtime: &Runtime,
+    session_id: &SessionId,
+    auto_approve: &bool,
+    prompt: &str,
+    delay_until: Option<chrono::DateTime<chrono::Utc>>,
+    cron: Option<String>,
+) -> SlashOutcome {
+    if prompt.is_empty() {
+        return SlashOutcome::Status("usage: /task <prompt>".to_owned());
+    }
+    SlashOutcome::Status(
+        runtime
+            .create_task(CreateTask {
+                session_id: session_id.clone(),
+                title: prompt.chars().take(40).collect(),
+                prompt: prompt.to_owned(),
+                delay_until,
+                max_attempts: 3,
+                auto_approve: *auto_approve,
+                mock: std::env::var("BLORA_API_KEY").is_err(),
+                cron,
             })
+            .map(|id| format!("queued {id}"))
             .unwrap_or_else(|err| err.to_string()),
-        "/permissions" => format!("auto-approve={auto_approve}"),
-        "/mode" => runtime
-            .show_session(session_id)
-            .ok()
-            .and_then(|projection| projection.session)
-            .map(|session| session.mode.as_str().to_owned())
-            .unwrap_or_else(|| "unknown".to_owned()),
-        _ => format!("unknown command {cmd}"),
+    )
+}
+
+fn queue_cron(
+    runtime: &Runtime,
+    session_id: &SessionId,
+    auto_approve: &bool,
+    args: &str,
+) -> SlashOutcome {
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    if parts.len() < 6 {
+        return SlashOutcome::Status("usage: /cron <m h dom mon dow> <prompt>".to_owned());
+    }
+    let expr = parts[..5].join(" ");
+    let prompt = parts[5..].join(" ");
+    match blora_runtime::next_cron(&expr, chrono::Utc::now()) {
+        Ok(next) => queue_task(
+            runtime,
+            session_id,
+            auto_approve,
+            &prompt,
+            Some(next),
+            Some(expr),
+        ),
+        Err(err) => SlashOutcome::Status(err.to_string()),
+    }
+}
+
+fn queue_loop(
+    runtime: &Runtime,
+    session_id: &SessionId,
+    auto_approve: &bool,
+    args: &str,
+) -> SlashOutcome {
+    let Some((spec, prompt)) = args.split_once(char::is_whitespace) else {
+        return SlashOutcome::Status("usage: /loop <duration> <prompt>".to_owned());
+    };
+    match parse_delay(spec) {
+        Some(delay) => queue_task(
+            runtime,
+            session_id,
+            auto_approve,
+            prompt.trim(),
+            Some(chrono::Utc::now() + delay),
+            None,
+        ),
+        None => SlashOutcome::Status("duration must look like 30s, 5m, 1h, or 2d".to_owned()),
+    }
+}
+
+fn parse_delay(spec: &str) -> Option<chrono::TimeDelta> {
+    let spec = spec.trim();
+    let split = spec.len().checked_sub(1)?;
+    let (digits, unit) = spec.split_at(split);
+    let n: i64 = digits.parse().ok()?;
+    if n <= 0 {
+        return None;
+    }
+    match unit {
+        "s" => Some(chrono::TimeDelta::seconds(n)),
+        "m" => Some(chrono::TimeDelta::minutes(n)),
+        "h" => Some(chrono::TimeDelta::hours(n)),
+        "d" => Some(chrono::TimeDelta::days(n)),
+        _ => None,
+    }
+}
+
+fn mutate_task(args: &str, op: impl FnOnce(&TaskId) -> Result<&'static str>) -> SlashOutcome {
+    if args.is_empty() {
+        return SlashOutcome::Status("usage: /pause|/unpause|/cancel-task <task-id>".to_owned());
+    }
+    match TaskId::parse(args) {
+        Ok(id) => match op(&id) {
+            Ok(verb) => SlashOutcome::Status(format!("{verb} {id}")),
+            Err(err) => SlashOutcome::Status(err.to_string()),
+        },
+        Err(err) => SlashOutcome::Status(err.to_string()),
+    }
+}
+
+fn memory_panel(runtime: &Runtime, workspace: &Path) -> SlashOutcome {
+    match runtime.list_memories(&workspace_key(workspace)) {
+        Ok(rows) if rows.is_empty() => SlashOutcome::Status("no memories".to_owned()),
+        Ok(rows) => panel(
+            "memory",
+            rows.into_iter()
+                .map(|row| format!("{}={}", row.key, row.value))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+        Err(err) => SlashOutcome::Status(err.to_string()),
+    }
+}
+
+fn remember_cmd(runtime: &Runtime, workspace: &Path, args: &str) -> SlashOutcome {
+    let Some((key, value)) = args.split_once(char::is_whitespace) else {
+        return SlashOutcome::Status("usage: /remember <key> <value>".to_owned());
+    };
+    let key = key.trim();
+    let value = value.trim();
+    if key.is_empty() || value.is_empty() {
+        return SlashOutcome::Status("usage: /remember <key> <value>".to_owned());
+    }
+    SlashOutcome::Status(
+        runtime
+            .remember(&workspace_key(workspace), key, value)
+            .map(|()| format!("remembered {key}"))
+            .unwrap_or_else(|err| err.to_string()),
+    )
+}
+
+fn recall_cmd(runtime: &Runtime, workspace: &Path, args: &str) -> SlashOutcome {
+    if args.is_empty() {
+        return memory_panel(runtime, workspace);
+    }
+    match runtime.recall(&workspace_key(workspace), args) {
+        Ok(Some(row)) => SlashOutcome::Status(format!("{}={}", row.key, row.value)),
+        Ok(None) => SlashOutcome::Status(format!("no memory {args}")),
+        Err(err) => SlashOutcome::Status(err.to_string()),
+    }
+}
+
+fn list_skills(workspace: &Path) -> String {
+    let dir = workspace.join(".blora/skills");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return "no skills in .blora/skills".to_owned();
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) == Some("md") {
+                path.file_stem()
+                    .map(|stem| stem.to_string_lossy().into_owned())
+            } else {
+                None
+            }
+        })
+        .collect();
+    names.sort();
+    if names.is_empty() {
+        "no skills in .blora/skills".to_owned()
+    } else {
+        names.join("\n")
+    }
+}
+
+fn write_rules(workspace: &Path) -> String {
+    let dir = workspace.join(".blora");
+    let path = dir.join("rules.md");
+    if path.exists() {
+        return format!("exists {}", path.display());
+    }
+    if std::fs::create_dir_all(&dir).is_err() {
+        return "could not create .blora".to_owned();
+    }
+    match std::fs::write(
+        &path,
+        "# Blora rules\n\nStay inside this workspace. Prefer tests before claiming a fix.\n",
+    ) {
+        Ok(()) => format!("wrote {}", path.display()),
+        Err(err) => err.to_string(),
     }
 }
 
