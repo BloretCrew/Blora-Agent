@@ -19,4 +19,4 @@ TUI 快捷键见 [`tui.md`](tui.md)。Provider 矩阵见 [`../architecture/provi
 
 `BLORA_HOME` 可指向临时目录做隔离测试。真实模型使用 `BLORA_API_KEY` / `BLORA_API_BASE` / `BLORA_MODEL` / `GEMINI_API_KEY`。
 
-首次启动 TUI 或 Web 时会通过 Bloret PassPort 登录：App ID 和 App Secret 使用内置应用配置，也可通过 `BLORA_PASSPORT_APP_ID`、`BLORA_PASSPORT_APP_SECRET` 覆盖；另可设置 `BLORA_PASSPORT_URL` 和 `BLORA_PUBLIC_URL`。TUI 和 Web 使用 OAuth 设备码登录：先显示 `user_code` 与 `verification_uri`，再打开或点击 Passport 页面，客户端按服务端间隔轮询授权结果。设备码和访问令牌不会展示或写入日志；登录成功后再保存用户信息。设备码接口遵循 `/oauth/device/code`、`/oauth/token` 和 `/oauth/userinfo`。
+首次启动 TUI 或 Web 时会通过 Bloret PassPort 登录：App ID 和 App Secret 使用内置应用配置，也可通过 `BLORA_PASSPORT_APP_ID`、`BLORA_PASSPORT_APP_SECRET` 覆盖；另可设置 `BLORA_PASSPORT_URL` 和 `BLORA_PUBLIC_URL`。TUI 和 Web 使用 OAuth 设备码登录：先显示 `user_code` 与 `verification_uri`，再打开或点击 Passport 页面，客户端按服务端间隔轮询授权结果。设备码和访问令牌不会展示或写入日志；登录成功后再保存用户信息。设备码接口遵循 `/oauth/device/code`、`/oauth/token` 和 `/oauth/userinfo`。TUI 支持 `/login` 重新登录和 `/logout` 退出；Web 侧提供对应的退出按钮。

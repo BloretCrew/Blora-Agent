@@ -20,6 +20,7 @@ const approvalEmpty = document.querySelector("#approval-empty");
 const pageAlert = document.querySelector("#page-alert");
 const passportLogin = document.querySelector("#passport-login");
 const passportUser = document.querySelector("#passport-user");
+const passportLogout = document.querySelector("#passport-logout");
 let passportDevice = null;
 
 async function refreshPassport() {
@@ -29,15 +30,25 @@ async function refreshPassport() {
     passportLogin.hidden = true;
     passportUser.hidden = false;
     passportUser.textContent = `已登录 · ${user.name || user.username}`;
+    if (passportLogout) passportLogout.hidden = false;
   } catch (_) {
     passportLogin.hidden = false;
     passportUser.hidden = true;
+    if (passportLogout) passportLogout.hidden = true;
     const payload = await fetch("/api/auth/device").then((response) => response.json());
     passportDevice = payload;
     passportLogin.href = payload.verification_uri;
     passportLogin.textContent = `设备码 ${payload.user_code} · 打开 PassPort`;
     pollPassportDevice();
   }
+}
+
+if (passportLogout) {
+  passportLogout.addEventListener("click", async () => {
+    await api("/api/auth/logout", { method: "POST", body: "{}" });
+    passportDevice = null;
+    await refreshPassport();
+  });
 }
 
 async function pollPassportDevice() {

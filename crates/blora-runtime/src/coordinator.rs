@@ -177,6 +177,10 @@ impl Runtime {
         self.store.user_by_passport_username(username)
     }
 
+    pub fn clear_passport_users(&self) -> Result<usize> {
+        self.store.clear_passport_users()
+    }
+
     pub fn list_users(&self) -> Result<Vec<blora_storage::UserRecord>> {
         self.store.list_users()
     }

@@ -320,6 +320,11 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                                 status = text;
                                                 notice = Some(body);
                                             }
+                                            SlashOutcome::Login { url, receiver } => {
+                                                status = url;
+                                                passport_receiver = Some(receiver);
+                                                passport_browser_opened = false;
+                                            }
                                         }
                                     }
                                 } else if !input.trim().is_empty() {
@@ -636,7 +641,14 @@ fn create_session(
 
 enum SlashOutcome {
     Status(String),
-    Panel { status: String, body: String },
+    Panel {
+        status: String,
+        body: String,
+    },
+    Login {
+        url: String,
+        receiver: std::sync::mpsc::Receiver<blora_auth::PassportUser>,
+    },
     Quit,
 }
 
@@ -659,6 +671,10 @@ fn apply_slash(
         SlashOutcome::Panel { status: text, body } => {
             *status = text;
             *notice = Some(body);
+            false
+        }
+        SlashOutcome::Login { .. } => {
+            *status = "PassPort 登录已启动".to_owned();
             false
         }
     }
@@ -713,6 +729,20 @@ fn slash(
     };
     match spec.name {
         "help" => panel("help", slash::help_text(args)),
+        "login" => match start_passport_login() {
+            Ok(Some((device, receiver))) => SlashOutcome::Login {
+                url: format!("{}\n设备码：{}", device.verification_uri, device.user_code),
+                receiver,
+            },
+            Ok(None) => SlashOutcome::Status("Passport 未配置".to_owned()),
+            Err(err) => SlashOutcome::Status(err.to_string()),
+        },
+        "logout" => SlashOutcome::Status(
+            runtime
+                .clear_passport_users()
+                .map(|count| format!("已退出 Passport（清除 {count} 个本地用户）"))
+                .unwrap_or_else(|err| err.to_string()),
+        ),
         "keymap" => panel("keymap", slash::keymap_text()),
         "new" => open_session(runtime, workspace, sessions, index, Mode::Code, "tui"),
         "sessions" => panel("sessions", list_session_lines(sessions)),

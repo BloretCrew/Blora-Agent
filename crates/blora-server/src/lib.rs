@@ -166,6 +166,7 @@ fn app(state: AppState) -> Router {
         .route("/api/auth/device/poll", post(passport_device_poll))
         .route("/auth/callback", get(passport_callback))
         .route("/api/auth/me", get(auth_me))
+        .route("/api/auth/logout", post(auth_logout))
         .route("/api/sessions", get(list_sessions).post(create_session))
         .route("/api/sessions/{id}", get(show_session))
         .route("/api/sessions/{id}/run", post(run_session))
@@ -376,6 +377,19 @@ async fn passport_callback(
             ),
         ],
         StatusCode::FOUND,
+    )
+        .into_response()
+}
+
+async fn auth_logout() -> Response {
+    (
+        [(
+            header::SET_COOKIE,
+            HeaderValue::from_static(
+                "blora_passport_user=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0",
+            ),
+        )],
+        StatusCode::NO_CONTENT,
     )
         .into_response()
 }

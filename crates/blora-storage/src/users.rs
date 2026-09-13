@@ -86,6 +86,12 @@ impl SqliteStore {
             .ok_or_else(|| BloraError::Other("Passport user was not stored".to_owned()))
     }
 
+    pub fn clear_passport_users(&self) -> Result<usize> {
+        let conn = self.lock();
+        conn.execute("DELETE FROM users WHERE passport_username IS NOT NULL", [])
+            .map_err(BloraError::storage)
+    }
+
     pub fn user_by_passport_username(&self, username: &str) -> Result<Option<UserRecord>> {
         let conn = self.lock();
         let row = conn.query_row(

@@ -31,6 +31,8 @@ const fn cmd(
 /// Display order is the autocomplete order for a bare `/`.
 pub const COMMANDS: &[SlashCommand] = &[
     cmd("help", &["?"], "[query]", "List slash commands", "system"),
+    cmd("login", &[], "", "Sign in with Bloret PassPort", "system"),
+    cmd("logout", &[], "", "Sign out of Bloret PassPort", "system"),
     cmd(
         "keymap",
         &["keys", "shortcuts"],
