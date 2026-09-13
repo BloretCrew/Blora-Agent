@@ -30,11 +30,10 @@ use ratatui::backend::CrosstermBackend;
 pub fn ensure_passport_login(
     runtime: &Runtime,
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
-    if std::env::var_os("BLORA_PASSPORT_APP_SECRET").is_none()
-        || runtime
-            .list_users()?
-            .iter()
-            .any(|user| user.passport_username.is_some())
+    if runtime
+        .list_users()?
+        .iter()
+        .any(|user| user.passport_username.is_some())
     {
         return Ok(());
     }

@@ -3,8 +3,8 @@
 
 //! Small, server-side Bloret PassPort OAuth client.
 //!
-//! The app secret is intentionally supplied by the caller at runtime and is never
-//! represented in configuration files or browser-facing values.
+//! The default app credential is only used for the server-side verification request;
+//! it is never placed in authorization URLs or browser-facing values.
 
 use std::time::Duration;
 
@@ -13,6 +13,7 @@ use serde_json::Value;
 
 pub const DEFAULT_PASSPORT_URL: &str = "https://passport.bloret.net";
 pub const DEFAULT_PASSPORT_APP_ID: &str = "bp_98a98eeb52be6618";
+pub const DEFAULT_PASSPORT_APP_SECRET: &str = "bs_00c2e065fbcc17f844499c2e9814ea3368c999477c179884";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PassportConfig {
@@ -26,7 +27,7 @@ impl PassportConfig {
         let app_id = std::env::var("BLORA_PASSPORT_APP_ID")
             .unwrap_or_else(|_| DEFAULT_PASSPORT_APP_ID.to_owned());
         let app_secret = std::env::var("BLORA_PASSPORT_APP_SECRET")
-            .map_err(|_| AuthError::Config("BLORA_PASSPORT_APP_SECRET is not set".to_owned()))?;
+            .unwrap_or_else(|_| DEFAULT_PASSPORT_APP_SECRET.to_owned());
         let base_url =
             std::env::var("BLORA_PASSPORT_URL").unwrap_or_else(|_| DEFAULT_PASSPORT_URL.to_owned());
         Self::new(app_id, app_secret, base_url)
@@ -186,6 +187,13 @@ mod tests {
             ..PassportUser::default()
         };
         assert_eq!(user.display_name(), "alice");
+    }
+
+    #[test]
+    fn defaults_include_the_registered_app() {
+        let config = PassportConfig::from_env().unwrap();
+        assert_eq!(config.app_id, DEFAULT_PASSPORT_APP_ID);
+        assert_eq!(config.app_secret, DEFAULT_PASSPORT_APP_SECRET);
     }
 
     #[test]
