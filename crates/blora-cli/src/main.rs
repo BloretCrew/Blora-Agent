@@ -151,6 +151,9 @@ enum SessionCommands {
     Resume {
         id: String,
     },
+    Search {
+        query: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -388,6 +391,16 @@ fn dispatch(
             SessionCommands::Resume { id } => {
                 runtime.resume_session(&SessionId::parse(&id)?)?;
                 println!("resumed {id}");
+            }
+            SessionCommands::Search { query } => {
+                for session in runtime.search_sessions(&query)? {
+                    println!(
+                        "{}  {}  {}",
+                        session.id,
+                        session.status.as_str(),
+                        session.title.as_deref().unwrap_or("-")
+                    );
+                }
             }
         },
         Commands::Run {

@@ -2,6 +2,7 @@ const state = {
   sessionId: null,
   view: "session",
   source: null,
+  query: "",
 };
 
 const sessionEmpty = document.querySelector("#session-empty");
@@ -111,6 +112,12 @@ function parseHash() {
   if (parts[0] === "approvals") {
     return { view: "approvals" };
   }
+  if (parts[0] === "timeline") {
+    return { view: "timeline" };
+  }
+  if (parts[0] === "artifacts") {
+    return { view: "artifacts" };
+  }
   if (parts[0] === "workspace") {
     return { view: "workspace" };
   }
@@ -122,7 +129,7 @@ function parseHash() {
 
 function setView(view) {
   state.view = view;
-  for (const id of ["session", "tasks", "approvals", "workspace", "settings"]) {
+  for (const id of ["session", "tasks", "approvals", "timeline", "artifacts", "workspace", "settings"]) {
     const el = document.querySelector(`#view-${id}`);
     if (el) {
       el.hidden = id !== view;
@@ -174,6 +181,8 @@ function renderSessions(sessions) {
     ["会话", "session", "#/session"],
     ["任务", "tasks", "#/tasks"],
     ["审批", "approvals", "#/approvals"],
+    ["时间线", "timeline", "#/timeline"],
+    ["产物", "artifacts", "#/artifacts"],
     ["工作区", "workspace", "#/workspace"],
     ["设置", "settings", "#/settings"],
   ];
@@ -205,7 +214,8 @@ function renderSessions(sessions) {
 }
 
 async function refreshSessions() {
-  const sessions = await api("/api/sessions");
+  const query = state.query ? `?q=${encodeURIComponent(state.query)}` : "";
+  const sessions = await api(`/api/sessions${query}`);
   renderSessions(sessions);
   if (!state.sessionId && sessions[0] && state.view === "session") {
     await selectSession(sessions[0].id);
@@ -248,6 +258,12 @@ async function applyRoute() {
   if (parsed.view === "approvals") {
     await refreshApprovalPage();
   }
+  if (parsed.view === "timeline") {
+    await refreshTimeline();
+  }
+  if (parsed.view === "artifacts") {
+    await refreshArtifacts();
+  }
   if (parsed.view === "workspace") {
     await refreshWorkspace();
   }
@@ -265,7 +281,14 @@ document.addEventListener("blora-change", (event) => {
   if (!value) {
     return;
   }
-  if (value === "tasks" || value === "approvals" || value === "workspace" || value === "settings") {
+  if (
+    value === "tasks" ||
+    value === "approvals" ||
+    value === "workspace" ||
+    value === "settings" ||
+    value === "timeline" ||
+    value === "artifacts"
+  ) {
     location.hash = `#/${value}`;
     return;
   }
@@ -487,12 +510,82 @@ async function refreshApprovalPage() {
   enhance();
 }
 
+async function refreshTimeline() {
+  const list = document.querySelector("#timeline-list");
+  const empty = document.querySelector("#timeline-empty");
+  list.replaceChildren();
+  if (!state.sessionId) {
+    listOrEmpty(list, empty, 0);
+    return;
+  }
+  const events = await api(`/api/sessions/${state.sessionId}/export`);
+  const rows = Array.isArray(events) ? events : [];
+  listOrEmpty(list, empty, rows.length);
+  for (const event of rows) {
+    const item = document.createElement("div");
+    item.className = "blora-list__item";
+    const meta = document.createElement("div");
+    meta.className = "blora-list__meta";
+    const name = document.createElement("div");
+    name.className = "blora-list__title";
+    name.textContent = event.type || "event";
+    const desc = document.createElement("div");
+    desc.className = "blora-list__desc";
+    desc.textContent = `${event.sequence || ""} · ${event.timestamp || ""}`;
+    meta.append(name, desc);
+    item.append(meta);
+    list.append(item);
+  }
+}
+
+async function refreshArtifacts() {
+  const list = document.querySelector("#artifact-list");
+  const empty = document.querySelector("#artifact-empty");
+  const query = state.sessionId ? `?session=${state.sessionId}` : "";
+  const payload = await api(`/api/artifacts${query}`);
+  const rows = payload.artifacts || [];
+  list.replaceChildren();
+  listOrEmpty(list, empty, rows.length);
+  for (const row of rows) {
+    const item = document.createElement("div");
+    item.className = "blora-list__item";
+    const meta = document.createElement("div");
+    meta.className = "blora-list__meta";
+    const name = document.createElement("div");
+    name.className = "blora-list__title";
+    name.textContent = `${row.kind} · ${row.id}`;
+    const desc = document.createElement("div");
+    desc.className = "blora-list__desc";
+    desc.textContent = row.content || row.path || "";
+    meta.append(name, desc);
+    item.append(meta);
+    list.append(item);
+  }
+}
+
 async function refreshWorkspace() {
   const info = await api("/api/workspace");
   document.querySelector("#workspace-path").textContent = info.path;
   document.querySelector("#workspace-git").textContent =
     [info.git_branch, info.git_status, info.git_log, info.git_diff].join("\n\n");
-  document.querySelector("#workspace-files").textContent = info.files;
+  const list = document.querySelector("#workspace-file-list");
+  list.replaceChildren();
+  for (const name of info.entries || []) {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className = "blora-button";
+    item.dataset.variant = "ghost";
+    item.dataset.size = "sm";
+    item.textContent = name;
+    if (!name.endsWith("/")) {
+      item.addEventListener("click", async () => {
+        const file = await api(`/api/workspace/file?path=${encodeURIComponent(name)}`);
+        document.querySelector("#workspace-file").textContent = file.contents || "";
+      });
+    }
+    list.append(item);
+  }
+  enhance();
 }
 
 async function refreshSettings() {
@@ -571,6 +664,14 @@ if (prefProvider) {
 }
 if (prefModel) {
   prefModel.addEventListener("change", () => store("blora-model", prefModel.value));
+}
+
+const searchBox = fieldInput("#session-search") || document.querySelector("#session-search");
+if (searchBox) {
+  searchBox.addEventListener("change", async () => {
+    state.query = (searchBox.value || "").trim();
+    await refreshSessions();
+  });
 }
 
 enhance();

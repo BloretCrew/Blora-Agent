@@ -20,6 +20,7 @@
 - Provider：`openai` / `responses` / `anthropic` / `mock`，逗号分隔回退
 - `blora session fork|export|archive`、MCP（`BLORA_MCP_COMMAND`）、`blora acp`、`BLORA_HOOKS_DIR`
 - 插件 JSON、显式记忆、sandbox/container 执行、`blora backup` / `usage`
+- 会话搜索、事件时间线、产物与工作区文件只读查看
 
 ## 快速开始
 

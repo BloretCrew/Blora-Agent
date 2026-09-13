@@ -4,6 +4,7 @@
 
 ```text
 GET    /api/sessions
+GET    /api/sessions?q=
 POST   /api/sessions
 GET    /api/sessions/:id
 POST   /api/sessions/:id/run
@@ -23,6 +24,8 @@ POST   /api/tasks/pump
 GET    /api/approvals
 POST   /api/approvals/:id/resolve
 GET    /api/workspace
+GET    /api/workspace/file?path=
+GET    /api/artifacts
 GET    /api/settings
 GET    /api/usage
 GET    /api/plugins

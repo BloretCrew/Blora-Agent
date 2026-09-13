@@ -8,5 +8,7 @@ mod sqlite;
 mod tasks;
 
 pub use approvals::ApprovalRecord;
-pub use sqlite::{CreateSession, MemoryRecord, SessionSummary, SqliteStore, UsageTotals};
+pub use sqlite::{
+    ArtifactRecord, CreateSession, MemoryRecord, SessionSummary, SqliteStore, UsageTotals,
+};
 pub use tasks::{AgentRecord, CreateTask, TaskRecord};

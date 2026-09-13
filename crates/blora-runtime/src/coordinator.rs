@@ -37,6 +37,7 @@ impl Default for MockRunOptions {
 pub struct WorkspaceInfo {
     pub path: String,
     pub files: String,
+    pub entries: Vec<String>,
     pub git_status: String,
     pub git_diff: String,
     pub git_log: String,
@@ -124,9 +125,16 @@ impl Runtime {
     pub fn workspace_info(&self, path: &std::path::Path) -> Result<WorkspaceInfo> {
         let policy = Policy::new(path, true)?;
         let backend = LocalBackend::new(policy);
+        let files = backend.list_dir(".").unwrap_or_default();
+        let entries = files
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(ToOwned::to_owned)
+            .collect();
         Ok(WorkspaceInfo {
             path: path.display().to_string(),
-            files: backend.list_dir(".").unwrap_or_default(),
+            files,
+            entries,
             git_status: backend.git_status().unwrap_or_else(|err| err.to_string()),
             git_diff: backend.git_diff().unwrap_or_else(|err| err.to_string()),
             git_log: backend.git_log().unwrap_or_else(|err| err.to_string()),
@@ -136,6 +144,50 @@ impl Runtime {
 
     pub fn list_sessions(&self) -> Result<Vec<SessionSummary>> {
         self.store.list_sessions()
+    }
+
+    pub fn search_sessions(&self, query: &str) -> Result<Vec<SessionSummary>> {
+        let needle = query.trim().to_ascii_lowercase();
+        if needle.is_empty() {
+            return self.list_sessions();
+        }
+        let mut out = Vec::new();
+        for summary in self.list_sessions()? {
+            let hay = format!("{} {}", summary.id, summary.title.as_deref().unwrap_or(""))
+                .to_ascii_lowercase();
+            let in_transcript = self
+                .show_session(&summary.id)?
+                .transcript
+                .iter()
+                .any(|item| match item {
+                    blora_session::TranscriptItem::User { text, .. }
+                    | blora_session::TranscriptItem::Assistant { text, .. } => {
+                        text.to_ascii_lowercase().contains(&needle)
+                    }
+                    blora_session::TranscriptItem::Tool { name, .. } => {
+                        name.to_ascii_lowercase().contains(&needle)
+                    }
+                    blora_session::TranscriptItem::System { summary, .. } => {
+                        summary.to_ascii_lowercase().contains(&needle)
+                    }
+                });
+            if hay.contains(&needle) || in_transcript {
+                out.push(summary);
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn list_artifacts(
+        &self,
+        session_id: Option<&SessionId>,
+    ) -> Result<Vec<blora_storage::ArtifactRecord>> {
+        self.store.list_artifacts(session_id)
+    }
+
+    pub fn read_workspace_file(&self, workspace: &std::path::Path, path: &str) -> Result<String> {
+        let policy = Policy::new(workspace, true)?;
+        LocalBackend::new(policy).read_file(path)
     }
 
     pub fn show_session(&self, session_id: &SessionId) -> Result<SessionProjection> {
@@ -1199,5 +1251,30 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(row.value, "v");
+    }
+
+    #[test]
+    fn searches_session_transcript() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let runtime = Runtime::new(store);
+        let session = runtime
+            .create_session(CreateSession {
+                title: Some("alpha".to_owned()),
+                workspace_path: "/tmp".to_owned(),
+                mode: Mode::Code,
+                parent_session_id: None,
+            })
+            .unwrap();
+        runtime
+            .run_mock(
+                &session,
+                "unique-needle-xyz",
+                &CancelToken::new(),
+                &MockRunOptions::default(),
+            )
+            .unwrap();
+        let hits = runtime.search_sessions("unique-needle-xyz").unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(runtime.search_sessions("no-such-text").unwrap().is_empty());
     }
 }

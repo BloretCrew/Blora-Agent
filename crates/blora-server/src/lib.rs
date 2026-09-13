@@ -134,7 +134,17 @@ pub async fn serve(
         workspace,
         cancels: Arc::new(Mutex::new(HashMap::new())),
     };
-    let app = Router::new()
+    let listener = TcpListener::bind(bind)
+        .await
+        .map_err(|err| err.to_string())?;
+    tracing::info!("listening on {bind}");
+    axum::serve(listener, app(state))
+        .await
+        .map_err(|err| err.to_string())
+}
+
+fn app(state: AppState) -> Router {
+    Router::new()
         .route("/", get(index))
         .route("/app.js", get(app_js))
         .route("/app.css", get(app_css))
@@ -153,6 +163,7 @@ pub async fn serve(
         .route("/api/sessions/{id}/cancel", post(cancel_session))
         .route("/api/usage", get(usage))
         .route("/api/plugins", get(plugins))
+        .route("/api/artifacts", get(list_artifacts))
         .route("/api/tasks", get(list_tasks).post(create_task))
         .route("/api/tasks/{id}/cancel", post(cancel_task))
         .route("/api/tasks/{id}/pause", post(pause_task))
@@ -161,16 +172,10 @@ pub async fn serve(
         .route("/api/approvals", get(list_approvals))
         .route("/api/approvals/{id}/resolve", post(resolve_approval))
         .route("/api/workspace", get(workspace_snapshot))
+        .route("/api/workspace/file", get(workspace_file))
         .route("/api/settings", get(settings))
         .layer(CorsLayer::permissive())
-        .with_state(state);
-    let listener = TcpListener::bind(bind)
-        .await
-        .map_err(|err| err.to_string())?;
-    tracing::info!("listening on {bind}");
-    axum::serve(listener, app)
-        .await
-        .map_err(|err| err.to_string())
+        .with_state(state)
 }
 
 async fn index() -> Html<&'static str> {
@@ -234,7 +239,9 @@ fn resolve_vendor(request: &str) -> Option<PathBuf> {
     }
     let root = vendor_root();
     let disk = match request {
-        "layout.css" | "layout.global.js" => root.join("addons/layout/dist").join(path.file_name()?),
+        "layout.css" | "layout.global.js" => {
+            root.join("addons/layout/dist").join(path.file_name()?)
+        }
         "theming.css" | "theming.global.js" => {
             root.join("addons/theming/dist").join(path.file_name()?)
         }
@@ -243,8 +250,20 @@ fn resolve_vendor(request: &str) -> Option<PathBuf> {
     disk.is_file().then_some(disk)
 }
 
-async fn list_sessions(State(state): State<AppState>) -> Result<Json<Vec<SessionJson>>, ApiError> {
-    let sessions = state.runtime.list_sessions().map_err(ApiError::from)?;
+#[derive(Deserialize)]
+struct SessionListQuery {
+    q: Option<String>,
+}
+
+async fn list_sessions(
+    State(state): State<AppState>,
+    Query(query): Query<SessionListQuery>,
+) -> Result<Json<Vec<SessionJson>>, ApiError> {
+    let sessions = if let Some(q) = query.q.filter(|value| !value.trim().is_empty()) {
+        state.runtime.search_sessions(&q).map_err(ApiError::from)?
+    } else {
+        state.runtime.list_sessions().map_err(ApiError::from)?
+    };
     let mut out = Vec::new();
     for session in sessions {
         out.push(to_json(&state, &session.id)?);
@@ -580,6 +599,53 @@ async fn workspace_snapshot(
         "git_diff": info.git_diff,
         "git_log": info.git_log,
         "git_branch": info.git_branch,
+        "entries": info.entries,
+    })))
+}
+
+#[derive(Deserialize)]
+struct FileQuery {
+    path: String,
+}
+
+async fn workspace_file(
+    State(state): State<AppState>,
+    Query(query): Query<FileQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let contents = state
+        .runtime
+        .read_workspace_file(&state.workspace, &query.path)
+        .map_err(ApiError::from)?;
+    Ok(Json(serde_json::json!({
+        "path": query.path,
+        "contents": contents,
+    })))
+}
+
+async fn list_artifacts(
+    State(state): State<AppState>,
+    Query(query): Query<TaskQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let session_id = query.session.as_deref().map(SessionId::parse).transpose()?;
+    let rows = state
+        .runtime
+        .list_artifacts(session_id.as_ref())
+        .map_err(ApiError::from)?;
+    Ok(Json(serde_json::json!({
+        "artifacts": rows.into_iter().map(|row| serde_json::json!({
+            "id": row.id.to_string(),
+            "session_id": row.session_id.to_string(),
+            "kind": row.kind,
+            "path": row.path,
+            "content": row.content.map(|text| {
+                if text.len() > 2000 {
+                    format!("{}…", &text[..2000])
+                } else {
+                    text
+                }
+            }),
+            "created_at": row.created_at.to_rfc3339(),
+        })).collect::<Vec<_>>(),
     })))
 }
 
@@ -780,12 +846,67 @@ mod tests {
         assert!(resolve_vendor("foundations/reset.css").is_some());
         assert!(resolve_vendor("foundations/base.css").is_some());
         assert!(resolve_vendor("foundations/layout.css").is_some());
-        assert!(resolve_vendor("layout.css")
-            .unwrap()
-            .to_string_lossy()
-            .contains("addons/layout"));
+        assert!(
+            resolve_vendor("layout.css")
+                .unwrap()
+                .to_string_lossy()
+                .contains("addons/layout")
+        );
         assert!(resolve_vendor("../secret.css").is_none());
         assert!(resolve_vendor("components/alert/alert.rs").is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn http_serves_css_and_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "hello").unwrap();
+        let store = blora_storage::SqliteStore::open(dir.path().join("state.sqlite")).unwrap();
+        let runtime = Arc::new(Runtime::new(store));
+        let state = AppState {
+            runtime,
+            workspace: dir.path().to_path_buf(),
+            cancels: Arc::new(Mutex::new(HashMap::new())),
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app(state)).await.ok();
+        });
+        let (css_status, session_id, contents) = tokio::task::spawn_blocking(move || {
+            let css_url = format!("http://{addr}/vendor/components/button/button.css");
+            let mut css_status = 0;
+            for _ in 0..40 {
+                match ureq::get(&css_url).call() {
+                    Ok(ok) => {
+                        css_status = ok.status();
+                        break;
+                    }
+                    Err(_) => std::thread::sleep(Duration::from_millis(25)),
+                }
+            }
+            let created: serde_json::Value = ureq::post(&format!("http://{addr}/api/sessions"))
+                .set("Content-Type", "application/json")
+                .send_string(r#"{"title":"it"}"#)
+                .unwrap()
+                .into_json()
+                .unwrap();
+            let file: serde_json::Value =
+                ureq::get(&format!("http://{addr}/api/workspace/file?path=README.md"))
+                    .call()
+                    .unwrap()
+                    .into_json()
+                    .unwrap();
+            (
+                css_status,
+                created["id"].as_str().unwrap_or_default().to_owned(),
+                file["contents"].as_str().unwrap_or_default().to_owned(),
+            )
+        })
+        .await
+        .unwrap();
+        assert_eq!(css_status, 200);
+        assert!(session_id.starts_with("ses_"));
+        assert_eq!(contents, "hello");
     }
 
     #[test]

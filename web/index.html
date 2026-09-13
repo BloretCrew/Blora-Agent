@@ -42,11 +42,16 @@
         <button type="button" class="blora-button" data-variant="primary" data-icon="plus" id="new-session">
           新建会话
         </button>
+        <blora-field label="搜索会话" name="search">
+          <input class="blora-input" id="session-search" placeholder="标题或消息" />
+        </blora-field>
         <blora-sidebar-nav id="session-nav" label="导航">
           <blora-sidebar-nav-group label="工作台">
             <blora-sidebar-nav-link label="会话" value="session" href="#/session"></blora-sidebar-nav-link>
             <blora-sidebar-nav-link label="任务" value="tasks" href="#/tasks"></blora-sidebar-nav-link>
             <blora-sidebar-nav-link label="审批" value="approvals" href="#/approvals"></blora-sidebar-nav-link>
+            <blora-sidebar-nav-link label="时间线" value="timeline" href="#/timeline"></blora-sidebar-nav-link>
+            <blora-sidebar-nav-link label="产物" value="artifacts" href="#/artifacts"></blora-sidebar-nav-link>
             <blora-sidebar-nav-link label="工作区" value="workspace" href="#/workspace"></blora-sidebar-nav-link>
             <blora-sidebar-nav-link label="设置" value="settings" href="#/settings"></blora-sidebar-nav-link>
           </blora-sidebar-nav-group>
@@ -124,12 +129,23 @@
             <div id="approval-page-list" class="blora-list"></div>
             <blora-empty id="approval-page-empty" title="没有待审批" description="写入和命令会在这里列出。"></blora-empty>
           </section>
+          <section id="view-timeline" hidden>
+            <div id="timeline-list" class="blora-list"></div>
+            <blora-empty id="timeline-empty" title="没有事件" description="打开会话后再查看回放时间线。"></blora-empty>
+          </section>
+          <section id="view-artifacts" hidden>
+            <div id="artifact-list" class="blora-list"></div>
+            <blora-empty id="artifact-empty" title="没有产物" description="压缩上下文后会出现摘要产物。"></blora-empty>
+          </section>
           <section id="view-workspace" hidden>
             <p class="ba-toolbar__path" id="workspace-path"></p>
             <h2 class="ba-section__title">Git</h2>
             <pre class="ba-pre" id="workspace-git"></pre>
             <h2 class="ba-section__title">文件</h2>
-            <pre class="ba-pre" id="workspace-files"></pre>
+            <div id="workspace-file-list" class="blora-list"></div>
+            <pre class="ba-pre" id="workspace-files" hidden></pre>
+            <h2 class="ba-section__title">文件内容</h2>
+            <pre class="ba-pre" id="workspace-file"></pre>
           </section>
           <section id="view-settings" hidden>
             <div class="ba-settings">

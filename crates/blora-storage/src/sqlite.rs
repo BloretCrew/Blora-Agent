@@ -9,8 +9,8 @@ use crate::{AgentRecord, CreateTask, TaskRecord};
 use blora_events::{EventEnvelope, KnownPayload, NewEvent, SessionCreated};
 use blora_session::{SessionProjection, rebuild};
 use blora_types::{
-    Actor, AgentId, BloraError, Clock, EventId, Mode, Result, RunId, SCHEMA_VERSION, SessionId,
-    SessionStatus, SystemClock, TaskId, TaskStatus, TurnId, Visibility,
+    Actor, AgentId, ArtifactId, BloraError, Clock, EventId, Mode, Result, RunId, SCHEMA_VERSION,
+    SessionId, SessionStatus, SystemClock, TaskId, TaskStatus, TurnId, Visibility,
 };
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -31,6 +31,16 @@ pub struct MemoryRecord {
     pub key: String,
     pub value: String,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ArtifactRecord {
+    pub id: ArtifactId,
+    pub session_id: SessionId,
+    pub kind: String,
+    pub path: Option<String>,
+    pub content: Option<String>,
+    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -61,6 +71,7 @@ impl SqliteStore {
         let path = path.as_ref();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(BloraError::storage)?;
+            restrict_home(parent);
         }
         let conn = Connection::open(path).map_err(BloraError::storage)?;
         Self::from_connection(conn)
@@ -667,6 +678,39 @@ impl SqliteStore {
         Ok(())
     }
 
+    pub fn list_artifacts(&self, session_id: Option<&SessionId>) -> Result<Vec<ArtifactRecord>> {
+        let conn = self.lock();
+        let mut out = Vec::new();
+        if let Some(session_id) = session_id {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, session_id, kind, path, content, created_at FROM artifacts
+                     WHERE session_id = ?1 ORDER BY created_at DESC",
+                )
+                .map_err(BloraError::storage)?;
+            let rows = stmt
+                .query_map(params![session_id.as_str()], artifact_row)
+                .map_err(BloraError::storage)?;
+            for row in rows {
+                out.push(row_to_artifact(row.map_err(BloraError::storage)?)?);
+            }
+        } else {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, session_id, kind, path, content, created_at FROM artifacts
+                     ORDER BY created_at DESC",
+                )
+                .map_err(BloraError::storage)?;
+            let rows = stmt
+                .query_map([], artifact_row)
+                .map_err(BloraError::storage)?;
+            for row in rows {
+                out.push(row_to_artifact(row.map_err(BloraError::storage)?)?);
+            }
+        }
+        Ok(out)
+    }
+
     fn list_agents_filtered(
         &self,
         agent_id: Option<&AgentId>,
@@ -992,6 +1036,51 @@ fn status_from_payload(payload: &KnownPayload) -> Option<&'static str> {
     }
 }
 
+fn restrict_home(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(metadata) = std::fs::metadata(path) {
+            let mut perms = metadata.permissions();
+            perms.set_mode(0o700);
+            let _ = std::fs::set_permissions(path, perms);
+        }
+    }
+    let _ = path;
+}
+
+type ArtifactRow = (
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    String,
+);
+
+fn artifact_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ArtifactRow> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+    ))
+}
+
+fn row_to_artifact(row: ArtifactRow) -> Result<ArtifactRecord> {
+    let (id, session_id, kind, path, content, created_at) = row;
+    Ok(ArtifactRecord {
+        id: ArtifactId::parse(&id)?,
+        session_id: SessionId::parse(&session_id)?,
+        kind,
+        path,
+        content,
+        created_at: parse_time(&created_at)?,
+    })
+}
+
 fn parse_time(value: &str) -> Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(value)
         .map(|dt| dt.with_timezone(&Utc))
@@ -1008,6 +1097,13 @@ mod tests {
     fn persist_reopen_and_rebuild() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.sqlite");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = SqliteStore::open(&path).unwrap();
+            let mode = std::fs::metadata(dir.path()).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700);
+        }
         let session_id = {
             let store = SqliteStore::open(&path).unwrap();
             let session_id = store

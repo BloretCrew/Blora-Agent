@@ -47,6 +47,8 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
         "Enter send  /help  [ ] session  Ctrl+N new  y/n approve  Ctrl+C quit".to_owned();
     let mut auto_approve = false;
     let mut scroll = 0usize;
+    let mut search: Option<String> = None;
+    let mut hide_tools = false;
     let mut cancel = CancelToken::new();
     let result = thread::scope(|scope| -> Result<()> {
         let mut job: Option<thread::ScopedJoinHandle<'_, Result<blora_types::RunId>>> = None;
@@ -84,8 +86,19 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             )
                         })
                         .unwrap_or_else(|| "Blora Agent".to_owned());
+                    let running_tasks = projection
+                        .as_ref()
+                        .map(|item| {
+                            item.tasks
+                                .iter()
+                                .filter(|task| task.status.as_str() == "running")
+                                .count()
+                        })
+                        .unwrap_or(0);
                     let banner = if let Some(first) = pending.first() {
                         format!("APPROVE {}  y/n  {}", first.id, first.summary)
+                    } else if running_tasks > 0 {
+                        format!("task running ({running_tasks})  {status}")
                     } else {
                         status.clone()
                     };
@@ -100,7 +113,9 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                     );
                     let lines = projection
                         .as_ref()
-                        .map(|projection| render_transcript(projection, scroll))
+                        .map(|projection| {
+                            render_transcript(projection, scroll, search.as_deref(), hide_tools)
+                        })
                         .unwrap_or_default();
                     frame.render_widget(
                         Paragraph::new(lines)
@@ -194,6 +209,8 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                             &mut index,
                                             workspace,
                                             &cancel,
+                                            &mut search,
+                                            &mut hide_tools,
                                         );
                                     }
                                 } else if !input.trim().is_empty() {
@@ -266,6 +283,7 @@ fn create_session(runtime: &Runtime, workspace: &Path) -> Result<SessionId> {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn slash(
     runtime: &Runtime,
     command: &str,
@@ -275,12 +293,27 @@ fn slash(
     index: &mut usize,
     workspace: &Path,
     cancel: &CancelToken,
+    search: &mut Option<String>,
+    hide_tools: &mut bool,
 ) -> String {
     let cmd = command.trim();
+    if let Some(query) = cmd.strip_prefix("/search") {
+        let query = query.trim();
+        if query.is_empty() {
+            *search = None;
+            return "search cleared".to_owned();
+        }
+        *search = Some(query.to_owned());
+        return format!("search {query}");
+    }
     match cmd {
         "/help" => {
-            "/new /compact /tasks /yes /model /cancel /fork /resume /export /permissions /mode"
+            "/new /compact /tasks /yes /model /cancel /fork /resume /export /permissions /mode /search /tools"
                 .to_owned()
+        }
+        "/tools" => {
+            *hide_tools = !*hide_tools;
+            format!("hide-tools={hide_tools}")
         }
         "/new" => match create_session(runtime, workspace) {
             Ok(id) => {
@@ -358,12 +391,39 @@ fn slash(
 fn render_transcript(
     projection: &blora_session::SessionProjection,
     scroll: usize,
+    search: Option<&str>,
+    hide_tools: bool,
 ) -> Vec<Line<'static>> {
-    let total = projection.transcript.len();
-    let skip = scroll.min(total.saturating_sub(1));
-    projection
+    let needle = search.map(str::to_ascii_lowercase);
+    let filtered: Vec<_> = projection
         .transcript
         .iter()
+        .filter(|item| {
+            if hide_tools {
+                !matches!(item, TranscriptItem::Tool { .. })
+            } else {
+                true
+            }
+        })
+        .filter(|item| {
+            let Some(needle) = needle.as_deref() else {
+                return true;
+            };
+            match item {
+                TranscriptItem::User { text, .. } | TranscriptItem::Assistant { text, .. } => {
+                    text.to_ascii_lowercase().contains(needle)
+                }
+                TranscriptItem::Tool { name, .. } => name.to_ascii_lowercase().contains(needle),
+                TranscriptItem::System { summary, .. } => {
+                    summary.to_ascii_lowercase().contains(needle)
+                }
+            }
+        })
+        .collect();
+    let total = filtered.len();
+    let skip = scroll.min(total.saturating_sub(1));
+    filtered
+        .into_iter()
         .rev()
         .skip(skip)
         .take(80)
