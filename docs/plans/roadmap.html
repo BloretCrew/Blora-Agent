@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Blora Agent · 实施路线图</title>
+<style>
+  :root{
+    --bg:#120f10; --panel:#1c1618; --panel-2:#231b1e; --line:#382e32;
+    --text:#f2eaec; --dim:#b9a6ab; --mute:#7c6b70;
+    --rose:#c97b86; --sage:#8aab9c; --amber:#d4a574; --rust:#c45c5c;
+    --serif:"Noto Serif SC","Songti SC","SimSun",serif;
+    --sans:"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+    --mono:ui-monospace,"SF Mono","JetBrains Mono",Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0; background:var(--bg); color:var(--text);
+    font:16px/1.75 var(--sans);
+    background-image:radial-gradient(1100px 500px at 15% -10%,rgba(201,123,134,.08),transparent 60%),
+                     radial-gradient(900px 480px at 95% 0%,rgba(138,171,156,.06),transparent 55%);
+  }
+  .wrap{max-width:1060px;margin:0 auto;padding:0 28px 96px}
+  a{color:var(--sage);text-decoration:none;border-bottom:1px solid rgba(138,171,156,.35)}
+  a:hover{border-bottom-color:var(--sage)}
+  code,.hash{font-family:var(--mono);font-size:.86em;background:var(--panel-2);border:1px solid var(--line);border-radius:5px;padding:.08em .42em;color:var(--dim)}
+  .hash{color:var(--amber);border-color:rgba(212,165,116,.3)}
+
+  /* ── header ─────────────────────────────── */
+  header{padding:72px 0 40px;border-bottom:1px solid var(--line)}
+  .kicker{color:var(--rose);letter-spacing:.42em;font-size:12px;font-weight:600}
+  h1{font-family:var(--serif);font-weight:700;font-size:clamp(34px,5.4vw,54px);line-height:1.18;margin:14px 0 10px}
+  h1 .accent{color:var(--rose)}
+  .lede{color:var(--dim);max-width:44em;font-size:17px}
+  .meta{display:flex;flex-wrap:wrap;gap:10px 26px;margin-top:26px;font-size:13.5px;color:var(--mute)}
+  .meta b{color:var(--dim);font-weight:600}
+
+  /* ── sections ───────────────────────────── */
+  section{padding:52px 0 8px}
+  h2{font-family:var(--serif);font-size:27px;margin:0 0 6px;display:flex;align-items:baseline;gap:14px}
+  h2 .no{font-family:var(--mono);font-size:14px;color:var(--sage);letter-spacing:.1em}
+  .sub{color:var(--mute);font-size:14.5px;margin:0 0 26px}
+
+  /* ── principles ─────────────────────────── */
+  .grid-2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media(max-width:760px){.grid-2{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px 20px}
+  .card h3{margin:0 0 8px;font-size:15.5px;color:var(--text)}
+  .card p,.card li{font-size:14px;color:var(--dim)}
+  .card ul{margin:6px 0 0;padding-left:1.15em}
+
+  /* ── tables ─────────────────────────────── */
+  table{width:100%;border-collapse:collapse;font-size:14px;margin-top:6px}
+  th{font-family:var(--mono);font-size:12px;letter-spacing:.12em;color:var(--mute);text-align:left;
+     padding:10px 14px;border-bottom:1px solid var(--line);white-space:nowrap}
+  td{padding:10px 14px;border-bottom:1px solid rgba(56,46,50,.55);vertical-align:top;color:var(--dim)}
+  tr:last-child td{border-bottom:none}
+  td:first-child{color:var(--text);white-space:nowrap}
+  .tbl{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:6px 8px;overflow-x:auto}
+
+  /* ── phases ─────────────────────────────── */
+  .phase{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--sage);
+         border-radius:12px;padding:22px 26px 20px;margin-bottom:18px}
+  .phase.human{border-left-color:var(--rose)}
+  .phase-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:12px}
+  .phase-head h3{font-family:var(--serif);font-size:20px;margin:0}
+  .phase-head .pn{font-family:var(--mono);font-size:12.5px;color:var(--mute)}
+  .badge{font-size:12px;padding:2px 10px;border-radius:999px;white-space:nowrap}
+  .badge.done{color:#0f1311;background:var(--sage);font-weight:600}
+  .badge.later{color:var(--mute);border:1px dashed var(--line)}
+  .phase-cols{display:grid;grid-template-columns:1fr 1fr;gap:4px 34px;margin-top:12px}
+  @media(max-width:760px){.phase-cols{grid-template-columns:1fr}}
+  .phase-cols h4{margin:10px 0 4px;font-size:13px;letter-spacing:.14em;color:var(--mute);font-weight:600}
+  .phase ul{margin:0;padding-left:1.15em;font-size:14px;color:var(--dim)}
+  .phase li{margin:3px 0}
+  .phase li::marker{color:var(--sage)}
+  .phase.human li::marker{color:var(--rose)}
+  .phase .commits{margin-top:14px;padding-top:12px;border-top:1px dashed var(--line);
+                  font-family:var(--mono);font-size:12.5px;color:var(--mute)}
+  .phase .commits .hash{margin-right:6px}
+
+  /* ── timeline ───────────────────────────── */
+  .tl{border-left:2px solid var(--line);margin-left:8px;padding-left:26px}
+  .tl-item{position:relative;padding-bottom:22px}
+  .tl-item::before{content:"";position:absolute;left:-32px;top:7px;width:10px;height:10px;
+                   border-radius:50%;background:var(--sage)}
+  .tl-item.human::before{background:var(--rose)}
+  .tl-date{font-family:var(--mono);font-size:12.5px;color:var(--mute);letter-spacing:.08em}
+  .tl-item h3{margin:2px 0 4px;font-size:16px}
+  .tl-item p{margin:0;font-size:14px;color:var(--dim)}
+
+  .note{background:rgba(212,165,116,.07);border:1px solid rgba(212,165,116,.35);border-radius:12px;
+        padding:14px 18px;font-size:14px;color:var(--dim);margin-top:16px}
+  .note b{color:var(--amber)}
+  footer{margin-top:70px;padding-top:22px;border-top:1px solid var(--line);
+         color:var(--mute);font-size:13px;display:flex;flex-wrap:wrap;gap:8px 24px}
+
+  @media print{
+    body{background:#fff;color:#1c1616}
+    .card,.phase,.tbl{background:#faf7f6;border-color:#ddd}
+    td,th{border-color:#ddd}
+    code,.hash{background:#f2eeec;border-color:#ddd;color:#4a3d40}
+    .badge.done{background:#2e5a4a;color:#fff}
+    .lede,.card p,.card li,td,.phase ul,.phase-cols li,.tl-item p{color:#444}
+    header,footer{border-color:#ddd}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <div class="kicker">BLORA AGENT · ROADMAP</div>
+  <h1>实施路线图<span class="accent">。</span></h1>
+  <p class="lede">从零实现的本地优先 Code / Work / Agent 工程代理：以规范事件为唯一事实来源，
+     TUI 与 Web 双入口，能力策略默认拒绝，Bloret PassPort 设备码登录。本文记录全部阶段、
+     范围、验收标准、对应提交，以及明确的边界与后续候选。</p>
+  <div class="meta">
+    <span><b>状态</b> 已完成</span>
+    <span><b>许可</b> GPL-3.0-or-later</span>
+    <span><b>语言</b> Rust 2024（rust-version 1.85）</span>
+    <span><b>周期</b> 2026-09-12 → 2026-09-13</span>
+    <span><b>提交</b> 26 个，领先 origin/main，未推送</span>
+  </div>
+</header>
+
+<section id="principles">
+  <h2><span class="no">01</span>设计约束</h2>
+  <p class="sub">这些约束贯穿所有阶段，任何阶段都不允许为进度破例。</p>
+  <div class="grid-2">
+    <div class="card"><h3>事件是唯一事实</h3>
+      <p>会话、审批、任务、记忆全部落在 SQLite 追加事件日志；<b>未知事件类型不得破坏回放</b>。</p></div>
+    <div class="card"><h3>类型层零 IO</h3>
+      <p><code>blora-types</code> 不出现 IO 与供应商类型；供应商与执行细节只存在于各自的 crate。</p></div>
+    <div class="card"><h3>克制运行时</h3>
+      <p>优先新增 crate，而不是把 <code>blora-runtime</code> 养成单体；每个 crate 单一职责。</p></div>
+    <div class="card"><h3>策略默认拒绝</h3>
+      <p>工具能力 allow / deny / ask 三态，fail-closed；网络默认关闭，机密路径与破坏性 git 操作走审批。</p></div>
+    <div class="card"><h3>Web 只用官方包</h3>
+      <p>界面组件仅来自已发布的 <code>@bloret-crew/blora-design</code>；不引入第二套视觉体系，不 innerHTML 用户内容。</p></div>
+    <div class="card"><h3>不 fork、不抄</h3>
+      <p>GPL-3.0-or-later 从零实现；其他 harness 仓库只作研究参照，代码与结构不进入产品树。</p></div>
+  </div>
+</section>
+
+<section id="crates">
+  <h2><span class="no">02</span>架构与 Crate 划分</h2>
+  <p class="sub">14 个 crate，依赖方向自上而下单向；入口只做装配。</p>
+  <div class="tbl"><table>
+    <tr><th>Crate</th><th>职责</th><th>关键内容</th></tr>
+    <tr><td>blora-types</td><td>核心类型</td><td>SessionId / TaskId / Mode / BloraError，无 IO、无供应商类型</td></tr>
+    <tr><td>blora-events</td><td>规范事件</td><td>事件类型与 envelope，追加式日志的载体</td></tr>
+    <tr><td>blora-storage</td><td>持久化</td><td>SQLite、schema 迁移 v1→v9、用户 / 任务 / 记忆 / 工件</td></tr>
+    <tr><td>blora-session</td><td>会话投影</td><td>SessionProjection、TranscriptItem、状态机</td></tr>
+    <tr><td>blora-context</td><td>上下文</td><td>稳定 / 上下文 / 易失三层，AGENTS.md 与 skills 加载</td></tr>
+    <tr><td>blora-model</td><td>供应商</td><td>factory + openai / responses / anthropic / gemini 适配</td></tr>
+    <tr><td>blora-exec</td><td>执行与隔离</td><td>isolation（Local/Sandbox/Container/Pty/Remote）、process、worktree</td></tr>
+    <tr><td>blora-policy</td><td>能力策略</td><td>POLICY_VERSION=1，Decision 三态，路径与网络规则</td></tr>
+    <tr><td>blora-tools</td><td>工具实现</td><td>工具 schema 与执行，mcp__* / plugin__* 动态接入</td></tr>
+    <tr><td>blora-runtime</td><td>协调器</td><td>run 循环、审批、后台任务、记忆、插件、市场</td></tr>
+    <tr><td>blora-server</td><td>Web 服务</td><td>axum API、/vendor 静态资源、PassPort 设备码端点</td></tr>
+    <tr><td>blora-tui</td><td>终端界面</td><td>ratatui、斜杠命令、命中区域鼠标、dusk 主题</td></tr>
+    <tr><td>blora-auth</td><td>PassPort 客户端</td><td>OAuth 设备码申请 / 轮询 / userinfo，凭据内置可覆盖</td></tr>
+    <tr><td>blora-cli</td><td>入口</td><td><code>blora</code> 子命令：TUI / web / gateway / user / plugin / memory / backup</td></tr>
+  </table></div>
+</section>
+
+<section id="phases">
+  <h2><span class="no">03</span>阶段计划</h2>
+  <p class="sub">左侧竖线：绿色为系统与协议层，玫瑰色为直接面向使用者的体验层。全部阶段已完成。</p>
+
+  <div class="phase">
+    <div class="phase-head"><span class="pn">PHASE 0</span><h3>工程引导</h3><span class="badge done">已完成</span></div>
+    <div class="phase-cols">
+      <div><h4>范围</h4><ul>
+        <li>Cargo workspace 与 14 个 crate 骨架，仓库根即产品根</li>
+        <li>rust-version 1.85，全工作区禁 <code>unsafe_code</code></li>
+        <li>引入的 harness 参照仓库移出产品跟踪</li></ul></div>
+      <div><h4>验收</h4><ul>
+        <li><code>cargo clippy --workspace -D warnings</code> 通过</li>
+        <li>仓库只含产品代码与产品文档</li></ul></div>
+    </div>
+    <div class="commits">c56c0d6 · f4fb372 · 6d7883b · e64dadf · 60c3d59</div>
+  </div>
+
+  <div class="phase">
+    <div class="phase-head"><span class="pn">PHASE 1</span><h3>规范事件与存储</h3><span class="badge done">已完成</span></div>
+    <div class="phase-cols">
+      <div><h4>范围</h4><ul>
+        <li>blora-events envelope，事件类型可扩展</li>
+        <li>SQLite 追加日志，schema 迁移 v1→v9（含 users、tasks.cron、memories、workspaces）</li>
+        <li>会话 fork / export / archive / 全文搜索</li></ul></div>
+      <div><h4>验收</h4><ul>
+        <li>回放只依赖事件，未知类型跳过不报错</li>
+        <li>迁移幂等，旧库可升级</li></ul></div>
+    </div>
+    <div class="commits">6d7883b · 66528a2 · 7caa58a · 77dd8f6 · d22b033</div>
+  </div>
+
+  <div class="phase">
+    <div class="phase-head"><span class="pn">PHASE 2</span><h3>运行时与工具循环</h3><span class="badge done">已完成</span></div>
+    <div class="phase-cols">
+      <div><h4>范围</h4><ul>
+        <li>Runtime.run 循环：流式响应、工具调用、审批等待</li>
+        <li>工具：read / write / list / search、shell（后台）、apply_patch、process、schedule_task、delegate、handoff、remember / recall / forget、git_status / diff / log / branch / worktree</li>
+        <li>mcp__* 与 plugin__* 动态工具命名空间</li></ul></div>
+      <div><h4>验收</h4><ul>
+        <li>能力策略 fail-closed：allow / deny / ask，网络默认 Deny</li>
+        <li>机密路径 Ask、破坏性 git Ask、审批可 y/n 现场应答</li>
+        <li>POLICY_VERSION=1</li></ul></div>
+    </div>
+    <div class="commits">66528a2 · bbe5e31</div>
+  </div>
+
+  <div class="phase">
+    <div class="phase-head"><span class="pn">PHASE 3</span><h3>供应商层</h3><span class="badge done">已完成</span></div>
+    <div class="phase-cols">
+      <div><h4>范围</h4><ul>
+        <li>Mock、OpenAI Chat、OpenAI Responses、Anthropic、Gemini</li>
+        <li><code>BLORA_PROVIDER</code> 逗号分隔回退链</li>
+        <li><code>BLORA_MODEL</code> / <code>BLORA_API_KEY</code> / <code>BLORA_API_BASE</code> / <code>BLORA_MAX_TOKENS</code></li></ul></div>
+      <div><h4>验收</h4><ul>
+        <li>无密钥环境自动落入 Mock，TUI / Web / 任务全链路可用</li>
+        <li>供应商解析有 fixture 测试覆盖</li></ul></div>
+    </div>
+    <div class="commits">6d7883b · bbe5e31 · d22b033</div>
+  </div>
+
+  <div class="phase">
+    <div class="phase-head"><span class="pn">PHASE 4</span><h3>上下文与压缩</h3><span class="badge done">已完成</span></div>
+    <div class="phase-cols">
+      <div><h4>范围</h4><ul>
+        <li>稳定 / 上下文 / 易失三层上下文装配</li>
+        <li>AGENTS.md、skills、git 快照、<code>.blora/memory.md</code> 注入</li>
+        <li>自动 compact，手动 <code>/compact [note]</code></li></ul></div>
+      <div><h4>验收</h4><ul>
+        <li>compact 写入 summary 事件，回放一致</li>
+        <li>墙钟预算 <code>BLORA_MAX_WALL_SECS</code>（默认 900s）</li></ul></div>
+    </div>
+    <div class="commits">66528a2 · bbe5e31</div>
+  </div>
+
+  <div class="phase">
+    <div class="phase-head"><span class="pn">PHASE 5</span><h3>Work 调度与 Agent 子代理</h3><span class="badge done">已完成</span></div>
+    <div class="phase-cols">
+      <div><h4>范围</h4><ul>
+        <li>延时任务 + 5 段 cron（列表 / 区间），暂停 / 恢复 / 取消</li>
+        <li>Agent 模式：深度 2、并发 3；角色 research / review（RO，6）、plan（RO，4）、code（8）</li>
+        <li>子代理提示禁止再 spawn，防递归</li></ul></div>
+      <div><h4>验收</h4><ul>
+        <li>cron 表达式解析有单元测试（列表、区间、步进）</li>
+        <li>任务 pump 语义：到期才执行，幂等</li></ul></div>
+    </div>
+    <div class="commits">8be4c62 · bbe5e31</div>
+  </div>
+
+  <div class="phase">
+    <div class="phase-head"><span class="pn">PHASE 6</span><h3>入口与 CLI</h3><span class="badge done">已完成</span></div>
+    <div class="phase-cols">
+      <div><h4>范围</h4><ul>
+        <li><code>blora</code> = TUI；<code>blora --web</code> / <code>web</code> / <code>serve</code> = Web</li>
+        <li><code>gateway</code>（多用户令牌）、<code>user add|list</code>、<code>plugin list|install|remove</code>、<code>memory distill</code>、<code>backup / restore / usage</code>、<code>acp</code></li></ul></div>
+      <div><h4>验收</h4><ul>
+        <li>clap 解析全部子命令有测试（含 --web 别名）</li>
+        <li>令牌 <code>blt_…</code> 仅存 SHA-256 摘要</li></ul></div>
+    </div>
+    <div class="commits">2149740 · a45bd33 · 77dd8f6 · 7caa58a</div>
+  </div>
+
+  <div class="phase">
+    <div class="phase-head"><span class="pn">PHASE 7</span><h3>Web UI（Blora Design）</h3><span class="badge done">已完成</span></div>
+    <div class="phase-cols">
+      <div><h4>范围</h4><ul>
+        <li>仅使用已发布 <code>@bloret-crew/blora-design</code>：Composite 自定义元素、官方类名、主题先行</li>
+        <li>hash 路由：session / tasks / approvals / timeline / artifacts / workspace / settings</li>
+        <li><code>/vendor/{*path}</code> 映射 dist 嵌套 CSS 与扩展别名</li></ul></div>
+      <div><h4>验收</h4><ul>
+        <li>HTTP 集成测试：CSS 链、favicon、sessions API</li>
+        <li>用户内容不经 innerHTML 注入</li></ul></div>
+    </div>
+    <div class="commits">76c3d6a · f6f9868 · 7caa58a</div>
+  </div>
+
+  <div class="phase">
+    <div class="phase-head"><span class="pn">PHASE 8</span><h3>计划外扩展</h3><span class="badge done">已完成</span></div>
+    <div class="phase-cols">
+      <div><h4>范围</h4><ul>
+        <li>多用户 Gateway：Bearer 令牌鉴权、/ws 双向取消与审批</li>
+        <li>PTY 执行（<code>script -qefc</code>）、SSH 远程执行（<code>BLORA_REMOTE</code> / <code>BLORA_REMOTE_ROOT</code>）</li>
+        <li>本地插件市场 <code>marketplace/index.json</code>、自动记忆蒸馏（抽取式，SQLite + memory.md）</li></ul></div>
+      <div><h4>验收</h4><ul>
+        <li>隔离矩阵 Local / Sandbox（unshare -n）/ Container（docker --network=none）/ Pty / Remote 全部可用</li>
+        <li>无 <code>script(1)</code> 环境降级不 panic</li></ul></div>
+    </div>
+    <div class="commits">77dd8f6 · 7caa58a · bbe5e31 · d22b033</div>
+  </div>
+
+  <div class="phase human">
+    <div class="phase-head"><span class="pn">ROUND A</span><h3>TUI 体验重构</h3><span class="badge done">已完成</span></div>
+    <div class="phase-cols">
+      <div><h4>范围</h4><ul>
+        <li>斜杠补全：71 个命令，前缀 / 子串 / 子序列模糊过滤，Tab 补全、↑↓ 选择、Enter 执行，长输出走结果面板</li>
+        <li>视觉重构：去掉满屏边框，留白画布 + 左侧色条分层，<code>❯</code> 底栏 composer，dusk 主题（玫瑰 / 鼠尾草），<code>NO_COLOR</code> 降级</li>
+        <li>鼠标：按上一帧命中区域支持点击 / 滚轮 / 悬停</li></ul></div>
+      <div><h4>验收</h4><ul>
+        <li>斜杠命令目录与分发表一致性由测试守护</li>
+        <li>鼠标命中区域有 HitMap 单元测试</li></ul></div>
+    </div>
+    <div class="commits">f7b5a83 · 55b46f3 · 4e80354</div>
+  </div>
+
+  <div class="phase human">
+    <div class="phase-head"><span class="pn">ROUND B</span><h3>Bloret PassPort 登录</h3><span class="badge done">已完成</span></div>
+    <div class="phase-cols">
+      <div><h4>范围</h4><ul>
+        <li>OAuth 设备码流程：<code>/oauth/device/code</code> → 展示 user_code 与 verification_uri → 按 interval 轮询 <code>/oauth/token</code> → Bearer 调 <code>/oauth/userinfo</code></li>
+        <li>TUI：先进入界面显示设备码与链接，再开浏览器；Web：页面内申请设备码并轮询</li>
+        <li><code>/login</code> / <code>/logout</code> 斜杠命令，Web 退出按钮</li>
+        <li>App 凭据内置，可用 <code>BLORA_PASSPORT_APP_ID</code> / <code>BLORA_PASSPORT_APP_SECRET</code> 覆盖</li></ul></div>
+      <div><h4>验收</h4><ul>
+        <li><code>device_code</code> 只存在于服务端，不进浏览器、不进日志、不进 URL</li>
+        <li>轮询处理 authorization_pending / slow_down / access_denied / expired_token</li>
+        <li>轮询成功即写入 HttpOnly 会话 Cookie，前端立即变为已登录</li></ul></div>
+    </div>
+    <div class="commits">508d9fd · b7ae994 · 8ea89aa · 73d2b75 · d3d2c20 · a0dea7e · c9aded1</div>
+  </div>
+</section>
+
+<section id="matrix">
+  <h2><span class="no">04</span>能力与环境参考</h2>
+  <p class="sub">排期阶段落地的配置面，供运维与二次开发对照。</p>
+  <div class="tbl"><table>
+    <tr><th>环境变量</th><th>作用</th></tr>
+    <tr><td>BLORA_HOME</td><td>数据目录（默认 <code>~/.blora</code>，Unix 0700）</td></tr>
+    <tr><td>BLORA_PROVIDER / BLORA_MODEL</td><td>供应商回退链与会话模型</td></tr>
+    <tr><td>BLORA_API_KEY / BLORA_API_BASE</td><td>OpenAI 兼容密钥与网关地址（GEMINI_API_KEY 另行识别）</td></tr>
+    <tr><td>BLORA_MAX_TOKENS / BLORA_MAX_WALL_SECS</td><td>单次运行 token 与墙钟预算（默认 900s）</td></tr>
+    <tr><td>BLORA_NETWORK</td><td>网络能力开关，默认 0 = Deny</td></tr>
+    <tr><td>BLORA_EXEC / BLORA_WORKTREE</td><td>隔离模式与 worktree 执行</td></tr>
+    <tr><td>BLORA_REMOTE / BLORA_REMOTE_ROOT</td><td>SSH 远程执行目标与根目录</td></tr>
+    <tr><td>BLORA_MCP_COMMAND / BLORA_HOOKS_DIR / BLORA_PLUGINS_DIR</td><td>MCP stdio 命令、hooks 目录、插件目录</td></tr>
+    <tr><td>BLORA_PASSPORT_APP_ID / _SECRET / BLORA_PASSPORT_URL / BLORA_PUBLIC_URL</td><td>PassPort 凭据与服务端点（内置值可覆盖）</td></tr>
+  </table></div>
+</section>
+
+<section id="security">
+  <h2><span class="no">05</span>安全模型</h2>
+  <div class="grid-2">
+    <div class="card"><h3>凭据生命周期</h3>
+      <ul><li>Gateway 令牌 <code>blt_…</code> 明文只在创建时返回一次，库存 SHA-256</li>
+      <li>设备码流程：access_token 与 device_code 留在服务端，浏览器只见 user_code</li>
+      <li>Web 会话为 HttpOnly + SameSite=Lax Cookie，Passport 侧凭据可随时换环境变量轮换</li></ul></div>
+    <div class="card"><h3>执行边界</h3>
+      <ul><li>策略三态 fail-closed，未知工具一律 Ask</li>
+      <li>路径逃逸（<code>../</code>）在执行层归一化后校验</li>
+      <li>远程执行走 SSH 单通道，容器与沙箱一律断网</li></ul></div>
+  </div>
+  <div class="note"><b>已声明的边界（诚实条款）</b>：PTY 经 <code>script(1)</code> 而非原生 libc；远程是 SSH 而非 k8s 编排；
+     市场是本地索引而非签名公共商店；记忆是抽取式蒸馏而非训练；Gateway 是单进程多令牌而非分布式集群。</div>
+</section>
+
+<section id="verify">
+  <h2><span class="no">06</span>验证状态</h2>
+  <div class="tbl"><table>
+    <tr><th>检查</th><th>结果</th></tr>
+    <tr><td>cargo test --workspace</td><td>71 个单元测试全部通过，0 失败</td></tr>
+    <tr><td>cargo clippy --workspace --all-targets -- -D warnings</td><td>通过，0 警告</td></tr>
+    <tr><td>git diff --check</td><td>通过，无空白错误</td></tr>
+    <tr><td>密钥审计</td><td>App Secret 按用户明确要求内置；审计确认未进入 URL / 日志 / 浏览器载荷</td></tr>
+  </table></div>
+</section>
+
+<section id="next">
+  <h2><span class="no">07</span>后续候选（未排期）</h2>
+  <p class="sub">以下不在本次路线图承诺内，作为下一轮输入。</p>
+  <div class="grid-2">
+    <div class="card"><h3>分发与协作</h3>
+      <ul><li>推送 origin / 打 tag 发布</li>
+      <li>签名插件市场与远端索引</li></ul></div>
+    <div class="card"><h3>执行与协议</h3>
+      <ul><li>原生 PTY（替换 script(1) 包装）</li>
+      <li>Gateway 水平扩展与多实例会话亲和</li></ul></div>
+    <div class="card"><h3>记忆与上下文</h3>
+      <ul><li>跨会话记忆检索排序（当前为按 key 读写）</li>
+      <li>压缩策略可配置（当前自动阈值）</li></ul></div>
+    <div class="card"><h3>界面</h3>
+      <ul><li>TUI 主题切换（当前仅 dusk 与 NO_COLOR）</li>
+      <li>Web 移动端断点细调</li></ul></div>
+  </div>
+</section>
+
+<section id="timeline">
+  <h2><span class="no">08</span>时间线</h2>
+  <div class="tl">
+    <div class="tl-item"><div class="tl-date">2026-09-12</div><h3>奠基 → Code 模式可用</h3>
+      <p>bootstrap、harness 参照入库、核心与 Code 模式、产品提升到仓库根。</p></div>
+    <div class="tl-item"><div class="tl-date">2026-09-13 上午</div><h3>Work / Agent / Web 全量</h3>
+      <p>调度器与子代理、入口与 Web UI、审批 / git / 压缩、Blora Design 重写、计划外扩展、文档与策略。</p></div>
+    <div class="tl-item"><div class="tl-date">2026-09-13 下午</div><h3>TUI 体验三轮</h3>
+      <p>斜杠补全与 71 命令、留白界面重构、鼠标命中与点击。</p></div>
+    <div class="tl-item human"><div class="tl-date">2026-09-13 晚</div><h3>Bloret PassPort 登录</h3>
+      <p>OAuth 接入、设备码流程、登录 / 登出命令、会话保持修复。</p></div>
+  </div>
+</section>
+
+<footer>
+  <span>Blora Agent · docs/plans/roadmap.html</span>
+  <span>GPL-3.0-or-later</span>
+  <span>生成于 2026-09-13 · 与提交历史一一对应</span>
+</footer>
+
+</div>
+</body>
+</html>
