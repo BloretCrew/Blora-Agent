@@ -161,6 +161,16 @@ CREATE TABLE IF NOT EXISTS provider_usage (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS steers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    message TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    consumed_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_steers_session ON steers(session_id, consumed_at);
+
 CREATE TRIGGER IF NOT EXISTS events_no_update BEFORE UPDATE ON events
 BEGIN
     SELECT RAISE(ABORT, 'events are append-only');

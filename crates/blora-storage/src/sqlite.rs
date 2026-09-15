@@ -153,10 +153,61 @@ impl SqliteStore {
             params![now],
         )
         .map_err(BloraError::storage)?;
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (10, ?1)",
+            params![now],
+        )
+        .map_err(BloraError::storage)?;
         Ok(Self {
             conn: Mutex::new(conn),
             clock: SystemClock,
         })
+    }
+
+    /// Current storage schema version written by this build.
+    pub const STORE_VERSION: u32 = 10;
+
+    pub fn queue_steer(&self, session_id: &SessionId, message: &str) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "INSERT INTO steers (session_id, message, created_at) VALUES (?1, ?2, ?3)",
+            params![session_id.as_str(), message, Utc::now().to_rfc3339()],
+        )
+        .map_err(BloraError::storage)?;
+        Ok(())
+    }
+
+    /// Pop every unconsumed steering message for the session, oldest first.
+    pub fn take_steers(&self, session_id: &SessionId) -> Result<Vec<String>> {
+        let mut conn = self.lock();
+        let tx = conn.transaction().map_err(BloraError::storage)?;
+        let pending: Vec<(i64, String)> = {
+            let mut stmt = tx
+                .prepare(
+                    "SELECT id, message FROM steers WHERE session_id = ?1 AND consumed_at IS NULL ORDER BY id ASC",
+                )
+                .map_err(BloraError::storage)?;
+            let rows = stmt
+                .query_map(params![session_id.as_str()], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(BloraError::storage)?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row.map_err(BloraError::storage)?);
+            }
+            out
+        };
+        let now = Utc::now().to_rfc3339();
+        for (id, _) in &pending {
+            tx.execute(
+                "UPDATE steers SET consumed_at = ?1 WHERE id = ?2",
+                params![now, id],
+            )
+            .map_err(BloraError::storage)?;
+        }
+        tx.commit().map_err(BloraError::storage)?;
+        Ok(pending.into_iter().map(|(_, message)| message).collect())
     }
 
     pub(crate) fn lock(&self) -> MutexGuard<'_, Connection> {
@@ -225,16 +276,25 @@ impl SqliteStore {
     }
 
     pub fn load_events(&self, session_id: &SessionId) -> Result<Vec<EventEnvelope>> {
+        self.load_events_after(session_id, 0)
+    }
+
+    /// Events with `sequence > after`, in order. `after = 0` loads everything.
+    pub fn load_events_after(
+        &self,
+        session_id: &SessionId,
+        after: u64,
+    ) -> Result<Vec<EventEnvelope>> {
         let conn = self.lock();
         let mut stmt = conn
             .prepare(
                 "SELECT event_id, schema_version, session_id, run_id, turn_id, parent_event_id,
                         causation_id, sequence, timestamp, actor, visibility, event_type, payload, metadata
-                 FROM events WHERE session_id = ?1 ORDER BY sequence ASC",
+                 FROM events WHERE session_id = ?1 AND sequence > ?2 ORDER BY sequence ASC",
             )
             .map_err(BloraError::storage)?;
         let rows = stmt
-            .query_map(params![session_id.as_str()], |row| {
+            .query_map(params![session_id.as_str(), after as i64], |row| {
                 Ok(EventRow {
                     event_id: row.get(0)?,
                     schema_version: row.get(1)?,
@@ -267,6 +327,18 @@ impl SqliteStore {
             return Err(BloraError::SessionNotFound(session_id.to_string()));
         }
         rebuild(&events)
+    }
+
+    pub fn last_sequence(&self, session_id: &SessionId) -> Result<u64> {
+        let conn = self.lock();
+        let max: i64 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(sequence), 0) FROM events WHERE session_id = ?1",
+                params![session_id.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(BloraError::storage)?;
+        Ok(u64::try_from(max).unwrap_or(0))
     }
 
     pub fn list_sessions(&self) -> Result<Vec<SessionSummary>> {

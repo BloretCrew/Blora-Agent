@@ -8,7 +8,7 @@ mod approvals;
 mod compact;
 mod coordinator;
 mod cron;
-mod hooks;
+pub mod hooks;
 mod market;
 mod mcp;
 mod memory;
@@ -17,6 +17,7 @@ mod work;
 
 pub use agents::{MAX_RUNNING_CHILDREN, MAX_SUBAGENT_DEPTH, SUBAGENT_TURNS};
 pub use blora_types::CancelToken;
+pub use compact::{COMPACTION_BREAKER, CompactionReport};
 pub use coordinator::{MockRunOptions, RunOptions, Runtime, WorkspaceInfo};
 pub use cron::next_cron;
 pub use market::{

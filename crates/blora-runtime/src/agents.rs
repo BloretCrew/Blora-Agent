@@ -89,6 +89,7 @@ impl Runtime {
                 role: role.to_owned(),
                 child_session_id: Some(child_session.clone()),
                 prompt: Some(prompt.to_owned()),
+                depth,
             }),
         )?;
         let child_options = RunOptions {
@@ -101,21 +102,42 @@ impl Runtime {
             read_only,
             worktree: false,
         };
-        let child_prompt = format!("[subagent:{role}] {prompt}\nDo not spawn another subagent.");
+        let can_spawn = depth < MAX_SUBAGENT_DEPTH;
+        let child_prompt = if can_spawn {
+            format!("[subagent:{role}] {prompt}")
+        } else {
+            format!("[subagent:{role}] {prompt}\nDo not spawn another subagent.")
+        };
         let result = self.run(&child_session, &child_prompt, cancel, &child_options);
-        let summary = self
-            .show_session(&child_session)
-            .ok()
+        // Steer/stop: a control row may have been written while the child ran.
+        let control = self.store.get_agent(&agent_id).ok();
+        if control.as_ref().is_some_and(|a| a.status == "cancelled") {
+            return Err(BloraError::Cancelled);
+        }
+        let projection = self.show_session(&child_session).ok();
+        let summary = projection
+            .as_ref()
             .and_then(|projection| {
-                projection.transcript.into_iter().rev().find_map(|item| {
+                projection.transcript.iter().rev().find_map(|item| {
                     if let blora_session::TranscriptItem::Assistant { text, .. } = item {
-                        Some(text)
+                        Some(text.clone())
                     } else {
                         None
                     }
                 })
             })
             .unwrap_or_else(|| "subagent finished without text".to_owned());
+        let (input_tokens, output_tokens, turns) = projection
+            .as_ref()
+            .map(|p| {
+                let turns = p
+                    .transcript
+                    .iter()
+                    .filter(|item| matches!(item, blora_session::TranscriptItem::Assistant { .. }))
+                    .count() as u32;
+                (p.input_tokens, p.output_tokens, turns)
+            })
+            .unwrap_or_default();
         match result {
             Ok(_) => {
                 self.store
@@ -127,9 +149,15 @@ impl Runtime {
                     KnownPayload::SubagentCompleted(SubagentCompleted {
                         agent_id,
                         summary: Some(summary.clone()),
+                        input_tokens,
+                        output_tokens,
+                        turns,
                     }),
                 )?;
-                Ok(summary)
+                Ok(format!(
+                    "<subagent role=\"{role}\" turns=\"{turns}\" tokens=\"{}\">\n{summary}\n</subagent>",
+                    input_tokens + output_tokens
+                ))
             }
             Err(err) => {
                 let error = err.to_string();
@@ -149,6 +177,8 @@ impl Runtime {
         }
     }
 
+    /// Mark a running subagent as cancelled. The child run observes this at the
+    /// next safe point via its parent's cancel token or when it returns.
     pub fn cancel_subagent(&self, agent_id: &AgentId) -> Result<()> {
         let agent = self.store.get_agent(agent_id)?;
         if agent.status != "running" {
@@ -165,6 +195,18 @@ impl Runtime {
                 error: "cancelled".to_owned(),
             }),
         )
+    }
+
+    /// Queue a steering message for a running subagent. It is delivered as the
+    /// next user turn in the child session.
+    pub fn steer_subagent(&self, agent_id: &AgentId, message: &str) -> Result<()> {
+        let agent = self.store.get_agent(agent_id)?;
+        if agent.status != "running" {
+            return Err(BloraError::Other(format!(
+                "subagent {agent_id} is not running"
+            )));
+        }
+        self.queue_steer(&agent.child_session_id, message)
     }
 }
 
