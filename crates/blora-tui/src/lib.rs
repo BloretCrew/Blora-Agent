@@ -102,6 +102,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut pointer: Option<(u16, u16)> = None;
     let mut hits = view::HitMap::default();
     let mut cancel = CancelToken::new();
+    let mut cached: Option<(SessionId, blora_session::SessionProjection)> = None;
     let result = thread::scope(|scope| -> Result<()> {
         let mut job: Option<thread::ScopedJoinHandle<'_, Result<blora_types::RunId>>> = None;
         loop {
@@ -120,9 +121,20 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                 status = format!("PassPort 登录成功：{}", user.display_name());
             }
             let session_id = sessions.get(index).map(|item| item.id.clone());
-            let projection = session_id
-                .as_ref()
-                .and_then(|id| runtime.show_session(id).ok());
+            // Keep one projection per selected session and apply only new events.
+            if let Some(id) = session_id.as_ref() {
+                if cached.as_ref().map(|(cached_id, _)| cached_id) != Some(id) {
+                    cached = Some((id.clone(), blora_session::SessionProjection::new()));
+                }
+                if let Some((_, projection)) = cached.as_mut()
+                    && runtime.refresh_projection(id, projection).is_err()
+                {
+                    cached = None;
+                }
+            } else {
+                cached = None;
+            }
+            let projection = cached.as_ref().map(|(_, projection)| projection);
             let pending = session_id
                 .as_ref()
                 .and_then(|id| runtime.pending_approvals(id).ok())
@@ -156,7 +168,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             workspace,
                             sessions: &sessions,
                             index,
-                            projection: projection.as_ref(),
+                            projection,
                             pending: &pending,
                             input: &input,
                             status: if let Some(url) = passport_url.as_deref()
@@ -328,13 +340,18 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                         }
                                     }
                                 } else if !input.trim().is_empty() {
-                                    if job.is_some() {
-                                        status = "a run is already in progress".to_owned();
-                                        continue;
-                                    }
                                     let Some(id) = session_id.clone() else {
                                         continue;
                                     };
+                                    if job.is_some() {
+                                        let text = input.clone();
+                                        input.clear();
+                                        status = match runtime.queue_steer(&id, &text) {
+                                            Ok(()) => "已排队插话，将在下一轮送达".to_owned(),
+                                            Err(err) => err.to_string(),
+                                        };
+                                        continue;
+                                    }
                                     let prompt = input.clone();
                                     input.clear();
                                     notice = None;
@@ -552,13 +569,18 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                             }
                                         }
                                     } else if !input.trim().is_empty() {
-                                        if job.is_some() {
-                                            status = "a run is already in progress".to_owned();
-                                            continue;
-                                        }
                                         let Some(id) = session_id.clone() else {
                                             continue;
                                         };
+                                        if job.is_some() {
+                                            let text = input.clone();
+                                            input.clear();
+                                            status = match runtime.queue_steer(&id, &text) {
+                                                Ok(()) => "已排队插话，将在下一轮送达".to_owned(),
+                                                Err(err) => err.to_string(),
+                                            };
+                                            continue;
+                                        }
                                         let prompt = input.clone();
                                         input.clear();
                                         notice = None;
@@ -819,6 +841,18 @@ fn slash(
         "cancel" => {
             cancel.cancel();
             SlashOutcome::Status("cancel requested".to_owned())
+        }
+        "steer" => {
+            if args.is_empty() {
+                SlashOutcome::Status("usage: /steer <message>".to_owned())
+            } else {
+                SlashOutcome::Status(
+                    runtime
+                        .queue_steer(session_id, args)
+                        .map(|()| "steer queued for the next turn".to_owned())
+                        .unwrap_or_else(|err| err.to_string()),
+                )
+            }
         }
         "yes" => {
             *auto_approve = match args {

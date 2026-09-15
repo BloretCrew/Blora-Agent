@@ -40,6 +40,9 @@ Blora Agent 是从零实现的本地优先 harness。第一阶段是单用户模
 - 文档：OpenAPI、TUI 快捷键、Provider 矩阵
 - Gemini provider、PTY（`script` / `pty: true`）、SSH 远程执行（`BLORA_EXEC=remote` + `BLORA_REMOTE`）
 - 多用户 Gateway（`blora gateway` + `blora user add`）、WebSocket 控制、插件市场、自动记忆蒸馏
+- 请求层：稳定/上下文/易失三层提示与缓存断点、模型驱动压缩（85% 阈值、逐字尾部、三次熔断）、指数退避重试与流空闲看门狗、cached token 计量
+- 工具层：唯一匹配的 apply_patch、只读工具批次并发、工具结果截断与 microcompact、三态 hooks（allow/block/ask）
+- Work/Agent：cron 至多一次语义与失活恢复、任务退避重试与 180s 硬上限、子代理深度与用量回写、运行中 steer
 
 ```text
 cargo run -p blora-cli --         # TUI

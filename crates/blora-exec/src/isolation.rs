@@ -13,6 +13,8 @@ pub enum Isolation {
     Local,
     /// Drop extra env; use `unshare -n` when available so the command has no network.
     Sandbox,
+    /// OS-level sandbox via bubblewrap: read-only root, writable workspace, no network.
+    Bwrap,
     /// Run the command in a disposable container with the workspace mounted.
     Container,
     /// Allocate a PTY via `script` so interactive programs see a terminal.
@@ -30,6 +32,7 @@ impl Isolation {
             .as_str()
         {
             "sandbox" => Self::Sandbox,
+            "bwrap" | "bubblewrap" => Self::Bwrap,
             "container" | "docker" => Self::Container,
             "pty" => Self::Pty,
             "remote" | "ssh" => Self::Remote,
@@ -45,6 +48,7 @@ impl Isolation {
                 Ok(cmd)
             }
             Self::Sandbox => sandbox_command(workspace, command),
+            Self::Bwrap => bwrap_command(workspace, command),
             Self::Container => container_command(workspace, command),
             Self::Pty => pty_command(workspace, command),
             Self::Remote => remote_command(workspace, command),
@@ -74,6 +78,47 @@ fn sandbox_command(workspace: &Path, command: &str) -> Result<Command> {
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", workspace)
         .env("LANG", "C");
+    Ok(cmd)
+}
+
+/// Bubblewrap sandbox: the host filesystem is visible read-only, only the
+/// workspace and a private /tmp are writable, and the network namespace is
+/// unshared. Extra writable paths come from `BLORA_BWRAP_RW` (colon separated).
+fn bwrap_command(workspace: &Path, command: &str) -> Result<Command> {
+    let available = Command::new("bwrap")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    if !available {
+        return Err(BloraError::Exec(
+            "BLORA_EXEC=bwrap requires bubblewrap (`bwrap`) on PATH".to_owned(),
+        ));
+    }
+    let workspace_str = workspace.display().to_string();
+    let mut cmd = Command::new("bwrap");
+    cmd.args(["--ro-bind", "/", "/"])
+        .args(["--bind", &workspace_str, &workspace_str])
+        .args(["--tmpfs", "/tmp"])
+        .args(["--dev", "/dev"])
+        .args(["--proc", "/proc"])
+        .arg("--unshare-net")
+        .arg("--unshare-pid")
+        .arg("--die-with-parent")
+        .arg("--new-session")
+        .args(["--chdir", &workspace_str]);
+    if let Ok(extra) = std::env::var("BLORA_BWRAP_RW") {
+        for path in extra.split(':').filter(|p| !p.is_empty()) {
+            cmd.args(["--bind", path, path]);
+        }
+    }
+    cmd.args(["--setenv", "HOME", &workspace_str])
+        .args(["--setenv", "LANG", "C"])
+        .args(["--", "sh", "-c", command])
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin");
     Ok(cmd)
 }
 
@@ -164,6 +209,23 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cmd = Isolation::Pty.shell_command(dir.path(), "echo hi").unwrap();
         assert_eq!(cmd.get_program(), "script");
+    }
+
+    #[test]
+    fn bwrap_builds_or_explains() {
+        let dir = tempfile::tempdir().unwrap();
+        match Isolation::Bwrap.shell_command(dir.path(), "true") {
+            Ok(cmd) => {
+                assert_eq!(cmd.get_program(), "bwrap");
+                let args: Vec<String> = cmd
+                    .get_args()
+                    .map(|a| a.to_string_lossy().into_owned())
+                    .collect();
+                assert!(args.iter().any(|a| a == "--unshare-net"));
+                assert!(args.iter().any(|a| a == "--die-with-parent"));
+            }
+            Err(err) => assert!(err.to_string().contains("bubblewrap")),
+        }
     }
 
     #[test]

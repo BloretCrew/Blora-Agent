@@ -3,6 +3,8 @@ const state = {
   view: "session",
   source: null,
   query: "",
+  running: false,
+  streaming: null,
 };
 
 const sessionEmpty = document.querySelector("#session-empty");
@@ -307,14 +309,102 @@ async function selectSession(id) {
   if (state.source) {
     state.source.close();
   }
+  state.streaming = null;
   state.source = new EventSource(`/api/sessions/${id}/events`);
-  state.source.onmessage = async () => {
+  state.source.onmessage = (message) => {
+    let data = null;
+    try {
+      data = JSON.parse(message.data);
+    } catch (_) {
+      data = null;
+    }
+    handleSessionEvent(id, data).catch((error) => showAlert(error.message));
+  };
+}
+
+// Apply one live event without refetching the whole session where possible.
+// Assistant deltas append to an in-progress bubble; structural events refetch
+// only the panel they affect.
+async function handleSessionEvent(id, data) {
+  if (!data || id !== state.sessionId) {
+    return;
+  }
+  const kind = data.type || "";
+  const payload = data.payload || {};
+  if (data.status) {
+    pathEl.textContent = pathEl.textContent.replace(/ · [a-z_]+ · /, ` · ${data.status} · `);
+  }
+  if (kind === "assistant.delta") {
+    appendStreamingText(payload.text || "");
+    return;
+  }
+  if (kind === "user.input") {
+    appendBubble("user", payload.text || "");
+    return;
+  }
+  if (kind === "tool.requested") {
+    appendBubble("tool", `${payload.tool || "tool"} …`);
+    return;
+  }
+  if (kind.startsWith("approval.")) {
+    await refreshApprovals();
+    return;
+  }
+  if (kind.startsWith("task.")) {
+    await refreshTasks();
+    return;
+  }
+  if (
+    kind === "assistant.message.completed" ||
+    kind === "tool.completed" ||
+    kind === "tool.failed" ||
+    kind.startsWith("run.") ||
+    kind.startsWith("subagent.") ||
+    kind.startsWith("context.") ||
+    kind === "snapshot"
+  ) {
+    state.streaming = null;
     const latest = await api(`/api/sessions/${id}`);
+    pathEl.textContent = `${latest.workspace_path} · ${latest.status} · ${latest.input_tokens}/${latest.output_tokens} tokens`;
     renderTranscript(latest.transcript);
     renderSubagents(latest.subagents);
-    await refreshApprovals();
-    await refreshTasks();
-  };
+  }
+}
+
+function appendBubble(kind, text) {
+  threadEmpty.hidden = true;
+  if (threadEmpty.parentElement === thread) {
+    threadEmpty.remove();
+  }
+  const bubble = document.createElement("blora-chat");
+  if (kind === "user") {
+    bubble.setAttribute("author", "你");
+    bubble.setAttribute("avatar", "You");
+    bubble.setAttribute("side", "end");
+    bubble.setAttribute("avatar-variant", "primary");
+  } else if (kind === "assistant") {
+    bubble.setAttribute("author", "Blora");
+    bubble.setAttribute("avatar", "BA");
+  } else {
+    bubble.setAttribute("author", kind);
+    bubble.setAttribute("avatar", kind.slice(0, 1).toUpperCase());
+  }
+  bubble.setAttribute("message", text);
+  thread.append(bubble);
+  thread.scrollTop = thread.scrollHeight;
+  return bubble;
+}
+
+function appendStreamingText(text) {
+  if (!text) {
+    return;
+  }
+  if (!state.streaming) {
+    state.streaming = appendBubble("assistant", "");
+  }
+  const current = state.streaming.getAttribute("message") || "";
+  state.streaming.setAttribute("message", current + text);
+  thread.scrollTop = thread.scrollHeight;
 }
 
 async function applyRoute() {
@@ -401,18 +491,46 @@ document.querySelector("#composer").addEventListener("submit", async (event) => 
     return;
   }
   box.value = "";
-  await api(`/api/sessions/${state.sessionId}/run`, {
-    method: "POST",
-    body: JSON.stringify({
-      prompt: text,
-      auto_approve: isChecked(autoApprove),
-      provider: stored("blora-provider"),
-      model: stored("blora-model"),
-      worktree: isChecked(document.querySelector("#pref-worktree")),
-    }),
-  });
+  // While a run is in flight the composer becomes a steering channel: the
+  // message is queued and delivered at the next model-turn boundary.
+  if (state.running) {
+    await api(`/api/sessions/${state.sessionId}/steer`, {
+      method: "POST",
+      body: JSON.stringify({ message: text }),
+    });
+    return;
+  }
+  setRunning(true);
+  try {
+    await api(`/api/sessions/${state.sessionId}/run`, {
+      method: "POST",
+      body: JSON.stringify({
+        prompt: text,
+        auto_approve: isChecked(autoApprove),
+        provider: stored("blora-provider"),
+        model: stored("blora-model"),
+        worktree: isChecked(document.querySelector("#pref-worktree")),
+      }),
+    });
+  } finally {
+    setRunning(false);
+  }
   await selectSession(state.sessionId);
 });
+
+function setRunning(running) {
+  state.running = running;
+  const send = document.querySelector("#send");
+  if (send) {
+    send.textContent = running ? "插话" : "发送";
+  }
+  const box = fieldInput("#prompt") || prompt;
+  if (box) {
+    box.placeholder = running
+      ? "运行中：输入的内容会在下一轮送达模型"
+      : "描述你想在工作区完成的事";
+  }
+}
 
 function renderSubagents(items) {
   if (!items || items.length === 0) {

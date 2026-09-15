@@ -97,6 +97,13 @@ pub const COMMANDS: &[SlashCommand] = &[
     cmd("copy", &[], "", "Copy the last assistant reply", "session"),
     cmd("cancel", &["stop"], "", "Cancel the in-flight run", "run"),
     cmd(
+        "steer",
+        &["interject"],
+        "<message>",
+        "Queue a message for the running turn (delivered at the next safe point)",
+        "run",
+    ),
+    cmd(
         "yes",
         &["yolo", "always-approve", "auto"],
         "[on|off]",

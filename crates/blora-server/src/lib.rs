@@ -177,6 +177,7 @@ fn app(state: AppState) -> Router {
         .route("/api/sessions/{id}/resume", post(resume_session))
         .route("/api/sessions/{id}/compact", post(compact_session))
         .route("/api/sessions/{id}/cancel", post(cancel_session))
+        .route("/api/sessions/{id}/steer", post(steer_session))
         .route("/api/usage", get(usage))
         .route("/api/plugins", get(plugins))
         .route("/api/artifacts", get(list_artifacts))
@@ -627,32 +628,72 @@ async fn session_events(
 {
     let session_id = SessionId::parse(&id).map_err(ApiError::from)?;
     let runtime = state.runtime.clone();
-    let (tx, rx) = mpsc::channel::<std::result::Result<Event, Infallible>>(16);
-    tokio::spawn(async move {
-        let mut last = 0_u64;
+    let (tx, rx) = mpsc::channel::<std::result::Result<Event, Infallible>>(64);
+    // Subscribe before the initial snapshot so nothing appended in between is lost.
+    let receiver = runtime.subscribe();
+    tokio::task::spawn_blocking(move || {
+        let make = |sequence: u64, kind: &str, status: Option<&str>, payload: serde_json::Value| {
+            Event::default()
+                .json_data(serde_json::json!({
+                    "sequence": sequence,
+                    "type": kind,
+                    "status": status,
+                    "payload": payload,
+                }))
+                .unwrap_or_else(|_| Event::default())
+        };
+        let Ok(projection) = runtime.show_session(&session_id) else {
+            return;
+        };
+        let status = projection
+            .runs
+            .last()
+            .map(|run| run.status.as_str().to_owned());
+        if tx
+            .blocking_send(Ok(make(
+                projection.last_sequence,
+                "snapshot",
+                status.as_deref(),
+                serde_json::Value::Null,
+            )))
+            .is_err()
+        {
+            return;
+        }
         loop {
-            let runtime = runtime.clone();
-            let session_id = session_id.clone();
-            let snapshot =
-                tokio::task::spawn_blocking(move || runtime.show_session(&session_id)).await;
-            match snapshot {
-                Ok(Ok(projection)) if projection.last_sequence != last => {
-                    last = projection.last_sequence;
-                    let body = serde_json::json!({
-                        "sequence": last,
-                        "status": projection.runs.last().map(|run| run.status.as_str()),
-                    });
-                    let event = Event::default()
-                        .json_data(body)
-                        .unwrap_or_else(|_| Event::default());
-                    if tx.send(Ok(event)).await.is_err() {
-                        break;
+            match receiver.recv_timeout(Duration::from_secs(15)) {
+                Ok(event) if event.session_id == session_id => {
+                    let status = runtime
+                        .show_session(&session_id)
+                        .ok()
+                        .and_then(|p| p.runs.last().map(|run| run.status.as_str().to_owned()));
+                    // Small payloads ride along so clients can render deltas without a
+                    // round trip; bulky tool output is fetched on demand instead.
+                    let payload = if event.event_type == "tool.output" {
+                        serde_json::Value::Null
+                    } else {
+                        event.payload.clone()
+                    };
+                    if tx
+                        .blocking_send(Ok(make(
+                            event.sequence,
+                            &event.event_type,
+                            status.as_deref(),
+                            payload,
+                        )))
+                        .is_err()
+                    {
+                        return;
                     }
                 }
-                Ok(Err(_)) | Err(_) => break,
-                _ => {}
+                Ok(_) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    if tx.is_closed() {
+                        return;
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
             }
-            tokio::time::sleep(Duration::from_millis(400)).await;
         }
     });
     Ok(Sse::new(ReceiverStream::new(rx)).keep_alive(KeepAlive::default()))
@@ -713,6 +754,26 @@ async fn cancel_task(
         .cancel_task(&TaskId::parse(&id)?)
         .map_err(ApiError::from)?;
     Ok(Json(serde_json::json!({ "cancelled": id })))
+}
+
+#[derive(Deserialize)]
+struct SteerBody {
+    message: String,
+}
+
+async fn steer_session(
+    State(state): State<AppState>,
+    headers: HttpHeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<SteerBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let session_id = SessionId::parse(&id).map_err(ApiError::from)?;
+    ensure_session(&state, &headers, &session_id)?;
+    state
+        .runtime
+        .queue_steer(&session_id, &body.message)
+        .map_err(ApiError::from)?;
+    Ok(Json(serde_json::json!({ "queued": true })))
 }
 
 async fn pump_tasks(State(state): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {

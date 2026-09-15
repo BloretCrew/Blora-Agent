@@ -6,7 +6,7 @@
 
 | 键 | 作用 |
 |---|---|
-| Enter | 发送当前输入；以 `/` 开头则补全或执行选中的斜杠命令 |
+| Enter | 发送当前输入；以 `/` 开头则补全或执行选中的斜杠命令；运行中则作为插话排队，下一轮送达 |
 | Tab | 补全选中的斜杠命令 |
 | ↑ / ↓ | 在斜杠补全列表中移动 |
 | Ctrl+P | 打开斜杠菜单（prompt 为空时） |
@@ -30,7 +30,7 @@
 
 会话：`/new` `/sessions` `/goto` `/status` `/context` `/id` `/pwd` `/fork` `/resume` `/archive` `/export` `/timeline` `/code` `/work` `/agent` `/plan` `/mode` `/next` `/prev` `/reload` `/quit`
 
-运行：`/compact` `/checkpoint` `/cancel` `/yes` `/no` `/permissions` `/approvals` `/model` `/provider` `/exec` `/worktree`
+运行：`/compact` `/checkpoint` `/cancel` `/steer` `/yes` `/no` `/permissions` `/approvals` `/model` `/provider` `/exec` `/worktree`
 
 工作：`/tasks` `/task` `/cron` `/loop` `/pause` `/unpause` `/cancel-task` `/pump` `/agents` `/search` `/find` `/clear` `/tools` `/copy`
 

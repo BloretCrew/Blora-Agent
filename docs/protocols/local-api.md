@@ -15,6 +15,7 @@ POST   /api/sessions/:id/archive
 POST   /api/sessions/:id/resume
 POST   /api/sessions/:id/compact
 POST   /api/sessions/:id/cancel
+POST   /api/sessions/:id/steer        {"message": "..."} — delivered at the next turn boundary
 GET    /api/tasks
 POST   /api/tasks
 POST   /api/tasks/:id/cancel
@@ -29,6 +30,13 @@ GET    /api/artifacts
 GET    /api/settings
 GET    /api/usage
 GET    /api/plugins
+GET    /api/marketplace
+POST   /api/marketplace
+GET    /api/auth/me
+GET    /api/auth/device
+POST   /api/auth/device/poll
+POST   /api/auth/logout
+GET    /ws
 ```
 
 事件流使用 SSE。密钥不会出现在 `/api/settings` 中。
