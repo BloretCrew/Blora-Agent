@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Blora Agent contributors
 
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader};
 
 use blora_types::{BloraError, CancelToken, Result};
 use serde_json::{Value, json};
 
-use crate::{ChatMessage, Completion, CompletionRequest, Provider, StreamEvent, ToolCall};
+use crate::{ChatMessage, Completion, CompletionRequest, Provider, StreamEvent, ToolCall, http};
 
 pub struct ResponsesProvider {
     pub base_url: String,
@@ -63,20 +64,28 @@ impl Provider for ResponsesProvider {
                 })
             })
             .collect();
-        let body = json!({
+        let mut body = json!({
             "model": model,
             "stream": true,
+            "store": false,
             "instructions": instructions,
             "input": input,
-            "tools": tools,
+            "max_output_tokens": request.max_output_tokens.unwrap_or_else(http::max_output_tokens),
         });
+        if !tools.is_empty() {
+            body["tools"] = Value::Array(tools);
+        }
+        if let Some(key) = &request.cache_key {
+            body["prompt_cache_key"] = json!(key);
+        }
         let url = format!("{}/responses", self.base_url);
-        let response = ureq::post(&url)
+        let response = http::agent()
+            .post(&url)
             .set("Authorization", &format!("Bearer {}", self.api_key))
             .set("Content-Type", "application/json")
             .set("Accept", "text/event-stream")
             .send_json(body)
-            .map_err(|err| BloraError::provider(err.to_string()))?;
+            .map_err(http::map_error)?;
         parse_responses_sse(BufReader::new(response.into_reader()), cancel, on_event)
     }
 }
@@ -100,6 +109,14 @@ fn split_input(messages: &[ChatMessage]) -> (String, Vec<Value>) {
                 "output": message.content,
             })),
             _ => {
+                if let Some(content) = &message.content {
+                    if !content.is_empty() {
+                        input.push(json!({
+                            "role": message.role,
+                            "content": content,
+                        }));
+                    }
+                }
                 if let Some(calls) = &message.tool_calls {
                     for call in calls {
                         input.push(json!({
@@ -109,12 +126,6 @@ fn split_input(messages: &[ChatMessage]) -> (String, Vec<Value>) {
                             "arguments": call.arguments,
                         }));
                     }
-                }
-                if let Some(content) = &message.content {
-                    input.push(json!({
-                        "role": message.role,
-                        "content": content,
-                    }));
                 }
             }
         }
@@ -128,7 +139,9 @@ pub fn parse_responses_sse(
     on_event: &mut dyn FnMut(StreamEvent) -> Result<()>,
 ) -> Result<Completion> {
     let mut completion = Completion::default();
-    let mut pending = PartialCall::default();
+    let mut pending: BTreeMap<u64, PartialCall> = BTreeMap::new();
+    let mut terminated = false;
+    let mut saw_event = false;
     for line in reader.lines() {
         if cancel.is_cancelled() {
             return Err(BloraError::Cancelled);
@@ -144,36 +157,74 @@ pub fn parse_responses_sse(
         let value: Value =
             serde_json::from_str(data).map_err(|err| BloraError::provider(err.to_string()))?;
         let kind = value.get("type").and_then(Value::as_str).unwrap_or("");
+        let index = value
+            .get("output_index")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
         match kind {
             "response.output_text.delta" => {
+                saw_event = true;
                 if let Some(text) = value.get("delta").and_then(Value::as_str) {
                     completion.text.push_str(text);
                     on_event(StreamEvent::TextDelta(text.to_owned()))?;
                 }
             }
             "response.output_item.added" => {
+                saw_event = true;
                 if let Some(item) = value.get("item") {
                     if item.get("type").and_then(Value::as_str) == Some("function_call") {
-                        pending.id = item
-                            .get("call_id")
-                            .or_else(|| item.get("id"))
-                            .and_then(Value::as_str)
-                            .unwrap_or_default()
-                            .to_owned();
-                        pending.name = item
-                            .get("name")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default()
-                            .to_owned();
+                        pending.insert(
+                            index,
+                            PartialCall {
+                                id: item
+                                    .get("call_id")
+                                    .or_else(|| item.get("id"))
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default()
+                                    .to_owned(),
+                                name: item
+                                    .get("name")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default()
+                                    .to_owned(),
+                                arguments: String::new(),
+                            },
+                        );
                     }
                 }
             }
             "response.function_call_arguments.delta" => {
                 if let Some(delta) = value.get("delta").and_then(Value::as_str) {
-                    pending.arguments.push_str(delta);
+                    pending.entry(index).or_default().arguments.push_str(delta);
                 }
             }
-            "response.completed" => {
+            "response.output_item.done" => {
+                // The completed item carries authoritative arguments.
+                if let Some(item) = value.get("item") {
+                    if item.get("type").and_then(Value::as_str) == Some("function_call") {
+                        let slot = pending.entry(index).or_default();
+                        if let Some(arguments) = item.get("arguments").and_then(Value::as_str) {
+                            slot.arguments = arguments.to_owned();
+                        }
+                        if slot.name.is_empty() {
+                            slot.name = item
+                                .get("name")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_owned();
+                        }
+                        if slot.id.is_empty() {
+                            slot.id = item
+                                .get("call_id")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_owned();
+                        }
+                    }
+                }
+            }
+            "response.completed" | "response.incomplete" => {
+                terminated = true;
                 if let Some(usage) = value.pointer("/response/usage") {
                     completion.input_tokens = usage
                         .get("input_tokens")
@@ -183,19 +234,48 @@ pub fn parse_responses_sse(
                         .get("output_tokens")
                         .and_then(Value::as_u64)
                         .unwrap_or(0);
+                    completion.cached_tokens = usage
+                        .pointer("/input_tokens_details/cached_tokens")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
                 }
+                if kind == "response.incomplete" {
+                    completion.finish_reason = "length".to_owned();
+                }
+            }
+            "response.failed" | "error" => {
+                return Err(BloraError::provider(format!(
+                    "HTTP 500: in-stream error {}",
+                    value
+                        .pointer("/response/error")
+                        .or_else(|| value.get("error"))
+                        .cloned()
+                        .unwrap_or(Value::Null)
+                )));
             }
             _ => {}
         }
     }
-    if !pending.name.is_empty() {
+    if !terminated && !saw_event {
+        return Err(http::incomplete_stream("response.completed"));
+    }
+    for (_, partial) in pending {
+        if partial.name.is_empty() {
+            continue;
+        }
         let call = ToolCall {
-            id: pending.id,
-            name: pending.name,
-            arguments: pending.arguments,
+            id: partial.id,
+            name: partial.name,
+            arguments: if partial.arguments.trim().is_empty() {
+                "{}".to_owned()
+            } else {
+                partial.arguments
+            },
         };
         on_event(StreamEvent::ToolCall(call.clone()))?;
         completion.tool_calls.push(call);
+    }
+    if !completion.tool_calls.is_empty() {
         completion.finish_reason = "tool_calls".to_owned();
     } else if completion.finish_reason.is_empty() {
         completion.finish_reason = "stop".to_owned();
@@ -219,9 +299,11 @@ mod tests {
     fn parses_text_and_function_call() {
         let body = "\
 data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hi\"}\n\
-data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"call_id\":\"c1\",\"name\":\"list_dir\"}}\n\
-data: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"{\\\"path\\\":\\\".\\\"}\"}\n\
-data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":3,\"output_tokens\":1}}}\n";
+data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"function_call\",\"call_id\":\"c1\",\"name\":\"list_dir\"}}\n\
+data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":1,\"delta\":\"{\\\"path\\\":\\\".\\\"}\"}\n\
+data: {\"type\":\"response.output_item.added\",\"output_index\":2,\"item\":{\"type\":\"function_call\",\"call_id\":\"c2\",\"name\":\"git_status\"}}\n\
+data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"function_call\",\"call_id\":\"c2\",\"name\":\"git_status\",\"arguments\":\"{}\"}}\n\
+data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":3,\"output_tokens\":1,\"input_tokens_details\":{\"cached_tokens\":2}}}}\n";
         let mut deltas = Vec::new();
         let completion =
             parse_responses_sse(Cursor::new(body), &CancelToken::new(), &mut |event| {
@@ -232,7 +314,10 @@ data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\"
             })
             .unwrap();
         assert_eq!(deltas, vec!["Hi".to_owned()]);
+        assert_eq!(completion.tool_calls.len(), 2);
         assert_eq!(completion.tool_calls[0].name, "list_dir");
+        assert_eq!(completion.tool_calls[1].id, "c2");
         assert_eq!(completion.input_tokens, 3);
+        assert_eq!(completion.cached_tokens, 2);
     }
 }

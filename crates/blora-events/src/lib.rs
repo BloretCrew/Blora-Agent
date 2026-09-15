@@ -11,11 +11,11 @@ pub use envelope::{EventEnvelope, NewEvent};
 pub use payload::{
     ApprovalRequested, ApprovalResolved, ArtifactCreated, AssistantDelta,
     AssistantMessageCompleted, AssistantReasoning, CheckpointCreated, ContextCompactionCompleted,
-    ContextCompactionStarted, ContextDeltaCreated, ContextSnapshotCreated, KnownPayload,
-    ModelRequested, ModelResponseCompleted, PolicyDenied, ProviderChanged, RetryStarted,
-    RunCancelRequested, RunCancelled, RunCompleted, RunCreated, RunFailed, RunPaused, RunStarted,
-    SessionArchived, SessionCreated, SessionForked, SessionResumed, SubagentCompleted,
-    SubagentFailed, SubagentMessage, SubagentSpawned, TaskCompleted, TaskCreated, TaskFailed,
-    TaskProgress, TaskStarted, TaskWakeup, ToolCompleted, ToolFailed, ToolOutput, ToolRequested,
-    ToolStarted, UsageRecorded, UserInput,
+    ContextCompactionFailed, ContextCompactionStarted, ContextDeltaCreated, ContextSnapshotCreated,
+    HookCompleted, KnownPayload, ModelRequested, ModelResponseCompleted, PolicyDenied,
+    ProviderChanged, RetryStarted, RunCancelRequested, RunCancelled, RunCompleted, RunCreated,
+    RunFailed, RunPaused, RunStarted, SessionArchived, SessionCreated, SessionForked,
+    SessionResumed, SubagentCompleted, SubagentFailed, SubagentMessage, SubagentSpawned,
+    TaskCompleted, TaskCreated, TaskFailed, TaskProgress, TaskStarted, TaskWakeup, ToolCompleted,
+    ToolFailed, ToolOutput, ToolRequested, ToolStarted, UsageRecorded, UserInput,
 };

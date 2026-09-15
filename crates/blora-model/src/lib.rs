@@ -6,8 +6,10 @@
 mod anthropic;
 mod factory;
 mod gemini;
+pub mod http;
 mod openai;
 mod responses;
+pub mod retry;
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -31,6 +33,55 @@ pub struct ChatMessage {
     pub tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
+    /// Providers with explicit prompt caching may place a cache breakpoint here.
+    /// The compiler sets this on byte-stable prefixes and on the latest user turns.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cache_breakpoint: bool,
+}
+
+impl ChatMessage {
+    #[must_use]
+    pub fn text(role: &str, content: impl Into<String>) -> Self {
+        Self {
+            role: role.to_owned(),
+            content: Some(content.into()),
+            tool_call_id: None,
+            tool_calls: None,
+            cache_breakpoint: false,
+        }
+    }
+
+    #[must_use]
+    pub fn tool_result(call_id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: "tool".to_owned(),
+            content: Some(content.into()),
+            tool_call_id: Some(call_id.into()),
+            tool_calls: None,
+            cache_breakpoint: false,
+        }
+    }
+
+    #[must_use]
+    pub fn assistant(content: Option<String>, tool_calls: Vec<ToolCall>) -> Self {
+        Self {
+            role: "assistant".to_owned(),
+            content,
+            tool_call_id: None,
+            tool_calls: if tool_calls.is_empty() {
+                None
+            } else {
+                Some(tool_calls)
+            },
+            cache_breakpoint: false,
+        }
+    }
+
+    #[must_use]
+    pub fn with_breakpoint(mut self) -> Self {
+        self.cache_breakpoint = true;
+        self
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -47,11 +98,15 @@ pub struct ToolDeclaration {
     pub parameters: Value,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct CompletionRequest {
     pub model: String,
     pub messages: Vec<ChatMessage>,
     pub tools: Vec<ToolDeclaration>,
+    /// Upper bound on generated tokens; adapters fall back to `http::max_output_tokens()`.
+    pub max_output_tokens: Option<u32>,
+    /// Session-affinity key for providers with server-side prefix caching.
+    pub cache_key: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -60,6 +115,8 @@ pub struct Completion {
     pub tool_calls: Vec<ToolCall>,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// Prompt tokens served from the provider cache (subset of `input_tokens`).
+    pub cached_tokens: u64,
     pub finish_reason: String,
 }
 
@@ -124,9 +181,10 @@ impl Provider for MockProvider {
         let system = request
             .messages
             .iter()
-            .find(|message| message.role == "system")
-            .and_then(|message| message.content.as_deref())
-            .unwrap_or_default();
+            .filter(|message| message.role == "system")
+            .filter_map(|message| message.content.as_deref())
+            .collect::<Vec<_>>()
+            .join("\n");
         let last_user = request
             .messages
             .iter()
@@ -134,7 +192,16 @@ impl Provider for MockProvider {
             .find(|message| message.role == "user")
             .and_then(|message| message.content.clone())
             .unwrap_or_default();
-        let completion = if last_role == Some("tool") {
+        let completion = if last_user.contains("[compaction request]") {
+            let lines = last_user.lines().count();
+            Completion {
+                text: format!(
+                    "## Goal\nContinue the session.\n## Progress\nSummarised {lines} lines of history.\n## Next steps\nResume from the latest user request."
+                ),
+                finish_reason: "stop".to_owned(),
+                ..Completion::default()
+            }
+        } else if last_role == Some("tool") {
             let listing = request
                 .messages
                 .iter()
@@ -236,10 +303,10 @@ fn emit_completion(
 }
 
 fn truncate(text: &str, max: usize) -> String {
-    if text.len() <= max {
+    if text.chars().count() <= max {
         text.to_owned()
     } else {
-        format!("{}…", &text[..max])
+        format!("{}…", text.chars().take(max).collect::<String>())
     }
 }
 

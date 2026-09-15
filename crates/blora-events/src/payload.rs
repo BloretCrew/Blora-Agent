@@ -116,6 +116,9 @@ pub struct ToolOutput {
     pub text: String,
     #[serde(default)]
     pub call_id: Option<String>,
+    /// True when the harness cut the raw result before recording it.
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -202,6 +205,9 @@ pub struct SubagentSpawned {
     pub child_session_id: Option<SessionId>,
     #[serde(default)]
     pub prompt: Option<String>,
+    /// Nesting depth below the root session (1 for a direct child).
+    #[serde(default)]
+    pub depth: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -215,6 +221,13 @@ pub struct SubagentCompleted {
     pub agent_id: AgentId,
     #[serde(default)]
     pub summary: Option<String>,
+    /// Token usage of the child session, rolled up for parent-side attribution.
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub turns: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -241,6 +254,33 @@ pub struct ContextCompactionStarted {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ContextCompactionCompleted {
     pub summary: String,
+    /// Events with `sequence >= preserve_from_sequence` stay in the prompt verbatim.
+    #[serde(default)]
+    pub preserve_from_sequence: Option<u64>,
+    #[serde(default)]
+    pub tokens_before: u64,
+    #[serde(default)]
+    pub tokens_after: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ContextCompactionFailed {
+    pub error: String,
+    /// Consecutive failures so far; three trips the circuit breaker.
+    #[serde(default)]
+    pub consecutive_failures: u32,
+}
+
+/// Outcome of an external hook. Recorded so a failed or skipped hook is auditable.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct HookCompleted {
+    pub hook: String,
+    pub decision: String,
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// True when the hook errored or timed out and the harness continued.
+    #[serde(default)]
+    pub degraded: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -317,6 +357,8 @@ pub enum KnownPayload {
     ContextDeltaCreated(ContextDeltaCreated),
     ContextCompactionStarted(ContextCompactionStarted),
     ContextCompactionCompleted(ContextCompactionCompleted),
+    ContextCompactionFailed(ContextCompactionFailed),
+    HookCompleted(HookCompleted),
     RetryStarted(RetryStarted),
     ProviderChanged(ProviderChanged),
     UsageRecorded(UsageRecorded),
@@ -367,6 +409,8 @@ impl KnownPayload {
             Self::ContextDeltaCreated(_) => "context.delta.created",
             Self::ContextCompactionStarted(_) => "context.compaction.started",
             Self::ContextCompactionCompleted(_) => "context.compaction.completed",
+            Self::ContextCompactionFailed(_) => "context.compaction.failed",
+            Self::HookCompleted(_) => "hook.completed",
             Self::RetryStarted(_) => "retry.started",
             Self::ProviderChanged(_) => "provider.changed",
             Self::UsageRecorded(_) => "usage.recorded",
@@ -442,6 +486,8 @@ impl KnownPayload {
             Self::ContextDeltaCreated(v) => serde_json::to_value(v),
             Self::ContextCompactionStarted(v) => serde_json::to_value(v),
             Self::ContextCompactionCompleted(v) => serde_json::to_value(v),
+            Self::ContextCompactionFailed(v) => serde_json::to_value(v),
+            Self::HookCompleted(v) => serde_json::to_value(v),
             Self::RetryStarted(v) => serde_json::to_value(v),
             Self::ProviderChanged(v) => serde_json::to_value(v),
             Self::UsageRecorded(v) => serde_json::to_value(v),
@@ -493,6 +539,8 @@ impl KnownPayload {
             "context.delta.created" => Self::ContextDeltaCreated(from_value(value)?),
             "context.compaction.started" => Self::ContextCompactionStarted(from_value(value)?),
             "context.compaction.completed" => Self::ContextCompactionCompleted(from_value(value)?),
+            "context.compaction.failed" => Self::ContextCompactionFailed(from_value(value)?),
+            "hook.completed" => Self::HookCompleted(from_value(value)?),
             "retry.started" => Self::RetryStarted(from_value(value)?),
             "provider.changed" => Self::ProviderChanged(from_value(value)?),
             "usage.recorded" => Self::UsageRecorded(from_value(value)?),

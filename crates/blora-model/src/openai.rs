@@ -6,7 +6,7 @@ use std::io::{BufRead, BufReader};
 use blora_types::{BloraError, CancelToken, Result};
 use serde_json::{Value, json};
 
-use crate::{ChatMessage, Completion, CompletionRequest, Provider, StreamEvent, ToolCall};
+use crate::{ChatMessage, Completion, CompletionRequest, Provider, StreamEvent, ToolCall, http};
 
 fn openai_messages(messages: &[ChatMessage]) -> Vec<Value> {
     messages
@@ -15,6 +15,8 @@ fn openai_messages(messages: &[ChatMessage]) -> Vec<Value> {
             let mut value = json!({ "role": message.role });
             if let Some(content) = &message.content {
                 value["content"] = json!(content);
+            } else if message.role == "assistant" {
+                value["content"] = Value::Null;
             }
             if let Some(tool_call_id) = &message.tool_call_id {
                 value["tool_call_id"] = json!(tool_call_id);
@@ -97,32 +99,41 @@ impl Provider for OpenAiProvider {
                 })
             })
             .collect();
-        let body = json!({
+        let mut body = json!({
             "model": model,
             "stream": true,
             "stream_options": {"include_usage": true},
             "messages": openai_messages(&request.messages),
-            "tools": tools,
+            "max_completion_tokens": request.max_output_tokens.unwrap_or_else(http::max_output_tokens),
         });
+        if !tools.is_empty() {
+            body["tools"] = Value::Array(tools);
+        }
+        if let Some(key) = &request.cache_key {
+            body["prompt_cache_key"] = json!(key);
+        }
         let url = format!("{}/chat/completions", self.base_url);
-        let response = ureq::post(&url)
+        let response = http::agent()
+            .post(&url)
             .set("Authorization", &format!("Bearer {}", self.api_key))
             .set("Content-Type", "application/json")
             .set("Accept", "text/event-stream")
             .send_json(body)
-            .map_err(|err| BloraError::provider(err.to_string()))?;
+            .map_err(http::map_error)?;
         let reader = BufReader::new(response.into_reader());
         parse_sse(reader, cancel, on_event)
     }
 }
 
-fn parse_sse(
+pub fn parse_sse(
     reader: impl BufRead,
     cancel: &CancelToken,
     on_event: &mut dyn FnMut(StreamEvent) -> Result<()>,
 ) -> Result<Completion> {
     let mut completion = Completion::default();
     let mut pending: Vec<PartialCall> = Vec::new();
+    let mut terminated = false;
+    let mut saw_chunk = false;
     for line in reader.lines() {
         if cancel.is_cancelled() {
             return Err(BloraError::Cancelled);
@@ -136,19 +147,30 @@ fn parse_sse(
             continue;
         }
         if data == "[DONE]" {
+            terminated = true;
             break;
         }
         let value: Value =
             serde_json::from_str(data).map_err(|err| BloraError::provider(err.to_string()))?;
-        if let Some(usage) = value.get("usage") {
+        if let Some(error) = value.get("error") {
+            return Err(BloraError::provider(format!(
+                "HTTP 500: in-stream error {error}"
+            )));
+        }
+        saw_chunk = true;
+        if let Some(usage) = value.get("usage").filter(|usage| !usage.is_null()) {
             completion.input_tokens = usage
                 .get("prompt_tokens")
                 .and_then(Value::as_u64)
-                .unwrap_or(0);
+                .unwrap_or(completion.input_tokens);
             completion.output_tokens = usage
                 .get("completion_tokens")
                 .and_then(Value::as_u64)
-                .unwrap_or(0);
+                .unwrap_or(completion.output_tokens);
+            completion.cached_tokens = usage
+                .pointer("/prompt_tokens_details/cached_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(completion.cached_tokens);
         }
         let Some(choice) = value
             .get("choices")
@@ -160,6 +182,7 @@ fn parse_sse(
         if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
             if !reason.is_empty() && reason != "null" {
                 completion.finish_reason = reason.to_owned();
+                terminated = true;
             }
         }
         let Some(delta) = choice.get("delta") else {
@@ -179,6 +202,7 @@ fn parse_sse(
                 }
                 let slot = &mut pending[index];
                 if let Some(id) = call.get("id").and_then(Value::as_str) {
+                    // Some gateways resend the id on every chunk; assignment, never append.
                     slot.id = id.to_owned();
                 }
                 if let Some(name) = call.pointer("/function/name").and_then(Value::as_str) {
@@ -191,28 +215,33 @@ fn parse_sse(
             }
         }
     }
-    for partial in pending {
+    if !terminated && !saw_chunk {
+        return Err(http::incomplete_stream("any chat completion chunk"));
+    }
+    for (index, partial) in pending.into_iter().enumerate() {
         if partial.name.is_empty() {
             continue;
         }
         let call = ToolCall {
             id: if partial.id.is_empty() {
-                format!("call_{}", partial.name)
+                format!("call_{}_{index}", partial.name)
             } else {
                 partial.id
             },
             name: partial.name,
-            arguments: partial.arguments,
+            arguments: if partial.arguments.trim().is_empty() {
+                "{}".to_owned()
+            } else {
+                partial.arguments
+            },
         };
         on_event(StreamEvent::ToolCall(call.clone()))?;
         completion.tool_calls.push(call);
     }
-    if completion.finish_reason.is_empty() {
-        completion.finish_reason = if completion.tool_calls.is_empty() {
-            "stop".to_owned()
-        } else {
-            "tool_calls".to_owned()
-        };
+    if !completion.tool_calls.is_empty() {
+        completion.finish_reason = "tool_calls".to_owned();
+    } else if completion.finish_reason.is_empty() {
+        completion.finish_reason = "stop".to_owned();
     }
     Ok(completion)
 }
@@ -222,4 +251,34 @@ struct PartialCall {
     id: String,
     name: String,
     arguments: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn parses_parallel_tool_calls_and_cached_usage() {
+        let body = "\
+data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\
+data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"a\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\"}}]}}]}\n\
+data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"b\",\"function\":{\"name\":\"list_dir\",\"arguments\":\"{}\"}}]}}]}\n\
+data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"x\\\"}\"}}]}}]}\n\
+data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"prompt_tokens_details\":{\"cached_tokens\":6}}}\n\
+data: [DONE]\n";
+        let completion =
+            parse_sse(Cursor::new(body), &CancelToken::new(), &mut |_| Ok(())).unwrap();
+        assert_eq!(completion.tool_calls.len(), 2);
+        assert_eq!(completion.tool_calls[0].arguments, "{\"path\":\"x\"}");
+        assert_eq!(completion.tool_calls[1].name, "list_dir");
+        assert_eq!(completion.cached_tokens, 6);
+        assert_eq!(completion.finish_reason, "tool_calls");
+    }
+
+    #[test]
+    fn empty_stream_is_an_error() {
+        let err = parse_sse(Cursor::new(""), &CancelToken::new(), &mut |_| Ok(())).unwrap_err();
+        assert!(err.to_string().contains("stream ended before"));
+    }
 }

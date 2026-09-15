@@ -6,7 +6,7 @@ use std::io::{BufRead, BufReader};
 use blora_types::{BloraError, CancelToken, Result};
 use serde_json::{Value, json};
 
-use crate::{ChatMessage, Completion, CompletionRequest, Provider, StreamEvent, ToolCall};
+use crate::{ChatMessage, Completion, CompletionRequest, Provider, StreamEvent, ToolCall, http};
 
 pub struct GeminiProvider {
     pub api_key: String,
@@ -63,27 +63,38 @@ impl Provider for GeminiProvider {
             .collect();
         let mut body = json!({
             "contents": contents,
-            "tools": [{ "functionDeclarations": declarations }],
+            "generationConfig": {
+                "maxOutputTokens": request.max_output_tokens.unwrap_or_else(http::max_output_tokens),
+            },
         });
+        if !declarations.is_empty() {
+            body["tools"] = json!([{ "functionDeclarations": declarations }]);
+        }
         if !system.is_empty() {
             body["systemInstruction"] = json!({ "parts": [{ "text": system }] });
         }
         let url = format!(
-            "{}/v1beta/models/{model}:streamGenerateContent?alt=sse&key={}",
-            self.base_url, self.api_key
+            "{}/v1beta/models/{model}:streamGenerateContent?alt=sse",
+            self.base_url
         );
-        let response = ureq::post(&url)
+        let response = http::agent()
+            .post(&url)
+            .set("x-goog-api-key", &self.api_key)
             .set("Content-Type", "application/json")
             .set("Accept", "text/event-stream")
             .send_json(body)
-            .map_err(|err| BloraError::provider(err.to_string()))?;
+            .map_err(http::map_error)?;
         parse_gemini_sse(BufReader::new(response.into_reader()), cancel, on_event)
     }
 }
 
 fn split_contents(messages: &[ChatMessage]) -> (String, Vec<Value>) {
     let mut system = String::new();
-    let mut contents = Vec::new();
+    let mut contents: Vec<(String, Vec<Value>)> = Vec::new();
+    let mut push = |role: &str, part: Value| match contents.last_mut() {
+        Some((last, parts)) if last.as_str() == role => parts.push(part),
+        _ => contents.push((role.to_owned(), vec![part])),
+    };
     for message in messages {
         match message.role.as_str() {
             "system" => {
@@ -95,34 +106,49 @@ fn split_contents(messages: &[ChatMessage]) -> (String, Vec<Value>) {
                 }
             }
             "assistant" => {
-                let mut parts = Vec::new();
-                if let Some(text) = &message.content {
-                    parts.push(json!({"text": text}));
+                if let Some(text) = message.content.as_deref().filter(|t| !t.is_empty()) {
+                    push("model", json!({"text": text}));
                 }
                 if let Some(calls) = &message.tool_calls {
                     for call in calls {
                         let args = serde_json::from_str::<Value>(&call.arguments)
                             .unwrap_or_else(|_| json!({"raw": call.arguments}));
-                        parts.push(json!({"functionCall": {"name": call.name, "args": args}}));
+                        push(
+                            "model",
+                            json!({"functionCall": {"name": call.name, "args": args}}),
+                        );
                     }
                 }
-                contents.push(json!({"role": "model", "parts": parts}));
             }
-            "tool" => contents.push(json!({
-                "role": "user",
-                "parts": [{
-                    "functionResponse": {
-                        "name": message.tool_call_id,
-                        "response": { "output": message.content },
-                    }
-                }]
-            })),
-            _ => contents.push(json!({
-                "role": "user",
-                "parts": [{ "text": message.content }],
-            })),
+            "tool" => {
+                let name = message
+                    .tool_call_id
+                    .as_deref()
+                    .map(|id| id.strip_prefix("call_").unwrap_or(id))
+                    .map(|id| id.rsplit_once('_').map_or(id, |(head, _)| head))
+                    .unwrap_or("tool")
+                    .to_owned();
+                push(
+                    "user",
+                    json!({
+                        "functionResponse": {
+                            "name": name,
+                            "response": { "output": message.content },
+                        }
+                    }),
+                );
+            }
+            _ => {
+                if let Some(text) = message.content.as_deref().filter(|t| !t.is_empty()) {
+                    push("user", json!({ "text": text }));
+                }
+            }
         }
     }
+    let contents = contents
+        .into_iter()
+        .map(|(role, parts)| json!({"role": role, "parts": parts}))
+        .collect();
     (system, contents)
 }
 
@@ -132,6 +158,7 @@ pub fn parse_gemini_sse(
     on_event: &mut dyn FnMut(StreamEvent) -> Result<()>,
 ) -> Result<Completion> {
     let mut completion = Completion::default();
+    let mut saw_event = false;
     for line in reader.lines() {
         if cancel.is_cancelled() {
             return Err(BloraError::Cancelled);
@@ -146,12 +173,22 @@ pub fn parse_gemini_sse(
         }
         let value: Value =
             serde_json::from_str(data).map_err(|err| BloraError::provider(err.to_string()))?;
+        if let Some(error) = value.get("error") {
+            let code = error.get("code").and_then(Value::as_u64).unwrap_or(500);
+            return Err(BloraError::provider(format!(
+                "HTTP {code}: in-stream error {error}"
+            )));
+        }
+        saw_event = true;
         if let Some(usage) = value.get("usageMetadata") {
             if let Some(n) = usage.get("promptTokenCount").and_then(Value::as_u64) {
                 completion.input_tokens = n;
             }
             if let Some(n) = usage.get("candidatesTokenCount").and_then(Value::as_u64) {
                 completion.output_tokens = n;
+            }
+            if let Some(n) = usage.get("cachedContentTokenCount").and_then(Value::as_u64) {
+                completion.cached_tokens = n;
             }
         }
         let Some(parts) = value
@@ -173,7 +210,7 @@ pub fn parse_gemini_sse(
                     .to_owned();
                 let args = call.get("args").cloned().unwrap_or(json!({}));
                 let tool = ToolCall {
-                    id: format!("call_{name}"),
+                    id: format!("call_{name}_{}", completion.tool_calls.len()),
                     name,
                     arguments: args.to_string(),
                 };
@@ -191,6 +228,9 @@ pub fn parse_gemini_sse(
             }
         }
     }
+    if !saw_event {
+        return Err(http::incomplete_stream("any candidate"));
+    }
     if completion.finish_reason.is_empty() {
         completion.finish_reason = "stop".to_owned();
     }
@@ -206,7 +246,7 @@ mod tests {
     fn parses_text_and_function_call() {
         let body = "\
 data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hi\"}]}}]}\n\
-data: {\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"list_dir\",\"args\":{\"path\":\".\"}}}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":4,\"candidatesTokenCount\":2}}\n";
+data: {\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"list_dir\",\"args\":{\"path\":\".\"}}}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":4,\"candidatesTokenCount\":2,\"cachedContentTokenCount\":1}}\n";
         let mut deltas = Vec::new();
         let completion = parse_gemini_sse(Cursor::new(body), &CancelToken::new(), &mut |event| {
             if let StreamEvent::TextDelta(text) = event {
@@ -218,5 +258,28 @@ data: {\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"li
         assert_eq!(deltas, vec!["Hi".to_owned()]);
         assert_eq!(completion.tool_calls[0].name, "list_dir");
         assert_eq!(completion.input_tokens, 4);
+        assert_eq!(completion.cached_tokens, 1);
+    }
+
+    #[test]
+    fn tool_results_map_back_to_function_names() {
+        let messages = vec![
+            ChatMessage::text("user", "go"),
+            ChatMessage::assistant(
+                None,
+                vec![ToolCall {
+                    id: "call_list_dir_0".to_owned(),
+                    name: "list_dir".to_owned(),
+                    arguments: "{}".to_owned(),
+                }],
+            ),
+            ChatMessage::tool_result("call_list_dir_0", "a"),
+        ];
+        let (_, contents) = split_contents(&messages);
+        assert_eq!(contents.len(), 3);
+        assert_eq!(
+            contents[2]["parts"][0]["functionResponse"]["name"],
+            "list_dir"
+        );
     }
 }
