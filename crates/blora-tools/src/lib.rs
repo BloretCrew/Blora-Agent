@@ -12,6 +12,8 @@ pub struct ToolSpec {
     pub name: &'static str,
     pub description: &'static str,
     pub parameters: Value,
+    /// Read-only tools can run concurrently and are allowed in read-only roles.
+    pub read_only: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -23,18 +25,21 @@ impl ToolRegistry {
         vec![
             ToolSpec {
                 name: "read_file",
-                description: "Read a UTF-8 text file inside the workspace.",
+                description: "Read a UTF-8 text file inside the workspace. Optional offset/limit select a line range for large files.",
                 parameters: json!({
                     "type": "object",
                     "properties": {
-                        "path": {"type": "string", "description": "Path relative to the workspace"}
+                        "path": {"type": "string", "description": "Path relative to the workspace"},
+                        "offset": {"type": "integer", "minimum": 1, "description": "First line to return (1-based)"},
+                        "limit": {"type": "integer", "minimum": 1, "description": "Maximum number of lines"}
                     },
                     "required": ["path"]
                 }),
+                read_only: true,
             },
             ToolSpec {
                 name: "write_file",
-                description: "Write a UTF-8 text file inside the workspace.",
+                description: "Create or fully replace a UTF-8 text file inside the workspace. Prefer apply_patch for edits to existing files.",
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -43,6 +48,7 @@ impl ToolRegistry {
                     },
                     "required": ["path", "contents"]
                 }),
+                read_only: false,
             },
             ToolSpec {
                 name: "list_dir",
@@ -53,6 +59,7 @@ impl ToolRegistry {
                         "path": {"type": "string", "default": "."}
                     }
                 }),
+                read_only: true,
             },
             ToolSpec {
                 name: "search",
@@ -65,19 +72,22 @@ impl ToolRegistry {
                     },
                     "required": ["pattern"]
                 }),
+                read_only: true,
             },
             ToolSpec {
                 name: "shell",
-                description: "Run a shell command in the workspace. Requires approval unless auto-approve is enabled.",
+                description: "Run a shell command in the workspace. Requires approval unless auto-approve is enabled. timeout_seconds caps foreground commands (default 30, max 600).",
                 parameters: json!({
                     "type": "object",
                     "properties": {
                         "command": {"type": "string"},
                         "background": {"type": "boolean"},
-                        "pty": {"type": "boolean"}
+                        "pty": {"type": "boolean"},
+                        "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600}
                     },
                     "required": ["command"]
                 }),
+                read_only: false,
             },
             ToolSpec {
                 name: "schedule_task",
@@ -92,26 +102,31 @@ impl ToolRegistry {
                     },
                     "required": ["title", "prompt"]
                 }),
+                read_only: false,
             },
             ToolSpec {
                 name: "git_status",
                 description: "Show git status for the workspace.",
                 parameters: json!({"type": "object", "properties": {}}),
+                read_only: true,
             },
             ToolSpec {
                 name: "git_diff",
                 description: "Show git diff --stat against HEAD.",
                 parameters: json!({"type": "object", "properties": {}}),
+                read_only: true,
             },
             ToolSpec {
                 name: "git_log",
                 description: "Show recent git commits.",
                 parameters: json!({"type": "object", "properties": {}}),
+                read_only: true,
             },
             ToolSpec {
                 name: "git_branch",
                 description: "Show git branches for the workspace.",
                 parameters: json!({"type": "object", "properties": {}}),
+                read_only: true,
             },
             ToolSpec {
                 name: "git_worktree",
@@ -123,6 +138,7 @@ impl ToolRegistry {
                         "path": {"type": "string"}
                     }
                 }),
+                read_only: false,
             },
             ToolSpec {
                 name: "process",
@@ -135,19 +151,22 @@ impl ToolRegistry {
                     },
                     "required": ["action"]
                 }),
+                read_only: false,
             },
             ToolSpec {
                 name: "apply_patch",
-                description: "Replace old_string with new_string in a workspace file.",
+                description: "Edit a workspace file by replacing old_string with new_string. old_string must match exactly once; include enough surrounding lines to make it unique. Set replace_all to change every occurrence.",
                 parameters: json!({
                     "type": "object",
                     "properties": {
                         "path": {"type": "string"},
                         "old_string": {"type": "string"},
-                        "new_string": {"type": "string"}
+                        "new_string": {"type": "string"},
+                        "replace_all": {"type": "boolean"}
                     },
                     "required": ["path", "old_string", "new_string"]
                 }),
+                read_only: false,
             },
             ToolSpec {
                 name: "delegate",
@@ -160,6 +179,7 @@ impl ToolRegistry {
                     },
                     "required": ["prompt"]
                 }),
+                read_only: false,
             },
             ToolSpec {
                 name: "remember",
@@ -172,6 +192,7 @@ impl ToolRegistry {
                     },
                     "required": ["key", "value"]
                 }),
+                read_only: false,
             },
             ToolSpec {
                 name: "recall",
@@ -182,6 +203,7 @@ impl ToolRegistry {
                         "key": {"type": "string"}
                     }
                 }),
+                read_only: true,
             },
             ToolSpec {
                 name: "forget",
@@ -193,6 +215,7 @@ impl ToolRegistry {
                     },
                     "required": ["key"]
                 }),
+                read_only: false,
             },
             ToolSpec {
                 name: "handoff",
@@ -205,13 +228,27 @@ impl ToolRegistry {
                     },
                     "required": ["summary"]
                 }),
+                read_only: true,
             },
         ]
     }
 
+    /// True for tools that never mutate workspace, processes, or memory.
+    #[must_use]
+    pub fn is_read_only(name: &str) -> bool {
+        Self::specs()
+            .iter()
+            .any(|spec| spec.name == name && spec.read_only)
+    }
+
     pub fn execute(backend: &LocalBackend, name: &str, arguments: &Value) -> Result<String> {
         match name {
-            "read_file" => backend.read_file(required_str(arguments, "path")?),
+            "read_file" => {
+                let text = backend.read_file(required_str(arguments, "path")?)?;
+                let offset = arguments.get("offset").and_then(Value::as_u64);
+                let limit = arguments.get("limit").and_then(Value::as_u64);
+                Ok(slice_lines(&text, offset, limit))
+            }
             "write_file" => {
                 backend.write_file(
                     required_str(arguments, "path")?,
@@ -240,7 +277,11 @@ impl ToolRegistry {
                 {
                     backend.shell_pty(command)
                 } else {
-                    backend.shell(command)
+                    let timeout = arguments
+                        .get("timeout_seconds")
+                        .and_then(Value::as_u64)
+                        .map(|secs| std::time::Duration::from_secs(secs.clamp(1, 600)));
+                    backend.shell_with_timeout(command, timeout)
                 }
             }
             "git_status" => backend.git_status(),
@@ -267,16 +308,41 @@ impl ToolRegistry {
                 Ok(format!("HANDOFF\n{summary}\n{files}"))
             }
             "apply_patch" => {
-                backend.apply_patch(
+                let replace_all = arguments
+                    .get("replace_all")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let replaced = backend.apply_patch(
                     required_str(arguments, "path")?,
                     required_str(arguments, "old_string")?,
                     required_str(arguments, "new_string")?,
+                    replace_all,
                 )?;
-                Ok("patched file".to_owned())
+                Ok(format!("patched file ({replaced} replacement(s))"))
             }
             other => Err(BloraError::Other(format!("unknown tool: {other}"))),
         }
     }
+}
+
+fn slice_lines(text: &str, offset: Option<u64>, limit: Option<u64>) -> String {
+    if offset.is_none() && limit.is_none() {
+        return text.to_owned();
+    }
+    let start = offset.unwrap_or(1).max(1) as usize - 1;
+    let take = limit.unwrap_or(u64::MAX) as usize;
+    let total = text.lines().count();
+    let mut out: Vec<String> = text
+        .lines()
+        .enumerate()
+        .skip(start)
+        .take(take)
+        .map(|(index, line)| format!("{:>5}\t{line}", index + 1))
+        .collect();
+    if start + out.len() < total {
+        out.push(format!("… ({} more lines)", total - start - out.len()));
+    }
+    out.join("\n")
 }
 
 fn required_str<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
@@ -288,4 +354,27 @@ fn required_str<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
 
 fn optional_str<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     value.get(key).and_then(Value::as_str)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_only_classification() {
+        assert!(ToolRegistry::is_read_only("read_file"));
+        assert!(ToolRegistry::is_read_only("search"));
+        assert!(!ToolRegistry::is_read_only("shell"));
+        assert!(!ToolRegistry::is_read_only("apply_patch"));
+    }
+
+    #[test]
+    fn slices_lines_with_numbers() {
+        let text = "a\nb\nc\nd";
+        let out = slice_lines(text, Some(2), Some(2));
+        assert!(out.contains("    2\tb"));
+        assert!(out.contains("    3\tc"));
+        assert!(out.contains("1 more lines"));
+        assert_eq!(slice_lines(text, None, None), text);
+    }
 }

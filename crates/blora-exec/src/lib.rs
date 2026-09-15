@@ -153,6 +153,11 @@ impl LocalBackend {
     }
 
     pub fn shell(&self, command: &str) -> Result<String> {
+        self.shell_with_timeout(command, None)
+    }
+
+    pub fn shell_with_timeout(&self, command: &str, timeout: Option<Duration>) -> Result<String> {
+        let timeout = timeout.unwrap_or(DEFAULT_SHELL_TIMEOUT);
         self.policy.require(
             self.policy.shell_command(command),
             &format!("shell {command}"),
@@ -179,13 +184,13 @@ impl LocalBackend {
             let status = child.wait();
             let _ = tx.send(status);
         });
-        let status = match rx.recv_timeout(DEFAULT_SHELL_TIMEOUT) {
+        let status = match rx.recv_timeout(timeout) {
             Ok(status) => status.map_err(BloraError::exec)?,
             Err(_) => {
                 let _ = Command::new("kill").arg(pid.to_string()).status();
                 return Err(BloraError::Exec(format!(
                     "command timed out after {}s",
-                    DEFAULT_SHELL_TIMEOUT.as_secs()
+                    timeout.as_secs()
                 )));
             }
         };
@@ -266,15 +271,43 @@ impl LocalBackend {
         }
     }
 
-    pub fn apply_patch(&self, path: &str, old: &str, new: &str) -> Result<()> {
+    /// Replace `old` with `new` in `path`. Without `replace_all` the match must be
+    /// unique so an ambiguous edit cannot land in the wrong place. Returns the
+    /// number of replacements made.
+    pub fn apply_patch(
+        &self,
+        path: &str,
+        old: &str,
+        new: &str,
+        replace_all: bool,
+    ) -> Result<usize> {
+        if old.is_empty() {
+            return Err(BloraError::Exec("old_string must not be empty".to_owned()));
+        }
+        if old == new {
+            return Err(BloraError::Exec(
+                "old_string and new_string are identical".to_owned(),
+            ));
+        }
         let contents = self.read_file(path)?;
-        if !contents.contains(old) {
+        let count = contents.matches(old).count();
+        if count == 0 {
             return Err(BloraError::Exec(format!(
-                "patch target not found in {path}"
+                "patch target not found in {path}; re-read the file and copy the exact text"
             )));
         }
-        let updated = contents.replacen(old, new, 1);
-        self.write_file(path, &updated)
+        if count > 1 && !replace_all {
+            return Err(BloraError::Exec(format!(
+                "old_string matches {count} places in {path}; add surrounding lines to make it unique or set replace_all"
+            )));
+        }
+        let updated = if replace_all {
+            contents.replace(old, new)
+        } else {
+            contents.replacen(old, new, 1)
+        };
+        self.write_file(path, &updated)?;
+        Ok(if replace_all { count } else { 1 })
     }
 
     pub fn shell_pty(&self, command: &str) -> Result<String> {
@@ -450,7 +483,22 @@ mod tests {
         assert_eq!(backend.read_file("notes.txt").unwrap(), "hello");
         assert!(backend.list_dir(".").unwrap().contains("notes.txt"));
         assert!(backend.search("hello", None).unwrap().contains("notes.txt"));
-        backend.apply_patch("notes.txt", "hello", "hallo").unwrap();
+        backend
+            .apply_patch("notes.txt", "hello", "hallo", false)
+            .unwrap();
         assert_eq!(backend.read_file("notes.txt").unwrap(), "hallo");
+    }
+
+    #[test]
+    fn apply_patch_requires_unique_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let policy = Policy::new(dir.path(), true).unwrap();
+        let backend = LocalBackend::new(policy);
+        backend.write_file("a.txt", "x\nx\n").unwrap();
+        let err = backend.apply_patch("a.txt", "x", "y", false).unwrap_err();
+        assert!(err.to_string().contains("matches 2 places"));
+        assert_eq!(backend.apply_patch("a.txt", "x", "y", true).unwrap(), 2);
+        assert_eq!(backend.read_file("a.txt").unwrap(), "y\ny\n");
+        assert!(backend.apply_patch("a.txt", "zzz", "y", false).is_err());
     }
 }
