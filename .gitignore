@@ -10,3 +10,16 @@
 *.swp
 .DS_Store
 web/node_modules/
+
+# Reference harness checkouts: design comparison only, never part of the product tree.
+/CrewRouter-Desktop/
+/blora-design/
+/claude-code-source-code/
+/codex/
+/deepseek-harness/
+/grok-build/
+/hermes-agent/
+/openclaw/
+/opencode/
+/qwen-code/
+/docs/researches/
