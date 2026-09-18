@@ -12,6 +12,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use ureq::OrAnyStatus;
+
 pub const DEFAULT_PASSPORT_URL: &str = "https://passport.bloret.net";
 pub const DEFAULT_PASSPORT_APP_ID: &str = "bp_98a98eeb52be6618";
 pub const DEFAULT_PASSPORT_APP_SECRET: &str = "bs_00c2e065fbcc17f844499c2e9814ea3368c999477c179884";
@@ -80,6 +82,7 @@ impl PassportConfig {
             .set("Accept", "application/json")
             .timeout(Duration::from_secs(20))
             .send_string(&body)
+            .or_any_status()
             .map_err(|err| AuthError::Network(err.to_string()))?;
         let status = response.status();
         let value: Value = response
@@ -145,6 +148,7 @@ impl PassportConfig {
                 .set("Accept", "application/json")
                 .timeout(Duration::from_secs(20))
                 .send_string(&body)
+                .or_any_status()
                 .map_err(|err| AuthError::Network(err.to_string()))?;
             let status = response.status();
             let value: Value = response
@@ -180,6 +184,7 @@ impl PassportConfig {
             .set("Authorization", &format!("Bearer {access_token}"))
             .timeout(Duration::from_secs(20))
             .call()
+            .or_any_status()
             .map_err(|err| AuthError::Network(err.to_string()))?;
         let status = response.status();
         let value: Value = response
@@ -205,6 +210,7 @@ impl PassportConfig {
             .set("X-App-Secret", &self.app_secret)
             .timeout(Duration::from_secs(20))
             .send_json(body)
+            .or_any_status()
             .map_err(|err| AuthError::Network(err.to_string()))?;
         let status = response.status();
         let value: Value = response
@@ -356,6 +362,79 @@ mod tests {
         let config = PassportConfig::from_env().unwrap();
         assert_eq!(config.app_id, DEFAULT_PASSPORT_APP_ID);
         assert_eq!(config.app_secret, DEFAULT_PASSPORT_APP_SECRET);
+    }
+
+    #[test]
+    fn poll_device_keeps_polling_through_authorization_pending() {
+        use std::io::Read;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let mut pending = true;
+            loop {
+                let Ok((stream, _)) = listener.accept() else {
+                    return;
+                };
+                let mut stream = stream;
+                let mut buffer = [0u8; 4096];
+                let Ok(read) = Read::read(&mut stream, &mut buffer) else {
+                    continue;
+                };
+                let request = String::from_utf8_lossy(&buffer[..read]).into_owned();
+                if request.starts_with("POST /oauth/token") {
+                    if pending {
+                        pending = false;
+                        write_response(
+                            &mut stream,
+                            400,
+                            "Bad Request",
+                            br#"{"error":"authorization_pending"}"#,
+                        );
+                    } else {
+                        write_response(
+                            &mut stream,
+                            200,
+                            "OK",
+                            br#"{"access_token":"t","token_type":"bearer"}"#,
+                        );
+                    }
+                    continue;
+                }
+                if request.starts_with("GET /oauth/userinfo") {
+                    write_response(
+                        &mut stream,
+                        200,
+                        "OK",
+                        br#"{"username":"alice","nickname":"Alice"}"#,
+                    );
+                    return;
+                }
+                write_response(
+                    &mut stream,
+                    404,
+                    "Not Found",
+                    br#"{"error":"unsupported_endpoint"}"#,
+                );
+            }
+        });
+
+        let config = PassportConfig::new("bp_app", "bs_secret", format!("http://{addr}")).unwrap();
+        let device = DeviceCode::from_public("dc", "ABCD-EFGH", "https://passport.example", 60, 1);
+        let user = config.poll_device(&device).unwrap();
+        assert_eq!(user.username, "alice");
+        assert_eq!(user.display_name(), "Alice");
+        server.join().unwrap();
+    }
+
+    fn write_response(stream: &mut std::net::TcpStream, status: u16, text: &str, body: &[u8]) {
+        use std::io::Write;
+        let head = format!(
+            "HTTP/1.1 {status} {text}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(head.as_bytes()).unwrap();
+        stream.write_all(body).unwrap();
     }
 
     #[test]

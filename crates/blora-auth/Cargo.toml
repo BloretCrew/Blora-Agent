@@ -13,5 +13,6 @@ serde_json.workspace = true
 thiserror.workspace = true
 ureq.workspace = true
 
+
 [lints]
 workspace = true
