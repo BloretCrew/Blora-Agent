@@ -519,6 +519,7 @@ fn dispatch(
                     provider: provider.unwrap_or_default(),
                     read_only: false,
                     worktree,
+                    passport_user_token: None,
                 },
             )?;
             println!("run {run_id}");

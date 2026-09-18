@@ -2,7 +2,8 @@
 // Copyright (C) 2026 Blora Agent contributors
 
 use crate::{
-    AnthropicProvider, GeminiProvider, MockProvider, OpenAiProvider, Provider, ResponsesProvider,
+    AnthropicProvider, GeminiProvider, MockProvider, OpenAiProvider, PassportProvider, Provider,
+    ResponsesProvider,
 };
 
 /// Build a provider from `BLORA_PROVIDER` or an explicit name.
@@ -19,13 +20,35 @@ pub fn make_provider(force_mock: bool, name: &str) -> Box<dyn Provider> {
 
 #[must_use]
 pub fn make_providers(force_mock: bool, name: &str) -> Vec<Box<dyn Provider>> {
+    resolve_provider_chain(force_mock, name, None)
+}
+
+/// Resolve the provider chain for an optional logged-in PassPort user.
+///
+/// A logged-in user defaults to the PassPort provider (`blora`) unless a
+/// provider was explicitly chosen for the run; an anonymous session falls back
+/// to `BLORA_PROVIDER` / `openai`.
+#[must_use]
+pub fn resolve_provider_chain(
+    force_mock: bool,
+    requested: &str,
+    user_token: Option<&str>,
+) -> Vec<Box<dyn Provider>> {
     if force_mock {
         return vec![Box::new(MockProvider::new())];
     }
-    let spec = if name.is_empty() {
-        std::env::var("BLORA_PROVIDER").unwrap_or_else(|_| "openai".to_owned())
+    let explicit = !requested.trim().is_empty();
+    let login_default = !explicit
+        && user_token
+            .filter(|token| !token.trim().is_empty())
+            .and_then(passport_provider)
+            .is_some();
+    let spec = if explicit {
+        requested.to_owned()
+    } else if login_default {
+        "blora".to_owned()
     } else {
-        name.to_owned()
+        std::env::var("BLORA_PROVIDER").unwrap_or_else(|_| "openai".to_owned())
     };
     let mut out = Vec::new();
     for part in spec.split(',') {
@@ -33,12 +56,38 @@ pub fn make_providers(force_mock: bool, name: &str) -> Vec<Box<dyn Provider>> {
         if part.is_empty() {
             continue;
         }
-        out.push(one(part));
+        match part.to_ascii_lowercase().as_str() {
+            "blora" | "passport" | "bloret-passport" => out.push(
+                user_token
+                    .and_then(passport_provider)
+                    .unwrap_or_else(|| Box::new(MockProvider::new())),
+            ),
+            _ => out.push(one(part)),
+        }
     }
     if out.is_empty() {
         out.push(Box::new(MockProvider::new()));
     }
     out
+}
+
+fn passport_provider(user_token: &str) -> Option<Box<dyn Provider>> {
+    let user_token = user_token.trim();
+    if user_token.is_empty() {
+        return None;
+    }
+    let app_id = std::env::var("BLORA_PASSPORT_APP_ID")
+        .unwrap_or_else(|_| blora_auth::DEFAULT_PASSPORT_APP_ID.to_owned());
+    let app_secret = std::env::var("BLORA_PASSPORT_APP_SECRET")
+        .unwrap_or_else(|_| blora_auth::DEFAULT_PASSPORT_APP_SECRET.to_owned());
+    if app_id.trim().is_empty() || app_secret.trim().is_empty() {
+        return None;
+    }
+    Some(Box::new(PassportProvider::from_parts(
+        app_id.trim(),
+        app_secret.trim(),
+        user_token,
+    )))
 }
 
 fn one(kind: &str) -> Box<dyn Provider> {
@@ -107,5 +156,36 @@ mod tests {
         assert_eq!(make_provider(true, "openai,anthropic").name(), "mock");
         let chain = make_providers(true, "openai,anthropic");
         assert_eq!(chain.len(), 1);
+    }
+
+    #[test]
+    fn logged_in_user_defaults_to_blora() {
+        let chain = resolve_provider_chain(false, "", Some("tok"));
+        assert_eq!(chain.len(), 1);
+        assert_eq!(chain[0].name(), "blora");
+    }
+
+    #[test]
+    fn logged_in_user_keeps_explicit_provider() {
+        // Explicit non-blora request wins over the login default.
+        let chain = resolve_provider_chain(false, "mock", Some("tok"));
+        assert_eq!(chain[0].name(), "mock");
+    }
+
+    #[test]
+    fn anonymous_session_falls_back_to_openai() {
+        let chain = resolve_provider_chain(false, "", None);
+        assert!(matches!(
+            chain[0].name(),
+            "openai" | "mock" | "responses" | "anthropic" | "gemini" | "blora"
+        ));
+    }
+
+    #[test]
+    fn blora_alias_names_resolve() {
+        for name in ["blora", "passport", "bloret-passport"] {
+            let chain = resolve_provider_chain(false, name, Some("tok"));
+            assert_eq!(chain[0].name(), "blora", "alias {name}");
+        }
     }
 }

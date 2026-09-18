@@ -66,6 +66,55 @@ impl OpenAiProvider {
     }
 }
 
+/// Build the Chat Completions request body for `model`.
+pub(crate) fn chat_completions_body(request: &CompletionRequest, model: &str) -> Value {
+    let tools: Vec<Value> = request
+        .tools
+        .iter()
+        .map(|tool| {
+            json!({
+                "type": "function",
+                "function": {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": tool.parameters,
+                }
+            })
+        })
+        .collect();
+    let mut body = json!({
+        "model": model,
+        "stream": true,
+        "stream_options": {"include_usage": true},
+        "messages": openai_messages(&request.messages),
+        "max_completion_tokens": request.max_output_tokens.unwrap_or_else(http::max_output_tokens),
+    });
+    if !tools.is_empty() {
+        body["tools"] = Value::Array(tools);
+    }
+    if let Some(key) = &request.cache_key {
+        body["prompt_cache_key"] = json!(key);
+    }
+    body
+}
+
+/// POST a Chat Completions body and return the SSE reader.
+pub(crate) fn post_chat_completions(
+    base_url: &str,
+    api_key: &str,
+    body: Value,
+) -> Result<impl BufRead> {
+    let url = format!("{base_url}/chat/completions");
+    let response = http::agent()
+        .post(&url)
+        .set("Authorization", &format!("Bearer {api_key}"))
+        .set("Content-Type", "application/json")
+        .set("Accept", "text/event-stream")
+        .send_json(body)
+        .map_err(http::map_error)?;
+    Ok(BufReader::new(response.into_reader()))
+}
+
 impl Provider for OpenAiProvider {
     fn name(&self) -> &'static str {
         "openai"
@@ -85,42 +134,8 @@ impl Provider for OpenAiProvider {
         } else {
             request.model.clone()
         };
-        let tools: Vec<Value> = request
-            .tools
-            .iter()
-            .map(|tool| {
-                json!({
-                    "type": "function",
-                    "function": {
-                        "name": tool.name,
-                        "description": tool.description,
-                        "parameters": tool.parameters,
-                    }
-                })
-            })
-            .collect();
-        let mut body = json!({
-            "model": model,
-            "stream": true,
-            "stream_options": {"include_usage": true},
-            "messages": openai_messages(&request.messages),
-            "max_completion_tokens": request.max_output_tokens.unwrap_or_else(http::max_output_tokens),
-        });
-        if !tools.is_empty() {
-            body["tools"] = Value::Array(tools);
-        }
-        if let Some(key) = &request.cache_key {
-            body["prompt_cache_key"] = json!(key);
-        }
-        let url = format!("{}/chat/completions", self.base_url);
-        let response = http::agent()
-            .post(&url)
-            .set("Authorization", &format!("Bearer {}", self.api_key))
-            .set("Content-Type", "application/json")
-            .set("Accept", "text/event-stream")
-            .send_json(body)
-            .map_err(http::map_error)?;
-        let reader = BufReader::new(response.into_reader());
+        let body = chat_completions_body(request, &model);
+        let reader = post_chat_completions(&self.base_url, &self.api_key, body)?;
         parse_sse(reader, cancel, on_event)
     }
 }

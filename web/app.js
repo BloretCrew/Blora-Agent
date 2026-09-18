@@ -788,7 +788,7 @@ async function refreshSettings() {
     model.value = stored("blora-model", info.model);
   }
   document.querySelector("#settings-meta").textContent =
-    `环境 provider=${info.provider} model=${info.model} exec=${info.exec} gateway=${info.gateway} key=${info.has_api_key} mcp=${info.mcp} plugins=${(info.plugins || []).join(",") || "-"}`;
+    `供应商 ${info.provider_display || info.provider} · 模型 ${info.model} · exec=${info.exec} gateway=${info.gateway} key=${info.has_api_key} mcp=${info.mcp} plugins=${(info.plugins || []).join(",") || "-"}`;
   const tokenInput = fieldInput("#pref-token") || document.querySelector("#pref-token");
   if (tokenInput && !tokenInput.value) {
     tokenInput.value = stored("blora-token");

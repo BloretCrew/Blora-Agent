@@ -586,6 +586,11 @@ async fn run_session(
 ) -> Result<Json<SessionJson>, ApiError> {
     let session_id = SessionId::parse(&id).map_err(ApiError::from)?;
     ensure_session(&state, &headers, &session_id)?;
+    // Logged-in PassPort users run on the PassPort provider by default, so
+    // they never fall back to the mock provider for lack of an API key.
+    let passport_user_token = current_user(&state, &headers)?
+        .and_then(|user| user.passport_app_token)
+        .filter(|token| !token.trim().is_empty());
     let runtime = state.runtime.clone();
     let prompt = body.prompt;
     let cancel = CancelToken::new();
@@ -596,7 +601,8 @@ async fn run_session(
         .insert(id.clone(), cancel.clone());
     let options = RunOptions {
         mock: body.mock
-            || (std::env::var("BLORA_API_KEY").is_err()
+            || (passport_user_token.is_none()
+                && std::env::var("BLORA_API_KEY").is_err()
                 && std::env::var("OPENAI_API_KEY").is_err()
                 && std::env::var("ANTHROPIC_API_KEY").is_err()
                 && std::env::var("GEMINI_API_KEY").is_err()),
@@ -605,6 +611,7 @@ async fn run_session(
         provider: body.provider.unwrap_or_default(),
         model: body.model.unwrap_or_default(),
         worktree: body.worktree,
+        passport_user_token,
         ..RunOptions::default()
     };
     let result =
@@ -1026,15 +1033,32 @@ async fn plugins(State(state): State<AppState>) -> Json<serde_json::Value> {
     }))
 }
 
-async fn settings(State(state): State<AppState>) -> Json<serde_json::Value> {
+async fn settings(
+    State(state): State<AppState>,
+    headers: HttpHeaderMap,
+) -> Json<serde_json::Value> {
     let plugins = state.runtime.list_plugins(&state.workspace);
+    // Logged-in PassPort users default to the PassPort provider (`blora`).
+    let logged_in = current_user(&state, &headers).ok().flatten().is_some();
+    let default_provider = if logged_in {
+        blora_model::PASSPORT_MODEL_NAME.to_owned()
+    } else {
+        std::env::var("BLORA_PROVIDER").unwrap_or_else(|_| "openai".to_owned())
+    };
+    let has_api_key = logged_in
+        || std::env::var("BLORA_API_KEY").is_ok()
+        || std::env::var("OPENAI_API_KEY").is_ok()
+        || std::env::var("ANTHROPIC_API_KEY").is_ok()
+        || std::env::var("GEMINI_API_KEY").is_ok();
     Json(serde_json::json!({
-        "provider": std::env::var("BLORA_PROVIDER").unwrap_or_else(|_| "openai".to_owned()),
+        "provider": default_provider,
+        "provider_display": if logged_in {
+            blora_model::PASSPORT_PROVIDER_DISPLAY_NAME.to_owned()
+        } else {
+            default_provider.clone()
+        },
         "model": std::env::var("BLORA_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_owned()),
-        "has_api_key": std::env::var("BLORA_API_KEY").is_ok()
-            || std::env::var("OPENAI_API_KEY").is_ok()
-            || std::env::var("ANTHROPIC_API_KEY").is_ok()
-            || std::env::var("GEMINI_API_KEY").is_ok(),
+        "has_api_key": has_api_key,
         "mcp": std::env::var("BLORA_MCP_COMMAND").is_ok(),
         "worktree": std::env::var("BLORA_WORKTREE").is_ok(),
         "exec": std::env::var("BLORA_EXEC").unwrap_or_else(|_| "local".to_owned()),

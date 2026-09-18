@@ -8,6 +8,7 @@ mod factory;
 mod gemini;
 pub mod http;
 mod openai;
+mod passport;
 mod responses;
 pub mod retry;
 
@@ -19,9 +20,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 pub use anthropic::AnthropicProvider;
-pub use factory::{make_provider, make_providers};
+pub use factory::{make_provider, make_providers, resolve_provider_chain};
 pub use gemini::GeminiProvider;
 pub use openai::OpenAiProvider;
+pub use passport::{
+    PASSPORT_API_BASE_URL, PASSPORT_MODEL_NAME, PASSPORT_PROVIDER_DISPLAY_NAME, PassportProvider,
+};
 pub use responses::ResponsesProvider;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

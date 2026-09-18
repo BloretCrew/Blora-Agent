@@ -54,15 +54,21 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut passport_url = None;
     let mut passport_receiver = None;
     let mut passport_browser_opened = false;
-    if let Ok(users) = runtime.list_users()
-        && !users.iter().any(|user| user.passport_username.is_some())
-    {
-        if let Some((device, receiver)) = start_passport_login()? {
-            eprintln!("需要登录 Bloret PassPort");
-            eprintln!("设备码：{}", device.user_code);
-            eprintln!("登录链接：{}", device.verification_uri);
-            passport_url = Some(device.verification_uri.clone());
-            passport_receiver = Some(receiver);
+    // PassPort user token of the logged-in user; drives the default provider.
+    let mut passport_user_token: Option<String> = None;
+    if let Ok(users) = runtime.list_users() {
+        passport_user_token = users
+            .iter()
+            .find_map(|user| user.passport_app_token.clone())
+            .filter(|token| !token.trim().is_empty());
+        if !users.iter().any(|user| user.passport_username.is_some()) {
+            if let Some((device, receiver)) = start_passport_login()? {
+                eprintln!("需要登录 Bloret PassPort");
+                eprintln!("设备码：{}", device.user_code);
+                eprintln!("登录链接：{}", device.verification_uri);
+                passport_url = Some(device.verification_uri.clone());
+                passport_receiver = Some(receiver);
+            }
         }
     }
     let mut sessions = runtime.list_sessions()?;
@@ -117,6 +123,10 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                     user.email.as_deref(),
                     user.apptoken.as_deref(),
                 )?;
+                passport_user_token = user
+                    .apptoken
+                    .clone()
+                    .filter(|token| !token.trim().is_empty());
                 passport_receiver = None;
                 status = format!("PassPort 登录成功：{}", user.display_name());
             }
@@ -155,8 +165,13 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
             } else {
                 model_override.as_str()
             };
+            // Logged-in PassPort users run on the PassPort provider by default.
             let provider = if provider_override.is_empty() {
-                env_provider.as_str()
+                if env_provider.is_empty() && passport_user_token.is_some() {
+                    "Blora"
+                } else {
+                    env_provider.as_str()
+                }
             } else {
                 provider_override.as_str()
             };
@@ -357,13 +372,15 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     notice = None;
                                     status = "running…".to_owned();
                                     let options = RunOptions {
-                                        mock: std::env::var("BLORA_API_KEY").is_err()
+                                        mock: passport_user_token.is_none()
+                                            && std::env::var("BLORA_API_KEY").is_err()
                                             && std::env::var("OPENAI_API_KEY").is_err()
                                             && std::env::var("GEMINI_API_KEY").is_err(),
                                         auto_approve,
                                         interactive: true,
                                         model: model_override.clone(),
                                         provider: provider_override.clone(),
+                                        passport_user_token: passport_user_token.clone(),
                                         ..RunOptions::default()
                                     };
                                     let cancel_clone = cancel.clone();
@@ -586,13 +603,15 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                         notice = None;
                                         status = "running…".to_owned();
                                         let options = RunOptions {
-                                            mock: std::env::var("BLORA_API_KEY").is_err()
+                                            mock: passport_user_token.is_none()
+                                                && std::env::var("BLORA_API_KEY").is_err()
                                                 && std::env::var("OPENAI_API_KEY").is_err()
                                                 && std::env::var("GEMINI_API_KEY").is_err(),
                                             auto_approve,
                                             interactive: true,
                                             model: model_override.clone(),
                                             provider: provider_override.clone(),
+                                            passport_user_token: passport_user_token.clone(),
                                             ..RunOptions::default()
                                         };
                                         let cancel_clone = cancel.clone();

@@ -8,6 +8,7 @@ authors.workspace = true
 description = "Provider trait and OpenAI-compatible adapter for Blora Agent."
 
 [dependencies]
+blora-auth.workspace = true
 blora-types.workspace = true
 serde.workspace = true
 serde_json.workspace = true

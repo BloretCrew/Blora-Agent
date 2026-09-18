@@ -101,6 +101,7 @@ impl Runtime {
             provider: options.provider.clone(),
             read_only,
             worktree: false,
+            passport_user_token: options.passport_user_token.clone(),
         };
         let can_spawn = depth < MAX_SUBAGENT_DEPTH;
         let child_prompt = if can_spawn {

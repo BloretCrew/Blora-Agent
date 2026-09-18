@@ -12,7 +12,8 @@ use blora_events::{
 use blora_exec::{Isolation, LocalBackend, WorktreeHandle};
 use blora_model::retry::{self, RetryClass};
 use blora_model::{
-    Completion, CompletionRequest, Provider, StreamEvent, ToolCall, ToolDeclaration, make_providers,
+    Completion, CompletionRequest, Provider, StreamEvent, ToolCall, ToolDeclaration,
+    resolve_provider_chain,
 };
 use blora_policy::Policy;
 use blora_session::SessionProjection;
@@ -66,6 +67,9 @@ pub struct RunOptions {
     pub provider: String,
     pub read_only: bool,
     pub worktree: bool,
+    /// PassPort user token of the owner of this run; logged-in users default
+    /// to the PassPort provider (`blora`) when no provider is requested.
+    pub passport_user_token: Option<String>,
 }
 
 impl Default for RunOptions {
@@ -79,6 +83,7 @@ impl Default for RunOptions {
             provider: String::new(),
             read_only: false,
             worktree: false,
+            passport_user_token: None,
         }
     }
 }
@@ -465,11 +470,17 @@ impl Runtime {
         }
         let policy = Policy::new(&exec_root, options.auto_approve)?;
         let backend = LocalBackend::new(policy).with_isolation(Isolation::from_env());
-        let providers = make_providers(options.mock, &options.provider);
+        let providers = resolve_provider_chain(
+            options.mock,
+            &options.provider,
+            options.passport_user_token.as_deref(),
+        );
         let mut provider_index = 0;
         let model = if options.model.is_empty() {
             if options.mock || providers[provider_index].name() == "mock" {
                 "mock".to_owned()
+            } else if providers[provider_index].name() == "blora" {
+                blora_model::PASSPORT_MODEL_NAME.to_owned()
             } else {
                 std::env::var("BLORA_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_owned())
             }
