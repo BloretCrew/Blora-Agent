@@ -82,8 +82,39 @@ impl SqliteStore {
             params![id, name, token_hash, created_at, username, nickname, avatar, email, app_token],
         )
         .map_err(BloraError::storage)?;
-        self.user_by_passport_username(username)?
-            .ok_or_else(|| BloraError::Other("Passport user was not stored".to_owned()))
+        // Must not call user_by_passport_username here: it re-locks the same
+        // non-reentrant connection mutex and would deadlock the caller.
+        let row = conn
+            .query_row(
+                "SELECT id, name, token_hash, created_at, passport_username, passport_nickname, passport_avatar, passport_email, passport_app_token FROM users WHERE passport_username = ?1",
+                params![username],
+                |row| {
+                    let created: String = row.get(3)?;
+                    let created_at = DateTime::parse_from_rfc3339(&created)
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .map_err(|err| {
+                            rusqlite::Error::InvalidColumnType(
+                                3,
+                                err.to_string(),
+                                rusqlite::types::Type::Text,
+                            )
+                        })?;
+                    Ok(UserRecord {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        token_hash: row.get(2)?,
+                        created_at,
+                        passport_username: row.get(4)?,
+                        passport_nickname: row.get(5)?,
+                        passport_avatar: row.get(6)?,
+                        passport_email: row.get(7)?,
+                        passport_app_token: row.get(8)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(BloraError::storage)?;
+        row.ok_or_else(|| BloraError::Other("Passport user was not stored".to_owned()))
     }
 
     pub fn clear_passport_users(&self) -> Result<usize> {
@@ -325,5 +356,45 @@ mod tests {
         let found = store.user_by_token(&token).unwrap().unwrap();
         assert_eq!(found.id, user.id);
         assert!(store.user_by_token("blt_nope").unwrap().is_none());
+    }
+
+    #[test]
+    fn upsert_passport_user_does_not_deadlock_on_connection_mutex() {
+        // Regression: upsert used to call user_by_passport_username while
+        // still holding the connection lock, which re-locks the same
+        // non-reentrant mutex and hangs the caller forever.
+        let store = std::sync::Arc::new(SqliteStore::open_in_memory().unwrap());
+        std::thread::scope(|scope| {
+            let store_for_reader = store.clone();
+            let reader = scope.spawn(move || {
+                for _ in 0..50 {
+                    // Interleave reader traffic so a self-deadlock surfaces as
+                    // this loop never completing rather than a silent hang.
+                    let _ = store_for_reader.user_by_passport_username("rhedar");
+                }
+            });
+            let store_for_upsert = store.clone();
+            let upsert = scope.spawn(move || {
+                for round in 0..10 {
+                    let record = store_for_upsert
+                        .upsert_passport_user(
+                            "rhedar",
+                            Some(&format!("Rhedar {round}")),
+                            None,
+                            None,
+                            None,
+                        )
+                        .unwrap();
+                    assert_eq!(record.passport_username.as_deref(), Some("rhedar"));
+                }
+            });
+            reader.join().unwrap();
+            upsert.join().unwrap();
+        });
+        let stored = store
+            .user_by_passport_username("rhedar")
+            .unwrap()
+            .expect("user stored");
+        assert_eq!(stored.passport_nickname.as_deref(), Some("Rhedar 9"));
     }
 }
