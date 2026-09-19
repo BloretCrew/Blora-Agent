@@ -157,48 +157,97 @@ fn parse_align(cell: &str) -> Align {
     }
 }
 
-fn pad_cell(text: &str, width: usize, align: Align) -> String {
-    let w = text.width();
-    if w >= width {
-        return truncate_width(text, width);
+fn visible_cell_width(text: &str) -> usize {
+    let mut plain = text.to_owned();
+    for marker in ["**", "__", "~~", "`"] {
+        plain = plain.replace(marker, "");
     }
-    let pad = width - w;
-    match align {
-        Align::Left => format!("{text}{}", " ".repeat(pad)),
-        Align::Right => format!("{}{text}", " ".repeat(pad)),
-        Align::Center => {
-            let left = pad / 2;
-            format!("{}{text}{}", " ".repeat(left), " ".repeat(pad - left))
-        }
-    }
+    plain.replace('*', "").width().max(1)
 }
 
-fn truncate_width(text: &str, width: usize) -> String {
-    if width == 0 {
-        return String::new();
+fn fit_columns(natural: &[usize], usable: usize) -> Vec<usize> {
+    let cols = natural.len();
+    if cols == 0 {
+        return Vec::new();
     }
-    if text.width() <= width {
-        return text.to_owned();
+    let sep = 3 * cols.saturating_sub(1);
+    let budget = usable.saturating_sub(sep).max(cols);
+    let sum: usize = natural.iter().sum();
+    if sum <= budget {
+        return natural.to_vec();
     }
-    if width == 1 {
-        return "…".to_owned();
+    let min_w = (budget / cols).clamp(1, 8).min(4).max(1);
+    if min_w.saturating_mul(cols) > budget {
+        return vec![(budget / cols).max(1); cols];
     }
-    let mut out = String::new();
+    let extra = budget - min_w * cols;
+    let weights: Vec<usize> = natural
+        .iter()
+        .map(|width| width.saturating_sub(min_w).max(1))
+        .collect();
+    let weight_sum: usize = weights.iter().sum::<usize>().max(1);
+    let mut out = vec![min_w; cols];
     let mut used = 0usize;
-    for ch in text.chars() {
-        let cw = ch.width().unwrap_or(0);
-        if used + cw + 1 > width {
+    for index in 0..cols {
+        let add = extra * weights[index] / weight_sum;
+        out[index] += add;
+        used += add;
+    }
+    let mut rem = extra.saturating_sub(used);
+    let mut order: Vec<usize> = (0..cols).collect();
+    order.sort_by_key(|&index| std::cmp::Reverse(natural[index]));
+    for index in order {
+        if rem == 0 {
             break;
         }
-        out.push(ch);
-        used += cw;
-    }
-    out.push('…');
-    let extra = width.saturating_sub(out.width());
-    if extra > 0 {
-        out.push_str(&" ".repeat(extra));
+        out[index] += 1;
+        rem -= 1;
     }
     out
+}
+
+fn spans_width(spans: &[Span<'_>]) -> usize {
+    spans.iter().map(|span| span.content.width()).sum()
+}
+
+fn pad_spans(
+    mut spans: Vec<Span<'static>>,
+    width: usize,
+    align: Align,
+    theme: &Theme,
+) -> Vec<Span<'static>> {
+    let used = spans_width(&spans);
+    if used >= width {
+        return spans;
+    }
+    let pad = Span::styled(" ".repeat(width - used), theme.fg(theme.text));
+    match align {
+        Align::Left => {
+            spans.push(pad);
+            spans
+        }
+        Align::Right => {
+            let mut out = vec![pad];
+            out.append(&mut spans);
+            out
+        }
+        Align::Center => {
+            let total = width - used;
+            let left = total / 2;
+            let mut out = Vec::new();
+            if left > 0 {
+                out.push(Span::styled(" ".repeat(left), theme.fg(theme.text)));
+            }
+            out.append(&mut spans);
+            if total - left > 0 {
+                out.push(Span::styled(
+                    " ".repeat(total - left),
+                    theme.fg(theme.text),
+                ));
+            }
+            out
+        }
+    }
 }
 
 fn render_table(
@@ -231,48 +280,47 @@ fn render_table(
     if cols == 0 {
         return Vec::new();
     }
-    let mut col_w = vec![0usize; cols];
+    let mut natural = vec![1usize; cols];
     for (_, row) in &body {
         for (index, cell) in row.iter().enumerate() {
-            col_w[index] = col_w[index].max(cell.width());
+            natural[index] = natural[index].max(visible_cell_width(cell));
         }
     }
-    let sep_w = 3; // ` │ `
-    let usable = width.saturating_sub(2).max(cols);
-    let min_total = cols + sep_w * cols.saturating_sub(1);
-    if col_w.iter().sum::<usize>() + sep_w * cols.saturating_sub(1) > usable {
-        let extra = usable.saturating_sub(min_total);
-        let base = extra / cols;
-        let mut rem = extra % cols;
-        for width in &mut col_w {
-            *width = 1 + base + usize::from(rem > 0);
-            rem = rem.saturating_sub(1);
-        }
-    }
+    let usable = width.max(cols);
+    let col_w = fit_columns(&natural, usable);
+    let base = theme.fg(theme.text);
     let mut out = Vec::new();
     for (is_header, row) in body {
-        let mut line = String::new();
+        let mut wrapped: Vec<Vec<Vec<Span<'static>>>> = Vec::with_capacity(cols);
+        let mut height = 1usize;
         for index in 0..cols {
-            if index > 0 {
-                line.push_str(" │ ");
-            }
             let cell = row.get(index).map(String::as_str).unwrap_or("");
-            let align = aligns.get(index).copied().unwrap_or(Align::Left);
-            line.push_str(&pad_cell(cell, col_w[index], align));
+            let mut spans = render_inlines(cell, base, needle, theme);
+            if is_header {
+                spans = spans
+                    .into_iter()
+                    .map(|span| Span::styled(span.content, span.style.add_modifier(Modifier::BOLD)))
+                    .collect();
+            }
+            let lines = wrap_spans(spans, col_w[index].max(1), theme);
+            height = height.max(lines.len().max(1));
+            wrapped.push(lines);
         }
-        let style = if is_header {
-            theme.fg(theme.text).add_modifier(Modifier::BOLD)
-        } else {
-            theme.fg(theme.text)
-        };
-        let mut spans = highlight(line, style, needle, theme);
-        if is_header {
-            spans = spans
-                .into_iter()
-                .map(|span| Span::styled(span.content, span.style.add_modifier(Modifier::BOLD)))
-                .collect();
+        for line_idx in 0..height {
+            let mut spans = Vec::new();
+            for index in 0..cols {
+                if index > 0 {
+                    spans.push(Span::styled(" │ ".to_owned(), theme.mute()));
+                }
+                let piece = wrapped[index]
+                    .get(line_idx)
+                    .cloned()
+                    .unwrap_or_default();
+                let align = aligns.get(index).copied().unwrap_or(Align::Left);
+                spans.extend(pad_spans(piece, col_w[index].max(1), align, theme));
+            }
+            out.push(indent_line(spans, theme));
         }
-        out.push(indent_line(spans, theme));
         if is_header {
             let mut rule = String::new();
             for index in 0..cols {
@@ -689,5 +737,29 @@ mod tests {
             !text.contains("| ---"),
             "separator row should not be shown raw: {text}"
         );
+    }
+
+    #[test]
+    fn table_cells_wrap_instead_of_dropping_text() {
+        let md = "| Col |\n| --- |\n| this-is-a-very-long-cell-value |\n";
+        let lines = render(md, 16, None, &theme());
+        let text = flat(&lines);
+        assert!(text.contains("this-is-a"), "{text}");
+        assert!(text.contains("cell-value") || text.contains("value"), "{text}");
+        assert!(!text.contains('…'), "must wrap, not truncate: {text}");
+    }
+
+    #[test]
+    fn table_cells_render_inline_bold() {
+        let md = "| Name |\n| --- |\n| **bold** |\n";
+        let lines = render(md, 24, None, &theme());
+        let has_bold = lines.iter().any(|line| {
+            line.spans.iter().any(|span| {
+                span.content.contains("bold") && span.style.add_modifier.contains(Modifier::BOLD)
+            })
+        });
+        assert!(has_bold, "cell markdown bold should apply");
+        let text = flat(&lines);
+        assert!(!text.contains("**"), "markers should be consumed: {text}");
     }
 }
