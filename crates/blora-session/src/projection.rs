@@ -226,6 +226,11 @@ pub fn apply_event(projection: &mut SessionProjection, event: &EventEnvelope) ->
             projection.session = Some(record);
         }
         KnownPayload::SessionResumed(_) => touch_session(projection, event.timestamp)?,
+        KnownPayload::ModeChanged(changed) => {
+            let session = session_mut(projection)?;
+            session.mode = changed.to;
+            session.updated_at = event.timestamp;
+        }
         KnownPayload::SessionForked(forked) => {
             if let Some(session) = projection.session.as_mut() {
                 session.parent_session_id = Some(forked.source_session_id);

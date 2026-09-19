@@ -88,6 +88,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut provider_dialog: Option<view::ProviderDialog> = None;
     let mut add_provider_dialog: Option<view::AddProviderDialog> = None;
     let mut theme_dialog: Option<view::ThemeDialog> = None;
+    let mut mode_menu: Option<view::ModeMenu> = None;
     // PassPort user token of the logged-in user; drives the default provider.
     let mut passport_user_token: Option<String> = None;
     let mut passport_username = String::from("you");
@@ -312,6 +313,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             auto_approve,
                             model,
                             provider,
+                            mode_menu: mode_menu.as_ref(),
                             user_label: &passport_username,
                             running: job.is_some(),
                             tick,
@@ -647,7 +649,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     slash_selected = 0;
                                 }
                             }
-                            KeyCode::Enter => {
+                            KeyCode::Enter if mode_menu.is_none() => {
                                 if input.starts_with('/') {
                                     if slash::is_open(&input) {
                                         if let Some(cmd) = slash_hits.get(slash_selected) {
@@ -768,6 +770,30 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             }
                             // The login dialog is only hidden: polling keeps
                             // running so completing authorization still lands.
+                            KeyCode::Enter if mode_menu.is_some() => {
+                                if let Some(menu) = mode_menu.take()
+                                    && let Some(id) = session_id.as_ref()
+                                {
+                                    let option = view::MODE_OPTIONS[menu.selected.min(view::MODE_OPTIONS.len() - 1)];
+                                    match runtime.set_session_mode(id, option.mode) {
+                                        Ok(()) => status = format!("已切换到 {} 模式", option.title),
+                                        Err(err) => status = err.to_string(),
+                                    }
+                                }
+                            }
+                            KeyCode::Up if mode_menu.is_some() => {
+                                if let Some(menu) = mode_menu.as_mut() {
+                                    menu.selected = menu.selected.saturating_sub(1);
+                                }
+                            }
+                            KeyCode::Down if mode_menu.is_some() => {
+                                if let Some(menu) = mode_menu.as_mut() {
+                                    menu.selected = (menu.selected + 1).min(view::MODE_OPTIONS.len() - 1);
+                                }
+                            }
+                            KeyCode::Esc if mode_menu.is_some() => {
+                                mode_menu = None;
+                            }
                             KeyCode::Esc if passport_dialog.is_some() => {
                                 passport_dialog = None;
                             }
@@ -855,6 +881,29 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             },
                             MouseEventKind::Down(MouseButton::Left) => {
                                 let hit = hits.hit(mouse.column, mouse.row);
+                                if let Some(view::Hit::ModeRow(index)) = hit {
+                                    if let Some(id) = session_id.as_ref() {
+                                        let option = view::MODE_OPTIONS[index.min(view::MODE_OPTIONS.len() - 1)];
+                                        match runtime.set_session_mode(id, option.mode) {
+                                            Ok(()) => status = format!("已切换到 {} 模式", option.title),
+                                            Err(err) => status = err.to_string(),
+                                        }
+                                    }
+                                    mode_menu = None;
+                                    continue;
+                                }
+                                if matches!(hit, Some(view::Hit::Mode)) {
+                                    let current = projection
+                                        .and_then(|projection| projection.session.as_ref())
+                                        .map(|session| session.mode)
+                                        .unwrap_or(Mode::Code);
+                                    let selected = view::MODE_OPTIONS
+                                        .iter()
+                                        .position(|option| option.mode == current)
+                                        .unwrap_or(0);
+                                    mode_menu = Some(view::ModeMenu { selected });
+                                    continue;
+                                }
                                 // Provider dialog rows: click selects and confirms.
                                 if let Some(view::Hit::ThemeTab(idx)) = hit {
                                     if let Some(dialog) = theme_dialog.as_mut() {

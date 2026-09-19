@@ -13,7 +13,7 @@ pub use payload::{
     AssistantMessageCompleted, AssistantReasoning, CheckpointCreated, ContextCompactionCompleted,
     ContextCompactionFailed, ContextCompactionStarted, ContextDeltaCreated, ContextSnapshotCreated,
     HookCompleted, KnownPayload, ModelRequested, ModelResponseCompleted, PolicyDenied,
-    ProviderChanged, RetryStarted, RoutingChanged, RunCancelRequested, RunCancelled, RunCompleted, RunCreated,
+    ModeChanged, ProviderChanged, RetryStarted, RoutingChanged, RunCancelRequested, RunCancelled, RunCompleted, RunCreated,
     RunFailed, RunPaused, RunStarted, SessionArchived, SessionCreated, SessionForked,
     SessionResumed, SubagentCompleted, SubagentFailed, SubagentMessage, SubagentSpawned,
     TaskCompleted, TaskCreated, TaskFailed, TaskProgress, TaskStarted, TaskWakeup, ToolCompleted,

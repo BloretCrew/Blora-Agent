@@ -4,7 +4,7 @@
 use blora_context::{EnvSnapshot, compile_messages, estimate_messages};
 use blora_events::{
     AssistantDelta, AssistantMessageCompleted, ContextSnapshotCreated, EventEnvelope,
-    HookCompleted, KnownPayload, ModelRequested, ModelResponseCompleted, NewEvent, ProviderChanged,
+    HookCompleted, KnownPayload, ModeChanged, ModelRequested, ModelResponseCompleted, NewEvent, ProviderChanged,
     RetryStarted, RoutingChanged, RunCancelRequested, RunCancelled, RunCompleted, RunCreated,
     RunFailed,
     RunStarted, SessionArchived, SessionResumed, ToolCompleted, ToolFailed, ToolOutput,
@@ -168,6 +168,24 @@ impl Runtime {
         }
         hooks::fire(hooks::SESSION_START, id.as_str());
         Ok(id)
+    }
+
+    /// Persist a mode switch so the next turns use the selected strategy.
+    pub fn set_session_mode(&self, session_id: &SessionId, to: Mode) -> Result<()> {
+        let projection = self.store.load_projection(session_id)?;
+        let from = projection
+            .session
+            .ok_or_else(|| BloraError::Other("session missing".to_owned()))?
+            .mode;
+        if from == to {
+            return Ok(());
+        }
+        self.emit(
+            session_id,
+            None,
+            None,
+            KnownPayload::ModeChanged(ModeChanged { from, to }),
+        )
     }
 
     pub fn archive_session(&self, session_id: &SessionId) -> Result<()> {

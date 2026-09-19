@@ -6,6 +6,7 @@
 use std::path::Path;
 
 use blora_session::{SessionProjection, TranscriptItem};
+use blora_types::Mode;
 use blora_storage::{ApprovalRecord, SessionSummary};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Position, Rect};
@@ -203,6 +204,43 @@ pub struct ThemeDialog {
     pub minimized: bool,
 }
 
+#[derive(Clone, Debug)]
+pub struct ModeMenu {
+    pub selected: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ModeOption {
+    pub mode: Mode,
+    pub title: &'static str,
+    pub description: &'static str,
+}
+
+pub const MODE_OPTIONS: [ModeOption; 3] = [
+    ModeOption {
+        mode: Mode::Code,
+        title: "Code",
+        description: "读写代码、运行命令并完成明确的开发任务。",
+    },
+    ModeOption {
+        mode: Mode::Work,
+        title: "Work",
+        description: "处理工作区任务、后台任务和持续推进的工作流。",
+    },
+    ModeOption {
+        mode: Mode::Agent,
+        title: "Agent",
+        description: "自主拆解任务，使用工具并在需要时派发子代理。",
+    },
+];
+
+impl ModeMenu {
+    #[must_use]
+    pub fn current(&self) -> ModeOption {
+        MODE_OPTIONS[self.selected.min(MODE_OPTIONS.len() - 1)]
+    }
+}
+
 pub struct FrameModel<'a> {
     pub workspace: &'a Path,
     pub sessions: &'a [SessionSummary],
@@ -228,6 +266,7 @@ pub struct FrameModel<'a> {
     pub auto_approve: bool,
     pub model: &'a str,
     pub provider: &'a str,
+    pub mode_menu: Option<&'a ModeMenu>,
     pub user_label: &'a str,
     pub running: bool,
     pub tick: u64,
@@ -244,6 +283,8 @@ pub enum Hit {
     Deny,
     PrevSession,
     NextSession,
+    Mode,
+    ModeRow(usize),
     CancelRun,
     ToggleApprove,
     Hint(HintAction),
@@ -292,6 +333,8 @@ pub struct HitMap {
     pub deny: Option<Rect>,
     pub prev_session: Option<Rect>,
     pub next_session: Option<Rect>,
+    pub mode: Option<Rect>,
+    pub mode_rows: Vec<(Rect, usize)>,
     pub cancel_run: Option<Rect>,
     pub toggle_approve: Option<Rect>,
     pub hints: Vec<(Rect, HintAction)>,
@@ -352,6 +395,14 @@ impl HitMap {
             if contains(*rect, col, row) {
                 return Some(Hit::ThemeRow(*idx));
             }
+        }
+        for (rect, idx) in &self.mode_rows {
+            if contains(*rect, col, row) {
+                return Some(Hit::ModeRow(*idx));
+            }
+        }
+        if self.mode.is_some_and(|rect| contains(rect, col, row)) {
+            return Some(Hit::Mode);
         }
         if self.notice && self.overlay.is_some_and(|rect| contains(rect, col, row)) {
             return Some(Hit::Notice);
@@ -494,6 +545,39 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
     render_composer(frame, composer, model, &theme, &mut hits);
     render_status(frame, status, model, &theme);
     render_hints(frame, hints, model, &theme, &mut hits);
+    if let Some(menu) = model.mode_menu {
+        let menu_width = 58u16.min(area.width.saturating_sub(4));
+        let menu_height = (MODE_OPTIONS.len() as u16 * 3 + 2).min(area.height.saturating_sub(4));
+        let Some(menu_area) = dialog_rect(area, menu_width, menu_height) else {
+            return hits;
+        };
+        frame.render_widget(Clear, menu_area);
+        let block = Block::bordered()
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .title("运行模式")
+            .style(theme.base())
+            .border_style(theme.fg(theme.hairline).bg(theme.bg));
+        let inner = block.inner(menu_area);
+        frame.render_widget(block, menu_area);
+        let rows = split_n_rows(inner, MODE_OPTIONS.len() as u16);
+        for (index, option) in MODE_OPTIONS.iter().enumerate() {
+            if let Some(rect) = rows.get(index).copied() {
+                hits.mode_rows.push((rect, index));
+                let selected = index == menu.selected;
+                if selected {
+                    frame.render_widget(Block::default().style(Style::default().bg(theme.bg_select)), rect);
+                }
+                let marker = if selected { "❯ " } else { "  " };
+                let line = Line::from(vec![
+                    Span::styled(marker, theme.fg(theme.rose)),
+                    Span::styled(option.title, theme.fg(theme.text).add_modifier(Modifier::BOLD)),
+                    Span::styled("  ", theme.mute()),
+                    Span::styled(option.description, theme.mute()),
+                ]);
+                frame.render_widget(Paragraph::new(line).style(theme.base()), rect);
+            }
+        }
+    }
     if let Some(dialog) = model.passport_dialog {
         let dialog_hits = render_passport_dialog(frame, area, dialog, model.pointer, &theme);
         hits.traffic_lights = dialog_hits.traffic_lights;
@@ -653,9 +737,9 @@ fn render_header(
         .unwrap_or_else(|| id.clone());
     let counter = format!("{}/{}", model.index + 1, model.sessions.len().max(1));
     let left = Line::from(vec![
-        Span::styled("blora", theme.rose_bold()),
+        Span::styled("Blora", theme.rose_bold()),
         Span::styled("  ·  ", theme.mute()),
-        Span::styled(mode, theme.fg(theme.sage)),
+        Span::styled(mode_label(mode), theme.fg(theme.sage)),
         Span::styled("  ·  ", theme.mute()),
         Span::styled("‹ ", theme.dim()),
         Span::styled(counter.clone(), theme.dim()),
@@ -663,9 +747,16 @@ fn render_header(
         Span::styled("  ", theme.mute()),
         Span::styled(ellipsize(&title, 28), theme.dim()),
     ]);
+    let mode_title = mode_label(mode);
     let mut x = inner.x
-        + u16::try_from("blora".width() + "  ·  ".width() + mode.width() + "  ·  ".width())
+        + u16::try_from("Blora".width() + "  ·  ".width() + mode_title.width() + "  ·  ".width())
             .unwrap_or(0);
+    hits.mode = Some(Rect {
+        x: inner.x + u16::try_from("Blora".width() + "  ·  ".width()).unwrap_or(0),
+        y: inner.y,
+        width: u16::try_from(mode_title.width()).unwrap_or(4),
+        height: 1,
+    });
     hits.prev_session = Some(Rect {
         x,
         y: inner.y,
@@ -2272,6 +2363,18 @@ fn sanitize_title(text: &str) -> String {
     text.chars()
         .filter(|ch| *ch != '\u{1b}' && *ch != '\u{07}' && *ch != '\n' && *ch != '\r')
         .collect()
+}
+
+fn dialog_rect(area: Rect, width: u16, height: u16) -> Option<Rect> {
+    if width == 0 || height == 0 || width > area.width || height > area.height {
+        return None;
+    }
+    Some(Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    })
 }
 
 fn mode_label(mode: &str) -> String {
