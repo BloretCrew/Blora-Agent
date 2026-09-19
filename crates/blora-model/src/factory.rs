@@ -25,9 +25,8 @@ pub fn make_providers(force_mock: bool, name: &str) -> Vec<Box<dyn Provider>> {
 
 /// Resolve the provider chain for an optional logged-in PassPort user.
 ///
-/// A logged-in user defaults to the PassPort provider (`blora`) unless a
-/// provider was explicitly chosen for the run; an anonymous session falls back
-/// to `BLORA_PROVIDER` / `openai`.
+/// Default provider is Bloret PassPort (`blora`). An explicit request or
+/// `BLORA_PROVIDER` overrides it.
 #[must_use]
 pub fn resolve_provider_chain(
     force_mock: bool,
@@ -38,17 +37,10 @@ pub fn resolve_provider_chain(
         return vec![Box::new(MockProvider::new())];
     }
     let explicit = !requested.trim().is_empty();
-    let login_default = !explicit
-        && user_token
-            .filter(|token| !token.trim().is_empty())
-            .and_then(passport_provider)
-            .is_some();
     let spec = if explicit {
         requested.to_owned()
-    } else if login_default {
-        "blora".to_owned()
     } else {
-        std::env::var("BLORA_PROVIDER").unwrap_or_else(|_| "openai".to_owned())
+        std::env::var("BLORA_PROVIDER").unwrap_or_else(|_| "blora".to_owned())
     };
     let mut out = Vec::new();
     for part in spec.split(',') {
@@ -207,12 +199,13 @@ mod tests {
     }
 
     #[test]
-    fn anonymous_session_falls_back_to_openai() {
+    fn anonymous_session_defaults_to_passport() {
         let chain = resolve_provider_chain(false, "", None);
-        assert!(matches!(
-            chain[0].name(),
-            "openai" | "mock" | "responses" | "anthropic" | "gemini" | "blora"
-        ));
+        // No user token yet, so the PassPort adapter cannot run and falls
+        // through to mock — but the requested default is still `blora`.
+        assert!(matches!(chain[0].name(), "blora" | "mock"));
+        let logged_in = resolve_provider_chain(false, "", Some("tok"));
+        assert_eq!(logged_in[0].name(), "blora");
     }
 
     #[test]

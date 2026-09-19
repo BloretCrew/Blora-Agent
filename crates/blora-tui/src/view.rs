@@ -519,6 +519,20 @@ fn dialog_outer(
     Some(frame_y)
 }
 
+/// Rounded dialog chrome. Border cells must use the canvas background;
+/// `border_style` with only a foreground would reset the cell bg to the
+/// terminal default and show as a white ring.
+fn paint_dialog_chrome(frame: &mut Frame<'_>, area: Rect, theme: &Theme) -> Rect {
+    frame.render_widget(Clear, area);
+    let block = Block::bordered()
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .style(theme.base())
+        .border_style(theme.fg(theme.hairline).bg(theme.bg));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    inner
+}
+
 /// Paint macOS-style traffic lights and register their hit rects. Hovering a
 /// dot swaps in ✕ / − / +.
 fn paint_traffic_title(
@@ -1040,12 +1054,7 @@ fn render_passport_dialog(
     .flex(Flex::Center)
     .areas(frame_x);
 
-    frame.render_widget(Clear, frame_y);
-    let block = Block::bordered()
-        .border_type(ratatui::widgets::BorderType::Rounded)
-        .border_style(theme.fg(theme.hairline));
-    let inner = block.inner(frame_y);
-    frame.render_widget(block, frame_y);
+    let inner = paint_dialog_chrome(frame, frame_y, theme);
 
     let rows: [Rect; 5] = split_dialog_rows(inner, DIALOG_HEIGHT - 2);
     let wrap_width = inner.width.saturating_sub(2) as usize;
@@ -1140,12 +1149,7 @@ fn render_provider_dialog(
         return hits;
     };
 
-    frame.render_widget(Clear, frame_y);
-    let block = Block::bordered()
-        .border_type(ratatui::widgets::BorderType::Rounded)
-        .border_style(theme.fg(theme.hairline));
-    let inner = block.inner(frame_y);
-    frame.render_widget(block, frame_y);
+    let inner = paint_dialog_chrome(frame, frame_y, theme);
     if inner.height == 0 {
         return hits;
     }
@@ -1307,12 +1311,7 @@ fn render_add_provider_dialog(
     ) else {
         return hits;
     };
-    frame.render_widget(Clear, frame_y);
-    let block = Block::bordered()
-        .border_type(ratatui::widgets::BorderType::Rounded)
-        .border_style(theme.fg(theme.hairline));
-    let inner = block.inner(frame_y);
-    frame.render_widget(block, frame_y);
+    let inner = paint_dialog_chrome(frame, frame_y, theme);
     if inner.height == 0 {
         return hits;
     }
@@ -1494,12 +1493,7 @@ fn render_theme_dialog(
         return hits;
     };
 
-    frame.render_widget(Clear, frame_y);
-    let block = Block::bordered()
-        .border_type(ratatui::widgets::BorderType::Rounded)
-        .border_style(theme.fg(theme.hairline));
-    let inner = block.inner(frame_y);
-    frame.render_widget(block, frame_y);
+    let inner = paint_dialog_chrome(frame, frame_y, theme);
 
     if inner.height == 0 {
         return hits;
@@ -2152,20 +2146,9 @@ mod tests {
         ProviderDialog {
             options: vec![
                 ProviderOption {
-                    id: String::new(),
-                    display: "默认（Blora）".to_owned(),
-                    hint: "当前 · 跟随登录与环境配置".to_owned(),
-                    available: true,
-                    models: vec![ModelOption {
-                        id: "blora".to_owned(),
-                        display: "Blora".to_owned(),
-                        hint: String::new(),
-                    }],
-                },
-                ProviderOption {
                     id: "blora".to_owned(),
-                    display: "Blora".to_owned(),
-                    hint: "Bloret PassPort · 200 次/天".to_owned(),
+                    display: "Bloret PassPort".to_owned(),
+                    hint: "默认 · 200 次/天".to_owned(),
                     available: true,
                     models: vec![ModelOption {
                         id: "blora".to_owned(),
@@ -2176,7 +2159,7 @@ mod tests {
                 ProviderOption {
                     id: "openai".to_owned(),
                     display: "OpenAI".to_owned(),
-                    hint: "BLORA_API_KEY / OPENAI_API_KEY".to_owned(),
+                    hint: "已保存".to_owned(),
                     available: false,
                     models: vec![ModelOption {
                         id: "gpt-4o-mini".to_owned(),
@@ -2192,7 +2175,7 @@ mod tests {
                     models: Vec::new(),
                 },
             ],
-            selected: 1,
+            selected: 0,
             pane: ProviderPane::Providers,
             model_selected: 0,
             fullscreen: false,
@@ -2205,7 +2188,7 @@ mod tests {
         let dialog = sample_provider_dialog();
         let area = Rect::new(0, 0, 80, 24);
         let (lines, hits) = render_provider_with_hits(area, &dialog, None);
-        assert_eq!(hits.provider_rows.len(), 4, "one hit area per row");
+        assert_eq!(hits.provider_rows.len(), 3, "one hit area per row");
         assert!(!hits.provider_model_rows.is_empty());
         let find_row = |needle: &str| {
             lines
@@ -2225,10 +2208,9 @@ mod tests {
             marker_row.contains('❯'),
             "selected row has ❯, got {marker_row}"
         );
-        let default_row = &lines[find_row("默认（Blora）")];
         assert!(
-            flatten(default_row).contains("默认") && !default_row.contains('❯'),
-            "unselected row has no ❯, got {default_row}"
+            lines.iter().all(|line| !flatten(line).contains("默认（")),
+            "no synthetic default row"
         );
         let unavailable_row = &lines[openai_row];
         assert!(
@@ -2245,13 +2227,13 @@ mod tests {
         let dialog = sample_provider_dialog();
         let area = Rect::new(0, 0, 80, 24);
         let (_, hits) = render_provider_with_hits(area, &dialog, None);
-        let third = hits.provider_rows[2].0;
+        let third = hits.provider_rows[1].0;
         let (lines, _) = render_provider_with_hits(area, &dialog, Some((third.x + 1, third.y)));
         let openai_row = lines
             .iter()
             .position(|line| flatten(line).contains("OpenAI"))
             .expect("openai row");
-        // Hovering moves the ❯ marker to the hovered row (row index 2).
+        // Hovering moves the ❯ marker to the hovered row.
         let marker_row = &lines[openai_row];
         assert!(
             marker_row.contains('❯'),

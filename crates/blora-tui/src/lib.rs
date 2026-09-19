@@ -179,10 +179,9 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
             } else {
                 model_override.as_str()
             };
-            // Logged-in PassPort users run on the PassPort provider by default.
             let provider = if provider_override.is_empty() {
-                if env_provider.is_empty() && passport_user_token.is_some() {
-                    "Blora"
+                if env_provider.is_empty() {
+                    "Bloret PassPort"
                 } else {
                     env_provider.as_str()
                 }
@@ -1197,66 +1196,24 @@ fn apply_slash(
     }
 }
 
-/// Build the provider list for the switch dialog. `provider_override` and the
-/// login/API-key state decide which entries are marked available.
+/// Built-in list is Bloret PassPort plus any saved vendors. Extra vendors
+/// come from the add-provider wizard.
 fn provider_options(provider_override: &str, logged_in: bool) -> Vec<view::ProviderOption> {
-    let env_provider = std::env::var("BLORA_PROVIDER").unwrap_or_default();
-    let default_display = if logged_in {
-        "Blora"
-    } else if env_provider.is_empty() {
-        "OpenAI"
-    } else {
-        env_provider.trim()
-    };
     let override_id = provider_override.trim().to_owned();
-    let has_key = std::env::var("BLORA_API_KEY").is_ok()
-        || std::env::var("OPENAI_API_KEY").is_ok()
-        || std::env::var("ANTHROPIC_API_KEY").is_ok()
-        || std::env::var("GEMINI_API_KEY").is_ok();
     let current = |id: &str| {
         if override_id.is_empty() {
-            id.is_empty()
+            id.eq_ignore_ascii_case("blora")
         } else {
             override_id.eq_ignore_ascii_case(id)
         }
     };
-    let mut entries: Vec<view::ProviderOption> = vec![
-        view::ProviderOption {
-            id: String::new(),
-            display: format!("默认（{default_display}）"),
-            hint: "跟随登录与环境配置".to_owned(),
-            available: true,
-            models: models_for_provider(""),
-        },
-        view::ProviderOption {
-            id: "blora".to_owned(),
-            display: "Blora".to_owned(),
-            hint: "Bloret PassPort · 200 次/天".to_owned(),
-            available: logged_in,
-            models: models_for_provider("blora"),
-        },
-        view::ProviderOption {
-            id: "openai".to_owned(),
-            display: "OpenAI".to_owned(),
-            hint: "BLORA_API_KEY / OPENAI_API_KEY".to_owned(),
-            available: has_key,
-            models: models_for_provider("openai"),
-        },
-        view::ProviderOption {
-            id: "anthropic".to_owned(),
-            display: "Anthropic".to_owned(),
-            hint: "ANTHROPIC_API_KEY".to_owned(),
-            available: std::env::var("ANTHROPIC_API_KEY").is_ok(),
-            models: models_for_provider("anthropic"),
-        },
-        view::ProviderOption {
-            id: "gemini".to_owned(),
-            display: "Gemini".to_owned(),
-            hint: "GEMINI_API_KEY".to_owned(),
-            available: std::env::var("GEMINI_API_KEY").is_ok(),
-            models: models_for_provider("gemini"),
-        },
-    ];
+    let mut entries: Vec<view::ProviderOption> = vec![view::ProviderOption {
+        id: "blora".to_owned(),
+        display: "Bloret PassPort".to_owned(),
+        hint: "默认 · 200 次/天".to_owned(),
+        available: logged_in,
+        models: models_for_provider("blora"),
+    }];
     for saved in blora_catalog::load_saved() {
         if entries
             .iter()
@@ -1359,7 +1316,7 @@ fn open_provider_dialog(
         .iter()
         .position(|option| {
             if provider_override.is_empty() {
-                option.id.is_empty()
+                option.id.eq_ignore_ascii_case("blora")
             } else {
                 option.id.eq_ignore_ascii_case(provider_override)
             }
@@ -1403,9 +1360,7 @@ fn commit_provider_dialog(
     if let Some(model) = option.models.get(dialog.model_selected) {
         *model_override = model.id.clone();
     }
-    Some(if option.id.is_empty() {
-        "provider=默认（跟随登录与环境）".to_owned()
-    } else if model_override.is_empty() {
+    Some(if model_override.is_empty() {
         format!("provider={}", option.display)
     } else {
         format!("provider={}  model={model_override}", option.display)
