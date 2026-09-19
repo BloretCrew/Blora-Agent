@@ -50,6 +50,12 @@ pub enum TranscriptItem {
         name: String,
         status: String,
         event_id: EventId,
+        #[serde(default)]
+        arguments: Option<String>,
+        #[serde(default)]
+        output: Option<String>,
+        #[serde(default)]
+        call_id: Option<String>,
     },
     System {
         summary: String,
@@ -205,19 +211,111 @@ pub fn apply_event(projection: &mut SessionProjection, event: &EventEnvelope) ->
             touch_run(projection, event)?;
         }
         KnownPayload::ToolRequested(tool) => {
-            projection.transcript.push(TranscriptItem::Tool {
-                name: tool.tool,
-                status: "requested".to_owned(),
-                event_id: event.event_id.clone(),
-            });
+            let arguments = compact_tool_args(&tool.arguments);
+            if let Some(TranscriptItem::Tool {
+                status,
+                arguments: slot,
+                call_id,
+                event_id,
+                ..
+            }) = find_tool_mut(projection, Some(&tool.tool), tool.call_id.as_deref())
+            {
+                *status = "requested".to_owned();
+                if arguments.is_some() {
+                    *slot = arguments;
+                }
+                if call_id.is_none() {
+                    *call_id = tool.call_id;
+                }
+                *event_id = event.event_id.clone();
+            } else {
+                projection.transcript.push(TranscriptItem::Tool {
+                    name: tool.tool,
+                    status: "requested".to_owned(),
+                    event_id: event.event_id.clone(),
+                    arguments,
+                    output: None,
+                    call_id: tool.call_id,
+                });
+            }
+            touch_run(projection, event)?;
+        }
+        KnownPayload::ToolStarted(tool) => {
+            if let Some(TranscriptItem::Tool { status, .. }) =
+                find_tool_mut(projection, Some(&tool.tool), None)
+            {
+                *status = "running".to_owned();
+            }
+            touch_run(projection, event)?;
+        }
+        KnownPayload::ToolOutput(output) => {
+            if let Some(TranscriptItem::Tool {
+                output: slot,
+                status,
+                ..
+            }) = find_tool_mut(projection, None, output.call_id.as_deref())
+            {
+                *slot = Some(output.text);
+                if status == "requested" {
+                    *status = "running".to_owned();
+                }
+            } else {
+                projection.transcript.push(TranscriptItem::Tool {
+                    name: "tool".to_owned(),
+                    status: "output".to_owned(),
+                    event_id: event.event_id.clone(),
+                    arguments: None,
+                    output: Some(output.text),
+                    call_id: output.call_id,
+                });
+            }
             touch_run(projection, event)?;
         }
         KnownPayload::ToolCompleted(tool) => {
-            projection.transcript.push(TranscriptItem::Tool {
-                name: tool.tool,
-                status: if tool.ok { "completed" } else { "failed" }.to_owned(),
-                event_id: event.event_id.clone(),
-            });
+            let status = if tool.ok { "completed" } else { "failed" };
+            if let Some(TranscriptItem::Tool {
+                status: slot,
+                event_id,
+                ..
+            }) = find_tool_mut(projection, Some(&tool.tool), None)
+            {
+                *slot = status.to_owned();
+                *event_id = event.event_id.clone();
+            } else {
+                projection.transcript.push(TranscriptItem::Tool {
+                    name: tool.tool,
+                    status: status.to_owned(),
+                    event_id: event.event_id.clone(),
+                    arguments: None,
+                    output: None,
+                    call_id: None,
+                });
+            }
+            touch_run(projection, event)?;
+        }
+        KnownPayload::ToolFailed(failed) => {
+            if let Some(TranscriptItem::Tool {
+                status,
+                output,
+                event_id,
+                ..
+            }) = find_tool_mut(projection, Some(&failed.tool), None)
+            {
+                *status = "failed".to_owned();
+                if output.is_none() {
+                    *output = Some(failed.error);
+                }
+                *event_id = event.event_id.clone();
+            } else {
+                projection.transcript.push(TranscriptItem::Tool {
+                    name: failed.tool,
+                    status: "failed".to_owned(),
+                    event_id: event.event_id.clone(),
+                    arguments: None,
+                    output: Some(failed.error),
+                    call_id: None,
+                });
+            }
             touch_run(projection, event)?;
         }
         KnownPayload::ApprovalRequested(requested) => {
@@ -365,6 +463,37 @@ pub fn apply_event(projection: &mut SessionProjection, event: &EventEnvelope) ->
         session.updated_at = event.timestamp;
     }
     Ok(())
+}
+
+fn compact_tool_args(value: &impl ToString) -> Option<String> {
+    let raw = value.to_string();
+    if raw == "null" || raw == "{}" || raw == "[]" || raw.is_empty() {
+        None
+    } else {
+        Some(raw)
+    }
+}
+
+fn find_tool_mut<'a>(
+    projection: &'a mut SessionProjection,
+    name: Option<&str>,
+    call_id: Option<&str>,
+) -> Option<&'a mut TranscriptItem> {
+    projection.transcript.iter_mut().rev().find(|item| {
+        let TranscriptItem::Tool {
+            name: item_name,
+            call_id: item_call,
+            ..
+        } = item
+        else {
+            return false;
+        };
+        if let Some(call_id) = call_id {
+            return item_call.as_deref() == Some(call_id)
+                || (item_call.is_none() && name.is_some_and(|name| item_name == name));
+        }
+        name.is_some_and(|name| item_name == name)
+    })
 }
 
 fn apply_run_transition(

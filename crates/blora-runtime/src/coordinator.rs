@@ -823,7 +823,20 @@ impl Runtime {
                             KnownPayload::AssistantDelta(AssistantDelta { text }),
                         )
                     }
-                    StreamEvent::ToolCall(_) => Ok(()),
+                    StreamEvent::ToolCall(call) => {
+                        let arguments = serde_json::from_str(&call.arguments)
+                            .unwrap_or_else(|_| json!({ "raw": call.arguments }));
+                        self.emit(
+                            session_id,
+                            Some(run_id),
+                            Some(turn_id),
+                            KnownPayload::ToolRequested(ToolRequested {
+                                tool: call.name,
+                                arguments,
+                                call_id: Some(call.id),
+                            }),
+                        )
+                    }
                 });
                 match result {
                     Ok(completion) => break Ok((completion, streamed)),

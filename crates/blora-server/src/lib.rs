@@ -1115,10 +1115,27 @@ fn to_json(state: &AppState, id: &SessionId) -> Result<SessionJson, ApiError> {
                     kind: "assistant".to_owned(),
                     text,
                 },
-                TranscriptItem::Tool { name, status, .. } => TranscriptJson {
-                    kind: "tool".to_owned(),
-                    text: format!("{name} {status}"),
-                },
+                TranscriptItem::Tool {
+                    name,
+                    status,
+                    arguments,
+                    output,
+                    ..
+                } => {
+                    let mut text = format!("{name} {status}");
+                    if let Some(arguments) = arguments {
+                        text.push('\n');
+                        text.push_str(&arguments);
+                    }
+                    if let Some(output) = output {
+                        text.push('\n');
+                        text.push_str(&output);
+                    }
+                    TranscriptJson {
+                        kind: "tool".to_owned(),
+                        text,
+                    }
+                }
                 TranscriptItem::System { summary, .. } => TranscriptJson {
                     kind: "system".to_owned(),
                     text: summary,

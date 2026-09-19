@@ -566,8 +566,22 @@ fn print_projection(
         match item {
             TranscriptItem::User { text, .. } => println!("  user: {text}"),
             TranscriptItem::Assistant { text, .. } => println!("  assistant: {text}"),
-            TranscriptItem::Tool { name, status, .. } => {
+            TranscriptItem::Tool {
+                name,
+                status,
+                arguments,
+                output,
+                ..
+            } => {
                 println!("  tool {name}: {status}");
+                if let Some(arguments) = arguments {
+                    println!("    {arguments}");
+                }
+                if let Some(output) = output {
+                    for line in output.lines().take(12) {
+                        println!("    {line}");
+                    }
+                }
             }
             TranscriptItem::System { summary, .. } => println!("  system: {summary}"),
         }

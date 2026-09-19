@@ -782,7 +782,20 @@ fn transcript_lines(
                     TranscriptItem::User { text, .. } | TranscriptItem::Assistant { text, .. } => {
                         text.to_ascii_lowercase().contains(needle)
                     }
-                    TranscriptItem::Tool { name, .. } => name.to_ascii_lowercase().contains(needle),
+                    TranscriptItem::Tool {
+                        name,
+                        arguments,
+                        output,
+                        ..
+                    } => {
+                        name.to_ascii_lowercase().contains(needle)
+                            || arguments
+                                .as_deref()
+                                .is_some_and(|text| text.to_ascii_lowercase().contains(needle))
+                            || output
+                                .as_deref()
+                                .is_some_and(|text| text.to_ascii_lowercase().contains(needle))
+                    }
                     TranscriptItem::System { summary, .. } => {
                         summary.to_ascii_lowercase().contains(needle)
                     }
@@ -815,19 +828,41 @@ fn transcript_lines(
                     theme,
                 );
             }
-            TranscriptItem::Tool { name, status, .. } => {
+            TranscriptItem::Tool {
+                name,
+                status,
+                arguments,
+                output,
+                ..
+            } => {
                 let color = if status == "failed" || status == "error" {
                     theme.rust
-                } else if status == "running" {
+                } else if status == "running" || status == "requested" {
                     theme.amber
                 } else {
-                    theme.text_mute
+                    theme.sage
                 };
                 out.push(Line::from(vec![
-                    Span::styled("  ·  ", theme.mute()),
-                    Span::styled(name.clone(), theme.fg(color)),
+                    Span::styled("┃ ", theme.fg(color)),
+                    Span::styled(name.clone(), theme.fg(color).add_modifier(Modifier::BOLD)),
                     Span::styled(format!("  {status}"), theme.mute()),
                 ]));
+                let body_width = width.saturating_sub(2).max(8);
+                if let Some(arguments) = arguments {
+                    for line in wrap_text(arguments, body_width).into_iter().take(3) {
+                        out.push(Line::from(vec![
+                            Span::styled("  ", theme.mute()),
+                            Span::styled(line, theme.mute()),
+                        ]));
+                    }
+                }
+                if let Some(output) = output {
+                    for line in wrap_text(output, body_width).into_iter().take(12) {
+                        let mut spans = vec![Span::styled("  ", theme.fg(theme.text))];
+                        spans.extend(highlight_spans(&line, needle.as_deref(), theme));
+                        out.push(Line::from(spans));
+                    }
+                }
             }
             TranscriptItem::System { summary, .. } => {
                 out.push(Line::from(vec![
