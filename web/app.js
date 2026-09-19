@@ -254,6 +254,9 @@ function renderTranscript(items) {
     } else if (item.kind === "routing") {
       bubble.setAttribute("author", "路由");
       bubble.setAttribute("avatar", "⇄");
+    } else if (item.kind === "tools") {
+      bubble.setAttribute("author", "工具");
+      bubble.setAttribute("avatar", "⌘");
     } else {
       bubble.setAttribute("author", item.kind);
       bubble.setAttribute("avatar", item.kind.slice(0, 1).toUpperCase());

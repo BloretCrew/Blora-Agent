@@ -778,53 +778,47 @@ fn transcript_lines(
 ) -> Vec<Line<'static>> {
     let needle = search.map(str::to_ascii_lowercase);
     let mut out = Vec::new();
-    for item in projection.transcript.iter().filter(|item| {
-        !(hide_tools && matches!(item, TranscriptItem::Tool { .. }))
-            && match needle.as_deref() {
-                None => true,
-                Some(needle) => match item {
-                    TranscriptItem::User { text, .. } | TranscriptItem::Assistant { text, .. } => {
-                        text.to_ascii_lowercase().contains(needle)
-                    }
-                    TranscriptItem::Tool {
-                        name,
-                        arguments,
-                        output,
-                        ..
-                    } => {
-                        name.to_ascii_lowercase().contains(needle)
-                            || arguments
-                                .as_deref()
-                                .is_some_and(|text| text.to_ascii_lowercase().contains(needle))
-                            || output
-                                .as_deref()
-                                .is_some_and(|text| text.to_ascii_lowercase().contains(needle))
-                    }
-                    TranscriptItem::System { summary, .. } => {
-                        summary.to_ascii_lowercase().contains(needle)
-                    }
-                    TranscriptItem::Routing {
-                        to_provider,
-                        to_model,
-                        from_provider,
-                        from_model,
-                        ..
-                    } => {
-                        to_provider.to_ascii_lowercase().contains(needle)
-                            || to_model.to_ascii_lowercase().contains(needle)
-                            || from_provider
-                                .as_deref()
-                                .is_some_and(|value| value.to_ascii_lowercase().contains(needle))
-                            || from_model
-                                .as_deref()
-                                .is_some_and(|value| value.to_ascii_lowercase().contains(needle))
-                    }
-                },
-            }
-    }) {
+    let visible: Vec<&TranscriptItem> = projection
+        .transcript
+        .iter()
+        .filter(|item| {
+            !(hide_tools && matches!(item, TranscriptItem::Tool { .. }))
+                && item_matches(item, needle.as_deref())
+        })
+        .collect();
+    let mut index = 0usize;
+    while index < visible.len() {
         if !out.is_empty() {
             out.push(Line::default());
         }
+        if matches!(visible[index], TranscriptItem::Tool { .. }) {
+            let start = index;
+            index += 1;
+            while index < visible.len() && matches!(visible[index], TranscriptItem::Tool { .. }) {
+                index += 1;
+            }
+            let group = &visible[start..index];
+            let summary = blora_session::summarize_tool_run(group, running);
+            let failed = group.iter().any(|item| matches!(item, TranscriptItem::Tool { status, .. } if status == "failed" || status == "error"));
+            let color = if failed {
+                theme.rust
+            } else if running
+                && group.iter().any(|item| {
+                    matches!(item, TranscriptItem::Tool { status, .. } if status == "running" || status == "requested")
+                })
+            {
+                theme.amber
+            } else {
+                theme.text_dim
+            };
+            out.push(Line::from(vec![
+                Span::styled("  ", theme.mute()),
+                Span::styled(summary, theme.fg(color)),
+            ]));
+            continue;
+        }
+        let item = visible[index];
+        index += 1;
         match item {
             TranscriptItem::User { text, .. } => {
                 push_block(
@@ -952,6 +946,48 @@ fn transcript_lines(
 
 /// Keep the latest lines in view. `scroll` is how many lines above the bottom
 /// to reveal; 0 always shows the newest message.
+fn item_matches(item: &TranscriptItem, needle: Option<&str>) -> bool {
+    let Some(needle) = needle else {
+        return true;
+    };
+    match item {
+        TranscriptItem::User { text, .. } | TranscriptItem::Assistant { text, .. } => {
+            text.to_ascii_lowercase().contains(needle)
+        }
+        TranscriptItem::Tool {
+            name,
+            arguments,
+            output,
+            ..
+        } => {
+            name.to_ascii_lowercase().contains(needle)
+                || arguments
+                    .as_deref()
+                    .is_some_and(|text| text.to_ascii_lowercase().contains(needle))
+                || output
+                    .as_deref()
+                    .is_some_and(|text| text.to_ascii_lowercase().contains(needle))
+        }
+        TranscriptItem::System { summary, .. } => summary.to_ascii_lowercase().contains(needle),
+        TranscriptItem::Routing {
+            to_provider,
+            to_model,
+            from_provider,
+            from_model,
+            ..
+        } => {
+            to_provider.to_ascii_lowercase().contains(needle)
+                || to_model.to_ascii_lowercase().contains(needle)
+                || from_provider
+                    .as_deref()
+                    .is_some_and(|value| value.to_ascii_lowercase().contains(needle))
+                || from_model
+                    .as_deref()
+                    .is_some_and(|value| value.to_ascii_lowercase().contains(needle))
+        }
+    }
+}
+
 fn transcript_window(
     lines: Vec<Line<'static>>,
     height: usize,

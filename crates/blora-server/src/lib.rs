@@ -1123,62 +1123,61 @@ fn to_json(state: &AppState, id: &SessionId) -> Result<SessionJson, ApiError> {
         last_sequence: projection.last_sequence,
         input_tokens: projection.input_tokens,
         output_tokens: projection.output_tokens,
-        transcript: projection
-            .transcript
-            .into_iter()
-            .map(|item| match item {
-                TranscriptItem::User { text, .. } => TranscriptJson {
-                    kind: "user".to_owned(),
-                    text,
-                },
-                TranscriptItem::Assistant { text, .. } => TranscriptJson {
-                    kind: "assistant".to_owned(),
-                    text,
-                },
-                TranscriptItem::Tool {
-                    name,
-                    status,
-                    arguments,
-                    output,
-                    ..
-                } => {
-                    let mut text = format!("{name} {status}");
-                    if let Some(arguments) = arguments {
-                        text.push('\n');
-                        text.push_str(&arguments);
+        transcript: {
+            let items = projection.transcript;
+            let mut out = Vec::new();
+            let mut index = 0usize;
+            while index < items.len() {
+                if matches!(items[index], TranscriptItem::Tool { .. }) {
+                    let start = index;
+                    index += 1;
+                    while index < items.len() && matches!(items[index], TranscriptItem::Tool { .. })
+                    {
+                        index += 1;
                     }
-                    if let Some(output) = output {
-                        text.push('\n');
-                        text.push_str(&output);
-                    }
-                    TranscriptJson {
-                        kind: "tool".to_owned(),
-                        text,
-                    }
+                    let group: Vec<&TranscriptItem> = items[start..index].iter().collect();
+                    out.push(TranscriptJson {
+                        kind: "tools".to_owned(),
+                        text: blora_session::summarize_tool_run(&group, false),
+                    });
+                    continue;
                 }
-                TranscriptItem::System { summary, .. } => TranscriptJson {
-                    kind: "system".to_owned(),
-                    text: summary,
-                },
-                TranscriptItem::Routing {
-                    from_provider,
-                    to_provider,
-                    from_model,
-                    to_model,
-                    at,
-                    ..
-                } => TranscriptJson {
-                    kind: "routing".to_owned(),
-                    text: format_routing_notice(
-                        from_provider.as_deref(),
-                        &to_provider,
-                        from_model.as_deref(),
-                        &to_model,
+                out.push(match &items[index] {
+                    TranscriptItem::User { text, .. } => TranscriptJson {
+                        kind: "user".to_owned(),
+                        text: text.clone(),
+                    },
+                    TranscriptItem::Assistant { text, .. } => TranscriptJson {
+                        kind: "assistant".to_owned(),
+                        text: text.clone(),
+                    },
+                    TranscriptItem::Tool { .. } => unreachable!(),
+                    TranscriptItem::System { summary, .. } => TranscriptJson {
+                        kind: "system".to_owned(),
+                        text: summary.clone(),
+                    },
+                    TranscriptItem::Routing {
+                        from_provider,
+                        to_provider,
+                        from_model,
+                        to_model,
                         at,
-                    ),
-                },
-            })
-            .collect(),
+                        ..
+                    } => TranscriptJson {
+                        kind: "routing".to_owned(),
+                        text: format_routing_notice(
+                            from_provider.as_deref(),
+                            to_provider,
+                            from_model.as_deref(),
+                            to_model,
+                            *at,
+                        ),
+                    },
+                });
+                index += 1;
+            }
+            out
+        },
         tasks: projection
             .tasks
             .into_iter()
