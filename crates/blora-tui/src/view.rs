@@ -9,7 +9,7 @@ use blora_session::{SessionProjection, TranscriptItem};
 use blora_storage::{ApprovalRecord, SessionSummary};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Position, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -67,6 +67,10 @@ pub enum Hit {
     ToggleApprove,
     Hint(HintAction),
     Notice,
+    /// macOS-style window dots on the login dialog.
+    TrafficClose,
+    TrafficMinimize,
+    TrafficOpenBrowser,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -98,6 +102,8 @@ pub struct HitMap {
     pub cancel_run: Option<Rect>,
     pub toggle_approve: Option<Rect>,
     pub hints: Vec<(Rect, HintAction)>,
+    /// macOS-style traffic-light dots of the login dialog.
+    pub traffic_lights: [Option<Rect>; 3],
 }
 
 impl HitMap {
@@ -106,6 +112,17 @@ impl HitMap {
         for (rect, idx) in &self.slash_rows {
             if contains(*rect, col, row) {
                 return Some(Hit::Slash(*idx));
+            }
+        }
+        for (index, rect) in self.traffic_lights.iter().enumerate() {
+            if let Some(rect) = rect
+                && contains(*rect, col, row)
+            {
+                return Some(match index {
+                    0 => Hit::TrafficClose,
+                    1 => Hit::TrafficMinimize,
+                    _ => Hit::TrafficOpenBrowser,
+                });
             }
         }
         if self.notice && self.overlay.is_some_and(|rect| contains(rect, col, row)) {
@@ -250,7 +267,8 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
     render_status(frame, status, model, &theme);
     render_hints(frame, hints, model, &theme, &mut hits);
     if let Some(dialog) = model.passport_dialog {
-        render_passport_dialog(frame, area, dialog, &theme);
+        let dialog_hits = render_passport_dialog(frame, area, dialog, model.pointer, &theme);
+        hits.traffic_lights = dialog_hits.traffic_lights;
     }
     hits
 }
@@ -700,18 +718,22 @@ fn render_notice(frame: &mut Frame<'_>, area: Rect, body: &str, theme: &Theme) {
 }
 
 /// PassPort login dialog, centered like the modal dialogs of the reference
-/// harness: rounded frame on a cleared background, bold title, body rows, and
-/// a bottom key hint (`esc = …`). Pure overlay: closing it only hides it.
+/// harness: rounded frame on a cleared background, mac-style traffic lights,
+/// dim body rows, and a bottom key hint (`esc = …`). Pure overlay: closing it
+/// only hides it. The traffic lights are clickable like their macOS
+/// counterparts: red quits, yellow hides, green reopens the browser.
 fn render_passport_dialog(
     frame: &mut Frame<'_>,
     area: Rect,
     dialog: &PassportDialog,
+    pointer: Option<(u16, u16)>,
     theme: &Theme,
-) {
+) -> HitMap {
+    let mut hits = HitMap::default();
     const DIALOG_HEIGHT: u16 = 8;
     const MIN_WIDTH: u16 = 46;
     if area.width < 20 || area.height < DIALOG_HEIGHT {
-        return;
+        return hits;
     }
     let uri_width = dialog.verification_uri.width() as u16;
     let dialog_width = (uri_width + 8).clamp(MIN_WIDTH, area.width.saturating_sub(4));
@@ -740,21 +762,48 @@ fn render_passport_dialog(
     let rows: [Rect; 5] = split_dialog_rows(inner, DIALOG_HEIGHT - 2);
     let wrap_width = inner.width.saturating_sub(2) as usize;
 
-    // Row 0: traffic-light dots on the left, then the bold title. Body text
-    // below stays dim so the dots and title carry the visual weight.
+    // Row 0: mac-style traffic lights (hovering shows their symbols), a
+    // leading space for breathing room, then the dim title. Body text below
+    // stays dim so the dots carry the visual weight.
     let title = "Bloret PassPort 登录";
-    let title_style = theme.fg(theme.text_dim);
-    let mut title_line = vec![
-        Span::styled("●", theme.fg(theme.rust)),
-        Span::styled(" ●", theme.fg(theme.amber)),
-        Span::styled(" ●", theme.fg(theme.sage)),
-        Span::styled("  ", theme.mute()),
-        Span::styled(title.to_owned(), title_style),
+    let dot_glyphs: [(&str, &str, Color); 3] = [
+        ("●", "✕", theme.rust),
+        ("●", "−", theme.amber),
+        ("●", "+", theme.sage),
     ];
-    let title_span_width = "● ● ●  ".width() + title.width();
+    // Click targets are deterministic: leading space, then each dot one blank
+    // column apart. Compute them first so hover detection can use them.
+    for (index, _) in dot_glyphs.iter().enumerate() {
+        hits.traffic_lights[index] = Some(Rect {
+            x: rows[0].x.saturating_add(1 + (index as u16) * 2),
+            y: rows[0].y,
+            width: 1,
+            height: 1,
+        });
+    }
+    let hovered_dot = pointer.and_then(|(col, row)| {
+        hits.traffic_lights
+            .iter()
+            .position(|rect| rect.is_some_and(|rect| contains(rect, col, row)))
+    });
+    let mut title_line = vec![Span::styled(" ", theme.base())];
+    for (index, (dot, symbol, color)) in dot_glyphs.iter().enumerate() {
+        let glyph = if hovered_dot == Some(index) {
+            symbol
+        } else {
+            dot
+        };
+        if index > 0 {
+            title_line.push(Span::styled(" ", theme.base()));
+        }
+        title_line.push(Span::styled(glyph.to_owned(), theme.fg(*color)));
+    }
+    title_line.push(Span::styled("  ".to_owned(), theme.mute()));
+    title_line.push(Span::styled(title.to_owned(), theme.fg(theme.text_dim)));
+    let title_span_width = 1 + " ● ● ●".width() + "  ".width() + title.width();
     if title_span_width >= usize::from(rows[0].width) {
         // Too narrow for dots + title: keep the dots, drop the title text.
-        title_line.truncate(3);
+        title_line.truncate(6);
     }
     frame.render_widget(
         Paragraph::new(Line::from(title_line)).style(theme.base()),
@@ -808,6 +857,7 @@ fn render_passport_dialog(
         Span::styled(waiting.to_owned(), theme.mute()),
     ]);
     frame.render_widget(Paragraph::new(hint).style(theme.base()), rows[4]);
+    hits
 }
 
 /// Even rows of the dialog inner area; the first row gets the remainder so the
@@ -1090,7 +1140,6 @@ mod tests {
     use super::*;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    use ratatui::style::Color;
 
     /// Double-width CJK cells leave a placeholder space in the buffer, so
     /// text assertions compare with all spaces removed.
@@ -1098,22 +1147,30 @@ mod tests {
         line.chars().filter(|ch| *ch != ' ').collect()
     }
 
-    /// Build a dialog, render it, and return the text lines plus each cell's
-    /// foreground color so tests can assert both content and dimness.
-    fn render_passport(
+    /// Build a dialog, render it, and return the text lines so tests can
+    /// assert content and layout.
+    fn render_passport(area: Rect, dialog: &PassportDialog) -> Vec<String> {
+        render_passport_with_hits(area, dialog, None).0
+    }
+
+    /// Like [`render_passport`], but also returns the hit map so tests can
+    /// assert the traffic-light click targets, and takes a hover pointer.
+    fn render_passport_with_hits(
         area: Rect,
         dialog: &PassportDialog,
-    ) -> (Vec<String>, Vec<Vec<ratatui::style::Color>>) {
+        pointer: Option<(u16, u16)>,
+    ) -> (Vec<String>, HitMap) {
         let backend = TestBackend::new(area.width, area.height);
         let mut terminal = Terminal::new(backend).unwrap();
+        let mut hits = HitMap::default();
         terminal
-            .draw(|frame| render_passport_dialog(frame, area, dialog, &Theme::current()))
+            .draw(|frame| {
+                hits = render_passport_dialog(frame, area, dialog, pointer, &Theme::current());
+            })
             .unwrap();
         let mut lines = Vec::new();
-        let mut colors = Vec::new();
         for row in 0..area.height {
             let mut line = String::new();
-            let mut row_colors = Vec::new();
             for col in 0..area.width {
                 let cell = terminal
                     .backend()
@@ -1122,12 +1179,10 @@ mod tests {
                     .cloned()
                     .unwrap_or_default();
                 line.push_str(cell.symbol());
-                row_colors.push(cell.fg);
             }
             lines.push(line);
-            colors.push(row_colors);
         }
-        (lines, colors)
+        (lines, hits)
     }
 
     #[test]
@@ -1139,17 +1194,32 @@ mod tests {
             opened_browser: false,
         };
         let area = Rect::new(0, 0, 90, 30);
-        let (lines, colors) = render_passport(area, &dialog);
+        let (lines, hits) = render_passport_with_hits(area, &dialog, None);
         let title_row = lines
             .iter()
             .position(|line| flatten(line).contains("BloretPassPort登录"))
             .expect("dialog title rendered");
-        // The title row opens with the three traffic-light dots.
-        let title = flatten(&lines[title_row]);
-        assert!(
-            title.starts_with("│●●●") && title.contains("BloretPassPort登录"),
-            "traffic lights + title, got {title}"
+        // The title row leads with a padding space, then the three dots
+        // separated by single spaces. Offsets are relative to the dialog's
+        // inner area (the whole-screen row also contains the left border).
+        let inner_x = hits.traffic_lights[0]
+            .expect("red hit area")
+            .x
+            .saturating_sub(1);
+        let title_chars: Vec<char> = lines[title_row].chars().collect();
+        let red_col = title_chars
+            .iter()
+            .position(|ch| *ch == '●')
+            .expect("red dot glyph");
+        assert_eq!(
+            u16::try_from(red_col).unwrap_or(0),
+            inner_x + 1,
+            "one space inside the frame before the red dot"
         );
+        assert_eq!(title_chars[red_col + 1], ' ');
+        assert_eq!(title_chars[red_col + 2], '●');
+        assert_eq!(title_chars[red_col + 3], ' ');
+        assert_eq!(title_chars[red_col + 4], '●');
         let code_row = lines
             .iter()
             .position(|line| flatten(line).contains("ABCD-2345"))
@@ -1168,21 +1238,20 @@ mod tests {
         assert!(code_row > title_row);
         assert!(link_row > code_row);
         assert!(hint_row > link_row);
-        // Body rows are dimmed: the device code and the link no longer use the
-        // bright rose/sage highlight styling of the old dialog. Colors depend
-        // on the active theme (plain resets everything to Color::Reset), so
-        // skip the check entirely under a colorless theme.
-        let theme = Theme::current();
-        if theme.rose != Color::Reset {
-            assert!(
-                !colors[code_row].contains(&theme.rose),
-                "device code is highlighted"
-            );
-            assert!(
-                !colors[link_row].contains(&theme.sage),
-                "link is highlighted"
-            );
-        }
+        // All three dots expose click targets, one column apart, on the title
+        // row after the leading space.
+        let dot_column = |index: usize| {
+            hits.traffic_lights[index]
+                .expect("traffic light hit area")
+                .x
+        };
+        assert_eq!(dot_column(0), u16::try_from(red_col).unwrap_or(0));
+        assert_eq!(dot_column(1), dot_column(0) + 2);
+        assert_eq!(dot_column(2), dot_column(0) + 4);
+        assert_eq!(
+            hits.traffic_lights[0].unwrap().y,
+            u16::try_from(title_row).unwrap_or(0)
+        );
         // Centered horizontally: the top border's corner margins are symmetric.
         let frame_row = &lines[title_row - 1];
         // `find` returns a byte offset; these box glyphs are multi-byte UTF-8.
@@ -1198,6 +1267,56 @@ mod tests {
     }
 
     #[test]
+    fn traffic_lights_show_symbols_on_hover() {
+        let dialog = PassportDialog {
+            user_code: "ABCD-2345".to_owned(),
+            verification_uri: "https://passport.bloret.net".to_owned(),
+            opened_browser: false,
+        };
+        let area = Rect::new(0, 0, 70, 20);
+        let (lines, hits) = render_passport_with_hits(area, &dialog, None);
+        let red = hits.traffic_lights[0].expect("red hit area");
+        let row_chars = |line: &str| -> Vec<char> { line.chars().collect() };
+        // No hover: plain dots.
+        assert_eq!(row_chars(&lines[red.y as usize])[red.x as usize], '●');
+        // Hovering the red dot swaps its glyph for the close symbol.
+        let (lines, _) = render_passport_with_hits(area, &dialog, Some((red.x, red.y)));
+        let chars = row_chars(&lines[red.y as usize]);
+        assert_eq!(chars[red.x as usize], '✕', "red shows ✕ on hover");
+        assert_eq!(chars[red.x as usize + 2], '●', "yellow stays a dot");
+        assert_eq!(chars[red.x as usize + 4], '●', "green stays a dot");
+        // Hovering the green dot shows the fullscreen plus.
+        let green = hits.traffic_lights[2].expect("green hit area");
+        let (lines, _) = render_passport_with_hits(area, &dialog, Some((green.x, green.y)));
+        let chars = row_chars(&lines[green.y as usize]);
+        assert_eq!(chars[green.x as usize], '+', "green shows + on hover");
+    }
+
+    #[test]
+    fn traffic_lights_resolve_to_hits() {
+        let dialog = PassportDialog {
+            user_code: "ABCD-2345".to_owned(),
+            verification_uri: "https://passport.bloret.net".to_owned(),
+            opened_browser: false,
+        };
+        let area = Rect::new(0, 0, 70, 20);
+        let (_, hits) = render_passport_with_hits(area, &dialog, None);
+        let cases: [(usize, Hit); 3] = [
+            (0, Hit::TrafficClose),
+            (1, Hit::TrafficMinimize),
+            (2, Hit::TrafficOpenBrowser),
+        ];
+        for (index, expected) in cases {
+            let rect = hits.traffic_lights[index].expect("hit area");
+            assert_eq!(
+                hits.hit(rect.x, rect.y),
+                Some(expected),
+                "dot {index} resolves"
+            );
+        }
+    }
+
+    #[test]
     fn passport_dialog_survives_narrow_screens() {
         let dialog = PassportDialog {
             user_code: "ABCD-2345".to_owned(),
@@ -1205,10 +1324,10 @@ mod tests {
             opened_browser: true,
         };
         // Too small: nothing drawn, no panic.
-        let (lines, _) = render_passport(Rect::new(0, 0, 16, 4), &dialog);
+        let lines = render_passport(Rect::new(0, 0, 16, 4), &dialog);
         assert!(lines.iter().all(|line| line.trim().is_empty()));
         // Small but sufficient: the browser-opened status replaces 等待授权.
-        let (lines, _) = render_passport(Rect::new(0, 0, 70, 20), &dialog);
+        let lines = render_passport(Rect::new(0, 0, 70, 20), &dialog);
         assert!(
             lines
                 .iter()

@@ -530,6 +530,25 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 } else if hit == Some(view::Hit::ToggleApprove) {
                                     auto_approve = !auto_approve;
                                     status = format!("auto-approve={auto_approve}");
+                                } else if hit == Some(view::Hit::TrafficClose) {
+                                    // Red dot: quit the TUI, like closing a window.
+                                    cancel.cancel();
+                                    break Ok(());
+                                } else if hit == Some(view::Hit::TrafficMinimize) {
+                                    // Yellow dot: minimize = hide the dialog only;
+                                    // device polling keeps running.
+                                    passport_dialog = None;
+                                } else if hit == Some(view::Hit::TrafficOpenBrowser) {
+                                    // Green dot: (re)open the verification page.
+                                    if let Some(url) = passport_url.as_deref() {
+                                        let _ =
+                                            std::process::Command::new("xdg-open").arg(url).spawn();
+                                        let _ = std::process::Command::new("open").arg(url).spawn();
+                                        if let Some(dialog) = passport_dialog.as_mut() {
+                                            dialog.opened_browser = true;
+                                        }
+                                        status = format!("已打开 {url}");
+                                    }
                                 } else if hit == Some(view::Hit::Notice)
                                     || hit == Some(view::Hit::Hint(view::HintAction::Close))
                                 {
