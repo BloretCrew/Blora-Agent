@@ -223,10 +223,40 @@ pub fn save_provider(provider: SavedProvider) -> Result<()> {
     Ok(())
 }
 
+/// OpenAI-compatible bases usually live under `/v1`. Users often paste the
+/// host without that suffix; keep both candidates so `/models` still works.
+#[must_use]
+pub fn openai_base_candidates(base_url: &str) -> Vec<String> {
+    let base = base_url.trim().trim_end_matches('/').to_owned();
+    if base.is_empty() {
+        return Vec::new();
+    }
+    let mut out = vec![base.clone()];
+    let already_versioned = base.ends_with("/v1")
+        || base.ends_with("/v1beta")
+        || base.contains("/v1/")
+        || base.contains("/v1beta/");
+    if !already_versioned {
+        out.push(format!("{base}/v1"));
+    }
+    out
+}
+
 /// List models from an OpenAI-compatible `/models` endpoint.
 pub fn fetch_openai_models(base_url: &str, api_key: &str) -> Result<Vec<CatalogModel>> {
-    let url = format!("{}/models", base_url.trim_end_matches('/'));
-    let body: serde_json::Value = ureq::get(&url)
+    let mut last_err: Option<BloraError> = None;
+    for base in openai_base_candidates(base_url) {
+        let url = format!("{base}/models");
+        match fetch_openai_models_url(&url, api_key) {
+            Ok(models) => return Ok(models),
+            Err(err) => last_err = Some(err),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| BloraError::provider("缺少 API 基址")))
+}
+
+fn fetch_openai_models_url(url: &str, api_key: &str) -> Result<Vec<CatalogModel>> {
+    let body: serde_json::Value = ureq::get(url)
         .set("Authorization", &format!("Bearer {api_key}"))
         .call()
         .map_err(|err| BloraError::provider(err.to_string()))?
@@ -243,35 +273,46 @@ pub fn fetch_openai_models(base_url: &str, api_key: &str) -> Result<Vec<CatalogM
             if id.is_empty() {
                 continue;
             }
-            models.push(CatalogModel {
-                name: id.clone(),
-                id,
-            });
+            let name = item
+                .get("name")
+                .or_else(|| item.get("description"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or(id.as_str())
+                .to_owned();
+            models.push(CatalogModel { name, id });
         }
     }
     Ok(models)
 }
 
 /// Merge catalog models with a live `/models` listing when the format is OpenAI-like.
+/// Empty live listings still keep catalog models. A failed live fetch with no
+/// catalog models is an error so the add-provider wizard can show it.
 pub fn resolve_models(
     entry: &CatalogEntry,
     format: MessageFormat,
     api_key: &str,
     base_url: &str,
-) -> Vec<CatalogModel> {
+) -> Result<Vec<CatalogModel>> {
     let mut models = entry.models.clone();
     if matches!(format, MessageFormat::Openai | MessageFormat::Responses)
         && !api_key.is_empty()
         && !base_url.is_empty()
-        && let Ok(live) = fetch_openai_models(base_url, api_key)
     {
-        let mut seen: BTreeMap<String, CatalogModel> = BTreeMap::new();
-        for model in models.into_iter().chain(live) {
-            seen.entry(model.id.clone()).or_insert(model);
+        match fetch_openai_models(base_url, api_key) {
+            Ok(live) => {
+                let mut seen: BTreeMap<String, CatalogModel> = BTreeMap::new();
+                for model in models.into_iter().chain(live) {
+                    seen.entry(model.id.clone()).or_insert(model);
+                }
+                models = seen.into_values().collect();
+            }
+            Err(err) if models.is_empty() => return Err(err),
+            Err(_) => {}
         }
-        models = seen.into_values().collect();
     }
-    models
+    Ok(models)
 }
 
 #[cfg(test)]
@@ -317,6 +358,21 @@ mod tests {
         assert_eq!(
             MessageFormat::from_npm("@ai-sdk/openai-compatible"),
             MessageFormat::Openai
+        );
+    }
+
+    #[test]
+    fn openai_base_adds_v1_when_missing() {
+        assert_eq!(
+            openai_base_candidates("https://router.bloret.net"),
+            vec![
+                "https://router.bloret.net".to_owned(),
+                "https://router.bloret.net/v1".to_owned(),
+            ]
+        );
+        assert_eq!(
+            openai_base_candidates("https://api.openai.com/v1/"),
+            vec!["https://api.openai.com/v1".to_owned()]
         );
     }
 }

@@ -1214,12 +1214,42 @@ fn provider_options(provider_override: &str, logged_in: bool) -> Vec<view::Provi
         available: logged_in,
         models: models_for_provider("blora"),
     }];
-    for saved in blora_catalog::load_saved() {
+    for mut saved in blora_catalog::load_saved() {
         if entries
             .iter()
             .any(|option| option.id.eq_ignore_ascii_case(&saved.id))
         {
             continue;
+        }
+        if saved.models.is_empty() {
+            let entry = blora_catalog::CatalogEntry {
+                id: saved.id.clone(),
+                name: saved.name.clone(),
+                api: Some(saved.base_url.clone()),
+                env: Vec::new(),
+                npm: None,
+                models: Vec::new(),
+            };
+            if let Ok(models) = blora_catalog::resolve_models(
+                &entry,
+                saved.format,
+                &saved.api_key,
+                &saved.base_url,
+            ) {
+                saved.models = models;
+                if matches!(
+                    saved.format,
+                    blora_catalog::MessageFormat::Openai | blora_catalog::MessageFormat::Responses
+                ) {
+                    if let Some(base) = blora_catalog::openai_base_candidates(&saved.base_url)
+                        .into_iter()
+                        .find(|candidate| candidate.ends_with("/v1"))
+                    {
+                        saved.base_url = base;
+                    }
+                }
+                let _ = blora_catalog::save_provider(saved.clone());
+            }
         }
         entries.push(view::ProviderOption {
             id: saved.id.clone(),
@@ -1481,8 +1511,37 @@ fn finish_add_provider(dialog: &view::AddProviderDialog) -> AddAdvance {
     } else {
         return AddAdvance::Fail("未选择供应商".to_owned());
     };
-    let base = dialog.custom_base.trim().to_owned();
-    let models = blora_catalog::resolve_models(&entry, dialog.format, &dialog.api_key, &base);
+    let mut base = dialog.custom_base.trim().to_owned();
+    if matches!(
+        dialog.format,
+        blora_catalog::MessageFormat::Openai | blora_catalog::MessageFormat::Responses
+    ) {
+        if let Some(with_v1) = blora_catalog::openai_base_candidates(&base)
+            .into_iter()
+            .find(|candidate| candidate.ends_with("/v1"))
+        {
+            // Prefer the versioned base when the host itself has no /models.
+            if !base.trim_end_matches('/').ends_with("/v1") {
+                base = with_v1;
+            }
+        }
+    }
+    let models = match blora_catalog::resolve_models(&entry, dialog.format, &dialog.api_key, &base)
+    {
+        Ok(models) => models,
+        Err(err) => return AddAdvance::Fail(format!("拉取模型失败：{err}")),
+    };
+    if models.is_empty()
+        && matches!(
+            dialog.format,
+            blora_catalog::MessageFormat::Openai | blora_catalog::MessageFormat::Responses
+        )
+    {
+        return AddAdvance::Fail(
+            "该基址没有列出任何模型，请确认 URL 是否包含 /v1，例如 https://router.bloret.net/v1"
+                .to_owned(),
+        );
+    }
     entry.models = models.clone();
     let saved = blora_catalog::SavedProvider {
         id,

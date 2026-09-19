@@ -109,6 +109,10 @@ fn saved_provider(saved: &blora_catalog::SavedProvider) -> Box<dyn Provider> {
         .first()
         .map(|m| m.id.as_str())
         .unwrap_or("gpt-4o-mini");
+    let openai_base = blora_catalog::openai_base_candidates(&saved.base_url)
+        .into_iter()
+        .find(|base| base.ends_with("/v1"))
+        .unwrap_or_else(|| saved.base_url.clone());
     match saved.format {
         blora_catalog::MessageFormat::Anthropic => Box::new(AnthropicProvider {
             base_url: saved.base_url.clone(),
@@ -121,13 +125,13 @@ fn saved_provider(saved: &blora_catalog::SavedProvider) -> Box<dyn Provider> {
             base_url: saved.base_url.clone(),
         }),
         blora_catalog::MessageFormat::Responses => Box::new(ResponsesProvider {
-            base_url: saved.base_url.clone(),
+            base_url: openai_base,
             api_key: saved.api_key.clone(),
             model: model.to_owned(),
         }),
         blora_catalog::MessageFormat::Openai => Box::new(OpenAiProvider::with_identity(
             saved.id.clone(),
-            saved.base_url.clone(),
+            openai_base,
             saved.api_key.clone(),
             model,
         )),
