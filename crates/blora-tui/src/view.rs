@@ -2102,7 +2102,7 @@ fn short_id(id: &str) -> String {
     rest.chars().take(8).collect()
 }
 
-fn spinner(tick: u64) -> char {
+pub(crate) fn spinner(tick: u64) -> char {
     let n = SPINNER.len();
     if n == 0 {
         return '✦';
@@ -2114,6 +2114,64 @@ fn spinner(tick: u64) -> char {
     let t = (tick as usize) % period;
     let index = if t < n { t } else { period - t };
     SPINNER[index]
+}
+
+fn sanitize_title(text: &str) -> String {
+    text.chars()
+        .filter(|ch| *ch != '\u{1b}' && *ch != '\u{07}' && *ch != '\n' && *ch != '\r')
+        .collect()
+}
+
+fn mode_label(mode: &str) -> String {
+    let mut chars = mode.trim().chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => "Code".to_owned(),
+    }
+}
+
+/// Terminal window title. While a run is in progress the star spinner
+/// ping-pongs through [`SPINNER`].
+#[must_use]
+pub(crate) fn window_title(running: bool, tick: u64, mode: &str, label: &str) -> String {
+    let mode = mode_label(mode);
+    let label = ellipsize(&sanitize_title(label.trim()), 32);
+    if running {
+        if label.is_empty() {
+            format!("{} Blora {mode}", spinner(tick))
+        } else {
+            format!("{} Blora {mode} · {label}", spinner(tick))
+        }
+    } else if label.is_empty() {
+        format!("Blora {mode}")
+    } else {
+        format!("Blora {mode} · {label}")
+    }
+}
+
+#[must_use]
+pub(crate) fn title_label(
+    projection: Option<&SessionProjection>,
+    session_title: Option<&str>,
+) -> String {
+    let from_user = projection.and_then(|projection| {
+        projection.transcript.iter().rev().find_map(|item| match item {
+            TranscriptItem::User { text, .. } => text
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+                .map(|line| ellipsize(line, 32)),
+            _ => None,
+        })
+    });
+    if let Some(text) = from_user {
+        return text;
+    }
+    session_title
+        .map(str::trim)
+        .filter(|text| !text.is_empty() && *text != "tui")
+        .map(|text| ellipsize(text, 32))
+        .unwrap_or_default()
 }
 
 fn line_count(text: &str) -> usize {
@@ -2139,6 +2197,14 @@ mod tests {
             older.iter().map(ToString::to_string).collect::<Vec<_>>(),
             vec!["3", "4", "5", "6"]
         );
+    }
+
+    #[test]
+    fn window_title_cycles_star_while_running() {
+        assert_eq!(window_title(true, 0, "code", "问候"), "✦ Blora Code · 问候");
+        assert_eq!(window_title(true, 19, "code", "问候"), "✽ Blora Code · 问候");
+        assert_eq!(window_title(true, 20, "code", "问候"), "✼ Blora Code · 问候");
+        assert_eq!(window_title(false, 0, "code", "问候"), "Blora Code · 问候");
     }
 
     #[test]

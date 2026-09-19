@@ -143,6 +143,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut provider_override = String::new();
     let mut notice: Option<String> = None;
     let mut tick = 0u64;
+    let mut last_window_title = String::new();
     let mut pointer: Option<(u16, u16)> = None;
     let mut hits = view::HitMap::default();
     let mut cancel = CancelToken::new();
@@ -260,6 +261,27 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                     );
                 })
                 .map_err(blora_types::BloraError::exec)?;
+            let running = job.is_some();
+            let mode = projection
+                .and_then(|projection| projection.session.as_ref())
+                .map(|session| session.mode.as_str())
+                .or_else(|| sessions.get(index).map(|session| session.mode.as_str()))
+                .unwrap_or("code");
+            let session_title = projection
+                .and_then(|projection| projection.session.as_ref())
+                .and_then(|session| session.title.as_deref())
+                .or_else(|| {
+                    sessions
+                        .get(index)
+                        .and_then(|session| session.title.as_deref())
+                });
+            let label = view::title_label(projection, session_title);
+            let title = view::window_title(running, tick, mode, &label);
+            if title != last_window_title {
+                last_window_title.clone_from(&title);
+                let _ = write!(io::stdout(), "{}", theme::title_osc(&title));
+                let _ = io::stdout().flush();
+            }
             if !passport_browser_opened
                 && passport_receiver.is_some()
                 && let Some(url) = passport_url.as_deref()
