@@ -287,6 +287,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                         match key.code {
                             KeyCode::Esc if add_provider_dialog.is_some() => {
                                 if let Some(dialog) = add_provider_dialog.as_mut() {
+                                    dialog.error = None;
                                     match dialog.step {
                                         view::AddProviderStep::Catalog => {
                                             add_provider_dialog = None;
@@ -295,16 +296,20 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                             dialog.step = view::AddProviderStep::Catalog;
                                         }
                                         view::AddProviderStep::CustomBase => {
-                                            dialog.step = view::AddProviderStep::CustomId;
+                                            dialog.step = if dialog.is_custom() {
+                                                view::AddProviderStep::CustomId
+                                            } else {
+                                                view::AddProviderStep::Catalog
+                                            };
                                         }
                                         view::AddProviderStep::ApiKey => {
-                                            dialog.step = if dialog.is_custom() {
+                                            dialog.step = if dialog.needs_base_step() {
                                                 view::AddProviderStep::CustomBase
                                             } else {
                                                 view::AddProviderStep::Catalog
                                             };
                                         }
-                                        view::AddProviderStep::Format => {
+                                        view::AddProviderStep::Review => {
                                             dialog.step = view::AddProviderStep::ApiKey;
                                         }
                                     }
@@ -312,29 +317,37 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             }
                             KeyCode::Up if add_provider_dialog.is_some() => {
                                 if let Some(dialog) = add_provider_dialog.as_mut() {
-                                    match dialog.step {
-                                        view::AddProviderStep::Catalog => {
-                                            dialog.selected = dialog.selected.saturating_sub(1);
-                                        }
-                                        view::AddProviderStep::Format => {
-                                            dialog.format = cycle_format(dialog.format, -1);
-                                        }
-                                        _ => {}
+                                    if dialog.step == view::AddProviderStep::Catalog {
+                                        dialog.selected = dialog.selected.saturating_sub(1);
                                     }
                                 }
                             }
                             KeyCode::Down if add_provider_dialog.is_some() => {
                                 if let Some(dialog) = add_provider_dialog.as_mut() {
-                                    match dialog.step {
-                                        view::AddProviderStep::Catalog => {
-                                            let max = dialog.catalog_len().saturating_sub(1);
-                                            dialog.selected = (dialog.selected + 1).min(max);
-                                        }
-                                        view::AddProviderStep::Format => {
-                                            dialog.format = cycle_format(dialog.format, 1);
-                                        }
-                                        _ => {}
+                                    if dialog.step == view::AddProviderStep::Catalog {
+                                        let max = dialog.catalog_len().saturating_sub(1);
+                                        dialog.selected = (dialog.selected + 1).min(max);
                                     }
+                                }
+                            }
+                            KeyCode::Left
+                                if add_provider_dialog.as_ref().is_some_and(|dialog| {
+                                    dialog.step == view::AddProviderStep::Review
+                                }) =>
+                            {
+                                if let Some(dialog) = add_provider_dialog.as_mut() {
+                                    dialog.format = cycle_format(dialog.format, -1);
+                                    refresh_add_preview(dialog);
+                                }
+                            }
+                            KeyCode::Right
+                                if add_provider_dialog.as_ref().is_some_and(|dialog| {
+                                    dialog.step == view::AddProviderStep::Review
+                                }) =>
+                            {
+                                if let Some(dialog) = add_provider_dialog.as_mut() {
+                                    dialog.format = cycle_format(dialog.format, 1);
+                                    refresh_add_preview(dialog);
                                 }
                             }
                             KeyCode::Enter if add_provider_dialog.is_some() => {
@@ -342,21 +355,14 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     match advance_add_provider(dialog) {
                                         AddAdvance::Stay => {}
                                         AddAdvance::Saved(saved) => {
-                                            add_provider_dialog = None;
-                                            provider_override = saved.id.clone();
-                                            if let Some(model) = saved.models.first() {
-                                                model_override = model.id.clone();
-                                            }
-                                            provider_dialog = Some(open_provider_dialog(
-                                                &provider_override,
-                                                &model_override,
+                                            status = accept_saved_provider(
+                                                saved,
+                                                &mut provider_override,
+                                                &mut model_override,
+                                                &mut provider_dialog,
                                                 logged_in,
-                                            ));
-                                            status = format!(
-                                                "已添加供应商 {}（{} 个模型）",
-                                                saved.name,
-                                                saved.models.len()
                                             );
+                                            add_provider_dialog = None;
                                         }
                                         AddAdvance::Fail(err) => {
                                             dialog.error = Some(err);
@@ -368,7 +374,8 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 if add_provider_dialog.as_ref().is_some_and(|dialog| {
                                     matches!(
                                         dialog.step,
-                                        view::AddProviderStep::CustomId
+                                        view::AddProviderStep::Catalog
+                                            | view::AddProviderStep::CustomId
                                             | view::AddProviderStep::CustomBase
                                             | view::AddProviderStep::ApiKey
                                     )
@@ -376,13 +383,17 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             {
                                 if let Some(dialog) = add_provider_dialog.as_mut() {
                                     add_step_buffer(dialog).pop();
+                                    if dialog.step == view::AddProviderStep::Catalog {
+                                        dialog.clamp_catalog_selected();
+                                    }
                                 }
                             }
                             KeyCode::Char(ch)
                                 if add_provider_dialog.as_ref().is_some_and(|dialog| {
                                     matches!(
                                         dialog.step,
-                                        view::AddProviderStep::CustomId
+                                        view::AddProviderStep::Catalog
+                                            | view::AddProviderStep::CustomId
                                             | view::AddProviderStep::CustomBase
                                             | view::AddProviderStep::ApiKey
                                     )
@@ -390,6 +401,9 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             {
                                 if let Some(dialog) = add_provider_dialog.as_mut() {
                                     add_step_buffer(dialog).push(ch);
+                                    if dialog.step == view::AddProviderStep::Catalog {
+                                        dialog.clamp_catalog_selected();
+                                    }
                                 }
                             }
                             KeyCode::Left if provider_dialog.is_some() => {
@@ -704,12 +718,9 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     if let Some(dialog) = add_provider_dialog.as_mut() {
                                         match dialog.step {
                                             view::AddProviderStep::Catalog => dialog.selected = idx,
-                                            view::AddProviderStep::Format => {
-                                                if let Some(format) =
-                                                    blora_catalog::MessageFormat::ALL.get(idx)
-                                                {
-                                                    dialog.format = *format;
-                                                }
+                                            view::AddProviderStep::Review => {
+                                                dialog.format = cycle_format(dialog.format, 1);
+                                                refresh_add_preview(dialog);
                                             }
                                             _ => {}
                                         }
@@ -782,37 +793,23 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                                 match advance_add_provider(dialog) {
                                                     AddAdvance::Stay => {}
                                                     AddAdvance::Saved(saved) => {
+                                                        status = accept_saved_provider(
+                                                            saved,
+                                                            &mut provider_override,
+                                                            &mut model_override,
+                                                            &mut provider_dialog,
+                                                            logged_in,
+                                                        );
                                                         add_provider_dialog = None;
-                                                        provider_override = saved.id.clone();
-                                                        status =
-                                                            format!("已添加供应商 {}", saved.name);
                                                     }
                                                     AddAdvance::Fail(err) => {
                                                         dialog.error = Some(err);
                                                     }
                                                 }
                                             }
-                                            view::AddProviderStep::Format => {
-                                                if let Some(format) =
-                                                    blora_catalog::MessageFormat::ALL.get(idx)
-                                                {
-                                                    dialog.format = *format;
-                                                }
-                                                match advance_add_provider(dialog) {
-                                                    AddAdvance::Stay => {}
-                                                    AddAdvance::Saved(saved) => {
-                                                        add_provider_dialog = None;
-                                                        provider_override = saved.id.clone();
-                                                        if let Some(model) = saved.models.first() {
-                                                            model_override = model.id.clone();
-                                                        }
-                                                        status =
-                                                            format!("已添加供应商 {}", saved.name);
-                                                    }
-                                                    AddAdvance::Fail(err) => {
-                                                        dialog.error = Some(err);
-                                                    }
-                                                }
+                                            view::AddProviderStep::Review => {
+                                                dialog.format = cycle_format(dialog.format, 1);
+                                                refresh_add_preview(dialog);
                                             }
                                             _ => {}
                                         }
@@ -1406,10 +1403,13 @@ fn open_add_provider_dialog() -> view::AddProviderDialog {
         step: view::AddProviderStep::Catalog,
         catalog,
         selected: 0,
+        filter: String::new(),
         custom_id: String::new(),
-        custom_base: "https://api.openai.com/v1".to_owned(),
+        custom_base: String::new(),
         api_key: String::new(),
         format: blora_catalog::MessageFormat::Openai,
+        preview_models: Vec::new(),
+        resolved_base: String::new(),
         error,
         fullscreen: false,
         minimized: false,
@@ -1424,13 +1424,11 @@ enum AddAdvance {
 
 fn add_step_buffer(dialog: &mut view::AddProviderDialog) -> &mut String {
     match dialog.step {
+        view::AddProviderStep::Catalog => &mut dialog.filter,
         view::AddProviderStep::CustomId => &mut dialog.custom_id,
         view::AddProviderStep::CustomBase => &mut dialog.custom_base,
         view::AddProviderStep::ApiKey => &mut dialog.api_key,
-        _ => {
-            // Catalog/format don't type; keep a harmless sink.
-            &mut dialog.custom_id
-        }
+        view::AddProviderStep::Review => &mut dialog.custom_id,
     }
 }
 
@@ -1439,6 +1437,29 @@ fn cycle_format(current: blora_catalog::MessageFormat, delta: i8) -> blora_catal
     let idx = all.iter().position(|item| *item == current).unwrap_or(0) as i8;
     let next = (idx + delta).rem_euclid(all.len() as i8) as usize;
     all[next]
+}
+
+fn accept_saved_provider(
+    saved: blora_catalog::SavedProvider,
+    provider_override: &mut String,
+    model_override: &mut String,
+    provider_dialog: &mut Option<view::ProviderDialog>,
+    logged_in: bool,
+) -> String {
+    *provider_override = saved.id.clone();
+    if let Some(model) = saved.models.first() {
+        *model_override = model.id.clone();
+    }
+    *provider_dialog = Some(open_provider_dialog(
+        provider_override,
+        model_override,
+        logged_in,
+    ));
+    format!(
+        "已添加供应商 {}（{} 个模型）",
+        saved.name,
+        saved.models.len()
+    )
 }
 
 fn advance_add_provider(dialog: &mut view::AddProviderDialog) -> AddAdvance {
@@ -1450,11 +1471,17 @@ fn advance_add_provider(dialog: &mut view::AddProviderDialog) -> AddAdvance {
                 AddAdvance::Stay
             } else if let Some(entry) = dialog.catalog_entry().cloned() {
                 dialog.format = entry.format();
-                if let Some(api) = entry.api {
+                dialog.custom_id = entry.id.clone();
+                if let Some(api) = entry.api.clone().filter(|api| !api.trim().is_empty()) {
                     dialog.custom_base = api;
+                } else {
+                    dialog.custom_base.clear();
                 }
-                dialog.custom_id = entry.id;
-                dialog.step = view::AddProviderStep::ApiKey;
+                dialog.step = if dialog.needs_base_step() {
+                    view::AddProviderStep::CustomBase
+                } else {
+                    view::AddProviderStep::ApiKey
+                };
                 AddAdvance::Stay
             } else {
                 AddAdvance::Fail("目录为空，可选手动添加".to_owned())
@@ -1467,16 +1494,21 @@ fn advance_add_provider(dialog: &mut view::AddProviderDialog) -> AddAdvance {
                 .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
                 || id.is_empty()
             {
-                return AddAdvance::Fail("id 只能用小写字母、数字、连字符".to_owned());
+                return AddAdvance::Fail("id 只能用小写字母、数字、连字符或下划线".to_owned());
             }
             dialog.custom_id = id;
             dialog.step = view::AddProviderStep::CustomBase;
             AddAdvance::Stay
         }
         view::AddProviderStep::CustomBase => {
-            if dialog.custom_base.trim().is_empty() {
+            let base = dialog.custom_base.trim();
+            if base.is_empty() {
                 return AddAdvance::Fail("需要 API 基址".to_owned());
             }
+            if !(base.starts_with("https://") || base.starts_with("http://")) {
+                return AddAdvance::Fail("基址需要以 http:// 或 https:// 开头".to_owned());
+            }
+            dialog.custom_base = base.trim_end_matches('/').to_owned();
             dialog.step = view::AddProviderStep::ApiKey;
             AddAdvance::Stay
         }
@@ -1484,16 +1516,22 @@ fn advance_add_provider(dialog: &mut view::AddProviderDialog) -> AddAdvance {
             if dialog.api_key.trim().is_empty() {
                 return AddAdvance::Fail("需要 API key".to_owned());
             }
-            dialog.step = view::AddProviderStep::Format;
+            dialog.step = view::AddProviderStep::Review;
+            refresh_add_preview(dialog);
             AddAdvance::Stay
         }
-        view::AddProviderStep::Format => finish_add_provider(dialog),
+        view::AddProviderStep::Review => finish_add_provider(dialog),
     }
 }
 
-fn finish_add_provider(dialog: &view::AddProviderDialog) -> AddAdvance {
-    let (id, name, mut entry) = if dialog.is_custom() {
+fn add_provider_draft(
+    dialog: &view::AddProviderDialog,
+) -> std::result::Result<(String, String, blora_catalog::CatalogEntry, String), String> {
+    let (id, name, entry) = if dialog.is_custom() {
         let id = dialog.custom_id.trim().to_owned();
+        if id.is_empty() {
+            return Err("未填写供应商 id".to_owned());
+        }
         (
             id.clone(),
             id.clone(),
@@ -1509,9 +1547,9 @@ fn finish_add_provider(dialog: &view::AddProviderDialog) -> AddAdvance {
     } else if let Some(entry) = dialog.catalog_entry().cloned() {
         (entry.id.clone(), entry.name.clone(), entry)
     } else {
-        return AddAdvance::Fail("未选择供应商".to_owned());
+        return Err("未选择供应商".to_owned());
     };
-    let mut base = dialog.custom_base.trim().to_owned();
+    let mut base = dialog.custom_base.trim().trim_end_matches('/').to_owned();
     if matches!(
         dialog.format,
         blora_catalog::MessageFormat::Openai | blora_catalog::MessageFormat::Responses
@@ -1520,16 +1558,54 @@ fn finish_add_provider(dialog: &view::AddProviderDialog) -> AddAdvance {
             .into_iter()
             .find(|candidate| candidate.ends_with("/v1"))
         {
-            // Prefer the versioned base when the host itself has no /models.
-            if !base.trim_end_matches('/').ends_with("/v1") {
+            if !base.ends_with("/v1") {
                 base = with_v1;
             }
         }
     }
-    let models = match blora_catalog::resolve_models(&entry, dialog.format, &dialog.api_key, &base)
-    {
-        Ok(models) => models,
-        Err(err) => return AddAdvance::Fail(format!("拉取模型失败：{err}")),
+    Ok((id, name, entry, base))
+}
+
+fn refresh_add_preview(dialog: &mut view::AddProviderDialog) {
+    match add_provider_draft(dialog) {
+        Ok((_, _, entry, base)) => {
+            dialog.resolved_base = base.clone();
+            match blora_catalog::resolve_models(&entry, dialog.format, &dialog.api_key, &base) {
+                Ok(models) => {
+                    dialog.preview_models = models;
+                    if dialog.preview_models.is_empty() {
+                        dialog.error = Some(
+                            "没有列出模型。可按 ←→ 切换格式，或返回修改基址。".to_owned(),
+                        );
+                    } else {
+                        dialog.error = None;
+                    }
+                }
+                Err(err) => {
+                    dialog.preview_models.clear();
+                    dialog.error = Some(format!("拉取模型失败：{err}"));
+                }
+            }
+        }
+        Err(err) => {
+            dialog.preview_models.clear();
+            dialog.error = Some(err);
+        }
+    }
+}
+
+fn finish_add_provider(dialog: &view::AddProviderDialog) -> AddAdvance {
+    let (id, name, mut entry, base) = match add_provider_draft(dialog) {
+        Ok(draft) => draft,
+        Err(err) => return AddAdvance::Fail(err),
+    };
+    let models = if dialog.preview_models.is_empty() {
+        match blora_catalog::resolve_models(&entry, dialog.format, &dialog.api_key, &base) {
+            Ok(models) => models,
+            Err(err) => return AddAdvance::Fail(format!("拉取模型失败：{err}")),
+        }
+    } else {
+        dialog.preview_models.clone()
     };
     if models.is_empty()
         && matches!(
@@ -1538,8 +1614,7 @@ fn finish_add_provider(dialog: &view::AddProviderDialog) -> AddAdvance {
         )
     {
         return AddAdvance::Fail(
-            "该基址没有列出任何模型，请确认 URL 是否包含 /v1，例如 https://router.bloret.net/v1"
-                .to_owned(),
+            "没有可保存的模型。请确认基址（通常以 /v1 结尾）和密钥。".to_owned(),
         );
     }
     entry.models = models.clone();

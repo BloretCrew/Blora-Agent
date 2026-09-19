@@ -94,7 +94,7 @@ pub enum AddProviderStep {
     CustomId,
     CustomBase,
     ApiKey,
-    Format,
+    Review,
 }
 
 /// Wizard for adding a provider from models.dev (or a custom endpoint).
@@ -103,10 +103,13 @@ pub struct AddProviderDialog {
     pub step: AddProviderStep,
     pub catalog: Vec<blora_catalog::CatalogEntry>,
     pub selected: usize,
+    pub filter: String,
     pub custom_id: String,
     pub custom_base: String,
     pub api_key: String,
     pub format: blora_catalog::MessageFormat,
+    pub preview_models: Vec<blora_catalog::CatalogModel>,
+    pub resolved_base: String,
     pub error: Option<String>,
     pub fullscreen: bool,
     pub minimized: bool,
@@ -119,17 +122,56 @@ impl AddProviderDialog {
     }
 
     #[must_use]
+    pub fn filtered_catalog(&self) -> Vec<&blora_catalog::CatalogEntry> {
+        let query = self.filter.trim().to_ascii_lowercase();
+        self.catalog
+            .iter()
+            .filter(|entry| {
+                if query.is_empty() {
+                    return true;
+                }
+                entry.id.to_ascii_lowercase().contains(&query)
+                    || entry.name.to_ascii_lowercase().contains(&query)
+                    || entry
+                        .api
+                        .as_deref()
+                        .unwrap_or("")
+                        .to_ascii_lowercase()
+                        .contains(&query)
+            })
+            .collect()
+    }
+
+    #[must_use]
     pub fn catalog_entry(&self) -> Option<&blora_catalog::CatalogEntry> {
         if self.is_custom() {
             None
         } else {
-            self.catalog.get(self.selected.saturating_sub(1))
+            self.filtered_catalog()
+                .into_iter()
+                .nth(self.selected.saturating_sub(1))
         }
     }
 
     #[must_use]
     pub fn catalog_len(&self) -> usize {
-        self.catalog.len().saturating_add(1)
+        self.filtered_catalog().len().saturating_add(1)
+    }
+
+    pub fn clamp_catalog_selected(&mut self) {
+        let max = self.catalog_len().saturating_sub(1);
+        if self.selected > max {
+            self.selected = max;
+        }
+    }
+
+    /// Custom vendors, and catalog entries with no `api` field, need a base URL.
+    #[must_use]
+    pub fn needs_base_step(&self) -> bool {
+        self.is_custom()
+            || self
+                .catalog_entry()
+                .is_some_and(|entry| entry.api.as_ref().is_none_or(|api| api.trim().is_empty()))
     }
 }
 
@@ -1298,7 +1340,7 @@ fn render_add_provider_dialog(
     theme: &Theme,
 ) -> HitMap {
     let mut hits = HitMap::default();
-    let compact_height = 16;
+    let compact_height = 18;
     if !dialog.fullscreen && !dialog.minimized && (area.width < 40 || area.height < 10) {
         return hits;
     }
@@ -1326,7 +1368,7 @@ fn render_add_provider_dialog(
         AddProviderStep::CustomId => "添加供应商 · 标识",
         AddProviderStep::CustomBase => "添加供应商 · 接口地址",
         AddProviderStep::ApiKey => "添加供应商 · API 密钥",
-        AddProviderStep::Format => "添加供应商 · 消息格式",
+        AddProviderStep::Review => "添加供应商 · 确认",
     };
     paint_traffic_title(frame, title_row, title, pointer, theme, &mut hits);
     if dialog.minimized {
@@ -1335,13 +1377,35 @@ fn render_add_provider_dialog(
 
     match dialog.step {
         AddProviderStep::Catalog => {
-            let total = dialog.catalog_len().clamp(1, 14);
-            let rows = split_n_rows(body, total as u16);
-            for index in 0..total {
+            let filtered = dialog.filtered_catalog();
+            let total = filtered.len().saturating_add(1);
+            let [filter_row, list_body] =
+                Layout::vertical([Constraint::Length(1), Constraint::Min(2)]).areas(body);
+            let filter_shown = if dialog.filter.is_empty() {
+                "▏".to_owned()
+            } else {
+                format!("{}▏", dialog.filter)
+            };
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(" 筛选  ", theme.mute()),
+                    Span::styled(filter_shown, theme.fg(theme.text)),
+                ]))
+                .style(theme.base()),
+                filter_row,
+            );
+            let visible = list_body.height.max(1) as usize;
+            let offset = catalog_window_offset(dialog.selected, visible, total);
+            let rows = split_n_rows(list_body, visible.min(total.saturating_sub(offset)) as u16);
+            for vis in 0..rows.len() {
+                let index = offset + vis;
+                if index >= total {
+                    break;
+                }
                 let rect = rows
-                    .get(index)
+                    .get(vis)
                     .copied()
-                    .unwrap_or(Rect::new(body.x, body.y, 0, 0));
+                    .unwrap_or(Rect::new(list_body.x, list_body.y, 0, 0));
                 if rect.height == 0 {
                     continue;
                 }
@@ -1363,13 +1427,16 @@ fn render_add_provider_dialog(
                         "自定义 OpenAI 兼容端点".to_owned(),
                     )
                 } else {
-                    let entry = &dialog.catalog[index - 1];
+                    let entry = filtered[index - 1];
+                    let count = entry.models.len();
+                    let count_hint = if count == 0 {
+                        "需拉取模型".to_owned()
+                    } else {
+                        format!("{count} 个模型")
+                    };
                     (
                         entry.name.clone(),
-                        entry
-                            .api
-                            .clone()
-                            .unwrap_or_else(|| entry.format().label().to_owned()),
+                        format!("{} · {}", count_hint, entry.format().label()),
                     )
                 };
                 let line = Line::from(vec![
@@ -1380,73 +1447,178 @@ fn render_add_provider_dialog(
                 ]);
                 frame.render_widget(Paragraph::new(line).style(theme.base()), rect);
             }
-            if let Some(err) = &dialog.error {
-                frame.render_widget(
-                    Paragraph::new(Line::from(Span::styled(err.clone(), theme.fg(theme.rust))))
-                        .style(theme.base()),
-                    hint_row,
-                );
-                return hits;
-            }
         }
         AddProviderStep::CustomId => {
-            paint_prompt_line(frame, body, "供应商 id", &dialog.custom_id, theme);
+            paint_prompt_block(
+                frame,
+                body,
+                "供应商 id",
+                &dialog.custom_id,
+                "crewrouter",
+                "小写字母、数字、连字符或下划线",
+                theme,
+            );
         }
         AddProviderStep::CustomBase => {
-            paint_prompt_line(frame, body, "API 基址", &dialog.custom_base, theme);
+            let preview = blora_catalog::openai_base_candidates(&dialog.custom_base)
+                .into_iter()
+                .find(|base| base.ends_with("/v1"));
+            let hint = if dialog.custom_base.trim().is_empty() {
+                "OpenAI 兼容地址，通常以 /v1 结尾，例如 https://router.bloret.net/v1".to_owned()
+            } else if let Some(base) = preview {
+                format!("将请求 {base}/models")
+            } else {
+                format!(
+                    "将请求 {}/models",
+                    dialog.custom_base.trim().trim_end_matches('/')
+                )
+            };
+            paint_prompt_block(
+                frame,
+                body,
+                "API 基址",
+                &dialog.custom_base,
+                "https://host/v1",
+                &hint,
+                theme,
+            );
         }
         AddProviderStep::ApiKey => {
             let masked: String = dialog.api_key.chars().map(|_| '•').collect();
-            paint_prompt_line(frame, body, "API key", &masked, theme);
+            paint_prompt_block(
+                frame,
+                body,
+                "API key",
+                &masked,
+                "",
+                "只保存在本机 ~/.config/blora/providers.json",
+                theme,
+            );
         }
-        AddProviderStep::Format => {
-            let rows = split_n_rows(body, blora_catalog::MessageFormat::ALL.len() as u16);
-            for (index, format) in blora_catalog::MessageFormat::ALL.iter().enumerate() {
-                let rect = rows
-                    .get(index)
-                    .copied()
-                    .unwrap_or(Rect::new(body.x, body.y, 0, 0));
-                let selected = *format == dialog.format;
-                if selected {
+        AddProviderStep::Review => {
+            let [format_row, base_row, list_body] = Layout::vertical([
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Min(2),
+            ])
+            .areas(body);
+            hits.add_provider_rows.push((format_row, 0));
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(" 格式  ", theme.mute()),
+                    Span::styled("← ".to_owned(), theme.fg(theme.rose)),
+                    Span::styled(dialog.format.label().to_owned(), theme.fg(theme.text)),
+                    Span::styled(" →".to_owned(), theme.fg(theme.rose)),
+                ]))
+                .style(theme.base()),
+                format_row,
+            );
+            let base = if dialog.resolved_base.is_empty() {
+                dialog.custom_base.trim()
+            } else {
+                dialog.resolved_base.as_str()
+            };
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(" 基址  ", theme.mute()),
+                    Span::styled(base.to_owned(), theme.fg(theme.text)),
+                ]))
+                .style(theme.base()),
+                base_row,
+            );
+            if dialog.preview_models.is_empty() {
+                frame.render_widget(
+                    Paragraph::new(Line::from(Span::styled(
+                        " 没有列出模型。可切换格式重试，或返回修改基址。",
+                        theme.fg(theme.rust),
+                    )))
+                    .style(theme.base()),
+                    list_body,
+                );
+            } else {
+                let shown = dialog.preview_models.len().clamp(1, list_body.height.max(1) as usize);
+                let rows = split_n_rows(list_body, shown as u16);
+                for (index, model) in dialog.preview_models.iter().take(shown).enumerate() {
+                    let rect = rows
+                        .get(index)
+                        .copied()
+                        .unwrap_or(Rect::new(list_body.x, list_body.y, 0, 0));
+                    let label = if model.name == model.id {
+                        model.id.clone()
+                    } else {
+                        format!("{}  {}", model.id, model.name)
+                    };
                     frame.render_widget(
-                        Block::default().style(Style::default().bg(theme.bg_select)),
+                        Paragraph::new(Line::from(vec![
+                            Span::styled("   ", theme.mute()),
+                            Span::styled(label, theme.fg(theme.text)),
+                        ]))
+                        .style(theme.base()),
                         rect,
                     );
                 }
-                hits.add_provider_rows.push((rect, index));
-                let marker = if selected { "❯" } else { " " };
-                let line = Line::from(vec![
-                    Span::styled(format!(" {marker} "), theme.fg(theme.rose)),
-                    Span::styled(format.label().to_owned(), theme.fg(theme.text)),
-                ]);
-                frame.render_widget(Paragraph::new(line).style(theme.base()), rect);
             }
         }
     }
-    if dialog.error.is_none() {
+    if let Some(err) = &dialog.error {
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                " enter 下一步  ·  esc 上一步/关闭",
-                theme.mute(),
-            )))
-            .style(theme.base()),
+            Paragraph::new(Line::from(Span::styled(err.clone(), theme.fg(theme.rust))))
+                .style(theme.base()),
+            hint_row,
+        );
+    } else {
+        let footer = match dialog.step {
+            AddProviderStep::Catalog => " 输入筛选  ·  enter 下一步  ·  esc 关闭",
+            AddProviderStep::Review => " enter 保存  ·  ←→ 切换格式  ·  esc 返回",
+            _ => " enter 下一步  ·  esc 上一步",
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(footer, theme.mute()))).style(theme.base()),
             hint_row,
         );
     }
     hits
 }
 
-fn paint_prompt_line(frame: &mut Frame<'_>, area: Rect, label: &str, value: &str, theme: &Theme) {
-    let shown = if value.is_empty() {
-        "▏".to_owned()
+fn catalog_window_offset(selected: usize, visible: usize, total: usize) -> usize {
+    if visible == 0 || total <= visible {
+        return 0;
+    }
+    if selected < visible {
+        0
     } else {
-        format!("{value}▏")
+        (selected + 1).saturating_sub(visible).min(total - visible)
+    }
+}
+
+fn paint_prompt_block(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    label: &str,
+    value: &str,
+    placeholder: &str,
+    hint: &str,
+    theme: &Theme,
+) {
+    let [input, hint_row] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(area);
+    let (shown, style) = if value.is_empty() {
+        (format!("{placeholder}▏"), theme.mute())
+    } else {
+        (format!("{value}▏"), theme.fg(theme.text))
     };
-    let line = Line::from(vec![
-        Span::styled(format!(" {label}  "), theme.mute()),
-        Span::styled(shown, theme.fg(theme.text)),
-    ]);
-    frame.render_widget(Paragraph::new(line).style(theme.base()), area);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(format!(" {label}  "), theme.mute()),
+            Span::styled(shown, style),
+        ]))
+        .style(theme.base()),
+        input,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(format!(" {hint}"), theme.mute()))).style(theme.base()),
+        hint_row,
+    );
 }
 
 const THEME_TABS: [(Scheme, &str); 3] = [
@@ -2284,10 +2456,13 @@ mod tests {
                 models: Vec::new(),
             }],
             selected: 0,
+            filter: String::new(),
             custom_id: String::new(),
             custom_base: String::new(),
             api_key: String::new(),
             format: blora_catalog::MessageFormat::Openai,
+            preview_models: Vec::new(),
+            resolved_base: String::new(),
             error: None,
             fullscreen: false,
             minimized: false,
@@ -2303,6 +2478,88 @@ mod tests {
             hits.hit(hits.add_provider_rows[0].0.x, hits.add_provider_rows[0].0.y),
             Some(Hit::AddProviderRow(0))
         );
+    }
+
+    #[test]
+    fn add_provider_filter_narrows_catalog() {
+        let mut dialog = AddProviderDialog {
+            step: AddProviderStep::Catalog,
+            catalog: vec![
+                blora_catalog::CatalogEntry {
+                    id: "openai".to_owned(),
+                    name: "AcmeAI".to_owned(),
+                    api: None,
+                    env: Vec::new(),
+                    npm: None,
+                    models: vec![blora_catalog::CatalogModel {
+                        id: "gpt-4o".to_owned(),
+                        name: "GPT-4o".to_owned(),
+                    }],
+                },
+                blora_catalog::CatalogEntry {
+                    id: "deepseek".to_owned(),
+                    name: "DeepSeek".to_owned(),
+                    api: None,
+                    env: Vec::new(),
+                    npm: None,
+                    models: Vec::new(),
+                },
+            ],
+            selected: 1,
+            filter: "deep".to_owned(),
+            custom_id: String::new(),
+            custom_base: String::new(),
+            api_key: String::new(),
+            format: blora_catalog::MessageFormat::Openai,
+            preview_models: Vec::new(),
+            resolved_base: String::new(),
+            error: None,
+            fullscreen: false,
+            minimized: false,
+        };
+        dialog.clamp_catalog_selected();
+        let (lines, _) = render_add_provider_with_hits(Rect::new(0, 0, 80, 24), &dialog, None);
+        let joined: String = lines.iter().map(|line| flatten(line)).collect();
+        assert!(joined.contains("DeepSeek"), "filtered catalog keeps DeepSeek");
+        assert!(
+            !joined.contains("AcmeAI"),
+            "filtered catalog hides AcmeAI, got {joined}"
+        );
+        assert!(joined.contains("筛选"));
+    }
+
+    #[test]
+    fn add_provider_review_lists_models_and_base() {
+        let dialog = AddProviderDialog {
+            step: AddProviderStep::Review,
+            catalog: Vec::new(),
+            selected: 0,
+            filter: String::new(),
+            custom_id: "crewrouter".to_owned(),
+            custom_base: "https://router.bloret.net".to_owned(),
+            api_key: "sk-test".to_owned(),
+            format: blora_catalog::MessageFormat::Openai,
+            preview_models: vec![
+                blora_catalog::CatalogModel {
+                    id: "fusion".to_owned(),
+                    name: "fusion".to_owned(),
+                },
+                blora_catalog::CatalogModel {
+                    id: "crew-router".to_owned(),
+                    name: "crew-router".to_owned(),
+                },
+            ],
+            resolved_base: "https://router.bloret.net/v1".to_owned(),
+            error: None,
+            fullscreen: false,
+            minimized: false,
+        };
+        let (lines, _) = render_add_provider_with_hits(Rect::new(0, 0, 80, 24), &dialog, None);
+        let joined: String = lines.iter().map(|line| flatten(line)).collect();
+        assert!(joined.contains("https://router.bloret.net/v1"));
+        assert!(joined.contains("fusion"));
+        assert!(joined.contains("OpenAIChatCompletions"));
+        assert!(joined.contains("enter保存"));
     }
 
     #[test]
