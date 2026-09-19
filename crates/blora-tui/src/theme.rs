@@ -465,7 +465,7 @@ pub const TERMINAL_RESET: &str = "\x1b]111\x07\x1b]112\x07\x1b]0;\x07";
 /// OSC 0 window/icon title.
 #[must_use]
 pub fn title_osc(title: &str) -> String {
-    format!("\x1b]0;{title}\x07")
+    format!("\x1b]0;{title}\x07\x1b[?25l")
 }
 
 fn terminal_is_light() -> bool {

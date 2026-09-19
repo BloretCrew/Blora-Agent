@@ -21,6 +21,7 @@ use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
     MouseButton, MouseEventKind,
 };
+use crossterm::cursor::{Hide, Show};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -89,6 +90,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut theme_dialog: Option<view::ThemeDialog> = None;
     // PassPort user token of the logged-in user; drives the default provider.
     let mut passport_user_token: Option<String> = None;
+    let mut passport_username = String::from("you");
     if let Ok(users) = runtime.list_users() {
         passport_user_token = users.iter().find_map(|user| {
             let token = user.passport_app_token.as_deref()?.trim();
@@ -103,6 +105,9 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
             }
             Some(token.to_owned())
         });
+        if let Some(name) = users.iter().find_map(passport_display_name) {
+            passport_username = name;
+        }
         // Username without an app token still cannot call the PassPort AI API.
         if passport_user_token.is_none() {
             if let Some((device, receiver)) = start_passport_login()? {
@@ -133,7 +138,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut index = 0usize;
     enable_raw_mode().map_err(blora_types::BloraError::exec)?;
     let mut stdout = stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture, Hide)
         .map_err(blora_types::BloraError::exec)?;
     if std::env::var_os("NO_COLOR").is_none() {
         let _ = write!(stdout, "{}", theme::Theme::current().terminal_osc());
@@ -183,6 +188,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                     .filter(|token| !token.trim().is_empty());
                 passport_receiver = None;
                 passport_dialog = None;
+                passport_username = user.username.clone();
                 status = format!("PassPort 登录成功：{}", user.display_name());
                 if provider_dialog.is_some() {
                     provider_dialog = Some(open_provider_dialog(
@@ -248,6 +254,27 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
             } else {
                 provider_override.as_str()
             };
+            let running = job.is_some();
+            let mode = projection
+                .and_then(|projection| projection.session.as_ref())
+                .map(|session| session.mode.as_str())
+                .or_else(|| sessions.get(index).map(|session| session.mode.as_str()))
+                .unwrap_or("code");
+            let session_title = projection
+                .and_then(|projection| projection.session.as_ref())
+                .and_then(|session| session.title.as_deref())
+                .or_else(|| {
+                    sessions
+                        .get(index)
+                        .and_then(|session| session.title.as_deref())
+                });
+            let label = view::title_label(projection, session_title);
+            let title = view::window_title(running, tick, mode, &label);
+            if title != last_window_title {
+                last_window_title.clone_from(&title);
+                let _ = write!(io::stdout(), "{}", theme::title_osc(&title));
+                let _ = execute!(io::stdout(), Hide);
+            }
             terminal
                 .draw(|frame| {
                     hits = view::draw(
@@ -279,6 +306,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             auto_approve,
                             model,
                             provider,
+                            user_label: &passport_username,
                             running: job.is_some(),
                             tick,
                             pointer,
@@ -286,27 +314,6 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                     );
                 })
                 .map_err(blora_types::BloraError::exec)?;
-            let running = job.is_some();
-            let mode = projection
-                .and_then(|projection| projection.session.as_ref())
-                .map(|session| session.mode.as_str())
-                .or_else(|| sessions.get(index).map(|session| session.mode.as_str()))
-                .unwrap_or("code");
-            let session_title = projection
-                .and_then(|projection| projection.session.as_ref())
-                .and_then(|session| session.title.as_deref())
-                .or_else(|| {
-                    sessions
-                        .get(index)
-                        .and_then(|session| session.title.as_deref())
-                });
-            let label = view::title_label(projection, session_title);
-            let title = view::window_title(running, tick, mode, &label);
-            if title != last_window_title {
-                last_window_title.clone_from(&title);
-                let _ = write!(io::stdout(), "{}", theme::title_osc(&title));
-                let _ = io::stdout().flush();
-            }
             if !passport_browser_opened
                 && passport_receiver.is_some()
                 && let Some(url) = passport_url.as_deref()
@@ -676,6 +683,12 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                                 notice = None;
                                                 status = text;
                                             }
+                                            SlashOutcome::LoggedOut(text) => {
+                                                notice = None;
+                                                status = text;
+                                                passport_user_token = None;
+                                                passport_username = "you".to_owned();
+                                            }
                                             SlashOutcome::Panel { status: text, body } => {
                                                 status = text;
                                                 notice = Some(body);
@@ -953,6 +966,8 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                                 &mut provider_dialog,
                                                 &provider_option_list,
                                                 &mut theme_dialog,
+                                                &mut passport_user_token,
+                                                &mut passport_username,
                                             ) {
                                                 break Ok(());
                                             }
@@ -1132,6 +1147,8 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                                 &mut provider_dialog,
                                                 &provider_option_list,
                                                 &mut theme_dialog,
+                                                &mut passport_user_token,
+                                                &mut passport_username,
                                             ) {
                                                 break Ok(());
                                             }
@@ -1188,7 +1205,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     });
 
     disable_raw_mode().ok();
-    execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen).ok();
+    execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen, Show).ok();
     if std::env::var_os("NO_COLOR").is_none() {
         let _ = write!(io::stdout(), "{}", theme::TERMINAL_RESET);
         let _ = io::stdout().flush();
@@ -1239,6 +1256,7 @@ enum SlashOutcome {
     ProviderDialog,
     /// Open the color-scheme picker.
     ThemeDialog,
+    LoggedOut(String),
     Quit,
 }
 
@@ -1250,6 +1268,8 @@ fn apply_slash(
     provider_dialog: &mut Option<view::ProviderDialog>,
     provider_options: &[view::ProviderOption],
     theme_dialog: &mut Option<view::ThemeDialog>,
+    passport_user_token: &mut Option<String>,
+    passport_username: &mut String,
 ) -> bool {
     match outcome {
         SlashOutcome::Quit => {
@@ -1288,6 +1308,13 @@ fn apply_slash(
         SlashOutcome::ThemeDialog => {
             *provider_dialog = None;
             *theme_dialog = Some(open_theme_dialog());
+            false
+        }
+        SlashOutcome::LoggedOut(text) => {
+            *notice = None;
+            *status = text;
+            *passport_user_token = None;
+            *passport_username = "you".to_owned();
             false
         }
     }
@@ -1508,6 +1535,14 @@ fn commit_provider_dialog(
     } else {
         format!("provider={}  model={model_override}", option.display)
     })
+}
+
+fn passport_display_name(user: &blora_storage::UserRecord) -> Option<String> {
+    user.passport_username
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 fn tui_run_options(
@@ -1973,7 +2008,7 @@ fn slash(
             Ok(None) => SlashOutcome::Status("Passport 未配置".to_owned()),
             Err(err) => SlashOutcome::Status(err.to_string()),
         },
-        "logout" => SlashOutcome::Status(
+        "logout" => SlashOutcome::LoggedOut(
             runtime
                 .clear_passport_users()
                 .map(|count| format!("已退出 Passport（清除 {count} 个本地用户）"))

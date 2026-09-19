@@ -228,6 +228,7 @@ pub struct FrameModel<'a> {
     pub auto_approve: bool,
     pub model: &'a str,
     pub provider: &'a str,
+    pub user_label: &'a str,
     pub running: bool,
     pub tick: u64,
     pub pointer: Option<(u16, u16)>,
@@ -738,6 +739,7 @@ fn render_transcript(frame: &mut Frame<'_>, area: Rect, model: &FrameModel<'_>, 
                 width.max(8),
                 model.running,
                 model.tick,
+                model.user_label,
                 theme,
             );
             if rendered.is_empty() {
@@ -774,6 +776,7 @@ fn transcript_lines(
     width: usize,
     running: bool,
     tick: u64,
+    user_label: &str,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
     let needle = search.map(str::to_ascii_lowercase);
@@ -821,9 +824,14 @@ fn transcript_lines(
         index += 1;
         match item {
             TranscriptItem::User { text, .. } => {
+                let label = if user_label.trim().is_empty() {
+                    "you"
+                } else {
+                    user_label
+                };
                 push_block(
                     &mut out,
-                    "you",
+                    label,
                     theme.rose,
                     text,
                     width,
