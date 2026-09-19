@@ -193,6 +193,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "blora-catalog"
+version = "0.1.0"
+dependencies = [
+ "blora-types",
+ "dirs",
+ "serde",
+ "serde_json",
+ "ureq",
+]
+
+[[package]]
 name = "blora-cli"
 version = "0.1.0"
 dependencies = [
@@ -248,6 +259,7 @@ name = "blora-model"
 version = "0.1.0"
 dependencies = [
  "blora-auth",
+ "blora-catalog",
  "blora-types",
  "serde",
  "serde_json",
@@ -345,6 +357,8 @@ name = "blora-tui"
 version = "0.1.0"
 dependencies = [
  "blora-auth",
+ "blora-catalog",
+ "blora-model",
  "blora-runtime",
  "blora-session",
  "blora-storage",
