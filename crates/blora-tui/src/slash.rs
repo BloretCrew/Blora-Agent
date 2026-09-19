@@ -40,6 +40,13 @@ pub const COMMANDS: &[SlashCommand] = &[
         "Show TUI key bindings",
         "system",
     ),
+    cmd(
+        "theme",
+        &["appearance"],
+        "[dusk|dawn|auto]",
+        "Show or set the TUI color theme",
+        "system",
+    ),
     cmd("new", &[], "", "Create a new session", "session"),
     cmd("sessions", &["ls-sessions"], "", "List sessions", "session"),
     cmd(
@@ -458,6 +465,13 @@ mod tests {
         assert_eq!(found.len(), COMMANDS.len());
         assert_eq!(found[0].name, "help");
         assert_eq!(found.last().map(|cmd| cmd.name), Some("quit"));
+    }
+
+    #[test]
+    fn theme_command_is_catalogued() {
+        assert_eq!(resolve("theme").map(|cmd| cmd.name), Some("theme"));
+        assert_eq!(resolve("appearance").map(|cmd| cmd.name), Some("theme"));
+        assert!(matches("/th").iter().any(|cmd| cmd.name == "theme"));
     }
 
     #[test]

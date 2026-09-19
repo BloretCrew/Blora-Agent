@@ -56,6 +56,8 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut passport_browser_opened = false;
     // Pending device-flow login, shown as a centered dialog; hidden with Esc.
     let mut passport_dialog: Option<view::PassportDialog> = None;
+    // Model-provider switch dialog opened via `/provider`.
+    let mut provider_dialog: Option<view::ProviderDialog> = None;
     // PassPort user token of the logged-in user; drives the default provider.
     let mut passport_user_token: Option<String> = None;
     if let Ok(users) = runtime.list_users() {
@@ -95,7 +97,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
         .map_err(blora_types::BloraError::exec)?;
     if std::env::var_os("NO_COLOR").is_none() {
-        let _ = write!(stdout, "{}", theme::CURSOR_ROSE);
+        let _ = write!(stdout, "{}", theme::Theme::current().cursor_osc());
         let _ = stdout.flush();
     }
     let backend = CrosstermBackend::new(stdout);
@@ -168,6 +170,8 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
             tick = tick.wrapping_add(1);
             let env_model = std::env::var("BLORA_MODEL").unwrap_or_default();
             let env_provider = std::env::var("BLORA_PROVIDER").unwrap_or_default();
+            let logged_in = passport_user_token.is_some();
+            let provider_option_list = provider_options(runtime, &provider_override, logged_in);
             let model = if model_override.is_empty() {
                 env_model.as_str()
             } else {
@@ -203,6 +207,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             },
                             notice: notice.as_deref(),
                             passport_dialog: passport_dialog.as_ref(),
+                            provider_dialog: provider_dialog.as_ref(),
                             slash_hits: &slash_hits,
                             slash_selected,
                             search: search.as_deref(),
@@ -374,6 +379,15 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                                 passport_receiver = Some(receiver);
                                                 passport_browser_opened = false;
                                             }
+                                            SlashOutcome::ProviderDialog => {
+                                                provider_dialog = Some(view::ProviderDialog {
+                                                    options: provider_option_list.clone(),
+                                                    selected: provider_option_list
+                                                        .iter()
+                                                        .position(|option| !option.id.is_empty())
+                                                        .unwrap_or(0),
+                                                });
+                                            }
                                         }
                                     }
                                 } else if !input.trim().is_empty() {
@@ -491,6 +505,8 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                                 &cancel,
                                                 &mut notice,
                                                 &mut status,
+                                                &mut provider_dialog,
+                                                &provider_option_list,
                                             ) {
                                                 break Ok(());
                                             }
@@ -627,6 +643,8 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                                 &cancel,
                                                 &mut notice,
                                                 &mut status,
+                                                &mut provider_dialog,
+                                                &provider_option_list,
                                             ) {
                                                 break Ok(());
                                             }
@@ -736,6 +754,8 @@ enum SlashOutcome {
         url: String,
         receiver: std::sync::mpsc::Receiver<blora_auth::PassportUser>,
     },
+    /// Open the model-provider switch dialog.
+    ProviderDialog,
     Quit,
 }
 
@@ -744,6 +764,8 @@ fn apply_slash(
     cancel: &CancelToken,
     notice: &mut Option<String>,
     status: &mut String,
+    provider_dialog: &mut Option<view::ProviderDialog>,
+    provider_options: &[view::ProviderOption],
 ) -> bool {
     match outcome {
         SlashOutcome::Quit => {
@@ -764,7 +786,87 @@ fn apply_slash(
             *status = "PassPort 登录已启动".to_owned();
             false
         }
+        SlashOutcome::ProviderDialog => {
+            let selected = provider_options
+                .iter()
+                .position(|option| !option.id.is_empty());
+            *provider_dialog = Some(view::ProviderDialog {
+                options: provider_options.to_vec(),
+                selected: selected.unwrap_or(0),
+            });
+            false
+        }
     }
+}
+
+/// Build the provider list for the switch dialog. `provider_override` and the
+/// login/API-key state decide which entries are marked available.
+fn provider_options(
+    runtime: &Runtime,
+    provider_override: &str,
+    logged_in: bool,
+) -> Vec<view::ProviderOption> {
+    let env_provider = std::env::var("BLORA_PROVIDER").unwrap_or_default();
+    let default_display = if logged_in {
+        "Blora"
+    } else if env_provider.is_empty() {
+        "OpenAI"
+    } else {
+        env_provider.trim()
+    };
+    let override_id = provider_override.trim().to_owned();
+    let has_key = std::env::var("BLORA_API_KEY").is_ok()
+        || std::env::var("OPENAI_API_KEY").is_ok()
+        || std::env::var("ANTHROPIC_API_KEY").is_ok()
+        || std::env::var("GEMINI_API_KEY").is_ok();
+    let current = |id: &str| {
+        if override_id.is_empty() {
+            id.is_empty()
+        } else {
+            override_id.eq_ignore_ascii_case(id)
+        }
+    };
+    let entries: Vec<view::ProviderOption> = vec![
+        view::ProviderOption {
+            id: String::new(),
+            display: format!("默认（{default_display}）"),
+            hint: "跟随登录与环境配置".to_owned(),
+            available: true,
+        },
+        view::ProviderOption {
+            id: "blora".to_owned(),
+            display: "Blora".to_owned(),
+            hint: "Bloret PassPort · 200 次/天".to_owned(),
+            available: logged_in,
+        },
+        view::ProviderOption {
+            id: "openai".to_owned(),
+            display: "OpenAI".to_owned(),
+            hint: "BLORA_API_KEY / OPENAI_API_KEY".to_owned(),
+            available: has_key,
+        },
+        view::ProviderOption {
+            id: "anthropic".to_owned(),
+            display: "Anthropic".to_owned(),
+            hint: "ANTHROPIC_API_KEY".to_owned(),
+            available: std::env::var("ANTHROPIC_API_KEY").is_ok(),
+        },
+        view::ProviderOption {
+            id: "gemini".to_owned(),
+            display: "Gemini".to_owned(),
+            hint: "GEMINI_API_KEY".to_owned(),
+            available: std::env::var("GEMINI_API_KEY").is_ok(),
+        },
+    ];
+    entries
+        .into_iter()
+        .map(|mut option| {
+            if current(&option.id) {
+                option.hint = format!("当前 · {}", option.hint);
+            }
+            option
+        })
+        .collect()
 }
 
 /// Split the `/login` status text (`<url>\n设备码：<code>`) back into its URL
@@ -801,6 +903,45 @@ fn panel(status: impl Into<String>, body: impl Into<String>) -> SlashOutcome {
 
 fn workspace_key(workspace: &Path) -> String {
     workspace.display().to_string()
+}
+
+fn apply_theme(args: &str) -> SlashOutcome {
+    let current = theme::pref();
+    if args.is_empty() {
+        let next = if theme::Theme::current().is_dark() {
+            theme::ThemePref::Dawn
+        } else {
+            theme::ThemePref::Dusk
+        };
+        theme::set_pref(next);
+        write_cursor();
+        return SlashOutcome::Status(format!(
+            "theme={} (was {}; /theme dusk|dawn|auto)",
+            next.as_str(),
+            current.as_str()
+        ));
+    }
+    match theme::ThemePref::parse(args) {
+        Some(pref) => {
+            theme::set_pref(pref);
+            write_cursor();
+            let resolved = theme::Theme::current();
+            let resolved = if resolved == theme::Theme::plain() {
+                "plain"
+            } else if resolved.is_dark() {
+                "dusk"
+            } else {
+                "dawn"
+            };
+            SlashOutcome::Status(format!("theme={} (resolved {resolved})", pref.as_str()))
+        }
+        None => SlashOutcome::Status("usage: /theme [dusk|dawn|auto|plain]".to_owned()),
+    }
+}
+
+fn write_cursor() {
+    let _ = write!(io::stdout(), "{}", theme::Theme::current().cursor_osc());
+    let _ = io::stdout().flush();
 }
 
 fn split_slash(input: &str) -> (&str, &str) {
@@ -847,6 +988,7 @@ fn slash(
                 .unwrap_or_else(|err| err.to_string()),
         ),
         "keymap" => panel("keymap", slash::keymap_text()),
+        "theme" => apply_theme(args),
         "new" => open_session(runtime, workspace, sessions, index, Mode::Code, "tui"),
         "sessions" => panel("sessions", list_session_lines(sessions)),
         "goto" => goto_session(sessions, index, args),
@@ -976,14 +1118,12 @@ fn slash(
             })
         }
         "provider" => {
-            if !args.is_empty() {
-                *provider = args.to_owned();
-            }
-            SlashOutcome::Status(if provider.is_empty() {
-                env_flag("BLORA_PROVIDER", "openai")
+            if args.is_empty() {
+                SlashOutcome::ProviderDialog
             } else {
-                provider.clone()
-            })
+                *provider = args.to_owned();
+                SlashOutcome::Status(format!("provider={}", provider.clone()))
+            }
         }
         "mode" => {
             if args.is_empty() {
@@ -1230,7 +1370,7 @@ fn slash(
         "doctor" => panel(
             "doctor",
             format!(
-                "provider={} (override={})\nmodel={} (override={})\nexec={}\nworktree={}\nnetwork={}\npty={}\nmcp={}\nhooks={}\nauto-approve={auto_approve}",
+                "provider={} (override={})\nmodel={} (override={})\ntheme={}\nexec={}\nworktree={}\nnetwork={}\npty={}\nmcp={}\nhooks={}\nauto-approve={auto_approve}",
                 env_flag("BLORA_PROVIDER", "openai"),
                 if provider.is_empty() {
                     "-"
@@ -1243,6 +1383,7 @@ fn slash(
                 } else {
                     model.as_str()
                 },
+                theme::pref().as_str(),
                 env_flag("BLORA_EXEC", "local"),
                 env_flag("BLORA_WORKTREE", "0"),
                 env_flag("BLORA_NETWORK", "0"),

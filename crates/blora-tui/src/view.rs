@@ -29,6 +29,26 @@ pub struct PassportDialog {
     pub opened_browser: bool,
 }
 
+/// One selectable provider inside the provider-switch dialog.
+#[derive(Clone, Debug)]
+pub struct ProviderOption {
+    /// Value stored in the provider override (`""` = follow the default).
+    pub id: String,
+    /// Display name, e.g. `Blora` or `OpenAI`.
+    pub display: String,
+    /// One-line description, e.g. the required credential or current state.
+    pub hint: String,
+    /// False when the provider cannot be used right now (no key, not logged in).
+    pub available: bool,
+}
+
+/// Model-provider switch dialog shown via `/provider` with no arguments.
+#[derive(Clone, Debug)]
+pub struct ProviderDialog {
+    pub options: Vec<ProviderOption>,
+    pub selected: usize,
+}
+
 pub struct FrameModel<'a> {
     pub workspace: &'a Path,
     pub sessions: &'a [SessionSummary],
@@ -40,6 +60,8 @@ pub struct FrameModel<'a> {
     pub notice: Option<&'a str>,
     /// Pending PassPort login; renders as a centered modal dialog.
     pub passport_dialog: Option<&'a PassportDialog>,
+    /// Model-provider switch dialog; renders as a centered modal dialog.
+    pub provider_dialog: Option<&'a ProviderDialog>,
     pub slash_hits: &'a [&'static SlashCommand],
     pub slash_selected: usize,
     pub search: Option<&'a str>,
@@ -71,6 +93,8 @@ pub enum Hit {
     TrafficClose,
     TrafficMinimize,
     TrafficOpenBrowser,
+    /// A provider row inside the provider-switch dialog.
+    ProviderRow(usize),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -104,6 +128,8 @@ pub struct HitMap {
     pub hints: Vec<(Rect, HintAction)>,
     /// macOS-style traffic-light dots of the login dialog.
     pub traffic_lights: [Option<Rect>; 3],
+    /// Provider rows of the provider-switch dialog.
+    pub provider_rows: Vec<(Rect, usize)>,
 }
 
 impl HitMap {
@@ -123,6 +149,11 @@ impl HitMap {
                     1 => Hit::TrafficMinimize,
                     _ => Hit::TrafficOpenBrowser,
                 });
+            }
+        }
+        for (rect, idx) in &self.provider_rows {
+            if contains(*rect, col, row) {
+                return Some(Hit::ProviderRow(*idx));
             }
         }
         if self.notice && self.overlay.is_some_and(|rect| contains(rect, col, row)) {
@@ -269,6 +300,9 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
     if let Some(dialog) = model.passport_dialog {
         let dialog_hits = render_passport_dialog(frame, area, dialog, model.pointer, &theme);
         hits.traffic_lights = dialog_hits.traffic_lights;
+    } else if let Some(dialog) = model.provider_dialog {
+        let dialog_hits = render_provider_dialog(frame, area, dialog, model.pointer, &theme);
+        hits.provider_rows = dialog_hits.provider_rows;
     }
     hits
 }
@@ -857,6 +891,120 @@ fn render_passport_dialog(
         Span::styled(waiting.to_owned(), theme.mute()),
     ]);
     frame.render_widget(Paragraph::new(hint).style(theme.base()), rows[4]);
+    hits
+}
+
+/// Model-provider switch dialog, sharing the login dialog's chrome: rounded
+/// centered frame, traffic lights, dim body. Rows are selectable with the
+/// pointer or the keyboard; Enter confirms, Esc closes.
+fn render_provider_dialog(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    dialog: &ProviderDialog,
+    pointer: Option<(u16, u16)>,
+    theme: &Theme,
+) -> HitMap {
+    let mut hits = HitMap::default();
+    let row_count = dialog.options.len().clamp(1, 8) as u16;
+    let dialog_height = row_count + 5;
+    if area.width < 30 || area.height < dialog_height + 2 || dialog.options.is_empty() {
+        return hits;
+    }
+    let content_width = dialog
+        .options
+        .iter()
+        .map(|option| option.display.width() + option.hint.width() + 8)
+        .max()
+        .unwrap_or(24) as u16;
+    let dialog_width = (content_width + 6).clamp(46, area.width.saturating_sub(4));
+    let [_, frame_x, _] = Layout::horizontal([
+        Constraint::Min(0),
+        Constraint::Length(dialog_width),
+        Constraint::Min(0),
+    ])
+    .flex(Flex::Center)
+    .areas(area);
+    let [_, frame_y, _] = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(dialog_height),
+        Constraint::Min(0),
+    ])
+    .flex(Flex::Center)
+    .areas(frame_x);
+
+    frame.render_widget(Clear, frame_y);
+    let block = Block::bordered()
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(theme.fg(theme.hairline));
+    let inner = block.inner(frame_y);
+    frame.render_widget(block, frame_y);
+
+    let body_height = inner.height;
+    if body_height == 0 {
+        return hits;
+    }
+    let mut rows: Vec<Rect> = split_dialog_rows(inner, row_count + 1).to_vec();
+    let title_row = rows.remove(0);
+
+    // Title row: traffic lights + title, same as the login dialog.
+    let dot_glyphs: [(&str, &str, Color); 3] = [
+        ("●", "✕", theme.rust),
+        ("●", "−", theme.amber),
+        ("●", "+", theme.sage),
+    ];
+    let mut title_line = vec![Span::styled(" ", theme.base())];
+    for (index, (dot, _, color)) in dot_glyphs.iter().enumerate() {
+        if index > 0 {
+            title_line.push(Span::styled(" ", theme.base()));
+        }
+        title_line.push(Span::styled((*dot).to_owned(), theme.fg(*color)));
+    }
+    title_line.push(Span::styled("  ".to_owned(), theme.mute()));
+    title_line.push(Span::styled(
+        "选择模型供应商",
+        theme.fg(theme.text_dim),
+    ));
+    frame.render_widget(Paragraph::new(Line::from(title_line)).style(theme.base()), title_row);
+
+    // Provider rows: marker, display name, hint. The selected row renders on
+    // the raised background; unavailable providers show why they cannot run.
+    for (index, option) in dialog.options.iter().enumerate() {
+        let rect = rows
+            .get(index)
+            .copied()
+            .unwrap_or(Rect::new(inner.x, inner.y, 0, 0));
+        if rect.height == 0 {
+            continue;
+        }
+        hits.provider_rows.push((rect, index));
+        let is_selected = index == dialog.selected;
+        let hovered = pointer
+            .map(|(col, row)| contains(rect, col, row))
+            .unwrap_or(false);
+        if is_selected || hovered {
+            let bg = Style::default().bg(theme.bg_select);
+            frame.render_widget(Block::default().style(bg), rect);
+        }
+        let marker = if is_selected { "❯" } else { " " };
+        let name_style = if is_selected {
+            theme.fg(theme.text)
+        } else {
+            theme.fg(theme.text_dim)
+        };
+        let hint_style = theme.mute();
+        let hint = if option.available {
+            option.hint.clone()
+        } else {
+            format!("不可用 · {}", option.hint)
+        };
+        let line = Line::from(vec![
+            Span::styled(format!(" {marker} "), theme.fg(theme.rose)),
+            Span::styled(option.display.clone(), name_style),
+            Span::styled("  ·  ".to_owned(), theme.mute()),
+            Span::styled(hint, hint_style),
+        ]);
+        frame.render_widget(Paragraph::new(line).style(theme.base()), rect);
+    }
     hits
 }
 
