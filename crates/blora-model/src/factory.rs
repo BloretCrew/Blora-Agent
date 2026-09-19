@@ -100,18 +100,7 @@ fn passport_provider(user_token: &str) -> Option<Box<dyn Provider>> {
     if user_token.is_empty() {
         return None;
     }
-    let app_id = std::env::var("BLORA_PASSPORT_APP_ID")
-        .unwrap_or_else(|_| blora_auth::DEFAULT_PASSPORT_APP_ID.to_owned());
-    let app_secret = std::env::var("BLORA_PASSPORT_APP_SECRET")
-        .unwrap_or_else(|_| blora_auth::DEFAULT_PASSPORT_APP_SECRET.to_owned());
-    if app_id.trim().is_empty() || app_secret.trim().is_empty() {
-        return None;
-    }
-    Some(Box::new(PassportProvider::from_parts(
-        app_id.trim(),
-        app_secret.trim(),
-        user_token,
-    )))
+    Some(Box::new(PassportProvider::from_bearer(user_token)))
 }
 
 fn one(kind: &str) -> Box<dyn Provider> {

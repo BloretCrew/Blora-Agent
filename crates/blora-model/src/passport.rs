@@ -4,9 +4,9 @@
 //! Bloret PassPort AI API provider.
 //!
 //! PassPort proxies a fixed upstream model, so the caller-supplied `model` is
-//! always reported as `blora` regardless of what the request asks for. Auth is
-//! the OAuth three-part key `{AppID};{AppSecret};{UserToken}` where the user
-//! token comes from the PassPort login flow.
+//! always reported as `blora` regardless of what the request asks for. Bearer
+//! auth accepts `sk-…` keys, the legacy `{AppID};{AppSecret};{UserToken}`
+//! triple, or an OAuth `access_token` from the device/authorization-code flow.
 
 use blora_types::{BloraError, CancelToken, Result};
 
@@ -26,11 +26,18 @@ pub struct PassportProvider {
 }
 
 impl PassportProvider {
+    /// Use a PassPort Bearer credential as-is: OAuth access token, `sk-` key,
+    /// or a legacy three-part `{AppID};{AppSecret};{UserToken}` string.
+    #[must_use]
+    pub fn from_bearer(token: &str) -> Self {
+        Self {
+            api_key: token.trim().to_owned(),
+        }
+    }
+
     /// Three-part OAuth key: `{AppID};{AppSecret};{UserToken}`.
     pub fn from_parts(app_id: &str, app_secret: &str, user_token: &str) -> Self {
-        Self {
-            api_key: format!("{app_id};{app_secret};{user_token}"),
-        }
+        Self::from_bearer(&format!("{app_id};{app_secret};{user_token}"))
     }
 
     #[must_use]
@@ -78,5 +85,11 @@ mod tests {
         assert_eq!(provider.name(), "blora");
         assert_eq!(provider.api_key, "bp_app;bs_secret;tok");
         assert_eq!(PassportProvider::display_name(), "Blora");
+    }
+
+    #[test]
+    fn oauth_access_token_is_a_plain_bearer() {
+        let provider = PassportProvider::from_bearer("oauth-access");
+        assert_eq!(provider.api_key, "oauth-access");
     }
 }

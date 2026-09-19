@@ -156,17 +156,9 @@ impl PassportConfig {
                 .map_err(|err| AuthError::Protocol(err.to_string()))?;
             if let Some(access_token) = value.get("access_token").and_then(Value::as_str) {
                 let mut user = self.userinfo(access_token)?;
-                // `/oauth/userinfo` only returns profile fields. `apptoken` is
-                // documented on `/app/verify`. Device-code logins still need a
-                // user token for the PassPort AI API, so fall back to the
-                // access token when userinfo omits it.
-                if user
-                    .apptoken
-                    .as_deref()
-                    .is_none_or(|token| token.trim().is_empty())
-                {
-                    user.apptoken = Some(access_token.to_owned());
-                }
+                // PassPort AI accepts the OAuth access_token as Bearer. Store
+                // that credential rather than a profile-only apptoken.
+                user.apptoken = Some(access_token.to_owned());
                 return Ok(user);
             }
             let error = value.get("error").and_then(Value::as_str).unwrap_or("");
@@ -445,7 +437,7 @@ mod tests {
         assert_eq!(
             user.apptoken.as_deref(),
             Some("t"),
-            "device login keeps the access token when userinfo has no apptoken"
+            "device login stores the OAuth access_token for the AI API"
         );
         server.join().unwrap();
     }
