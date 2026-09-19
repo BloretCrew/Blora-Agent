@@ -47,6 +47,8 @@ pub struct ProviderOption {
 pub struct ProviderDialog {
     pub options: Vec<ProviderOption>,
     pub selected: usize,
+    pub fullscreen: bool,
+    pub minimized: bool,
 }
 
 /// One selectable scheme inside the theme picker.
@@ -63,6 +65,8 @@ pub struct ThemeOption {
 pub struct ThemeDialog {
     pub options: Vec<ThemeOption>,
     pub selected: usize,
+    pub fullscreen: bool,
+    pub minimized: bool,
 }
 
 pub struct FrameModel<'a> {
@@ -330,9 +334,11 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
     } else if let Some(dialog) = model.theme_dialog {
         let dialog_hits = render_theme_dialog(frame, area, dialog, model.pointer, &theme);
         hits.theme_rows = dialog_hits.theme_rows;
+        hits.traffic_lights = dialog_hits.traffic_lights;
     } else if let Some(dialog) = model.provider_dialog {
         let dialog_hits = render_provider_dialog(frame, area, dialog, model.pointer, &theme);
         hits.provider_rows = dialog_hits.provider_rows;
+        hits.traffic_lights = dialog_hits.traffic_lights;
     }
     hits
 }
@@ -345,6 +351,99 @@ fn inset(area: Rect) -> Rect {
         width: area.width.saturating_sub(pad.saturating_mul(2)),
         height: area.height,
     }
+}
+
+/// Centered dialog frame. Yellow minimizes to a title bar; green fills the
+/// terminal minus a one-cell margin.
+fn dialog_outer(
+    area: Rect,
+    compact_width: u16,
+    compact_height: u16,
+    fullscreen: bool,
+    minimized: bool,
+) -> Option<Rect> {
+    if area.width < 20 || area.height < 3 {
+        return None;
+    }
+    let height = if minimized {
+        3.min(area.height)
+    } else if fullscreen {
+        area.height.saturating_sub(2).max(5).min(area.height)
+    } else {
+        compact_height.min(area.height.saturating_sub(2)).max(5)
+    };
+    let width = if fullscreen {
+        area.width.saturating_sub(2).max(20).min(area.width)
+    } else {
+        compact_width.clamp(24, area.width.saturating_sub(4).max(24))
+    };
+    let [_, frame_x, _] = Layout::horizontal([
+        Constraint::Min(0),
+        Constraint::Length(width.min(area.width)),
+        Constraint::Min(0),
+    ])
+    .flex(Flex::Center)
+    .areas(area);
+    let [_, frame_y, _] = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(height.min(area.height)),
+        Constraint::Min(0),
+    ])
+    .flex(Flex::Center)
+    .areas(frame_x);
+    Some(frame_y)
+}
+
+/// Paint macOS-style traffic lights and register their hit rects. Hovering a
+/// dot swaps in ✕ / − / +.
+fn paint_traffic_title(
+    frame: &mut Frame<'_>,
+    title_row: Rect,
+    title: &str,
+    pointer: Option<(u16, u16)>,
+    theme: &Theme,
+    hits: &mut HitMap,
+) {
+    let dot_glyphs: [(&str, &str, Color); 3] = [
+        ("●", "✕", theme.rust),
+        ("●", "−", theme.amber),
+        ("●", "+", theme.sage),
+    ];
+    for (index, _) in dot_glyphs.iter().enumerate() {
+        hits.traffic_lights[index] = Some(Rect {
+            x: title_row.x.saturating_add(1 + (index as u16) * 2),
+            y: title_row.y,
+            width: 1,
+            height: 1,
+        });
+    }
+    let hovered_dot = pointer.and_then(|(col, row)| {
+        hits.traffic_lights
+            .iter()
+            .position(|rect| rect.is_some_and(|rect| contains(rect, col, row)))
+    });
+    let mut title_line = vec![Span::styled(" ", theme.base())];
+    for (index, (dot, symbol, color)) in dot_glyphs.iter().enumerate() {
+        let glyph = if hovered_dot == Some(index) {
+            symbol
+        } else {
+            dot
+        };
+        if index > 0 {
+            title_line.push(Span::styled(" ", theme.base()));
+        }
+        title_line.push(Span::styled((*glyph).to_owned(), theme.fg(*color)));
+    }
+    title_line.push(Span::styled("  ".to_owned(), theme.mute()));
+    title_line.push(Span::styled(title.to_owned(), theme.fg(theme.text_dim)));
+    let title_span_width = 1 + " ● ● ●".width() + "  ".width() + title.width();
+    if title_span_width >= usize::from(title_row.width) {
+        title_line.truncate(6);
+    }
+    frame.render_widget(
+        Paragraph::new(Line::from(title_line)).style(theme.base()),
+        title_row,
+    );
 }
 
 fn render_header(
@@ -826,52 +925,13 @@ fn render_passport_dialog(
     let rows: [Rect; 5] = split_dialog_rows(inner, DIALOG_HEIGHT - 2);
     let wrap_width = inner.width.saturating_sub(2) as usize;
 
-    // Row 0: mac-style traffic lights (hovering shows their symbols), a
-    // leading space for breathing room, then the dim title. Body text below
-    // stays dim so the dots carry the visual weight.
-    let title = "Bloret PassPort 登录";
-    let dot_glyphs: [(&str, &str, Color); 3] = [
-        ("●", "✕", theme.rust),
-        ("●", "−", theme.amber),
-        ("●", "+", theme.sage),
-    ];
-    // Click targets are deterministic: leading space, then each dot one blank
-    // column apart. Compute them first so hover detection can use them.
-    for (index, _) in dot_glyphs.iter().enumerate() {
-        hits.traffic_lights[index] = Some(Rect {
-            x: rows[0].x.saturating_add(1 + (index as u16) * 2),
-            y: rows[0].y,
-            width: 1,
-            height: 1,
-        });
-    }
-    let hovered_dot = pointer.and_then(|(col, row)| {
-        hits.traffic_lights
-            .iter()
-            .position(|rect| rect.is_some_and(|rect| contains(rect, col, row)))
-    });
-    let mut title_line = vec![Span::styled(" ", theme.base())];
-    for (index, (dot, symbol, color)) in dot_glyphs.iter().enumerate() {
-        let glyph = if hovered_dot == Some(index) {
-            symbol
-        } else {
-            dot
-        };
-        if index > 0 {
-            title_line.push(Span::styled(" ", theme.base()));
-        }
-        title_line.push(Span::styled(glyph.to_owned(), theme.fg(*color)));
-    }
-    title_line.push(Span::styled("  ".to_owned(), theme.mute()));
-    title_line.push(Span::styled(title.to_owned(), theme.fg(theme.text_dim)));
-    let title_span_width = 1 + " ● ● ●".width() + "  ".width() + title.width();
-    if title_span_width >= usize::from(rows[0].width) {
-        // Too narrow for dots + title: keep the dots, drop the title text.
-        title_line.truncate(6);
-    }
-    frame.render_widget(
-        Paragraph::new(Line::from(title_line)).style(theme.base()),
+    paint_traffic_title(
+        frame,
         rows[0],
+        "Bloret PassPort 登录",
+        pointer,
+        theme,
+        &mut hits,
     );
 
     // Row 1: instructions.
@@ -936,8 +996,14 @@ fn render_provider_dialog(
 ) -> HitMap {
     let mut hits = HitMap::default();
     let row_count = dialog.options.len().clamp(1, 8) as u16;
-    let dialog_height = row_count + 5;
-    if area.width < 30 || area.height < dialog_height + 2 || dialog.options.is_empty() {
+    let compact_height = row_count + 5;
+    if dialog.options.is_empty() {
+        return hits;
+    }
+    if !dialog.fullscreen
+        && !dialog.minimized
+        && (area.width < 30 || area.height < compact_height + 2)
+    {
         return hits;
     }
     let content_width = dialog
@@ -946,21 +1012,16 @@ fn render_provider_dialog(
         .map(|option| option.display.width() + option.hint.width() + 8)
         .max()
         .unwrap_or(24) as u16;
-    let dialog_width = (content_width + 6).clamp(46, area.width.saturating_sub(4));
-    let [_, frame_x, _] = Layout::horizontal([
-        Constraint::Min(0),
-        Constraint::Length(dialog_width),
-        Constraint::Min(0),
-    ])
-    .flex(Flex::Center)
-    .areas(area);
-    let [_, frame_y, _] = Layout::vertical([
-        Constraint::Min(0),
-        Constraint::Length(dialog_height),
-        Constraint::Min(0),
-    ])
-    .flex(Flex::Center)
-    .areas(frame_x);
+    let compact_width = (content_width + 6).clamp(46, area.width.saturating_sub(4).max(46));
+    let Some(frame_y) = dialog_outer(
+        area,
+        compact_width,
+        compact_height,
+        dialog.fullscreen,
+        dialog.minimized,
+    ) else {
+        return hits;
+    };
 
     frame.render_widget(Clear, frame_y);
     let block = Block::bordered()
@@ -969,32 +1030,22 @@ fn render_provider_dialog(
     let inner = block.inner(frame_y);
     frame.render_widget(block, frame_y);
 
-    let body_height = inner.height;
-    if body_height == 0 {
+    if inner.height == 0 {
         return hits;
     }
     let mut rows: Vec<Rect> = split_dialog_rows(inner, row_count + 1).to_vec();
     let title_row = rows.remove(0);
-
-    // Title row: traffic lights + title, same as the login dialog.
-    let dot_glyphs: [(&str, &str, Color); 3] = [
-        ("●", "✕", theme.rust),
-        ("●", "−", theme.amber),
-        ("●", "+", theme.sage),
-    ];
-    let mut title_line = vec![Span::styled(" ", theme.base())];
-    for (index, (dot, _, color)) in dot_glyphs.iter().enumerate() {
-        if index > 0 {
-            title_line.push(Span::styled(" ", theme.base()));
-        }
-        title_line.push(Span::styled((*dot).to_owned(), theme.fg(*color)));
-    }
-    title_line.push(Span::styled("  ".to_owned(), theme.mute()));
-    title_line.push(Span::styled("选择模型供应商", theme.fg(theme.text_dim)));
-    frame.render_widget(
-        Paragraph::new(Line::from(title_line)).style(theme.base()),
+    paint_traffic_title(
+        frame,
         title_row,
+        "选择模型供应商",
+        pointer,
+        theme,
+        &mut hits,
     );
+    if dialog.minimized {
+        return hits;
+    }
 
     // Provider rows: marker, display name, hint. The selected row renders on
     // the raised background; unavailable providers show why they cannot run.
@@ -1049,8 +1100,14 @@ fn render_theme_dialog(
 ) -> HitMap {
     let mut hits = HitMap::default();
     let row_count = dialog.options.len().clamp(1, 8) as u16;
-    let dialog_height = row_count + 5;
-    if area.width < 30 || area.height < dialog_height + 2 || dialog.options.is_empty() {
+    let compact_height = row_count + 5;
+    if dialog.options.is_empty() {
+        return hits;
+    }
+    if !dialog.fullscreen
+        && !dialog.minimized
+        && (area.width < 30 || area.height < compact_height + 2)
+    {
         return hits;
     }
     let content_width = dialog
@@ -1059,21 +1116,16 @@ fn render_theme_dialog(
         .map(|option| option.display.width() + option.hint.width() + 8)
         .max()
         .unwrap_or(24) as u16;
-    let dialog_width = (content_width + 6).clamp(46, area.width.saturating_sub(4));
-    let [_, frame_x, _] = Layout::horizontal([
-        Constraint::Min(0),
-        Constraint::Length(dialog_width),
-        Constraint::Min(0),
-    ])
-    .flex(Flex::Center)
-    .areas(area);
-    let [_, frame_y, _] = Layout::vertical([
-        Constraint::Min(0),
-        Constraint::Length(dialog_height),
-        Constraint::Min(0),
-    ])
-    .flex(Flex::Center)
-    .areas(frame_x);
+    let compact_width = (content_width + 6).clamp(46, area.width.saturating_sub(4).max(46));
+    let Some(frame_y) = dialog_outer(
+        area,
+        compact_width,
+        compact_height,
+        dialog.fullscreen,
+        dialog.minimized,
+    ) else {
+        return hits;
+    };
 
     frame.render_widget(Clear, frame_y);
     let block = Block::bordered()
@@ -1087,20 +1139,10 @@ fn render_theme_dialog(
     }
     let mut rows: Vec<Rect> = split_dialog_rows(inner, row_count + 1).to_vec();
     let title_row = rows.remove(0);
-
-    let mut title_line = vec![Span::styled(" ", theme.base())];
-    for (index, color) in [theme.rust, theme.amber, theme.sage].iter().enumerate() {
-        if index > 0 {
-            title_line.push(Span::styled(" ", theme.base()));
-        }
-        title_line.push(Span::styled("●".to_owned(), theme.fg(*color)));
+    paint_traffic_title(frame, title_row, "选择外观", pointer, theme, &mut hits);
+    if dialog.minimized {
+        return hits;
     }
-    title_line.push(Span::styled("  ".to_owned(), theme.mute()));
-    title_line.push(Span::styled("选择外观", theme.fg(theme.text_dim)));
-    frame.render_widget(
-        Paragraph::new(Line::from(title_line)).style(theme.base()),
-        title_row,
-    );
 
     for (index, option) in dialog.options.iter().enumerate() {
         let rect = rows
@@ -1685,6 +1727,8 @@ mod tests {
                 },
             ],
             selected: 1,
+            fullscreen: false,
+            minimized: false,
         }
     }
 
@@ -1780,6 +1824,8 @@ mod tests {
                 },
             ],
             selected: 1,
+            fullscreen: false,
+            minimized: false,
         }
     }
 
@@ -1851,6 +1897,57 @@ mod tests {
         let (lines, hits) = render_theme_with_hits(Rect::new(0, 0, 20, 4), &dialog, None);
         assert!(lines.iter().all(|line| line.trim().is_empty()));
         assert!(hits.theme_rows.is_empty());
+    }
+
+    #[test]
+    fn theme_dialog_traffic_lights_are_clickable() {
+        let dialog = sample_theme_dialog();
+        let area = Rect::new(0, 0, 80, 24);
+        let (lines, hits) = render_theme_with_hits(area, &dialog, None);
+        let cases: [(usize, Hit); 3] = [
+            (0, Hit::TrafficClose),
+            (1, Hit::TrafficMinimize),
+            (2, Hit::TrafficOpenBrowser),
+        ];
+        for (index, expected) in cases {
+            let rect = hits.traffic_lights[index].expect("hit area");
+            assert_eq!(hits.hit(rect.x, rect.y), Some(expected));
+        }
+        let red = hits.traffic_lights[0].expect("red");
+        let row_chars = |line: &str| -> Vec<char> { line.chars().collect() };
+        assert_eq!(row_chars(&lines[red.y as usize])[red.x as usize], '●');
+        let (lines, _) = render_theme_with_hits(area, &dialog, Some((red.x, red.y)));
+        assert_eq!(
+            row_chars(&lines[red.y as usize])[red.x as usize],
+            '✕',
+            "red shows ✕ on hover"
+        );
+    }
+
+    #[test]
+    fn theme_dialog_minimize_hides_rows_fullscreen_grows() {
+        let mut dialog = sample_theme_dialog();
+        let area = Rect::new(0, 0, 80, 24);
+        dialog.minimized = true;
+        let (lines, hits) = render_theme_with_hits(area, &dialog, None);
+        assert!(hits.theme_rows.is_empty(), "minimized has no option rows");
+        assert!(hits.traffic_lights[0].is_some());
+        assert!(
+            lines.iter().any(|line| flatten(line).contains("选择外观")),
+            "title bar remains"
+        );
+        assert!(
+            !lines.iter().any(|line| flatten(line).contains("Coral")),
+            "option hints are hidden while minimized"
+        );
+
+        dialog.minimized = false;
+        dialog.fullscreen = true;
+        let (_, hits) = render_theme_with_hits(area, &dialog, None);
+        assert_eq!(hits.theme_rows.len(), 4);
+        let first = hits.theme_rows[0].0;
+        // Fullscreen inner content starts near the terminal edge, not mid-screen.
+        assert!(first.x <= 4, "fullscreen hugs the left, x={}", first.x);
     }
 
     #[test]

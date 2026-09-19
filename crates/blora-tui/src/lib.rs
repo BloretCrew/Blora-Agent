@@ -430,6 +430,8 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                                         .iter()
                                                         .position(|option| !option.id.is_empty())
                                                         .unwrap_or(0),
+                                                    fullscreen: false,
+                                                    minimized: false,
                                                 });
                                             }
                                             SlashOutcome::ThemeDialog => {
@@ -633,16 +635,44 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     auto_approve = !auto_approve;
                                     status = format!("auto-approve={auto_approve}");
                                 } else if hit == Some(view::Hit::TrafficClose) {
-                                    // Red dot: quit the TUI, like closing a window.
-                                    cancel.cancel();
-                                    break Ok(());
+                                    // Red: close the front dialog. Login still
+                                    // quits the TUI (the dialog is the session).
+                                    if theme_dialog.take().is_some() {
+                                        status = "theme picker closed".to_owned();
+                                    } else if provider_dialog.take().is_some() {
+                                        status = "provider picker closed".to_owned();
+                                    } else {
+                                        cancel.cancel();
+                                        break Ok(());
+                                    }
                                 } else if hit == Some(view::Hit::TrafficMinimize) {
-                                    // Yellow dot: minimize = hide the dialog only;
-                                    // device polling keeps running.
-                                    passport_dialog = None;
+                                    // Yellow: collapse pickers to a title bar;
+                                    // hide the login dialog while polling continues.
+                                    if let Some(dialog) = theme_dialog.as_mut() {
+                                        dialog.minimized = true;
+                                        dialog.fullscreen = false;
+                                    } else if let Some(dialog) = provider_dialog.as_mut() {
+                                        dialog.minimized = true;
+                                        dialog.fullscreen = false;
+                                    } else {
+                                        passport_dialog = None;
+                                    }
                                 } else if hit == Some(view::Hit::TrafficOpenBrowser) {
-                                    // Green dot: (re)open the verification page.
-                                    if let Some(url) = passport_url.as_deref() {
+                                    // Green: fullscreen the picker, or restore
+                                    // from minimized. Login still opens the browser.
+                                    if let Some(dialog) = theme_dialog.as_mut() {
+                                        if dialog.minimized {
+                                            dialog.minimized = false;
+                                        } else {
+                                            dialog.fullscreen = !dialog.fullscreen;
+                                        }
+                                    } else if let Some(dialog) = provider_dialog.as_mut() {
+                                        if dialog.minimized {
+                                            dialog.minimized = false;
+                                        } else {
+                                            dialog.fullscreen = !dialog.fullscreen;
+                                        }
+                                    } else if let Some(url) = passport_url.as_deref() {
                                         let _ =
                                             std::process::Command::new("xdg-open").arg(url).spawn();
                                         let _ = std::process::Command::new("open").arg(url).spawn();
@@ -884,6 +914,8 @@ fn apply_slash(
             *provider_dialog = Some(view::ProviderDialog {
                 options: provider_options.to_vec(),
                 selected: selected.unwrap_or(0),
+                fullscreen: false,
+                minimized: false,
             });
             false
         }
@@ -1033,7 +1065,12 @@ fn open_theme_dialog() -> view::ThemeDialog {
         .iter()
         .position(|option| option.id == current.as_str())
         .unwrap_or(0);
-    view::ThemeDialog { options, selected }
+    view::ThemeDialog {
+        options,
+        selected,
+        fullscreen: false,
+        minimized: false,
+    }
 }
 
 fn apply_theme_id(id: &str) -> String {
