@@ -740,13 +740,24 @@ fn render_passport_dialog(
     let rows: [Rect; 5] = split_dialog_rows(inner, DIALOG_HEIGHT - 2);
     let wrap_width = inner.width.saturating_sub(2) as usize;
 
-    // Row 0: bold title.
+    // Row 0: traffic-light dots on the left, then the bold title. Body text
+    // below stays dim so the dots and title carry the visual weight.
+    let title = "Bloret PassPort 登录";
+    let title_style = theme.fg(theme.text_dim);
+    let mut title_line = vec![
+        Span::styled("●", theme.fg(theme.rust)),
+        Span::styled(" ●", theme.fg(theme.amber)),
+        Span::styled(" ●", theme.fg(theme.sage)),
+        Span::styled("  ", theme.mute()),
+        Span::styled(title.to_owned(), title_style),
+    ];
+    let title_span_width = "● ● ●  ".width() + title.width();
+    if title_span_width >= usize::from(rows[0].width) {
+        // Too narrow for dots + title: keep the dots, drop the title text.
+        title_line.truncate(3);
+    }
     frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            "Bloret PassPort 登录",
-            theme.fg(theme.text).add_modifier(Modifier::BOLD),
-        )))
-        .style(theme.base()),
+        Paragraph::new(Line::from(title_line)).style(theme.base()),
         rows[0],
     );
 
@@ -757,7 +768,7 @@ fn render_passport_dialog(
     );
     let mut instruction_lines: Vec<Line> = instructions
         .into_iter()
-        .map(|line| Line::from(Span::styled(line, theme.dim())))
+        .map(|line| Line::from(Span::styled(line, theme.mute())))
         .collect();
     instruction_lines.resize(rows[1].height as usize, Line::default());
     frame.render_widget(
@@ -765,34 +776,34 @@ fn render_passport_dialog(
         rows[1],
     );
 
-    // Row 2: the device code, highlighted.
+    // Row 2: the device code, dimmed like the rest of the body.
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             ellipsize(&dialog.user_code, rows[2].width.saturating_sub(2) as usize),
-            theme.fg(theme.rose).add_modifier(Modifier::BOLD),
+            theme.dim(),
         )))
         .style(theme.base()),
         rows[2],
     );
 
-    // Row 3: the verification link.
+    // Row 3: the verification link, dimmed like the rest of the body.
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             ellipsize(&dialog.verification_uri, rows[3].width as usize),
-            theme.fg(theme.sage),
+            theme.mute(),
         )))
         .style(theme.base()),
         rows[3],
     );
 
-    // Row 4: status + key hint, key bold like the reference dialogs.
+    // Row 4: status + key hint, everything muted.
     let waiting = if dialog.opened_browser {
         "已打开浏览器"
     } else {
         "等待授权"
     };
     let hint = Line::from(vec![
-        Span::styled("esc", theme.dim()),
+        Span::styled("esc", theme.mute()),
         Span::styled(" 隐藏对话框 · ", theme.mute()),
         Span::styled(waiting.to_owned(), theme.mute()),
     ]);
@@ -1079,34 +1090,44 @@ mod tests {
     use super::*;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-
-    fn render_passport_to_text(area: Rect, dialog: &PassportDialog) -> Vec<String> {
-        let backend = TestBackend::new(area.width, area.height);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| render_passport_dialog(frame, area, dialog, &Theme::current()))
-            .unwrap();
-        (0..area.height)
-            .map(|row| {
-                (0..area.width)
-                    .map(|col| {
-                        terminal
-                            .backend()
-                            .buffer()
-                            .cell((col, row))
-                            .map(ratatui::buffer::Cell::symbol)
-                            .unwrap_or(" ")
-                            .to_owned()
-                    })
-                    .collect()
-            })
-            .collect()
-    }
+    use ratatui::style::Color;
 
     /// Double-width CJK cells leave a placeholder space in the buffer, so
     /// text assertions compare with all spaces removed.
     fn flatten(line: &str) -> String {
         line.chars().filter(|ch| *ch != ' ').collect()
+    }
+
+    /// Build a dialog, render it, and return the text lines plus each cell's
+    /// foreground color so tests can assert both content and dimness.
+    fn render_passport(
+        area: Rect,
+        dialog: &PassportDialog,
+    ) -> (Vec<String>, Vec<Vec<ratatui::style::Color>>) {
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_passport_dialog(frame, area, dialog, &Theme::current()))
+            .unwrap();
+        let mut lines = Vec::new();
+        let mut colors = Vec::new();
+        for row in 0..area.height {
+            let mut line = String::new();
+            let mut row_colors = Vec::new();
+            for col in 0..area.width {
+                let cell = terminal
+                    .backend()
+                    .buffer()
+                    .cell((col, row))
+                    .cloned()
+                    .unwrap_or_default();
+                line.push_str(cell.symbol());
+                row_colors.push(cell.fg);
+            }
+            lines.push(line);
+            colors.push(row_colors);
+        }
+        (lines, colors)
     }
 
     #[test]
@@ -1118,11 +1139,17 @@ mod tests {
             opened_browser: false,
         };
         let area = Rect::new(0, 0, 90, 30);
-        let lines = render_passport_to_text(area, &dialog);
+        let (lines, colors) = render_passport(area, &dialog);
         let title_row = lines
             .iter()
             .position(|line| flatten(line).contains("BloretPassPort登录"))
             .expect("dialog title rendered");
+        // The title row opens with the three traffic-light dots.
+        let title = flatten(&lines[title_row]);
+        assert!(
+            title.starts_with("│●●●") && title.contains("BloretPassPort登录"),
+            "traffic lights + title, got {title}"
+        );
         let code_row = lines
             .iter()
             .position(|line| flatten(line).contains("ABCD-2345"))
@@ -1141,6 +1168,21 @@ mod tests {
         assert!(code_row > title_row);
         assert!(link_row > code_row);
         assert!(hint_row > link_row);
+        // Body rows are dimmed: the device code and the link no longer use the
+        // bright rose/sage highlight styling of the old dialog. Colors depend
+        // on the active theme (plain resets everything to Color::Reset), so
+        // skip the check entirely under a colorless theme.
+        let theme = Theme::current();
+        if theme.rose != Color::Reset {
+            assert!(
+                !colors[code_row].contains(&theme.rose),
+                "device code is highlighted"
+            );
+            assert!(
+                !colors[link_row].contains(&theme.sage),
+                "link is highlighted"
+            );
+        }
         // Centered horizontally: the top border's corner margins are symmetric.
         let frame_row = &lines[title_row - 1];
         // `find` returns a byte offset; these box glyphs are multi-byte UTF-8.
@@ -1163,10 +1205,10 @@ mod tests {
             opened_browser: true,
         };
         // Too small: nothing drawn, no panic.
-        let lines = render_passport_to_text(Rect::new(0, 0, 16, 4), &dialog);
+        let (lines, _) = render_passport(Rect::new(0, 0, 16, 4), &dialog);
         assert!(lines.iter().all(|line| line.trim().is_empty()));
         // Small but sufficient: the browser-opened status replaces 等待授权.
-        let lines = render_passport_to_text(Rect::new(0, 0, 70, 20), &dialog);
+        let (lines, _) = render_passport(Rect::new(0, 0, 70, 20), &dialog);
         assert!(
             lines
                 .iter()
