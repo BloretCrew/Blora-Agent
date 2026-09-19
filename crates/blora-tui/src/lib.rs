@@ -570,6 +570,12 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     slash_selected = (slash_selected + 1).min(slash_hits.len() - 1);
                                 }
                             }
+                            KeyCode::Up if input.is_empty() => {
+                                scroll = scroll.saturating_add(1);
+                            }
+                            KeyCode::Down if input.is_empty() => {
+                                scroll = scroll.saturating_sub(1);
+                            }
                             KeyCode::Tab if slash::is_open(&input) => {
                                 if let Some(cmd) = slash_hits.get(slash_selected) {
                                     input = slash::complete(cmd);

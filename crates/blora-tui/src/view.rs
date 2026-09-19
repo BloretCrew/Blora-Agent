@@ -733,7 +733,6 @@ fn render_transcript(frame: &mut Frame<'_>, area: Rect, model: &FrameModel<'_>, 
         |projection| {
             let rendered = transcript_lines(
                 projection,
-                model.scroll,
                 model.search,
                 model.hide_tools,
                 width.max(8),
@@ -746,7 +745,8 @@ fn render_transcript(frame: &mut Frame<'_>, area: Rect, model: &FrameModel<'_>, 
             }
         },
     );
-    frame.render_widget(Paragraph::new(lines).style(theme.base()), inner);
+    let visible = transcript_window(lines, inner.height as usize, model.scroll);
+    frame.render_widget(Paragraph::new(visible).style(theme.base()), inner);
 }
 
 fn welcome_lines(theme: &Theme) -> Vec<Line<'static>> {
@@ -767,42 +767,28 @@ fn welcome_lines(theme: &Theme) -> Vec<Line<'static>> {
 
 fn transcript_lines(
     projection: &SessionProjection,
-    scroll: usize,
     search: Option<&str>,
     hide_tools: bool,
     width: usize,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
     let needle = search.map(str::to_ascii_lowercase);
-    let filtered: Vec<_> = projection
-        .transcript
-        .iter()
-        .filter(|item| !(hide_tools && matches!(item, TranscriptItem::Tool { .. })))
-        .filter(|item| match needle.as_deref() {
-            None => true,
-            Some(needle) => match item {
-                TranscriptItem::User { text, .. } | TranscriptItem::Assistant { text, .. } => {
-                    text.to_ascii_lowercase().contains(needle)
-                }
-                TranscriptItem::Tool { name, .. } => name.to_ascii_lowercase().contains(needle),
-                TranscriptItem::System { summary, .. } => {
-                    summary.to_ascii_lowercase().contains(needle)
-                }
-            },
-        })
-        .collect();
-    let total = filtered.len();
-    let skip = scroll.min(total.saturating_sub(1));
     let mut out = Vec::new();
-    for item in filtered
-        .into_iter()
-        .rev()
-        .skip(skip)
-        .take(48)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-    {
+    for item in projection.transcript.iter().filter(|item| {
+        !(hide_tools && matches!(item, TranscriptItem::Tool { .. }))
+            && match needle.as_deref() {
+                None => true,
+                Some(needle) => match item {
+                    TranscriptItem::User { text, .. } | TranscriptItem::Assistant { text, .. } => {
+                        text.to_ascii_lowercase().contains(needle)
+                    }
+                    TranscriptItem::Tool { name, .. } => name.to_ascii_lowercase().contains(needle),
+                    TranscriptItem::System { summary, .. } => {
+                        summary.to_ascii_lowercase().contains(needle)
+                    }
+                },
+            }
+    }) {
         if !out.is_empty() {
             out.push(Line::default());
         }
@@ -852,6 +838,26 @@ fn transcript_lines(
         }
     }
     out
+}
+
+/// Keep the latest lines in view. `scroll` is how many lines above the bottom
+/// to reveal; 0 always shows the newest message.
+fn transcript_window(
+    lines: Vec<Line<'static>>,
+    height: usize,
+    scroll: usize,
+) -> Vec<Line<'static>> {
+    if height == 0 {
+        return Vec::new();
+    }
+    let total = lines.len();
+    if total <= height {
+        return lines;
+    }
+    let max_scroll = total - height;
+    let from_bottom = scroll.min(max_scroll);
+    let start = total - height - from_bottom;
+    lines.into_iter().skip(start).take(height).collect()
 }
 
 fn push_block(
@@ -2084,6 +2090,21 @@ mod tests {
     use super::*;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+
+    #[test]
+    fn transcript_window_pins_newest_lines() {
+        let lines: Vec<Line> = (0..10).map(|i| Line::from(i.to_string())).collect();
+        let visible = transcript_window(lines.clone(), 4, 0);
+        assert_eq!(
+            visible.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            vec!["6", "7", "8", "9"]
+        );
+        let older = transcript_window(lines, 4, 3);
+        assert_eq!(
+            older.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            vec!["3", "4", "5", "6"]
+        );
+    }
 
     #[test]
     fn spinner_ping_pongs_star_sequence() {
