@@ -16,6 +16,7 @@ pub fn render(text: &str, width: usize, needle: Option<&str>, theme: &Theme) -> 
     let mut out = Vec::new();
     let mut in_fence = false;
     let mut fence_buf: Vec<String> = Vec::new();
+    let mut table_buf: Vec<String> = Vec::new();
     let mut paragraph: Vec<String> = Vec::new();
 
     let flush_para = |out: &mut Vec<Line<'static>>, paragraph: &mut Vec<String>| {
@@ -45,6 +46,14 @@ pub fn render(text: &str, width: usize, needle: Option<&str>, theme: &Theme) -> 
             fence_buf.push(raw.to_owned());
             continue;
         }
+        if is_table_line(trimmed) {
+            flush_para(&mut out, &mut paragraph);
+            table_buf.push(trimmed.to_owned());
+            continue;
+        }
+        if !table_buf.is_empty() {
+            out.extend(flush_table(&mut table_buf, width, needle, theme));
+        }
         if trimmed.trim().is_empty() {
             flush_para(&mut out, &mut paragraph);
             continue;
@@ -62,6 +71,9 @@ pub fn render(text: &str, width: usize, needle: Option<&str>, theme: &Theme) -> 
     }
     if in_fence {
         out.extend(render_code_block(&fence_buf, width, needle, theme));
+    }
+    if !table_buf.is_empty() {
+        out.extend(flush_table(&mut table_buf, width, needle, theme));
     }
     flush_para(&mut out, &mut paragraph);
     if out.is_empty() {
@@ -90,6 +102,192 @@ fn heading_level(line: &str) -> Option<(u8, &str)> {
     t.get(hashes..)
         .and_then(|rest| rest.strip_prefix(' '))
         .map(|rest| (hashes as u8, rest.trim()))
+}
+
+fn is_table_line(line: &str) -> bool {
+    let t = line.trim();
+    t.contains('|') && !t.starts_with("```")
+}
+
+fn is_table_sep_row(cells: &[String]) -> bool {
+    !cells.is_empty()
+        && cells.iter().all(|cell| {
+            let t = cell.trim();
+            let inner = t.trim_matches(':').trim();
+            !inner.is_empty() && inner.chars().all(|ch| ch == '-')
+        })
+}
+
+fn split_table_row(line: &str) -> Vec<String> {
+    let t = line.trim();
+    let t = t.strip_prefix('|').unwrap_or(t);
+    let t = t.strip_suffix('|').unwrap_or(t);
+    t.split('|').map(|cell| cell.trim().to_owned()).collect()
+}
+
+fn flush_table(
+    rows: &mut Vec<String>,
+    width: usize,
+    needle: Option<&str>,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let raw = std::mem::take(rows);
+    if raw.len() < 2 || !raw.iter().any(|line| is_table_sep_row(&split_table_row(line))) {
+        return raw
+            .into_iter()
+            .flat_map(|line| render_block(&line, width, needle, theme))
+            .collect();
+    }
+    render_table(&raw, width, needle, theme)
+}
+
+#[derive(Clone, Copy)]
+enum Align {
+    Left,
+    Center,
+    Right,
+}
+
+fn parse_align(cell: &str) -> Align {
+    let t = cell.trim();
+    match (t.starts_with(':'), t.ends_with(':')) {
+        (true, true) => Align::Center,
+        (false, true) => Align::Right,
+        _ => Align::Left,
+    }
+}
+
+fn pad_cell(text: &str, width: usize, align: Align) -> String {
+    let w = text.width();
+    if w >= width {
+        return truncate_width(text, width);
+    }
+    let pad = width - w;
+    match align {
+        Align::Left => format!("{text}{}", " ".repeat(pad)),
+        Align::Right => format!("{}{text}", " ".repeat(pad)),
+        Align::Center => {
+            let left = pad / 2;
+            format!("{}{text}{}", " ".repeat(left), " ".repeat(pad - left))
+        }
+    }
+}
+
+fn truncate_width(text: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    if text.width() <= width {
+        return text.to_owned();
+    }
+    if width == 1 {
+        return "…".to_owned();
+    }
+    let mut out = String::new();
+    let mut used = 0usize;
+    for ch in text.chars() {
+        let cw = ch.width().unwrap_or(0);
+        if used + cw + 1 > width {
+            break;
+        }
+        out.push(ch);
+        used += cw;
+    }
+    out.push('…');
+    let extra = width.saturating_sub(out.width());
+    if extra > 0 {
+        out.push_str(&" ".repeat(extra));
+    }
+    out
+}
+
+fn render_table(
+    lines: &[String],
+    width: usize,
+    needle: Option<&str>,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let parsed: Vec<Vec<String>> = lines.iter().map(|line| split_table_row(line)).collect();
+    let sep_at = parsed.iter().position(|row| is_table_sep_row(row));
+    let aligns = sep_at
+        .map(|index| {
+            parsed[index]
+                .iter()
+                .map(|cell| parse_align(cell))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let mut body: Vec<(bool, Vec<String>)> = Vec::new();
+    for (index, row) in parsed.into_iter().enumerate() {
+        if sep_at == Some(index) {
+            continue;
+        }
+        body.push((sep_at.is_some_and(|sep| index < sep), row));
+    }
+    if body.is_empty() {
+        return Vec::new();
+    }
+    let cols = body.iter().map(|(_, row)| row.len()).max().unwrap_or(0);
+    if cols == 0 {
+        return Vec::new();
+    }
+    let mut col_w = vec![0usize; cols];
+    for (_, row) in &body {
+        for (index, cell) in row.iter().enumerate() {
+            col_w[index] = col_w[index].max(cell.width());
+        }
+    }
+    let sep_w = 3; // ` │ `
+    let usable = width.saturating_sub(2).max(cols);
+    let min_total = cols + sep_w * cols.saturating_sub(1);
+    if col_w.iter().sum::<usize>() + sep_w * cols.saturating_sub(1) > usable {
+        let extra = usable.saturating_sub(min_total);
+        let base = extra / cols;
+        let mut rem = extra % cols;
+        for width in &mut col_w {
+            *width = 1 + base + usize::from(rem > 0);
+            rem = rem.saturating_sub(1);
+        }
+    }
+    let mut out = Vec::new();
+    for (is_header, row) in body {
+        let mut line = String::new();
+        for index in 0..cols {
+            if index > 0 {
+                line.push_str(" │ ");
+            }
+            let cell = row.get(index).map(String::as_str).unwrap_or("");
+            let align = aligns.get(index).copied().unwrap_or(Align::Left);
+            line.push_str(&pad_cell(cell, col_w[index], align));
+        }
+        let style = if is_header {
+            theme.fg(theme.text).add_modifier(Modifier::BOLD)
+        } else {
+            theme.fg(theme.text)
+        };
+        let mut spans = highlight(line, style, needle, theme);
+        if is_header {
+            spans = spans
+                .into_iter()
+                .map(|span| Span::styled(span.content, span.style.add_modifier(Modifier::BOLD)))
+                .collect();
+        }
+        out.push(indent_line(spans, theme));
+        if is_header {
+            let mut rule = String::new();
+            for index in 0..cols {
+                if index > 0 {
+                    rule.push_str("─┼─");
+                }
+                rule.push_str(&"─".repeat(col_w[index].max(1)));
+            }
+            out.push(indent_line(
+                vec![Span::styled(rule, theme.mute())],
+                theme,
+            ));
+        }
+    }
+    out
 }
 
 fn is_hr(line: &str) -> bool {
@@ -476,5 +674,20 @@ mod tests {
         let text = flat(&lines);
         assert!(text.contains("fn main()"), "{text}");
         assert!(text.contains("│ "), "{text}");
+    }
+
+    #[test]
+    fn renders_pipe_table_with_aligned_columns() {
+        let md = "| Name | Qty |\n| --- | ---: |\n| apples | 12 |\n| tea | 3 |\n";
+        let lines = render(md, 40, None, &theme());
+        let text = flat(&lines);
+        assert!(text.contains("Name"), "{text}");
+        assert!(text.contains("apples"), "{text}");
+        assert!(text.contains("│"), "{text}");
+        assert!(text.contains("┼"), "{text}");
+        assert!(
+            !text.contains("| ---"),
+            "separator row should not be shown raw: {text}"
+        );
     }
 }
