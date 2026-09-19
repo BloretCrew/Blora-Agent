@@ -27,6 +27,32 @@ use crossterm::terminal::{
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
+fn begin_passport_login(
+    passport_url: &mut Option<String>,
+    passport_receiver: &mut Option<std::sync::mpsc::Receiver<blora_auth::PassportUser>>,
+    passport_browser_opened: &mut bool,
+    passport_dialog: &mut Option<view::PassportDialog>,
+) -> String {
+    match start_passport_login() {
+        Ok(Some((device, receiver))) => {
+            *passport_url = Some(device.verification_uri.clone());
+            *passport_receiver = Some(receiver);
+            *passport_browser_opened = false;
+            *passport_dialog = Some(view::PassportDialog {
+                user_code: device.user_code.clone(),
+                verification_uri: device.verification_uri.clone(),
+                opened_browser: false,
+            });
+            format!(
+                "{}\n设备码：{}",
+                device.verification_uri, device.user_code
+            )
+        }
+        Ok(None) => "PassPort 登录未配置".to_owned(),
+        Err(err) => err.to_string(),
+    }
+}
+
 fn start_passport_login() -> Result<
     Option<(
         blora_auth::DeviceCode,
@@ -67,7 +93,8 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
             .iter()
             .find_map(|user| user.passport_app_token.clone())
             .filter(|token| !token.trim().is_empty());
-        if !users.iter().any(|user| user.passport_username.is_some()) {
+        // Username without an app token still cannot call the PassPort AI API.
+        if passport_user_token.is_none() {
             if let Some((device, receiver)) = start_passport_login()? {
                 eprintln!("需要登录 Bloret PassPort");
                 eprintln!("设备码：{}", device.user_code);
@@ -141,6 +168,13 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                 passport_receiver = None;
                 passport_dialog = None;
                 status = format!("PassPort 登录成功：{}", user.display_name());
+                if provider_dialog.is_some() {
+                    provider_dialog = Some(open_provider_dialog(
+                        &provider_override,
+                        &model_override,
+                        passport_user_token.is_some(),
+                    ));
+                }
             }
             let session_id = sessions.get(index).map(|item| item.id.clone());
             // Keep one projection per selected session and apply only new events.
@@ -506,6 +540,14 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 if let Some(dialog) = provider_dialog.as_mut() {
                                     if dialog.is_add() {
                                         add_provider_dialog = Some(open_add_provider_dialog());
+                                    } else if dialog.current().is_some_and(|option| !option.available)
+                                    {
+                                        status = begin_passport_login(
+                                            &mut passport_url,
+                                            &mut passport_receiver,
+                                            &mut passport_browser_opened,
+                                            &mut passport_dialog,
+                                        );
                                     } else if dialog.pane == view::ProviderPane::Providers
                                         && !dialog.current_models().is_empty()
                                     {
@@ -764,6 +806,14 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                         dialog.model_selected = 0;
                                         if dialog.is_add() {
                                             add_provider_dialog = Some(open_add_provider_dialog());
+                                        } else if dialog.current().is_some_and(|option| !option.available)
+                                        {
+                                            status = begin_passport_login(
+                                                &mut passport_url,
+                                                &mut passport_receiver,
+                                                &mut passport_browser_opened,
+                                                &mut passport_dialog,
+                                            );
                                         } else {
                                             dialog.pane = view::ProviderPane::Models;
                                         }
@@ -1207,7 +1257,11 @@ fn provider_options(provider_override: &str, logged_in: bool) -> Vec<view::Provi
     let mut entries: Vec<view::ProviderOption> = vec![view::ProviderOption {
         id: "blora".to_owned(),
         display: "Bloret PassPort".to_owned(),
-        hint: "默认 · 200 次/天".to_owned(),
+        hint: if logged_in {
+            "默认 · 200 次/天".to_owned()
+        } else {
+            "未登录 · /login 或回车登录".to_owned()
+        },
         available: logged_in,
         models: models_for_provider("blora"),
     }];
@@ -1381,6 +1435,9 @@ fn commit_provider_dialog(
 ) -> Option<String> {
     let option = dialog.current()?;
     if option.id == blora_catalog::ADD_PROVIDER_ID {
+        return None;
+    }
+    if !option.available {
         return None;
     }
     *provider_override = option.id.clone();

@@ -155,7 +155,19 @@ impl PassportConfig {
                 .into_json()
                 .map_err(|err| AuthError::Protocol(err.to_string()))?;
             if let Some(access_token) = value.get("access_token").and_then(Value::as_str) {
-                return self.userinfo(access_token);
+                let mut user = self.userinfo(access_token)?;
+                // `/oauth/userinfo` only returns profile fields. `apptoken` is
+                // documented on `/app/verify`. Device-code logins still need a
+                // user token for the PassPort AI API, so fall back to the
+                // access token when userinfo omits it.
+                if user
+                    .apptoken
+                    .as_deref()
+                    .is_none_or(|token| token.trim().is_empty())
+                {
+                    user.apptoken = Some(access_token.to_owned());
+                }
+                return Ok(user);
             }
             let error = value.get("error").and_then(Value::as_str).unwrap_or("");
             match error {
@@ -293,7 +305,7 @@ fn parse_user(value: Value) -> Result<PassportUser, AuthError> {
         nickname: string_field(&value, "nickname"),
         avatar: string_field(&value, "avatar"),
         email: string_field(&value, "email"),
-        apptoken: string_field(&value, "apptoken"),
+        apptoken: first_string_field(&value, &["apptoken", "app_token", "usertoken", "user_token"]),
     })
 }
 
@@ -301,7 +313,13 @@ fn string_field(value: &Value, key: &str) -> Option<String> {
     value
         .get(key)
         .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
+}
+
+fn first_string_field(value: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| string_field(value, key))
 }
 
 fn error_message(value: &Value, status: u16) -> String {
@@ -424,7 +442,22 @@ mod tests {
         let user = config.poll_device(&device).unwrap();
         assert_eq!(user.username, "alice");
         assert_eq!(user.display_name(), "Alice");
+        assert_eq!(
+            user.apptoken.as_deref(),
+            Some("t"),
+            "device login keeps the access token when userinfo has no apptoken"
+        );
         server.join().unwrap();
+    }
+
+    #[test]
+    fn parse_user_reads_usertoken_alias() {
+        let user = parse_user(serde_json::json!({
+            "username": "jiedi",
+            "usertoken": "tok-1"
+        }))
+        .unwrap();
+        assert_eq!(user.apptoken.as_deref(), Some("tok-1"));
     }
 
     fn write_response(stream: &mut std::net::TcpStream, status: u16, text: &str, body: &[u8]) {
