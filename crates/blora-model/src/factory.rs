@@ -23,6 +23,38 @@ pub fn make_providers(force_mock: bool, name: &str) -> Vec<Box<dyn Provider>> {
     resolve_provider_chain(force_mock, name, None)
 }
 
+/// Whether the TUI/server should force the mock adapter.
+///
+/// Mock is only the fallback when there is no PassPort user token, no env API
+/// key, and no explicit non-mock provider (for example a saved CrewRouter).
+#[must_use]
+pub fn should_auto_mock(requested: &str, user_token: Option<&str>) -> bool {
+    if user_token.is_some_and(|token| !token.trim().is_empty()) {
+        return false;
+    }
+    if env_has_provider_key() {
+        return false;
+    }
+    let name = requested.trim();
+    if name.is_empty() || is_passport_alias(name) {
+        return true;
+    }
+    name.eq_ignore_ascii_case("mock")
+}
+
+fn is_passport_alias(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "blora" | "passport" | "bloret-passport"
+    )
+}
+
+fn env_has_provider_key() -> bool {
+    ["BLORA_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY"]
+        .iter()
+        .any(|key| std::env::var(key).is_ok_and(|value| !value.trim().is_empty()))
+}
+
 /// Resolve the provider chain for an optional logged-in PassPort user.
 ///
 /// Default provider is Bloret PassPort (`blora`). An explicit request or
@@ -49,7 +81,7 @@ pub fn resolve_provider_chain(
             continue;
         }
         match part.to_ascii_lowercase().as_str() {
-            "blora" | "passport" | "bloret-passport" => out.push(
+            name if is_passport_alias(name) => out.push(
                 user_token
                     .and_then(passport_provider)
                     .unwrap_or_else(|| Box::new(MockProvider::new())),
@@ -210,6 +242,21 @@ mod tests {
         assert!(matches!(chain[0].name(), "blora" | "mock"));
         let logged_in = resolve_provider_chain(false, "", Some("tok"));
         assert_eq!(logged_in[0].name(), "blora");
+    }
+
+    #[test]
+    fn auto_mock_skips_explicit_saved_vendor() {
+        assert!(
+            should_auto_mock("", None),
+            "anonymous default PassPort still mocks"
+        );
+        assert!(should_auto_mock("blora", None));
+        assert!(
+            !should_auto_mock("crewrouter", None),
+            "an explicit vendor must not be replaced by mock"
+        );
+        assert!(!should_auto_mock("", Some("tok")));
+        assert!(should_auto_mock("mock", None));
     }
 
     #[test]

@@ -669,18 +669,12 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     input.clear();
                                     notice = None;
                                     status = "running…".to_owned();
-                                    let options = RunOptions {
-                                        mock: passport_user_token.is_none()
-                                            && std::env::var("BLORA_API_KEY").is_err()
-                                            && std::env::var("OPENAI_API_KEY").is_err()
-                                            && std::env::var("GEMINI_API_KEY").is_err(),
+                                    let options = tui_run_options(
                                         auto_approve,
-                                        interactive: true,
-                                        model: model_override.clone(),
-                                        provider: provider_override.clone(),
-                                        passport_user_token: passport_user_token.clone(),
-                                        ..RunOptions::default()
-                                    };
+                                        &model_override,
+                                        &provider_override,
+                                        passport_user_token.clone(),
+                                    );
                                     let cancel_clone = cancel.clone();
                                     job = Some(scope.spawn(move || {
                                         runtime.run(&id, &prompt, &cancel_clone, &options)
@@ -1097,18 +1091,12 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                         input.clear();
                                         notice = None;
                                         status = "running…".to_owned();
-                                        let options = RunOptions {
-                                            mock: passport_user_token.is_none()
-                                                && std::env::var("BLORA_API_KEY").is_err()
-                                                && std::env::var("OPENAI_API_KEY").is_err()
-                                                && std::env::var("GEMINI_API_KEY").is_err(),
+                                        let options = tui_run_options(
                                             auto_approve,
-                                            interactive: true,
-                                            model: model_override.clone(),
-                                            provider: provider_override.clone(),
-                                            passport_user_token: passport_user_token.clone(),
-                                            ..RunOptions::default()
-                                        };
+                                            &model_override,
+                                            &provider_override,
+                                            passport_user_token.clone(),
+                                        );
                                         let cancel_clone = cancel.clone();
                                         job = Some(scope.spawn(move || {
                                             runtime.run(&id, &prompt, &cancel_clone, &options)
@@ -1449,6 +1437,23 @@ fn commit_provider_dialog(
     } else {
         format!("provider={}  model={model_override}", option.display)
     })
+}
+
+fn tui_run_options(
+    auto_approve: bool,
+    model: &str,
+    provider: &str,
+    passport_user_token: Option<String>,
+) -> RunOptions {
+    RunOptions {
+        mock: blora_model::should_auto_mock(provider, passport_user_token.as_deref()),
+        auto_approve,
+        interactive: true,
+        model: model.to_owned(),
+        provider: provider.to_owned(),
+        passport_user_token,
+        ..RunOptions::default()
+    }
 }
 
 fn open_add_provider_dialog() -> view::AddProviderDialog {

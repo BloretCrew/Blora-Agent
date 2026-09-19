@@ -56,7 +56,8 @@ pub fn serve(
                     &RunOptions {
                         mock: std::env::var("BLORA_API_KEY").is_err()
                             && std::env::var("OPENAI_API_KEY").is_err()
-                            && std::env::var("ANTHROPIC_API_KEY").is_err(),
+                            && std::env::var("ANTHROPIC_API_KEY").is_err()
+                            && std::env::var("GEMINI_API_KEY").is_err(),
                         ..RunOptions::default()
                     },
                 )?;

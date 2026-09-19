@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 pub use anthropic::AnthropicProvider;
-pub use factory::{make_provider, make_providers, resolve_provider_chain};
+pub use factory::{make_provider, make_providers, resolve_provider_chain, should_auto_mock};
 pub use gemini::GeminiProvider;
 pub use openai::OpenAiProvider;
 pub use passport::{

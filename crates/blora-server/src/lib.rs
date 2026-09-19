@@ -611,16 +611,13 @@ async fn run_session(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .insert(id.clone(), cancel.clone());
+    let provider = body.provider.unwrap_or_default();
     let options = RunOptions {
         mock: body.mock
-            || (passport_user_token.is_none()
-                && std::env::var("BLORA_API_KEY").is_err()
-                && std::env::var("OPENAI_API_KEY").is_err()
-                && std::env::var("ANTHROPIC_API_KEY").is_err()
-                && std::env::var("GEMINI_API_KEY").is_err()),
+            || blora_model::should_auto_mock(&provider, passport_user_token.as_deref()),
         auto_approve: body.auto_approve,
         interactive: !body.auto_approve,
-        provider: body.provider.unwrap_or_default(),
+        provider,
         model: body.model.unwrap_or_default(),
         worktree: body.worktree,
         passport_user_token,
