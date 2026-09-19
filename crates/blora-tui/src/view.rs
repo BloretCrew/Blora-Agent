@@ -684,40 +684,36 @@ fn render_header(
         width: 1,
         height: 1,
     });
-    let tokens = model
-        .projection
-        .map(|projection| {
-            format!(
-                "{} → {}",
-                fmt_tokens(projection.input_tokens),
-                fmt_tokens(projection.output_tokens)
-            )
-        })
-        .unwrap_or_default();
-    let right = if model.running {
-        format!("{}  running", spinner(model.tick))
-    } else {
-        tokens
-    };
     frame.render_widget(Paragraph::new(left).style(theme.base()), inner);
-    if !right.is_empty() && inner.width > 24 {
-        let width = right.width().min(inner.width as usize) as u16;
-        let rect = Rect {
-            x: inner.x + inner.width.saturating_sub(width),
-            y: inner.y,
-            width,
-            height: 1,
-        };
-        if model.running {
-            hits.cancel_run = Some(rect);
-        }
-        let style = if model.running {
-            theme.fg(theme.sage)
-        } else {
-            theme.mute()
-        };
-        frame.render_widget(Paragraph::new(right).style(style), rect);
+    if inner.width <= 24 {
+        return;
     }
+    let right = if model.running {
+        Line::from(Span::styled(
+            format!("{}  running", spinner(model.tick)),
+            theme.fg(theme.sage),
+        ))
+    } else {
+        let used = model
+            .projection
+            .map(|projection| projection.input_tokens.saturating_add(projection.output_tokens))
+            .unwrap_or(0);
+        context_usage_line(used, blora_context::context_window(), theme)
+    };
+    let width = right.width().min(inner.width as usize) as u16;
+    if width == 0 {
+        return;
+    }
+    let rect = Rect {
+        x: inner.x + inner.width.saturating_sub(width),
+        y: inner.y,
+        width,
+        height: 1,
+    };
+    if model.running {
+        hits.cancel_run = Some(rect);
+    }
+    frame.render_widget(Paragraph::new(right).style(theme.base()), rect);
 }
 
 fn render_rule(frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
@@ -2164,7 +2160,29 @@ pub fn wrap_text(text: &str, width: usize) -> Vec<String> {
     lines
 }
 
-#[must_use]
+const CONTEXT_BAR_CELLS: usize = 10;
+
+fn context_usage_line(used: u64, window: u64, theme: &Theme) -> Line<'static> {
+    let window = window.max(1);
+    let ratio = (used as f64 / window as f64).clamp(0.0, 1.0);
+    let filled = ((ratio * CONTEXT_BAR_CELLS as f64).round() as usize).min(CONTEXT_BAR_CELLS);
+    let pct = (ratio * 100.0).round() as u16;
+    let fill = "▰".repeat(filled);
+    let rest = "▱".repeat(CONTEXT_BAR_CELLS - filled);
+    let color = if pct >= 90 {
+        theme.rust
+    } else if pct >= 85 {
+        theme.amber
+    } else {
+        theme.sage
+    };
+    Line::from(vec![
+        Span::styled(fill, theme.fg(color)),
+        Span::styled(rest, theme.mute()),
+        Span::styled(format!(" {pct}%"), theme.mute()),
+    ])
+}
+
 pub fn fmt_tokens(n: u64) -> String {
     if n < 1_000 {
         n.to_string()
@@ -2311,6 +2329,19 @@ mod tests {
     use super::*;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+
+    #[test]
+    fn idle_context_bar_fills_by_usage() {
+        let theme = Theme::current();
+        let empty = context_usage_line(0, 100_000, &theme);
+        let empty_text: String = empty.spans.iter().map(|span| span.content.as_ref()).collect();
+        assert!(empty_text.contains("▱"), "{empty_text}");
+        assert!(empty_text.contains("0%"), "{empty_text}");
+        let full = context_usage_line(100_000, 100_000, &theme);
+        let full_text: String = full.spans.iter().map(|span| span.content.as_ref()).collect();
+        assert!(full_text.contains("▰▰▰▰▰▰▰▰▰▰"), "{full_text}");
+        assert!(full_text.contains("100%"), "{full_text}");
+    }
 
     #[test]
     fn transcript_window_pins_newest_lines() {
