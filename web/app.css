@@ -1,4 +1,4 @@
-/* Page composition only. Component chrome comes from Blora CSS. */
+/* Harness canvas: sidebar chats + a quiet center stage. Chrome comes from Blora. */
 
 @media (prefers-reduced-motion: reduce) {
   *,
@@ -12,14 +12,15 @@
 
 .ba-brand {
   display: flex;
-  gap: var(--blora-space-4);
+  gap: var(--blora-space-3);
   align-items: center;
-  margin-bottom: var(--blora-space-5);
+  margin-bottom: var(--blora-space-4);
 }
 
 .ba-brand__name {
   margin: 0;
   display: block;
+  letter-spacing: 0.02em;
 }
 
 .ba-brand__meta,
@@ -30,50 +31,140 @@
   font-size: var(--blora-text-sm);
 }
 
+.ba-section__title {
+  margin: var(--blora-space-5) 0 var(--blora-space-3);
+}
+
 #new-session {
   width: 100%;
-  margin-bottom: var(--blora-space-5);
+  margin-bottom: var(--blora-space-4);
 }
 
-.ba-section {
-  margin-top: var(--blora-space-6);
+.ba-rail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--blora-space-2);
+  margin-top: auto;
+  padding-top: var(--blora-space-4);
 }
 
-.ba-section__title {
-  margin-bottom: var(--blora-space-3);
+.ba-rail__link {
+  color: var(--blora-color-text-muted);
+  font-size: var(--blora-text-sm);
+  text-decoration: none;
 }
 
-.ba-main {
+.ba-rail__link:hover {
+  color: var(--blora-color-text);
+}
+
+.ba-account {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--blora-space-2);
+  align-items: center;
+  margin-top: var(--blora-space-3);
+}
+
+.ba-shell {
   display: grid;
-  grid-template-rows: auto auto auto 1fr auto auto;
-  min-height: calc(100dvh - var(--blora-space-8));
-  gap: var(--blora-space-5);
-  padding: var(--blora-space-6);
+  grid-template-rows: auto auto 1fr;
+  min-height: 100dvh;
+  background: var(--blora-color-canvas, var(--blora-color-surface));
 }
 
 .ba-toolbar {
   display: flex;
   justify-content: space-between;
   gap: var(--blora-space-4);
-  align-items: end;
+  align-items: center;
+  padding: var(--blora-space-4) var(--blora-space-6) 0;
+}
+
+.ba-toolbar__identity {
+  min-width: 0;
+}
+
+.ba-toolbar h1 {
+  margin: 0;
+  font-size: var(--blora-text-lg);
+  font-weight: 600;
 }
 
 .ba-toolbar__actions {
   display: flex;
-  gap: var(--blora-space-3);
+  gap: var(--blora-space-2);
   align-items: center;
   flex-wrap: wrap;
 }
 
-.ba-toolbar h1 {
-  margin: 0 0 var(--blora-space-1);
-  font-size: var(--blora-text-2xl);
+.ba-session {
+  display: grid;
+  grid-template-rows: 1fr auto;
+  min-height: 0;
+  padding: 0 var(--blora-space-6) var(--blora-space-6);
 }
 
-.ba-tags {
+.ba-session--empty {
+  grid-template-rows: 1fr auto;
+  place-items: center;
+}
+
+.ba-hero {
+  display: none;
+  text-align: center;
+  max-width: 36rem;
+  padding: var(--blora-space-8) var(--blora-space-4);
+}
+
+.ba-session--empty .ba-hero {
+  display: block;
+}
+
+.ba-session--empty .ba-thread {
+  display: none;
+}
+
+.ba-hero__kicker {
+  margin: 0 0 var(--blora-space-2);
+  color: var(--blora-color-text-muted);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-size: var(--blora-text-xs, 0.75rem);
+}
+
+.ba-hero__title {
+  margin: 0 0 var(--blora-space-3);
+  font-size: clamp(1.8rem, 4vw, 2.6rem);
+  font-weight: 650;
+  letter-spacing: -0.03em;
+}
+
+.ba-hero__lede {
+  margin: 0 0 var(--blora-space-5);
+  color: var(--blora-color-text-muted);
+}
+
+.ba-chips {
   display: flex;
   flex-wrap: wrap;
+  justify-content: center;
   gap: var(--blora-space-2);
+}
+
+.ba-chip {
+  border: var(--blora-border-width) solid var(--blora-color-border);
+  background: var(--blora-color-raised, var(--blora-color-surface));
+  color: var(--blora-color-text);
+  border-radius: 999px;
+  padding: 0.4rem 0.85rem;
+  font: inherit;
+  font-size: var(--blora-text-sm);
+  cursor: pointer;
+}
+
+.ba-chip:hover {
+  border-color: var(--blora-color-action-primary, var(--blora-color-text));
 }
 
 .ba-thread {
@@ -81,32 +172,54 @@
   display: grid;
   align-content: start;
   gap: var(--blora-space-4);
-}
-
-.ba-composer,
-.ba-task-form {
-  display: grid;
-  gap: var(--blora-space-3);
+  max-width: 48rem;
+  width: 100%;
+  margin: 0 auto;
+  padding: var(--blora-space-4) 0;
 }
 
 .ba-composer {
+  display: grid;
   grid-template-columns: auto 1fr auto;
+  gap: var(--blora-space-3);
   align-items: end;
+  width: min(48rem, 100%);
+  margin: 0 auto;
+  padding: var(--blora-space-3);
+  background: var(--blora-color-raised, var(--blora-color-surface));
+  border: var(--blora-border-width) solid var(--blora-color-border);
+  border-radius: var(--blora-radius-lg, 1.25rem);
+  box-shadow: 0 12px 40px color-mix(in srgb, var(--blora-color-text) 8%, transparent);
 }
 
-.ba-work-orb {
-  width: 20px;
-  height: 20px;
-  margin-bottom: 0.7rem;
+.ba-session--empty .ba-composer {
+  margin-top: calc(-1 * var(--blora-space-4));
 }
 
 .ba-composer:has(#work-orb[hidden]) {
   grid-template-columns: 1fr auto;
 }
 
+.ba-work-orb {
+  width: 20px;
+  height: 20px;
+  margin-bottom: 0.4rem;
+}
+
+.ba-composer textarea {
+  border: 0;
+  background: transparent;
+  resize: none;
+  min-height: 2.75rem;
+  max-height: 12rem;
+}
+
 .ba-task-form {
+  display: grid;
   grid-template-columns: 1fr minmax(8rem, 10rem) minmax(8rem, 12rem) auto;
+  gap: var(--blora-space-3);
   align-items: end;
+  margin-bottom: var(--blora-space-5);
 }
 
 .ba-pre {
@@ -127,15 +240,25 @@
   max-width: 32rem;
 }
 
-@media (max-width: 720px) {
-  .ba-main {
-    padding: var(--blora-space-4);
-  }
+#view-tasks,
+#view-approvals,
+#view-timeline,
+#view-artifacts,
+#view-workspace,
+#view-settings {
+  padding: 0 var(--blora-space-6) var(--blora-space-6);
+}
 
+@media (max-width: 720px) {
   .ba-toolbar,
   .ba-task-form {
     grid-template-columns: 1fr;
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .ba-session,
+  .ba-toolbar {
+    padding-inline: var(--blora-space-4);
   }
 }

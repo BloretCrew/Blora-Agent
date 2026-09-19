@@ -322,13 +322,18 @@ async fn passport_device_poll(
         .into_response())
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 #[allow(dead_code)]
 struct DevicePollBody {
+    #[serde(default)]
     device_code: String,
+    #[serde(default)]
     user_code: String,
+    #[serde(default)]
     verification_uri: String,
+    #[serde(default)]
     expires_in: u64,
+    #[serde(default)]
     interval: u64,
 }
 

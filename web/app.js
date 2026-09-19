@@ -31,7 +31,11 @@ async function refreshPassport() {
     const user = await api("/api/auth/me");
     passportLogin.hidden = true;
     passportUser.hidden = false;
-    passportUser.textContent = `已登录 · ${user.name || user.username}`;
+    passportUser.textContent = user.name || user.username;
+    const hero = document.querySelector("#hero-title");
+    if (hero && !state.sessionId) {
+      hero.textContent = `继续，${user.name || user.username}`;
+    }
     if (passportLogout) passportLogout.hidden = false;
   } catch (_) {
     passportLogin.hidden = false;
@@ -39,8 +43,11 @@ async function refreshPassport() {
     if (passportLogout) passportLogout.hidden = true;
     const payload = await fetch("/api/auth/device").then((response) => response.json());
     passportDevice = payload;
-    passportLogin.href = payload.verification_uri;
-    passportLogin.textContent = `设备码 ${payload.user_code} · 打开 PassPort`;
+    passportLogin.href = payload.verification_uri || "/auth/start";
+    passportLogin.textContent = "PassPort 登录";
+    if (payload.user_code) {
+      passportLogin.title = `设备码 ${payload.user_code}`;
+    }
     pollPassportDevice();
   }
 }
@@ -58,7 +65,8 @@ async function pollPassportDevice() {
   try {
     const result = await api("/api/auth/device/poll", {
       method: "POST",
-      body: JSON.stringify(passportDevice),
+      body: "{}",
+      silent: true,
     });
     passportDevice = null;
     passportLogin.hidden = true;
@@ -66,13 +74,12 @@ async function pollPassportDevice() {
     passportUser.textContent = `已登录 · ${result.name || result.username}`;
     if (passportLogout) passportLogout.hidden = false;
   } catch (error) {
-    if (error.message.includes("authorization_pending")) {
+    const message = String(error.message || "");
+    if (message.includes("authorization_pending") || message.includes("authorization pending")) {
       setTimeout(pollPassportDevice, Math.max(1000, Number(passportDevice.interval || 5) * 1000));
-    } else if (error.message.includes("slow_down")) {
+    } else if (message.includes("slow_down")) {
       passportDevice.interval = Number(passportDevice.interval || 5) + 5;
       setTimeout(pollPassportDevice, passportDevice.interval * 1000);
-    } else {
-      showAlert(error.message);
     }
   }
 }
@@ -145,19 +152,22 @@ function store(key, value) {
 }
 
 async function api(path, options = {}) {
+  const silent = Boolean(options.silent);
+  const fetchOptions = { ...options };
+  delete fetchOptions.silent;
   const loading = document.querySelector("#page-loading");
-  if (loading) {
+  if (loading && !silent) {
     loading.hidden = false;
   }
   try {
-    const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
+    const headers = { "Content-Type": "application/json", ...(fetchOptions.headers || {}) };
     const token = stored("blora-token");
     if (token) {
       headers.Authorization = `Bearer ${token}`;
     }
     const response = await fetch(path, {
+      ...fetchOptions,
       headers,
-      ...options,
     });
     if (!response.ok) {
       throw new Error(await response.text());
@@ -167,7 +177,7 @@ async function api(path, options = {}) {
     }
     return response.json();
   } finally {
-    if (loading) {
+    if (loading && !silent) {
       loading.hidden = true;
     }
   }
@@ -210,11 +220,24 @@ function setView(view) {
   }
 }
 
+function setSessionCanvas(empty) {
+  const view = document.querySelector("#view-session");
+  if (view) {
+    view.classList.toggle("ba-session--empty", empty);
+  }
+  const actions = document.querySelector("#session-actions");
+  if (actions) {
+    actions.hidden = !state.sessionId;
+  }
+}
+
 function renderTranscript(items) {
   thread.replaceChildren();
-  if (!items || items.length === 0) {
+  const empty = !items || items.length === 0;
+  setSessionCanvas(empty);
+  if (empty) {
     thread.append(threadEmpty);
-    threadEmpty.hidden = false;
+    threadEmpty.hidden = true;
     return;
   }
   threadEmpty.hidden = true;
@@ -242,38 +265,18 @@ function renderTranscript(items) {
 }
 
 function renderSessions(sessions) {
-  const previous = document.querySelector("#session-nav");
-  const nav = document.createElement("blora-sidebar-nav");
-  nav.id = "session-nav";
-  nav.setAttribute("label", "导航");
-  if (state.view === "session" && state.sessionId) {
-    nav.setAttribute("value", state.sessionId);
-  } else {
-    nav.setAttribute("value", state.view);
+  const group = document.querySelector("#session-list");
+  const nav = document.querySelector("#session-nav");
+  if (!group) {
+    return;
   }
-  const desk = document.createElement("blora-sidebar-nav-group");
-  desk.setAttribute("label", "工作台");
-  const pages = [
-    ["会话", "session", "#/session"],
-    ["任务", "tasks", "#/tasks"],
-    ["审批", "approvals", "#/approvals"],
-    ["时间线", "timeline", "#/timeline"],
-    ["产物", "artifacts", "#/artifacts"],
-    ["工作区", "workspace", "#/workspace"],
-    ["设置", "settings", "#/settings"],
-  ];
-  for (const [label, value, href] of pages) {
-    const link = document.createElement("blora-sidebar-nav-link");
-    link.setAttribute("label", label);
-    link.setAttribute("value", value);
-    link.setAttribute("href", href);
-    if (state.view === value) {
-      link.setAttribute("current", "");
+  group.replaceChildren();
+  if (nav) {
+    nav.setAttribute("label", "会话");
+    if (state.view === "session" && state.sessionId) {
+      nav.setAttribute("value", state.sessionId);
     }
-    desk.append(link);
   }
-  const group = document.createElement("blora-sidebar-nav-group");
-  group.setAttribute("label", "会话");
   for (const session of sessions || []) {
     const link = document.createElement("blora-sidebar-nav-link");
     link.setAttribute("label", session.title || session.id);
@@ -284,8 +287,6 @@ function renderSessions(sessions) {
     }
     group.append(link);
   }
-  nav.append(desk, group);
-  previous.replaceWith(nav);
   sessionEmpty.hidden = Boolean(sessions && sessions.length);
 }
 
@@ -293,8 +294,10 @@ async function refreshSessions() {
   const query = state.query ? `?q=${encodeURIComponent(state.query)}` : "";
   const sessions = await api(`/api/sessions${query}`);
   renderSessions(sessions);
-  if (!state.sessionId && sessions[0] && state.view === "session") {
-    await selectSession(sessions[0].id);
+  if (!state.sessionId && state.view === "session") {
+    title.textContent = "Blora";
+    pathEl.textContent = "";
+    setSessionCanvas(true);
   }
 }
 
@@ -302,8 +305,8 @@ async function selectSession(id) {
   state.sessionId = id;
   hideAlert();
   const session = await api(`/api/sessions/${id}`);
-  title.textContent = session.title || session.id;
-  pathEl.textContent = `${session.workspace_path} · ${session.status} · ${session.input_tokens}/${session.output_tokens} tokens`;
+  title.textContent = session.title || "会话";
+  pathEl.textContent = `${session.workspace_path} · ${session.status}`;
   renderTranscript(session.transcript);
   renderSubagents(session.subagents);
   await refreshApprovals();
@@ -376,6 +379,7 @@ async function handleSessionEvent(id, data) {
 }
 
 function appendBubble(kind, text) {
+  setSessionCanvas(false);
   threadEmpty.hidden = true;
   if (threadEmpty.parentElement === thread) {
     threadEmpty.remove();
@@ -556,9 +560,7 @@ function setRunning(running) {
   }
   const box = fieldInput("#prompt") || prompt;
   if (box) {
-    box.placeholder = running
-      ? "运行中：输入的内容会在下一轮送达模型"
-      : "描述你想在工作区完成的事";
+    box.placeholder = running ? "运行中，输入会在下一轮送达" : "要在这个工作区做什么？";
   }
   setWorkOrb(running);
 }
@@ -941,6 +943,17 @@ if (searchBox) {
     await refreshSessions();
   });
 }
+
+document.querySelectorAll(".ba-chip").forEach((chip) => {
+  chip.addEventListener("click", () => {
+    const box = fieldInput("#prompt") || prompt;
+    if (!box) {
+      return;
+    }
+    box.value = chip.getAttribute("data-prompt") || "";
+    box.focus();
+  });
+});
 
 enhance();
 refreshPassport();

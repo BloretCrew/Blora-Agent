@@ -35,74 +35,95 @@
         <header class="ba-brand">
           <span class="blora-avatar" data-size="md" data-variant="primary">BA</span>
           <div>
-            <strong class="ba-brand__name">Blora Agent</strong>
-            <p class="ba-brand__meta">本地 Code / Work / Agent</p>
+            <strong class="ba-brand__name">Blora</strong>
+            <p class="ba-brand__meta">本地 harness</p>
           </div>
         </header>
-        <a class="blora-button" data-variant="ghost" id="passport-login" href="/auth/start">使用 Bloret PassPort 登录</a>
-        <span class="ba-brand__meta" id="passport-user" hidden></span>
-        <button class="blora-button" data-variant="ghost" id="passport-logout" hidden>退出 PassPort</button>
         <button type="button" class="blora-button" data-variant="primary" data-icon="plus" id="new-session">
-          新建会话
+          新会话
         </button>
-        <blora-field label="搜索会话" name="search">
-          <input class="blora-input" id="session-search" placeholder="标题或消息" />
+        <blora-field label="搜索" name="search">
+          <input class="blora-input" id="session-search" placeholder="搜索会话" />
         </blora-field>
-        <blora-sidebar-nav id="session-nav" label="导航">
-          <blora-sidebar-nav-group label="工作台">
-            <blora-sidebar-nav-link label="会话" value="session" href="#/session"></blora-sidebar-nav-link>
-            <blora-sidebar-nav-link label="任务" value="tasks" href="#/tasks"></blora-sidebar-nav-link>
-            <blora-sidebar-nav-link label="审批" value="approvals" href="#/approvals"></blora-sidebar-nav-link>
-            <blora-sidebar-nav-link label="时间线" value="timeline" href="#/timeline"></blora-sidebar-nav-link>
-            <blora-sidebar-nav-link label="产物" value="artifacts" href="#/artifacts"></blora-sidebar-nav-link>
-            <blora-sidebar-nav-link label="工作区" value="workspace" href="#/workspace"></blora-sidebar-nav-link>
-            <blora-sidebar-nav-link label="设置" value="settings" href="#/settings"></blora-sidebar-nav-link>
-          </blora-sidebar-nav-group>
+        <blora-sidebar-nav id="session-nav" label="会话">
           <blora-sidebar-nav-group id="session-list" label="会话"></blora-sidebar-nav-group>
         </blora-sidebar-nav>
-        <blora-empty id="session-empty" title="暂无会话" description="创建会话后会出现在这里。"></blora-empty>
-        <section class="ba-section" aria-labelledby="approvals-heading">
-          <h2 id="approvals-heading" class="ba-section__title">待审批</h2>
-          <div id="approval-list" class="blora-list"></div>
-          <blora-empty id="approval-empty" title="没有待审批" description="写入和命令会在这里请求确认。"></blora-empty>
-        </section>
-        <section class="ba-section" aria-labelledby="tasks-heading">
-          <h2 id="tasks-heading" class="ba-section__title">后台任务</h2>
-          <div id="task-list" class="blora-list"></div>
-          <blora-empty id="task-empty" title="没有后台任务" description="用下方表单排队一个任务。"></blora-empty>
-        </section>
+        <blora-empty id="session-empty" title="还没有会话" description="点上方新会话开始。"></blora-empty>
+        <nav class="ba-rail" aria-label="工作台">
+          <a class="ba-rail__link" href="#/tasks">任务</a>
+          <a class="ba-rail__link" href="#/approvals">审批</a>
+          <a class="ba-rail__link" href="#/workspace">工作区</a>
+          <a class="ba-rail__link" href="#/timeline">时间线</a>
+          <a class="ba-rail__link" href="#/artifacts">产物</a>
+          <a class="ba-rail__link" href="#/settings">设置</a>
+        </nav>
+        <div class="ba-account">
+          <a class="blora-button" data-variant="ghost" data-size="sm" id="passport-login" href="/auth/start">PassPort 登录</a>
+          <span class="ba-brand__meta" id="passport-user" hidden></span>
+          <button class="blora-button" data-variant="ghost" data-size="sm" id="passport-logout" hidden>退出</button>
+        </div>
       </blora-sidebar-layout-sidebar>
       <blora-sidebar-layout-content>
-        <main class="ba-main">
+        <main class="ba-shell">
           <header class="ba-toolbar">
-            <div>
-              <h1 id="session-title">选择一个会话</h1>
+            <div class="ba-toolbar__identity">
+              <h1 id="session-title">Blora</h1>
               <p class="ba-toolbar__path" id="session-path"></p>
             </div>
-            <div class="ba-toolbar__actions">
-              <blora-switch id="auto-approve" name="auto_approve" value="on">自动批准写入/命令</blora-switch>
-              <button type="button" class="blora-button" data-variant="ghost" data-icon="git-branch" id="fork">
-                派生会话
+            <div class="ba-toolbar__actions" id="session-actions" hidden>
+              <blora-switch id="auto-approve" name="auto_approve" value="on">自动批准</blora-switch>
+              <button type="button" class="blora-button" data-variant="ghost" data-size="sm" data-icon="git-branch" id="fork">
+                派生
               </button>
-              <button type="button" class="blora-button" data-variant="ghost" data-icon="minimize-2" id="compact">
-                压缩上下文
+              <button type="button" class="blora-button" data-variant="ghost" data-size="sm" data-icon="minimize-2" id="compact">
+                压缩
               </button>
-              <button type="button" class="blora-button" data-variant="ghost" data-icon="square" id="cancel-run">
-                取消运行
+              <button type="button" class="blora-button" data-variant="ghost" data-size="sm" data-icon="square" id="cancel-run">
+                停止
               </button>
               <blora-spinner id="page-loading" label="加载中" hidden></blora-spinner>
             </div>
           </header>
           <blora-alert id="page-alert" variant="danger" hidden></blora-alert>
-          <section id="view-session">
-            <div id="subagents" class="ba-tags" hidden></div>
+          <section id="view-session" class="ba-session ba-session--empty">
+            <div class="ba-hero" id="session-hero">
+              <p class="ba-hero__kicker">Code · Work · Agent</p>
+              <h2 class="ba-hero__title" id="hero-title">工作区已就绪</h2>
+              <p class="ba-hero__lede">在仓库里读、改、跑。会话、工具和审批都留在本地。</p>
+              <div class="ba-chips" id="hero-chips">
+                <button type="button" class="ba-chip" data-prompt="列出当前工作区的文件结构">列出工作区</button>
+                <button type="button" class="ba-chip" data-prompt="总结 git 状态和最近提交">查看 git 状态</button>
+                <button type="button" class="ba-chip" data-prompt="阅读 README 并说明这个项目做什么">阅读 README</button>
+                <button type="button" class="ba-chip" data-prompt="找出可以安全改进的测试缺口">检查测试</button>
+              </div>
+            </div>
             <section class="ba-thread" id="thread" aria-live="polite">
               <blora-empty
                 id="thread-empty"
+                hidden
                 title="还没有消息"
-                description="从左侧打开会话，或直接在下方发送第一条。"
+                description="从下方输入，或点上面的快捷动作。"
               ></blora-empty>
             </section>
+            <form class="ba-composer" id="composer">
+              <canvas
+                id="work-orb"
+                class="ba-work-orb"
+                width="20"
+                height="20"
+                hidden
+                aria-hidden="true"
+              ></canvas>
+              <textarea
+                class="blora-textarea"
+                id="prompt"
+                rows="2"
+                placeholder="要在这个工作区做什么？"
+              ></textarea>
+              <button type="submit" class="blora-button" data-variant="primary" data-icon="send" id="send">发送</button>
+            </form>
+          </section>
+          <section id="view-tasks" hidden>
             <form class="ba-task-form" id="task-form">
               <blora-field label="排队后台任务" name="title" required>
                 <input class="blora-input" id="task-title" maxlength="80" />
@@ -113,32 +134,15 @@
               </blora-field>
               <button type="submit" class="blora-button" data-variant="secondary">排队</button>
             </form>
-            <form class="ba-composer" id="composer">
-              <canvas
-                id="work-orb"
-                class="ba-work-orb"
-                width="20"
-                height="20"
-                hidden
-                aria-hidden="true"
-              ></canvas>
-              <blora-field label="向 Blora 发送" name="prompt" required>
-                <textarea
-                  class="blora-textarea"
-                  id="prompt"
-                  rows="3"
-                  placeholder="描述你想在工作区完成的事"
-                ></textarea>
-              </blora-field>
-              <button type="submit" class="blora-button" data-variant="primary" data-icon="send" id="send">发送</button>
-            </form>
-          </section>
-          <section id="view-tasks" hidden>
             <div id="task-page-list" class="blora-list"></div>
-            <blora-empty id="task-page-empty" title="没有任务" description="从会话页排队后台任务。"></blora-empty>
+            <div id="task-list" class="blora-list" hidden></div>
+            <blora-empty id="task-empty" hidden title="没有后台任务" description="用上方表单排队。"></blora-empty>
+            <blora-empty id="task-page-empty" title="没有任务" description="排队一个后台任务，或给会话加 cron。"></blora-empty>
           </section>
           <section id="view-approvals" hidden>
             <div id="approval-page-list" class="blora-list"></div>
+            <div id="approval-list" class="blora-list" hidden></div>
+            <blora-empty id="approval-empty" hidden title="没有待审批" description="写入和命令会在这里请求确认。"></blora-empty>
             <blora-empty id="approval-page-empty" title="没有待审批" description="写入和命令会在这里列出。"></blora-empty>
           </section>
           <section id="view-timeline" hidden>
