@@ -98,7 +98,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
         .map_err(blora_types::BloraError::exec)?;
     if std::env::var_os("NO_COLOR").is_none() {
-        let _ = write!(stdout, "{}", theme::Theme::current().cursor_osc());
+        let _ = write!(stdout, "{}", theme::Theme::current().terminal_osc());
         let _ = stdout.flush();
     }
     let backend = CrosstermBackend::new(stdout);
@@ -856,7 +856,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     disable_raw_mode().ok();
     execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen).ok();
     if std::env::var_os("NO_COLOR").is_none() {
-        let _ = write!(io::stdout(), "{}", theme::CURSOR_RESET);
+        let _ = write!(io::stdout(), "{}", theme::TERMINAL_RESET);
         let _ = io::stdout().flush();
     }
     result
@@ -1182,7 +1182,7 @@ fn apply_theme_pref(pref: theme::ThemePref) -> String {
 }
 
 fn write_cursor() {
-    let _ = write!(io::stdout(), "{}", theme::Theme::current().cursor_osc());
+    let _ = write!(io::stdout(), "{}", theme::Theme::current().terminal_osc());
     let _ = io::stdout().flush();
 }
 

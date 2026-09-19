@@ -414,6 +414,21 @@ impl Theme {
         }
     }
 
+    /// OSC 11 default terminal background matching `surface.canvas`.
+    #[must_use]
+    pub fn background_osc(self) -> String {
+        match self.bg {
+            Color::Rgb(r, g, b) => format!("\x1b]11;#{r:02X}{g:02X}{b:02X}\x07"),
+            _ => BACKGROUND_RESET.to_owned(),
+        }
+    }
+
+    /// Cursor + default-background OSC for the current palette.
+    #[must_use]
+    pub fn terminal_osc(self) -> String {
+        format!("{}{}", self.background_osc(), self.cursor_osc())
+    }
+
     #[must_use]
     pub fn fg(self, color: Color) -> Style {
         Style::default().fg(color)
@@ -421,7 +436,7 @@ impl Theme {
 
     #[must_use]
     pub fn base(self) -> Style {
-        self.fg(self.text)
+        Style::default().fg(self.text).bg(self.bg)
     }
 
     #[must_use]
@@ -446,6 +461,8 @@ impl Theme {
 }
 
 pub const CURSOR_RESET: &str = "\x1b]112\x07";
+pub const BACKGROUND_RESET: &str = "\x1b]111\x07";
+pub const TERMINAL_RESET: &str = "\x1b]111\x07\x1b]112\x07";
 
 fn terminal_is_light() -> bool {
     let Ok(value) = std::env::var("COLORFGBG") else {
@@ -477,6 +494,8 @@ mod tests {
         assert_eq!(theme.rose, hex(0x9F59_64));
         assert_eq!(theme.sage, hex(0x5B75_6B));
         assert!(!theme.is_dark());
+        assert_eq!(theme.base().bg, Some(hex(0xFAF7_F8)));
+        assert!(theme.background_osc().contains("#FAF7F8"));
     }
 
     #[test]
