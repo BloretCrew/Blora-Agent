@@ -58,6 +58,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut passport_dialog: Option<view::PassportDialog> = None;
     // Model-provider switch dialog opened via `/provider`.
     let mut provider_dialog: Option<view::ProviderDialog> = None;
+    let mut add_provider_dialog: Option<view::AddProviderDialog> = None;
     let mut theme_dialog: Option<view::ThemeDialog> = None;
     // PassPort user token of the logged-in user; drives the default provider.
     let mut passport_user_token: Option<String> = None;
@@ -209,6 +210,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             notice: notice.as_deref(),
                             passport_dialog: passport_dialog.as_ref(),
                             provider_dialog: provider_dialog.as_ref(),
+                            add_provider_dialog: add_provider_dialog.as_ref(),
                             theme_dialog: theme_dialog.as_ref(),
                             slash_hits: &slash_hits,
                             slash_selected,
@@ -284,6 +286,126 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             continue;
                         }
                         match key.code {
+                            KeyCode::Esc if add_provider_dialog.is_some() => {
+                                if let Some(dialog) = add_provider_dialog.as_mut() {
+                                    match dialog.step {
+                                        view::AddProviderStep::Catalog => {
+                                            add_provider_dialog = None;
+                                        }
+                                        view::AddProviderStep::CustomId => {
+                                            dialog.step = view::AddProviderStep::Catalog;
+                                        }
+                                        view::AddProviderStep::CustomBase => {
+                                            dialog.step = view::AddProviderStep::CustomId;
+                                        }
+                                        view::AddProviderStep::ApiKey => {
+                                            dialog.step = if dialog.is_custom() {
+                                                view::AddProviderStep::CustomBase
+                                            } else {
+                                                view::AddProviderStep::Catalog
+                                            };
+                                        }
+                                        view::AddProviderStep::Format => {
+                                            dialog.step = view::AddProviderStep::ApiKey;
+                                        }
+                                    }
+                                }
+                            }
+                            KeyCode::Up if add_provider_dialog.is_some() => {
+                                if let Some(dialog) = add_provider_dialog.as_mut() {
+                                    match dialog.step {
+                                        view::AddProviderStep::Catalog => {
+                                            dialog.selected = dialog.selected.saturating_sub(1);
+                                        }
+                                        view::AddProviderStep::Format => {
+                                            dialog.format = cycle_format(dialog.format, -1);
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                            KeyCode::Down if add_provider_dialog.is_some() => {
+                                if let Some(dialog) = add_provider_dialog.as_mut() {
+                                    match dialog.step {
+                                        view::AddProviderStep::Catalog => {
+                                            let max = dialog.catalog_len().saturating_sub(1);
+                                            dialog.selected = (dialog.selected + 1).min(max);
+                                        }
+                                        view::AddProviderStep::Format => {
+                                            dialog.format = cycle_format(dialog.format, 1);
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                            KeyCode::Enter if add_provider_dialog.is_some() => {
+                                if let Some(dialog) = add_provider_dialog.as_mut() {
+                                    match advance_add_provider(dialog) {
+                                        AddAdvance::Stay => {}
+                                        AddAdvance::Saved(saved) => {
+                                            add_provider_dialog = None;
+                                            provider_override = saved.id.clone();
+                                            if let Some(model) = saved.models.first() {
+                                                model_override = model.id.clone();
+                                            }
+                                            provider_dialog = Some(open_provider_dialog(
+                                                &provider_override,
+                                                &model_override,
+                                                logged_in,
+                                            ));
+                                            status = format!(
+                                                "已添加供应商 {}（{} 个模型）",
+                                                saved.name,
+                                                saved.models.len()
+                                            );
+                                        }
+                                        AddAdvance::Fail(err) => {
+                                            dialog.error = Some(err);
+                                        }
+                                    }
+                                }
+                            }
+                            KeyCode::Backspace
+                                if add_provider_dialog.as_ref().is_some_and(|dialog| {
+                                    matches!(
+                                        dialog.step,
+                                        view::AddProviderStep::CustomId
+                                            | view::AddProviderStep::CustomBase
+                                            | view::AddProviderStep::ApiKey
+                                    )
+                                }) =>
+                            {
+                                if let Some(dialog) = add_provider_dialog.as_mut() {
+                                    add_step_buffer(dialog).pop();
+                                }
+                            }
+                            KeyCode::Char(ch)
+                                if add_provider_dialog.as_ref().is_some_and(|dialog| {
+                                    matches!(
+                                        dialog.step,
+                                        view::AddProviderStep::CustomId
+                                            | view::AddProviderStep::CustomBase
+                                            | view::AddProviderStep::ApiKey
+                                    )
+                                }) && !key.modifiers.contains(KeyModifiers::CONTROL) =>
+                            {
+                                if let Some(dialog) = add_provider_dialog.as_mut() {
+                                    add_step_buffer(dialog).push(ch);
+                                }
+                            }
+                            KeyCode::Left if provider_dialog.is_some() => {
+                                if let Some(dialog) = provider_dialog.as_mut() {
+                                    dialog.pane = view::ProviderPane::Providers;
+                                }
+                            }
+                            KeyCode::Right if provider_dialog.is_some() => {
+                                if let Some(dialog) = provider_dialog.as_mut()
+                                    && !dialog.is_add()
+                                    && !dialog.current_models().is_empty()
+                                {
+                                    dialog.pane = view::ProviderPane::Models;
+                                }
+                            }
                             KeyCode::Left | KeyCode::Char('[') if input.is_empty() => {
                                 index = index.saturating_sub(1);
                             }
@@ -338,24 +460,50 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             }
                             KeyCode::Up if provider_dialog.is_some() => {
                                 if let Some(dialog) = provider_dialog.as_mut() {
-                                    dialog.selected = dialog.selected.saturating_sub(1);
+                                    match dialog.pane {
+                                        view::ProviderPane::Providers => {
+                                            dialog.selected = dialog.selected.saturating_sub(1);
+                                            dialog.model_selected = 0;
+                                        }
+                                        view::ProviderPane::Models => {
+                                            dialog.model_selected =
+                                                dialog.model_selected.saturating_sub(1);
+                                        }
+                                    }
                                 }
                             }
                             KeyCode::Down if provider_dialog.is_some() => {
                                 if let Some(dialog) = provider_dialog.as_mut() {
-                                    dialog.selected =
-                                        (dialog.selected + 1).min(dialog.options.len() - 1);
+                                    match dialog.pane {
+                                        view::ProviderPane::Providers => {
+                                            dialog.selected = (dialog.selected + 1)
+                                                .min(dialog.options.len().saturating_sub(1));
+                                            dialog.model_selected = 0;
+                                        }
+                                        view::ProviderPane::Models => {
+                                            let max =
+                                                dialog.current_models().len().saturating_sub(1);
+                                            dialog.model_selected =
+                                                (dialog.model_selected + 1).min(max);
+                                        }
+                                    }
                                 }
                             }
                             KeyCode::Enter if provider_dialog.is_some() => {
-                                if let Some(dialog) = provider_dialog.take() {
-                                    if let Some(option) = dialog.options.get(dialog.selected) {
-                                        provider_override = option.id.clone();
-                                        status = if option.id.is_empty() {
-                                            format!("provider=默认（跟随登录与环境）")
-                                        } else {
-                                            format!("provider={}", option.display)
-                                        };
+                                if let Some(dialog) = provider_dialog.as_mut() {
+                                    if dialog.is_add() {
+                                        add_provider_dialog = Some(open_add_provider_dialog());
+                                    } else if dialog.pane == view::ProviderPane::Providers
+                                        && !dialog.current_models().is_empty()
+                                    {
+                                        dialog.pane = view::ProviderPane::Models;
+                                    } else if let Some(status_text) = commit_provider_dialog(
+                                        dialog,
+                                        &mut provider_override,
+                                        &mut model_override,
+                                    ) {
+                                        provider_dialog = None;
+                                        status = status_text;
                                     }
                                 }
                             }
@@ -436,15 +584,12 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                             }
                                             SlashOutcome::ProviderDialog => {
                                                 theme_dialog = None;
-                                                provider_dialog = Some(view::ProviderDialog {
-                                                    options: provider_option_list.clone(),
-                                                    selected: provider_option_list
-                                                        .iter()
-                                                        .position(|option| !option.id.is_empty())
-                                                        .unwrap_or(0),
-                                                    fullscreen: false,
-                                                    minimized: false,
-                                                });
+                                                add_provider_dialog = None;
+                                                provider_dialog = Some(open_provider_dialog(
+                                                    &provider_override,
+                                                    &model_override,
+                                                    logged_in,
+                                                ));
                                             }
                                             SlashOutcome::ThemeDialog => {
                                                 provider_dialog = None;
@@ -546,6 +691,29 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 Some(view::Hit::ProviderRow(idx)) => {
                                     if let Some(dialog) = provider_dialog.as_mut() {
                                         dialog.selected = idx;
+                                        dialog.model_selected = 0;
+                                        dialog.pane = view::ProviderPane::Providers;
+                                    }
+                                }
+                                Some(view::Hit::ProviderModelRow(idx)) => {
+                                    if let Some(dialog) = provider_dialog.as_mut() {
+                                        dialog.model_selected = idx;
+                                        dialog.pane = view::ProviderPane::Models;
+                                    }
+                                }
+                                Some(view::Hit::AddProviderRow(idx)) => {
+                                    if let Some(dialog) = add_provider_dialog.as_mut() {
+                                        match dialog.step {
+                                            view::AddProviderStep::Catalog => dialog.selected = idx,
+                                            view::AddProviderStep::Format => {
+                                                if let Some(format) =
+                                                    blora_catalog::MessageFormat::ALL.get(idx)
+                                                {
+                                                    dialog.format = *format;
+                                                }
+                                            }
+                                            _ => {}
+                                        }
                                     }
                                 }
                                 Some(view::Hit::ThemeTab(idx)) => {
@@ -581,14 +749,73 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     continue;
                                 }
                                 if let Some(view::Hit::ProviderRow(idx)) = hit {
-                                    if let Some(dialog) = provider_dialog.take() {
-                                        if let Some(option) = dialog.options.get(idx) {
-                                            provider_override = option.id.clone();
-                                            status = if option.id.is_empty() {
-                                                format!("provider=默认（跟随登录与环境）")
-                                            } else {
-                                                format!("provider={}", option.display)
-                                            };
+                                    if let Some(dialog) = provider_dialog.as_mut() {
+                                        dialog.selected = idx;
+                                        dialog.model_selected = 0;
+                                        if dialog.is_add() {
+                                            add_provider_dialog = Some(open_add_provider_dialog());
+                                        } else {
+                                            dialog.pane = view::ProviderPane::Models;
+                                        }
+                                    }
+                                    continue;
+                                }
+                                if let Some(view::Hit::ProviderModelRow(idx)) = hit {
+                                    if let Some(dialog) = provider_dialog.as_mut() {
+                                        dialog.model_selected = idx;
+                                        dialog.pane = view::ProviderPane::Models;
+                                        if let Some(status_text) = commit_provider_dialog(
+                                            dialog,
+                                            &mut provider_override,
+                                            &mut model_override,
+                                        ) {
+                                            provider_dialog = None;
+                                            status = status_text;
+                                        }
+                                    }
+                                    continue;
+                                }
+                                if let Some(view::Hit::AddProviderRow(idx)) = hit {
+                                    if let Some(dialog) = add_provider_dialog.as_mut() {
+                                        match dialog.step {
+                                            view::AddProviderStep::Catalog => {
+                                                dialog.selected = idx;
+                                                match advance_add_provider(dialog) {
+                                                    AddAdvance::Stay => {}
+                                                    AddAdvance::Saved(saved) => {
+                                                        add_provider_dialog = None;
+                                                        provider_override = saved.id.clone();
+                                                        status =
+                                                            format!("已添加供应商 {}", saved.name);
+                                                    }
+                                                    AddAdvance::Fail(err) => {
+                                                        dialog.error = Some(err);
+                                                    }
+                                                }
+                                            }
+                                            view::AddProviderStep::Format => {
+                                                if let Some(format) =
+                                                    blora_catalog::MessageFormat::ALL.get(idx)
+                                                {
+                                                    dialog.format = *format;
+                                                }
+                                                match advance_add_provider(dialog) {
+                                                    AddAdvance::Stay => {}
+                                                    AddAdvance::Saved(saved) => {
+                                                        add_provider_dialog = None;
+                                                        provider_override = saved.id.clone();
+                                                        if let Some(model) = saved.models.first() {
+                                                            model_override = model.id.clone();
+                                                        }
+                                                        status =
+                                                            format!("已添加供应商 {}", saved.name);
+                                                    }
+                                                    AddAdvance::Fail(err) => {
+                                                        dialog.error = Some(err);
+                                                    }
+                                                }
+                                            }
+                                            _ => {}
                                         }
                                     }
                                     continue;
@@ -669,6 +896,8 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     if let Some(dialog) = theme_dialog.take() {
                                         cancel_theme_dialog(&dialog);
                                         status = "theme picker closed".to_owned();
+                                    } else if add_provider_dialog.take().is_some() {
+                                        status = "add provider cancelled".to_owned();
                                     } else if provider_dialog.take().is_some() {
                                         status = "provider picker closed".to_owned();
                                     } else {
@@ -681,6 +910,9 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     if let Some(dialog) = theme_dialog.as_mut() {
                                         dialog.minimized = true;
                                         dialog.fullscreen = false;
+                                    } else if let Some(dialog) = add_provider_dialog.as_mut() {
+                                        dialog.minimized = true;
+                                        dialog.fullscreen = false;
                                     } else if let Some(dialog) = provider_dialog.as_mut() {
                                         dialog.minimized = true;
                                         dialog.fullscreen = false;
@@ -691,6 +923,12 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     // Green: fullscreen the picker, or restore
                                     // from minimized. Login still opens the browser.
                                     if let Some(dialog) = theme_dialog.as_mut() {
+                                        if dialog.minimized {
+                                            dialog.minimized = false;
+                                        } else {
+                                            dialog.fullscreen = !dialog.fullscreen;
+                                        }
+                                    } else if let Some(dialog) = add_provider_dialog.as_mut() {
                                         if dialog.minimized {
                                             dialog.minimized = false;
                                         } else {
@@ -944,6 +1182,8 @@ fn apply_slash(
             *provider_dialog = Some(view::ProviderDialog {
                 options: provider_options.to_vec(),
                 selected: selected.unwrap_or(0),
+                pane: view::ProviderPane::Providers,
+                model_selected: 0,
                 fullscreen: false,
                 minimized: false,
             });
@@ -980,38 +1220,73 @@ fn provider_options(provider_override: &str, logged_in: bool) -> Vec<view::Provi
             override_id.eq_ignore_ascii_case(id)
         }
     };
-    let entries: Vec<view::ProviderOption> = vec![
+    let mut entries: Vec<view::ProviderOption> = vec![
         view::ProviderOption {
             id: String::new(),
             display: format!("默认（{default_display}）"),
             hint: "跟随登录与环境配置".to_owned(),
             available: true,
+            models: models_for_provider(""),
         },
         view::ProviderOption {
             id: "blora".to_owned(),
             display: "Blora".to_owned(),
             hint: "Bloret PassPort · 200 次/天".to_owned(),
             available: logged_in,
+            models: models_for_provider("blora"),
         },
         view::ProviderOption {
             id: "openai".to_owned(),
             display: "OpenAI".to_owned(),
             hint: "BLORA_API_KEY / OPENAI_API_KEY".to_owned(),
             available: has_key,
+            models: models_for_provider("openai"),
         },
         view::ProviderOption {
             id: "anthropic".to_owned(),
             display: "Anthropic".to_owned(),
             hint: "ANTHROPIC_API_KEY".to_owned(),
             available: std::env::var("ANTHROPIC_API_KEY").is_ok(),
+            models: models_for_provider("anthropic"),
         },
         view::ProviderOption {
             id: "gemini".to_owned(),
             display: "Gemini".to_owned(),
             hint: "GEMINI_API_KEY".to_owned(),
             available: std::env::var("GEMINI_API_KEY").is_ok(),
+            models: models_for_provider("gemini"),
         },
     ];
+    for saved in blora_catalog::load_saved() {
+        if entries
+            .iter()
+            .any(|option| option.id.eq_ignore_ascii_case(&saved.id))
+        {
+            continue;
+        }
+        entries.push(view::ProviderOption {
+            id: saved.id.clone(),
+            display: saved.name.clone(),
+            hint: saved.format.label().to_owned(),
+            available: !saved.api_key.is_empty(),
+            models: saved
+                .models
+                .into_iter()
+                .map(|model| view::ModelOption {
+                    id: model.id,
+                    display: model.name,
+                    hint: String::new(),
+                })
+                .collect(),
+        });
+    }
+    entries.push(view::ProviderOption {
+        id: blora_catalog::ADD_PROVIDER_ID.to_owned(),
+        display: "+ 添加供应商".to_owned(),
+        hint: "从 models.dev 接入".to_owned(),
+        available: true,
+        models: Vec::new(),
+    });
     entries
         .into_iter()
         .map(|mut option| {
@@ -1021,6 +1296,251 @@ fn provider_options(provider_override: &str, logged_in: bool) -> Vec<view::Provi
             option
         })
         .collect()
+}
+
+fn models_for_provider(id: &str) -> Vec<view::ModelOption> {
+    let catalog_id = if id.is_empty() { "openai" } else { id };
+    let from_catalog = blora_catalog::cached_catalog()
+        .into_iter()
+        .find(|entry| entry.id.eq_ignore_ascii_case(catalog_id))
+        .map(|entry| {
+            entry
+                .models
+                .into_iter()
+                .map(|model| view::ModelOption {
+                    id: model.id,
+                    display: model.name,
+                    hint: String::new(),
+                })
+                .collect::<Vec<_>>()
+        })
+        .filter(|models: &Vec<_>| !models.is_empty());
+    if let Some(models) = from_catalog {
+        return models;
+    }
+    match catalog_id {
+        "blora" => vec![view::ModelOption {
+            id: blora_model::PASSPORT_MODEL_NAME.to_owned(),
+            display: blora_model::PASSPORT_PROVIDER_DISPLAY_NAME.to_owned(),
+            hint: String::new(),
+        }],
+        "anthropic" => vec![view::ModelOption {
+            id: "claude-3-5-sonnet-latest".to_owned(),
+            display: "claude-3-5-sonnet-latest".to_owned(),
+            hint: String::new(),
+        }],
+        "gemini" => vec![view::ModelOption {
+            id: "gemini-2.0-flash".to_owned(),
+            display: "gemini-2.0-flash".to_owned(),
+            hint: String::new(),
+        }],
+        _ => vec![
+            view::ModelOption {
+                id: "gpt-4o".to_owned(),
+                display: "gpt-4o".to_owned(),
+                hint: String::new(),
+            },
+            view::ModelOption {
+                id: "gpt-4o-mini".to_owned(),
+                display: "gpt-4o-mini".to_owned(),
+                hint: String::new(),
+            },
+        ],
+    }
+}
+
+fn open_provider_dialog(
+    provider_override: &str,
+    model_override: &str,
+    logged_in: bool,
+) -> view::ProviderDialog {
+    let options = provider_options(provider_override, logged_in);
+    let selected = options
+        .iter()
+        .position(|option| {
+            if provider_override.is_empty() {
+                option.id.is_empty()
+            } else {
+                option.id.eq_ignore_ascii_case(provider_override)
+            }
+        })
+        .or_else(|| {
+            options
+                .iter()
+                .position(|option| option.id != blora_catalog::ADD_PROVIDER_ID)
+        })
+        .unwrap_or(0);
+    let model_selected = options
+        .get(selected)
+        .map(|option| {
+            option
+                .models
+                .iter()
+                .position(|model| model.id == model_override)
+                .unwrap_or(0)
+        })
+        .unwrap_or(0);
+    view::ProviderDialog {
+        options,
+        selected,
+        pane: view::ProviderPane::Providers,
+        model_selected,
+        fullscreen: false,
+        minimized: false,
+    }
+}
+
+fn commit_provider_dialog(
+    dialog: &view::ProviderDialog,
+    provider_override: &mut String,
+    model_override: &mut String,
+) -> Option<String> {
+    let option = dialog.current()?;
+    if option.id == blora_catalog::ADD_PROVIDER_ID {
+        return None;
+    }
+    *provider_override = option.id.clone();
+    if let Some(model) = option.models.get(dialog.model_selected) {
+        *model_override = model.id.clone();
+    }
+    Some(if option.id.is_empty() {
+        "provider=默认（跟随登录与环境）".to_owned()
+    } else if model_override.is_empty() {
+        format!("provider={}", option.display)
+    } else {
+        format!("provider={}  model={model_override}", option.display)
+    })
+}
+
+fn open_add_provider_dialog() -> view::AddProviderDialog {
+    let (catalog, error) = match blora_catalog::fetch_catalog() {
+        Ok(list) => (list, None),
+        Err(err) => (Vec::new(), Some(err.to_string())),
+    };
+    view::AddProviderDialog {
+        step: view::AddProviderStep::Catalog,
+        catalog,
+        selected: 0,
+        custom_id: String::new(),
+        custom_base: "https://api.openai.com/v1".to_owned(),
+        api_key: String::new(),
+        format: blora_catalog::MessageFormat::Openai,
+        error,
+        fullscreen: false,
+        minimized: false,
+    }
+}
+
+enum AddAdvance {
+    Stay,
+    Saved(blora_catalog::SavedProvider),
+    Fail(String),
+}
+
+fn add_step_buffer(dialog: &mut view::AddProviderDialog) -> &mut String {
+    match dialog.step {
+        view::AddProviderStep::CustomId => &mut dialog.custom_id,
+        view::AddProviderStep::CustomBase => &mut dialog.custom_base,
+        view::AddProviderStep::ApiKey => &mut dialog.api_key,
+        _ => {
+            // Catalog/format don't type; keep a harmless sink.
+            &mut dialog.custom_id
+        }
+    }
+}
+
+fn cycle_format(current: blora_catalog::MessageFormat, delta: i8) -> blora_catalog::MessageFormat {
+    let all = blora_catalog::MessageFormat::ALL;
+    let idx = all.iter().position(|item| *item == current).unwrap_or(0) as i8;
+    let next = (idx + delta).rem_euclid(all.len() as i8) as usize;
+    all[next]
+}
+
+fn advance_add_provider(dialog: &mut view::AddProviderDialog) -> AddAdvance {
+    dialog.error = None;
+    match dialog.step {
+        view::AddProviderStep::Catalog => {
+            if dialog.is_custom() {
+                dialog.step = view::AddProviderStep::CustomId;
+                AddAdvance::Stay
+            } else if let Some(entry) = dialog.catalog_entry().cloned() {
+                dialog.format = entry.format();
+                if let Some(api) = entry.api {
+                    dialog.custom_base = api;
+                }
+                dialog.custom_id = entry.id;
+                dialog.step = view::AddProviderStep::ApiKey;
+                AddAdvance::Stay
+            } else {
+                AddAdvance::Fail("目录为空，可选手动添加".to_owned())
+            }
+        }
+        view::AddProviderStep::CustomId => {
+            let id = dialog.custom_id.trim().to_ascii_lowercase();
+            if !id
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+                || id.is_empty()
+            {
+                return AddAdvance::Fail("id 只能用小写字母、数字、连字符".to_owned());
+            }
+            dialog.custom_id = id;
+            dialog.step = view::AddProviderStep::CustomBase;
+            AddAdvance::Stay
+        }
+        view::AddProviderStep::CustomBase => {
+            if dialog.custom_base.trim().is_empty() {
+                return AddAdvance::Fail("需要 API 基址".to_owned());
+            }
+            dialog.step = view::AddProviderStep::ApiKey;
+            AddAdvance::Stay
+        }
+        view::AddProviderStep::ApiKey => {
+            if dialog.api_key.trim().is_empty() {
+                return AddAdvance::Fail("需要 API key".to_owned());
+            }
+            dialog.step = view::AddProviderStep::Format;
+            AddAdvance::Stay
+        }
+        view::AddProviderStep::Format => finish_add_provider(dialog),
+    }
+}
+
+fn finish_add_provider(dialog: &view::AddProviderDialog) -> AddAdvance {
+    let (id, name, mut entry) = if dialog.is_custom() {
+        let id = dialog.custom_id.trim().to_owned();
+        (
+            id.clone(),
+            id.clone(),
+            blora_catalog::CatalogEntry {
+                id: id.clone(),
+                name: id,
+                api: Some(dialog.custom_base.clone()),
+                env: Vec::new(),
+                npm: None,
+                models: Vec::new(),
+            },
+        )
+    } else if let Some(entry) = dialog.catalog_entry().cloned() {
+        (entry.id.clone(), entry.name.clone(), entry)
+    } else {
+        return AddAdvance::Fail("未选择供应商".to_owned());
+    };
+    let base = dialog.custom_base.trim().to_owned();
+    let models = blora_catalog::resolve_models(&entry, dialog.format, &dialog.api_key, &base);
+    entry.models = models.clone();
+    let saved = blora_catalog::SavedProvider {
+        id,
+        name,
+        api_key: dialog.api_key.clone(),
+        base_url: base,
+        format: dialog.format,
+        models,
+    };
+    if let Err(err) = blora_catalog::save_provider(saved.clone()) {
+        return AddAdvance::Fail(err.to_string());
+    }
+    AddAdvance::Saved(saved)
 }
 
 /// Split the `/login` status text (`<url>\n设备码：<code>`) back into its URL
@@ -1066,8 +1586,7 @@ fn apply_theme(args: &str) -> SlashOutcome {
     match theme::ThemePref::parse(args) {
         Some(pref) => SlashOutcome::Status(apply_theme_pref(pref)),
         None => SlashOutcome::Status(
-            "usage: /theme [coral|indigo|graphite|mono|circuit|dusk|dark|light|auto]"
-                .to_owned(),
+            "usage: /theme [coral|indigo|graphite|mono|circuit|dusk|dark|light|auto]".to_owned(),
         ),
     }
 }

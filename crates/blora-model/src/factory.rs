@@ -91,6 +91,9 @@ fn passport_provider(user_token: &str) -> Option<Box<dyn Provider>> {
 }
 
 fn one(kind: &str) -> Box<dyn Provider> {
+    if let Some(saved) = blora_catalog::find_saved(kind) {
+        return saved_provider(&saved);
+    }
     match kind.to_ascii_lowercase().as_str() {
         "mock" => Box::new(MockProvider::new()),
         "anthropic" | "claude" => AnthropicProvider::from_env()
@@ -108,12 +111,43 @@ fn one(kind: &str) -> Box<dyn Provider> {
     }
 }
 
+fn saved_provider(saved: &blora_catalog::SavedProvider) -> Box<dyn Provider> {
+    let model = saved
+        .models
+        .first()
+        .map(|m| m.id.as_str())
+        .unwrap_or("gpt-4o-mini");
+    match saved.format {
+        blora_catalog::MessageFormat::Anthropic => Box::new(AnthropicProvider {
+            base_url: saved.base_url.clone(),
+            api_key: saved.api_key.clone(),
+            model: model.to_owned(),
+        }),
+        blora_catalog::MessageFormat::Gemini => Box::new(GeminiProvider {
+            api_key: saved.api_key.clone(),
+            model: model.to_owned(),
+            base_url: saved.base_url.clone(),
+        }),
+        blora_catalog::MessageFormat::Responses => Box::new(ResponsesProvider {
+            base_url: saved.base_url.clone(),
+            api_key: saved.api_key.clone(),
+            model: model.to_owned(),
+        }),
+        blora_catalog::MessageFormat::Openai => Box::new(OpenAiProvider::with_identity(
+            saved.id.clone(),
+            saved.base_url.clone(),
+            saved.api_key.clone(),
+            model,
+        )),
+    }
+}
+
 struct FallbackProvider {
     inner: Vec<Box<dyn Provider>>,
 }
 
 impl Provider for FallbackProvider {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         self.inner
             .first()
             .map(AsRef::as_ref)

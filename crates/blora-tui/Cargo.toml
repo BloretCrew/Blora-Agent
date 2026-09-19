@@ -9,6 +9,8 @@ description = "Terminal interface for Blora Agent."
 
 [dependencies]
 blora-auth.workspace = true
+blora-catalog.workspace = true
+blora-model.workspace = true
 blora-runtime.workspace = true
 blora-session.workspace = true
 blora-storage.workspace = true

@@ -40,6 +40,21 @@ pub struct ProviderOption {
     pub hint: String,
     /// False when the provider cannot be used right now (no key, not logged in).
     pub available: bool,
+    pub models: Vec<ModelOption>,
+}
+
+/// One selectable model in the right pane of the provider dialog.
+#[derive(Clone, Debug)]
+pub struct ModelOption {
+    pub id: String,
+    pub display: String,
+    pub hint: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProviderPane {
+    Providers,
+    Models,
 }
 
 /// Model-provider switch dialog shown via `/provider` with no arguments.
@@ -47,8 +62,75 @@ pub struct ProviderOption {
 pub struct ProviderDialog {
     pub options: Vec<ProviderOption>,
     pub selected: usize,
+    pub pane: ProviderPane,
+    pub model_selected: usize,
     pub fullscreen: bool,
     pub minimized: bool,
+}
+
+impl ProviderDialog {
+    #[must_use]
+    pub fn current(&self) -> Option<&ProviderOption> {
+        self.options.get(self.selected)
+    }
+
+    #[must_use]
+    pub fn is_add(&self) -> bool {
+        self.current()
+            .is_some_and(|option| option.id == blora_catalog::ADD_PROVIDER_ID)
+    }
+
+    #[must_use]
+    pub fn current_models(&self) -> &[ModelOption] {
+        self.current()
+            .map(|option| option.models.as_slice())
+            .unwrap_or(&[])
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AddProviderStep {
+    Catalog,
+    CustomId,
+    CustomBase,
+    ApiKey,
+    Format,
+}
+
+/// Wizard for adding a provider from models.dev (or a custom endpoint).
+#[derive(Clone, Debug)]
+pub struct AddProviderDialog {
+    pub step: AddProviderStep,
+    pub catalog: Vec<blora_catalog::CatalogEntry>,
+    pub selected: usize,
+    pub custom_id: String,
+    pub custom_base: String,
+    pub api_key: String,
+    pub format: blora_catalog::MessageFormat,
+    pub error: Option<String>,
+    pub fullscreen: bool,
+    pub minimized: bool,
+}
+
+impl AddProviderDialog {
+    #[must_use]
+    pub fn is_custom(&self) -> bool {
+        self.selected == 0
+    }
+
+    #[must_use]
+    pub fn catalog_entry(&self) -> Option<&blora_catalog::CatalogEntry> {
+        if self.is_custom() {
+            None
+        } else {
+            self.catalog.get(self.selected.saturating_sub(1))
+        }
+    }
+
+    #[must_use]
+    pub fn catalog_len(&self) -> usize {
+        self.catalog.len().saturating_add(1)
+    }
 }
 
 /// One selectable scheme inside the theme picker.
@@ -88,6 +170,8 @@ pub struct FrameModel<'a> {
     pub passport_dialog: Option<&'a PassportDialog>,
     /// Model-provider switch dialog; renders as a centered modal dialog.
     pub provider_dialog: Option<&'a ProviderDialog>,
+    /// Add-provider wizard; takes render priority over the switch dialog.
+    pub add_provider_dialog: Option<&'a AddProviderDialog>,
     /// Color-scheme picker; renders as a centered modal dialog.
     pub theme_dialog: Option<&'a ThemeDialog>,
     pub slash_hits: &'a [&'static SlashCommand],
@@ -123,6 +207,12 @@ pub enum Hit {
     TrafficOpenBrowser,
     /// A provider row inside the provider-switch dialog.
     ProviderRow(usize),
+    /// A model row in the right pane of the provider-switch dialog.
+    ProviderModelRow(usize),
+    /// A row in the add-provider catalog list.
+    AddProviderRow(usize),
+    /// Cycle the message-format step of the add-provider wizard.
+    AddProviderFormat,
     /// A scheme row inside the theme picker.
     ThemeRow(usize),
     /// Auto / light / dark section tab (`0` auto, `1` light, `2` dark).
@@ -162,6 +252,10 @@ pub struct HitMap {
     pub traffic_lights: [Option<Rect>; 3],
     /// Provider rows of the provider-switch dialog.
     pub provider_rows: Vec<(Rect, usize)>,
+    /// Model rows of the provider-switch dialog.
+    pub provider_model_rows: Vec<(Rect, usize)>,
+    /// Catalog rows of the add-provider wizard.
+    pub add_provider_rows: Vec<(Rect, usize)>,
     /// Scheme rows of the theme picker.
     pub theme_rows: Vec<(Rect, usize)>,
     /// Auto / light / dark section tabs.
@@ -190,6 +284,16 @@ impl HitMap {
         for (rect, idx) in &self.provider_rows {
             if contains(*rect, col, row) {
                 return Some(Hit::ProviderRow(*idx));
+            }
+        }
+        for (rect, idx) in &self.provider_model_rows {
+            if contains(*rect, col, row) {
+                return Some(Hit::ProviderModelRow(*idx));
+            }
+        }
+        for (rect, idx) in &self.add_provider_rows {
+            if contains(*rect, col, row) {
+                return Some(Hit::AddProviderRow(*idx));
             }
         }
         for (rect, idx) in &self.theme_tabs {
@@ -346,6 +450,10 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
     if let Some(dialog) = model.passport_dialog {
         let dialog_hits = render_passport_dialog(frame, area, dialog, model.pointer, &theme);
         hits.traffic_lights = dialog_hits.traffic_lights;
+    } else if let Some(dialog) = model.add_provider_dialog {
+        let dialog_hits = render_add_provider_dialog(frame, area, dialog, model.pointer, &theme);
+        hits.add_provider_rows = dialog_hits.add_provider_rows;
+        hits.traffic_lights = dialog_hits.traffic_lights;
     } else if let Some(dialog) = model.theme_dialog {
         let dialog_hits = render_theme_dialog(frame, area, dialog, model.pointer, &theme);
         hits.theme_rows = dialog_hits.theme_rows;
@@ -354,6 +462,7 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
     } else if let Some(dialog) = model.provider_dialog {
         let dialog_hits = render_provider_dialog(frame, area, dialog, model.pointer, &theme);
         hits.provider_rows = dialog_hits.provider_rows;
+        hits.provider_model_rows = dialog_hits.provider_model_rows;
         hits.traffic_lights = dialog_hits.traffic_lights;
     }
     hits
@@ -1000,9 +1109,7 @@ fn render_passport_dialog(
     hits
 }
 
-/// Model-provider switch dialog, sharing the login dialog's chrome: rounded
-/// centered frame, traffic lights, dim body. Rows are selectable with the
-/// pointer or the keyboard; Enter confirms, Esc closes.
+/// Two-pane provider/model switch dialog.
 fn render_provider_dialog(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -1011,28 +1118,22 @@ fn render_provider_dialog(
     theme: &Theme,
 ) -> HitMap {
     let mut hits = HitMap::default();
-    let row_count = dialog.options.len().clamp(1, 8) as u16;
-    let compact_height = row_count + 5;
     if dialog.options.is_empty() {
         return hits;
     }
+    let left_count = dialog.options.len().clamp(1, 12) as u16;
+    let compact_height = left_count.saturating_add(6);
     if !dialog.fullscreen
         && !dialog.minimized
-        && (area.width < 30 || area.height < compact_height + 2)
+        && (area.width < 48 || area.height < compact_height.min(12))
     {
         return hits;
     }
-    let content_width = dialog
-        .options
-        .iter()
-        .map(|option| option.display.width() + option.hint.width() + 8)
-        .max()
-        .unwrap_or(24) as u16;
-    let compact_width = (content_width + 6).clamp(46, area.width.saturating_sub(4).max(46));
+    let compact_width = area.width.saturating_sub(4).clamp(56, 88);
     let Some(frame_y) = dialog_outer(
         area,
         compact_width,
-        compact_height,
+        compact_height.max(12),
         dialog.fullscreen,
         dialog.minimized,
     ) else {
@@ -1045,16 +1146,20 @@ fn render_provider_dialog(
         .border_style(theme.fg(theme.hairline));
     let inner = block.inner(frame_y);
     frame.render_widget(block, frame_y);
-
     if inner.height == 0 {
         return hits;
     }
-    let mut rows: Vec<Rect> = split_dialog_rows(inner, row_count + 1).to_vec();
-    let title_row = rows.remove(0);
+
+    let [title_row, body, hint_row] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(3),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
     paint_traffic_title(
         frame,
         title_row,
-        "选择模型供应商",
+        "选择供应商与模型",
         pointer,
         theme,
         &mut hits,
@@ -1063,33 +1168,43 @@ fn render_provider_dialog(
         return hits;
     }
 
-    // Provider rows: marker, display name, hint. The selected row renders on
-    // the raised background; unavailable providers show why they cannot run.
+    let [left, right] =
+        Layout::horizontal([Constraint::Percentage(42), Constraint::Percentage(58)]).areas(body);
+    let left_rows = split_n_rows(left, left_count.max(1));
     for (index, option) in dialog.options.iter().enumerate() {
-        let rect = rows
+        let rect = left_rows
             .get(index)
             .copied()
-            .unwrap_or(Rect::new(inner.x, inner.y, 0, 0));
+            .unwrap_or(Rect::new(left.x, left.y, 0, 0));
         if rect.height == 0 {
             continue;
         }
         hits.provider_rows.push((rect, index));
-        let is_selected = index == dialog.selected;
         let hovered = pointer
             .map(|(col, row)| contains(rect, col, row))
             .unwrap_or(false);
+        let is_selected = index == dialog.selected;
         if is_selected || hovered {
-            let bg = Style::default().bg(theme.bg_select);
-            frame.render_widget(Block::default().style(bg), rect);
+            frame.render_widget(
+                Block::default().style(Style::default().bg(theme.bg_select)),
+                rect,
+            );
         }
-        let marker = if is_selected || hovered { "❯" } else { " " };
+        let marker = if (is_selected && dialog.pane == ProviderPane::Providers) || hovered {
+            "❯"
+        } else if is_selected {
+            "•"
+        } else {
+            " "
+        };
         let name_style = if is_selected {
             theme.fg(theme.text)
         } else {
             theme.fg(theme.text_dim)
         };
-        let hint_style = theme.mute();
-        let hint = if option.available {
+        let hint = if option.id == blora_catalog::ADD_PROVIDER_ID {
+            option.hint.clone()
+        } else if option.available {
             option.hint.clone()
         } else {
             format!("不可用 · {}", option.hint)
@@ -1097,12 +1212,242 @@ fn render_provider_dialog(
         let line = Line::from(vec![
             Span::styled(format!(" {marker} "), theme.fg(theme.rose)),
             Span::styled(option.display.clone(), name_style),
-            Span::styled("  ·  ".to_owned(), theme.mute()),
-            Span::styled(hint, hint_style),
+            Span::styled("  ", theme.mute()),
+            Span::styled(hint, theme.mute()),
         ]);
         frame.render_widget(Paragraph::new(line).style(theme.base()), rect);
     }
+
+    let models = dialog.current_models();
+    if dialog.is_add() {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "  回车打开添加供应商向导",
+                theme.mute(),
+            )))
+            .style(theme.base()),
+            right,
+        );
+    } else if models.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled("  没有可列出的模型", theme.mute())))
+                .style(theme.base()),
+            right,
+        );
+    } else {
+        let right_rows = split_n_rows(right, models.len().clamp(1, 16) as u16);
+        for (index, option) in models.iter().enumerate() {
+            let rect = right_rows
+                .get(index)
+                .copied()
+                .unwrap_or(Rect::new(right.x, right.y, 0, 0));
+            if rect.height == 0 {
+                continue;
+            }
+            hits.provider_model_rows.push((rect, index));
+            let hovered = pointer
+                .map(|(col, row)| contains(rect, col, row))
+                .unwrap_or(false);
+            let is_selected = index == dialog.model_selected;
+            if is_selected || hovered {
+                frame.render_widget(
+                    Block::default().style(Style::default().bg(theme.bg_select)),
+                    rect,
+                );
+            }
+            let marker = if (is_selected && dialog.pane == ProviderPane::Models) || hovered {
+                "❯"
+            } else {
+                " "
+            };
+            let name_style = if is_selected {
+                theme.fg(theme.text)
+            } else {
+                theme.fg(theme.text_dim)
+            };
+            let line = Line::from(vec![
+                Span::styled(format!(" {marker} "), theme.fg(theme.rose)),
+                Span::styled(option.display.clone(), name_style),
+                Span::styled("  ", theme.mute()),
+                Span::styled(option.hint.clone(), theme.mute()),
+            ]);
+            frame.render_widget(Paragraph::new(line).style(theme.base()), rect);
+        }
+    }
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            " ←/→ 切换栏  ·  enter 确认  ·  esc 关闭",
+            theme.mute(),
+        )))
+        .style(theme.base()),
+        hint_row,
+    );
     hits
+}
+
+fn render_add_provider_dialog(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    dialog: &AddProviderDialog,
+    pointer: Option<(u16, u16)>,
+    theme: &Theme,
+) -> HitMap {
+    let mut hits = HitMap::default();
+    let compact_height = 16;
+    if !dialog.fullscreen && !dialog.minimized && (area.width < 40 || area.height < 10) {
+        return hits;
+    }
+    let Some(frame_y) = dialog_outer(
+        area,
+        64,
+        compact_height,
+        dialog.fullscreen,
+        dialog.minimized,
+    ) else {
+        return hits;
+    };
+    frame.render_widget(Clear, frame_y);
+    let block = Block::bordered()
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(theme.fg(theme.hairline));
+    let inner = block.inner(frame_y);
+    frame.render_widget(block, frame_y);
+    if inner.height == 0 {
+        return hits;
+    }
+    let [title_row, body, hint_row] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(3),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+    let title = match dialog.step {
+        AddProviderStep::Catalog => "添加供应商 · 选择来源",
+        AddProviderStep::CustomId => "添加供应商 · 标识",
+        AddProviderStep::CustomBase => "添加供应商 · 接口地址",
+        AddProviderStep::ApiKey => "添加供应商 · API 密钥",
+        AddProviderStep::Format => "添加供应商 · 消息格式",
+    };
+    paint_traffic_title(frame, title_row, title, pointer, theme, &mut hits);
+    if dialog.minimized {
+        return hits;
+    }
+
+    match dialog.step {
+        AddProviderStep::Catalog => {
+            let total = dialog.catalog_len().clamp(1, 14);
+            let rows = split_n_rows(body, total as u16);
+            for index in 0..total {
+                let rect = rows
+                    .get(index)
+                    .copied()
+                    .unwrap_or(Rect::new(body.x, body.y, 0, 0));
+                if rect.height == 0 {
+                    continue;
+                }
+                hits.add_provider_rows.push((rect, index));
+                let hovered = pointer
+                    .map(|(col, row)| contains(rect, col, row))
+                    .unwrap_or(false);
+                let is_selected = index == dialog.selected;
+                if is_selected || hovered {
+                    frame.render_widget(
+                        Block::default().style(Style::default().bg(theme.bg_select)),
+                        rect,
+                    );
+                }
+                let marker = if is_selected || hovered { "❯" } else { " " };
+                let (display, hint) = if index == 0 {
+                    (
+                        "+ 列表中没有我想要的供应商".to_owned(),
+                        "自定义 OpenAI 兼容端点".to_owned(),
+                    )
+                } else {
+                    let entry = &dialog.catalog[index - 1];
+                    (
+                        entry.name.clone(),
+                        entry
+                            .api
+                            .clone()
+                            .unwrap_or_else(|| entry.format().label().to_owned()),
+                    )
+                };
+                let line = Line::from(vec![
+                    Span::styled(format!(" {marker} "), theme.fg(theme.rose)),
+                    Span::styled(display, theme.fg(theme.text)),
+                    Span::styled("  ", theme.mute()),
+                    Span::styled(hint, theme.mute()),
+                ]);
+                frame.render_widget(Paragraph::new(line).style(theme.base()), rect);
+            }
+            if let Some(err) = &dialog.error {
+                frame.render_widget(
+                    Paragraph::new(Line::from(Span::styled(err.clone(), theme.fg(theme.rust))))
+                        .style(theme.base()),
+                    hint_row,
+                );
+                return hits;
+            }
+        }
+        AddProviderStep::CustomId => {
+            paint_prompt_line(frame, body, "供应商 id", &dialog.custom_id, theme);
+        }
+        AddProviderStep::CustomBase => {
+            paint_prompt_line(frame, body, "API 基址", &dialog.custom_base, theme);
+        }
+        AddProviderStep::ApiKey => {
+            let masked: String = dialog.api_key.chars().map(|_| '•').collect();
+            paint_prompt_line(frame, body, "API key", &masked, theme);
+        }
+        AddProviderStep::Format => {
+            let rows = split_n_rows(body, blora_catalog::MessageFormat::ALL.len() as u16);
+            for (index, format) in blora_catalog::MessageFormat::ALL.iter().enumerate() {
+                let rect = rows
+                    .get(index)
+                    .copied()
+                    .unwrap_or(Rect::new(body.x, body.y, 0, 0));
+                let selected = *format == dialog.format;
+                if selected {
+                    frame.render_widget(
+                        Block::default().style(Style::default().bg(theme.bg_select)),
+                        rect,
+                    );
+                }
+                hits.add_provider_rows.push((rect, index));
+                let marker = if selected { "❯" } else { " " };
+                let line = Line::from(vec![
+                    Span::styled(format!(" {marker} "), theme.fg(theme.rose)),
+                    Span::styled(format.label().to_owned(), theme.fg(theme.text)),
+                ]);
+                frame.render_widget(Paragraph::new(line).style(theme.base()), rect);
+            }
+        }
+    }
+    if dialog.error.is_none() {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                " enter 下一步  ·  esc 上一步/关闭",
+                theme.mute(),
+            )))
+            .style(theme.base()),
+            hint_row,
+        );
+    }
+    hits
+}
+
+fn paint_prompt_line(frame: &mut Frame<'_>, area: Rect, label: &str, value: &str, theme: &Theme) {
+    let shown = if value.is_empty() {
+        "▏".to_owned()
+    } else {
+        format!("{value}▏")
+    };
+    let line = Line::from(vec![
+        Span::styled(format!(" {label}  "), theme.mute()),
+        Span::styled(shown, theme.fg(theme.text)),
+    ]);
+    frame.render_widget(Paragraph::new(line).style(theme.base()), area);
 }
 
 const THEME_TABS: [(Scheme, &str); 3] = [
@@ -1811,21 +2156,45 @@ mod tests {
                     display: "默认（Blora）".to_owned(),
                     hint: "当前 · 跟随登录与环境配置".to_owned(),
                     available: true,
+                    models: vec![ModelOption {
+                        id: "blora".to_owned(),
+                        display: "Blora".to_owned(),
+                        hint: String::new(),
+                    }],
                 },
                 ProviderOption {
                     id: "blora".to_owned(),
                     display: "Blora".to_owned(),
                     hint: "Bloret PassPort · 200 次/天".to_owned(),
                     available: true,
+                    models: vec![ModelOption {
+                        id: "blora".to_owned(),
+                        display: "Blora".to_owned(),
+                        hint: String::new(),
+                    }],
                 },
                 ProviderOption {
                     id: "openai".to_owned(),
                     display: "OpenAI".to_owned(),
                     hint: "BLORA_API_KEY / OPENAI_API_KEY".to_owned(),
                     available: false,
+                    models: vec![ModelOption {
+                        id: "gpt-4o-mini".to_owned(),
+                        display: "gpt-4o-mini".to_owned(),
+                        hint: String::new(),
+                    }],
+                },
+                ProviderOption {
+                    id: blora_catalog::ADD_PROVIDER_ID.to_owned(),
+                    display: "+ 添加供应商".to_owned(),
+                    hint: "从 models.dev 接入".to_owned(),
+                    available: true,
+                    models: Vec::new(),
                 },
             ],
             selected: 1,
+            pane: ProviderPane::Providers,
+            model_selected: 0,
             fullscreen: false,
             minimized: false,
         }
@@ -1836,19 +2205,21 @@ mod tests {
         let dialog = sample_provider_dialog();
         let area = Rect::new(0, 0, 80, 24);
         let (lines, hits) = render_provider_with_hits(area, &dialog, None);
-        assert_eq!(hits.provider_rows.len(), 3, "one hit area per row");
+        assert_eq!(hits.provider_rows.len(), 4, "one hit area per row");
+        assert!(!hits.provider_model_rows.is_empty());
         let find_row = |needle: &str| {
             lines
                 .iter()
                 .position(|line| flatten(line).contains(needle))
                 .unwrap_or_else(|| panic!("{needle} rendered"))
         };
-        let title_row = find_row("选择模型供应商");
+        let title_row = find_row("选择供应商与模型");
         let blora_row = find_row("BloretPassPort");
         let openai_row = find_row("OpenAI");
+        let add_row = find_row("+添加供应商");
         assert!(blora_row > title_row);
         assert!(openai_row > blora_row);
-        // The selected row shows the ❯ marker; the others keep a blank one.
+        assert!(add_row > openai_row);
         let marker_row = &lines[blora_row];
         assert!(
             marker_row.contains('❯'),
@@ -1859,13 +2230,11 @@ mod tests {
             flatten(default_row).contains("默认") && !default_row.contains('❯'),
             "unselected row has no ❯, got {default_row}"
         );
-        // The unavailable provider says so.
         let unavailable_row = &lines[openai_row];
         assert!(
             flatten(unavailable_row).contains("不可用"),
             "unavailable provider is labeled, got {unavailable_row}"
         );
-        // Row hit areas resolve to the row indices.
         for (rect, index) in &hits.provider_rows {
             assert_eq!(hits.hit(rect.x, rect.y), Some(Hit::ProviderRow(*index)));
         }
@@ -1887,6 +2256,70 @@ mod tests {
         assert!(
             marker_row.contains('❯'),
             "hovered row gets ❯, got {marker_row}"
+        );
+    }
+
+    fn render_add_provider_with_hits(
+        area: Rect,
+        dialog: &AddProviderDialog,
+        pointer: Option<(u16, u16)>,
+    ) -> (Vec<String>, HitMap) {
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut hits = HitMap::default();
+        terminal
+            .draw(|frame| {
+                hits = render_add_provider_dialog(frame, area, dialog, pointer, &Theme::current());
+            })
+            .unwrap();
+        let mut lines = Vec::new();
+        for row in 0..area.height {
+            let mut line = String::new();
+            for col in 0..area.width {
+                let cell = terminal
+                    .backend()
+                    .buffer()
+                    .cell((col, row))
+                    .cloned()
+                    .unwrap_or_default();
+                line.push_str(cell.symbol());
+            }
+            lines.push(line);
+        }
+        (lines, hits)
+    }
+
+    #[test]
+    fn add_provider_lists_custom_first() {
+        let dialog = AddProviderDialog {
+            step: AddProviderStep::Catalog,
+            catalog: vec![blora_catalog::CatalogEntry {
+                id: "openai".to_owned(),
+                name: "OpenAI".to_owned(),
+                api: Some("https://api.openai.com/v1".to_owned()),
+                env: vec!["OPENAI_API_KEY".to_owned()],
+                npm: Some("@ai-sdk/openai".to_owned()),
+                models: Vec::new(),
+            }],
+            selected: 0,
+            custom_id: String::new(),
+            custom_base: String::new(),
+            api_key: String::new(),
+            format: blora_catalog::MessageFormat::Openai,
+            error: None,
+            fullscreen: false,
+            minimized: false,
+        };
+        let (lines, hits) = render_add_provider_with_hits(Rect::new(0, 0, 80, 24), &dialog, None);
+        assert!(
+            lines
+                .iter()
+                .any(|line| flatten(line).contains("+列表中没有我想要的供应商"))
+        );
+        assert!(hits.add_provider_rows.len() >= 2);
+        assert_eq!(
+            hits.hit(hits.add_provider_rows[0].0.x, hits.add_provider_rows[0].0.y),
+            Some(Hit::AddProviderRow(0))
         );
     }
 

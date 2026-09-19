@@ -44,6 +44,7 @@ fn openai_messages(messages: &[ChatMessage]) -> Vec<Value> {
 }
 
 pub struct OpenAiProvider {
+    pub name: String,
     pub base_url: String,
     pub api_key: String,
     pub model: String,
@@ -59,10 +60,26 @@ impl OpenAiProvider {
             .unwrap_or_else(|_| "https://api.openai.com/v1".to_owned());
         let model = std::env::var("BLORA_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_owned());
         Ok(Self {
+            name: "openai".to_owned(),
             base_url: base_url.trim_end_matches('/').to_owned(),
             api_key,
             model,
         })
+    }
+
+    #[must_use]
+    pub fn with_identity(
+        name: impl Into<String>,
+        base_url: impl Into<String>,
+        api_key: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            base_url: base_url.into().trim_end_matches('/').to_owned(),
+            api_key: api_key.into(),
+            model: model.into(),
+        }
     }
 }
 
@@ -116,8 +133,8 @@ pub(crate) fn post_chat_completions(
 }
 
 impl Provider for OpenAiProvider {
-    fn name(&self) -> &'static str {
-        "openai"
+    fn name(&self) -> &str {
+        &self.name
     }
 
     fn complete(

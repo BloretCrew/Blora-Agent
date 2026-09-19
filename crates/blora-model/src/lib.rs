@@ -131,7 +131,7 @@ pub enum StreamEvent {
 }
 
 pub trait Provider: Send + Sync {
-    fn name(&self) -> &'static str;
+    fn name(&self) -> &str;
     fn complete(
         &self,
         request: &CompletionRequest,
@@ -164,7 +164,7 @@ impl Default for MockProvider {
 }
 
 impl Provider for MockProvider {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "mock"
     }
 

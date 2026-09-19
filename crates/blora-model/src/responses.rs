@@ -33,7 +33,7 @@ impl ResponsesProvider {
 }
 
 impl Provider for ResponsesProvider {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "responses"
     }
 

@@ -36,7 +36,7 @@ impl AnthropicProvider {
 }
 
 impl Provider for AnthropicProvider {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "anthropic"
     }
 

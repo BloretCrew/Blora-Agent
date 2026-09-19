@@ -1,16 +1,15 @@
 [package]
-name = "blora-model"
+name = "blora-catalog"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 authors.workspace = true
-description = "Provider trait and OpenAI-compatible adapter for Blora Agent."
+description = "models.dev catalog and saved provider credentials for Blora Agent."
 
 [dependencies]
-blora-auth.workspace = true
-blora-catalog.workspace = true
 blora-types.workspace = true
+dirs.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 ureq.workspace = true
