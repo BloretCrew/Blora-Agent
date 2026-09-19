@@ -957,11 +957,7 @@ fn push_block(
         ),
     ]));
     let body_width = width.saturating_sub(2).max(8);
-    for line in wrap_text(text, body_width) {
-        let mut spans = vec![Span::styled("  ", theme.fg(theme.text))];
-        spans.extend(highlight_spans(&line, needle, theme));
-        out.push(Line::from(spans));
-    }
+    out.extend(crate::markdown::render(text, body_width, needle, theme));
 }
 
 fn highlight_spans(text: &str, needle: Option<&str>, theme: &Theme) -> Vec<Span<'static>> {

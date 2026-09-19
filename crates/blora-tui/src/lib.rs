@@ -3,6 +3,7 @@
 
 //! Terminal UI. Renders session projections, never provider payloads.
 
+mod markdown;
 mod slash;
 mod theme;
 mod view;
