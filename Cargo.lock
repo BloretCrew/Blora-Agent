@@ -358,6 +358,7 @@ version = "0.1.0"
 dependencies = [
  "blora-auth",
  "blora-catalog",
+ "blora-context",
  "blora-model",
  "blora-runtime",
  "blora-session",
