@@ -54,6 +54,8 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut passport_url = None;
     let mut passport_receiver = None;
     let mut passport_browser_opened = false;
+    // Pending device-flow login, shown as a centered dialog; hidden with Esc.
+    let mut passport_dialog: Option<view::PassportDialog> = None;
     // PassPort user token of the logged-in user; drives the default provider.
     let mut passport_user_token: Option<String> = None;
     if let Ok(users) = runtime.list_users() {
@@ -68,6 +70,11 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                 eprintln!("登录链接：{}", device.verification_uri);
                 passport_url = Some(device.verification_uri.clone());
                 passport_receiver = Some(receiver);
+                passport_dialog = Some(view::PassportDialog {
+                    user_code: device.user_code.clone(),
+                    verification_uri: device.verification_uri.clone(),
+                    opened_browser: false,
+                });
             }
         }
     }
@@ -128,6 +135,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                     .clone()
                     .filter(|token| !token.trim().is_empty());
                 passport_receiver = None;
+                passport_dialog = None;
                 status = format!("PassPort 登录成功：{}", user.display_name());
             }
             let session_id = sessions.get(index).map(|item| item.id.clone());
@@ -194,6 +202,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 &status
                             },
                             notice: notice.as_deref(),
+                            passport_dialog: passport_dialog.as_ref(),
                             slash_hits: &slash_hits,
                             slash_selected,
                             search: search.as_deref(),
@@ -216,6 +225,9 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                 let _ = std::process::Command::new("xdg-open").arg(url).spawn();
                 let _ = std::process::Command::new("open").arg(url).spawn();
                 passport_browser_opened = true;
+                if let Some(dialog) = passport_dialog.as_mut() {
+                    dialog.opened_browser = true;
+                }
             }
 
             if let Some(handle) =
@@ -348,6 +360,16 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                                 notice = Some(body);
                                             }
                                             SlashOutcome::Login { url, receiver } => {
+                                                // Surface the device code as a centered
+                                                // dialog; the URL also stays in the status.
+                                                passport_dialog =
+                                                    url_parts(&url).map(|(uri, code)| {
+                                                        view::PassportDialog {
+                                                            user_code: code,
+                                                            verification_uri: uri,
+                                                            opened_browser: false,
+                                                        }
+                                                    });
                                                 status = url;
                                                 passport_receiver = Some(receiver);
                                                 passport_browser_opened = false;
@@ -396,6 +418,11 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             KeyCode::Esc if slash::is_open(&input) || input.starts_with('/') => {
                                 input.clear();
                                 slash_selected = 0;
+                            }
+                            // The login dialog is only hidden: polling keeps
+                            // running so completing authorization still lands.
+                            KeyCode::Esc if passport_dialog.is_some() => {
+                                passport_dialog = None;
                             }
                             KeyCode::Esc if notice.is_some() => {
                                 notice = None;
@@ -719,6 +746,22 @@ fn apply_slash(
             false
         }
     }
+}
+
+/// Split the `/login` status text (`<url>\n设备码：<code>`) back into its URL
+/// and device code so the dialog can be rebuilt from the slash outcome.
+fn url_parts(text: &str) -> Option<(String, String)> {
+    let mut lines = text.lines();
+    let url = lines.next()?.trim().to_owned();
+    if url.is_empty() {
+        return None;
+    }
+    let code = lines
+        .next()
+        .and_then(|line| line.split_once('：'))
+        .map(|(_, code)| code.trim().to_owned())
+        .unwrap_or_default();
+    Some((url, code))
 }
 
 fn clip_text(text: &str, max_lines: usize) -> String {

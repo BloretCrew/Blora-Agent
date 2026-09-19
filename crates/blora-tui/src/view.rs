@@ -8,10 +8,10 @@ use std::path::Path;
 use blora_session::{SessionProjection, TranscriptItem};
 use blora_storage::{ApprovalRecord, SessionSummary};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Position, Rect};
+use ratatui::layout::{Constraint, Flex, Layout, Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::slash::{self, SlashCommand};
@@ -19,6 +19,15 @@ use crate::theme::Theme;
 
 const PAD: u16 = 2;
 const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+/// Bloret PassPort device-flow login dialog shown while a login is pending.
+#[derive(Clone, Debug)]
+pub struct PassportDialog {
+    pub user_code: String,
+    pub verification_uri: String,
+    /// True once the browser hand-off has been attempted; switches the footer.
+    pub opened_browser: bool,
+}
 
 pub struct FrameModel<'a> {
     pub workspace: &'a Path,
@@ -29,6 +38,8 @@ pub struct FrameModel<'a> {
     pub input: &'a str,
     pub status: &'a str,
     pub notice: Option<&'a str>,
+    /// Pending PassPort login; renders as a centered modal dialog.
+    pub passport_dialog: Option<&'a PassportDialog>,
     pub slash_hits: &'a [&'static SlashCommand],
     pub slash_selected: usize,
     pub search: Option<&'a str>,
@@ -238,6 +249,9 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
     render_composer(frame, composer, model, &theme, &mut hits);
     render_status(frame, status, model, &theme);
     render_hints(frame, hints, model, &theme, &mut hits);
+    if let Some(dialog) = model.passport_dialog {
+        render_passport_dialog(frame, area, dialog, &theme);
+    }
     hits
 }
 
@@ -685,6 +699,123 @@ fn render_notice(frame: &mut Frame<'_>, area: Rect, body: &str, theme: &Theme) {
     );
 }
 
+/// PassPort login dialog, centered like the modal dialogs of the reference
+/// harness: rounded frame on a cleared background, bold title, body rows, and
+/// a bottom key hint (`esc = …`). Pure overlay: closing it only hides it.
+fn render_passport_dialog(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    dialog: &PassportDialog,
+    theme: &Theme,
+) {
+    const DIALOG_HEIGHT: u16 = 8;
+    const MIN_WIDTH: u16 = 46;
+    if area.width < 20 || area.height < DIALOG_HEIGHT {
+        return;
+    }
+    let uri_width = dialog.verification_uri.width() as u16;
+    let dialog_width = (uri_width + 8).clamp(MIN_WIDTH, area.width.saturating_sub(4));
+    let [_, frame_x, _] = Layout::horizontal([
+        Constraint::Min(0),
+        Constraint::Length(dialog_width),
+        Constraint::Min(0),
+    ])
+    .flex(Flex::Center)
+    .areas(area);
+    let [_, frame_y, _] = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(DIALOG_HEIGHT),
+        Constraint::Min(0),
+    ])
+    .flex(Flex::Center)
+    .areas(frame_x);
+
+    frame.render_widget(Clear, frame_y);
+    let block = Block::bordered()
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(theme.fg(theme.hairline));
+    let inner = block.inner(frame_y);
+    frame.render_widget(block, frame_y);
+
+    let rows: [Rect; 5] = split_dialog_rows(inner, DIALOG_HEIGHT - 2);
+    let wrap_width = inner.width.saturating_sub(2) as usize;
+
+    // Row 0: bold title.
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "Bloret PassPort 登录",
+            theme.fg(theme.text).add_modifier(Modifier::BOLD),
+        )))
+        .style(theme.base()),
+        rows[0],
+    );
+
+    // Row 1: instructions.
+    let instructions = wrap_text(
+        "在浏览器打开下面的链接并输入设备码，授权后这里会自动登录。",
+        wrap_width,
+    );
+    let mut instruction_lines: Vec<Line> = instructions
+        .into_iter()
+        .map(|line| Line::from(Span::styled(line, theme.dim())))
+        .collect();
+    instruction_lines.resize(rows[1].height as usize, Line::default());
+    frame.render_widget(
+        Paragraph::new(instruction_lines).style(theme.base()),
+        rows[1],
+    );
+
+    // Row 2: the device code, highlighted.
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            ellipsize(&dialog.user_code, rows[2].width.saturating_sub(2) as usize),
+            theme.fg(theme.rose).add_modifier(Modifier::BOLD),
+        )))
+        .style(theme.base()),
+        rows[2],
+    );
+
+    // Row 3: the verification link.
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            ellipsize(&dialog.verification_uri, rows[3].width as usize),
+            theme.fg(theme.sage),
+        )))
+        .style(theme.base()),
+        rows[3],
+    );
+
+    // Row 4: status + key hint, key bold like the reference dialogs.
+    let waiting = if dialog.opened_browser {
+        "已打开浏览器"
+    } else {
+        "等待授权"
+    };
+    let hint = Line::from(vec![
+        Span::styled("esc", theme.dim()),
+        Span::styled(" 隐藏对话框 · ", theme.mute()),
+        Span::styled(waiting.to_owned(), theme.mute()),
+    ]);
+    frame.render_widget(Paragraph::new(hint).style(theme.base()), rows[4]);
+}
+
+/// Even rows of the dialog inner area; the first row gets the remainder so the
+/// layout is stable when the inner height is not a multiple of the row count.
+fn split_dialog_rows(inner: Rect, count: u16) -> [Rect; 5] {
+    let height = inner.height;
+    let base = height / count;
+    let remainder = height % count;
+    let mut rows = [Rect::new(inner.x, inner.y, inner.width, 0); 5];
+    let mut y = inner.y;
+    for (index, row) in rows.iter_mut().enumerate() {
+        let extra = u16::from(index < remainder as usize);
+        let row_height = base + extra;
+        *row = Rect::new(inner.x, y, inner.width, row_height);
+        y = y.saturating_add(row_height);
+    }
+    rows
+}
+
 fn render_composer(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -946,6 +1077,120 @@ fn line_count(text: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    fn render_passport_to_text(area: Rect, dialog: &PassportDialog) -> Vec<String> {
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_passport_dialog(frame, area, dialog, &Theme::current()))
+            .unwrap();
+        (0..area.height)
+            .map(|row| {
+                (0..area.width)
+                    .map(|col| {
+                        terminal
+                            .backend()
+                            .buffer()
+                            .cell((col, row))
+                            .map(ratatui::buffer::Cell::symbol)
+                            .unwrap_or(" ")
+                            .to_owned()
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Double-width CJK cells leave a placeholder space in the buffer, so
+    /// text assertions compare with all spaces removed.
+    fn flatten(line: &str) -> String {
+        line.chars().filter(|ch| *ch != ' ').collect()
+    }
+
+    #[test]
+    fn passport_dialog_is_centered_and_complete() {
+        let dialog = PassportDialog {
+            user_code: "ABCD-2345".to_owned(),
+            verification_uri: "https://passport.bloret.net/oauth/device?user_code=ABCD-2345"
+                .to_owned(),
+            opened_browser: false,
+        };
+        let area = Rect::new(0, 0, 90, 30);
+        let lines = render_passport_to_text(area, &dialog);
+        let title_row = lines
+            .iter()
+            .position(|line| flatten(line).contains("BloretPassPort登录"))
+            .expect("dialog title rendered");
+        let code_row = lines
+            .iter()
+            .position(|line| flatten(line).contains("ABCD-2345"))
+            .expect("device code rendered");
+        let link_row = lines
+            .iter()
+            .position(|line| flatten(line).contains("passport.bloret.net"))
+            .expect("verification uri rendered");
+        let hint_row = lines
+            .iter()
+            .position(|line| {
+                let flat = flatten(line);
+                flat.contains("隐藏对话框") && flat.contains("等待授权")
+            })
+            .expect("footer hint rendered");
+        assert!(code_row > title_row);
+        assert!(link_row > code_row);
+        assert!(hint_row > link_row);
+        // Centered horizontally: the top border's corner margins are symmetric.
+        let frame_row = &lines[title_row - 1];
+        // `find` returns a byte offset; these box glyphs are multi-byte UTF-8.
+        let column = |needle: char| {
+            frame_row
+                .char_indices()
+                .position(|(_, ch)| ch == needle)
+                .expect("border corner")
+        };
+        let left = column('╭');
+        let right = column('╮');
+        assert_eq!(left, area.width as usize - right - 1);
+    }
+
+    #[test]
+    fn passport_dialog_survives_narrow_screens() {
+        let dialog = PassportDialog {
+            user_code: "ABCD-2345".to_owned(),
+            verification_uri: "https://passport.bloret.net".to_owned(),
+            opened_browser: true,
+        };
+        // Too small: nothing drawn, no panic.
+        let lines = render_passport_to_text(Rect::new(0, 0, 16, 4), &dialog);
+        assert!(lines.iter().all(|line| line.trim().is_empty()));
+        // Small but sufficient: the browser-opened status replaces 等待授权.
+        let lines = render_passport_to_text(Rect::new(0, 0, 70, 20), &dialog);
+        assert!(
+            lines
+                .iter()
+                .any(|line| flatten(line).contains("已打开浏览器"))
+        );
+    }
+
+    #[test]
+    fn splits_dialog_rows_evenly_with_remainder_on_top() {
+        let inner = Rect::new(3, 2, 40, 7);
+        let rows = split_dialog_rows(inner, 5);
+        let total: u16 = rows.iter().map(|row| row.height).sum();
+        assert_eq!(total, 7);
+        // 7 rows over 5 slots: the first two get the extra row.
+        assert_eq!(rows[0].height, 2);
+        assert_eq!(rows[1].height, 2);
+        assert!(rows[2..].iter().all(|row| row.height == 1));
+        for (index, row) in rows.iter().enumerate() {
+            let expected_y = inner.y + rows[..index].iter().map(|row| row.height).sum::<u16>();
+            assert_eq!(row.y, expected_y);
+            assert_eq!(row.x, inner.x);
+            assert_eq!(row.width, inner.width);
+        }
+    }
 
     #[test]
     fn wraps_on_width() {
