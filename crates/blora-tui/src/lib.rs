@@ -80,7 +80,7 @@ fn start_passport_login() -> Result<
 
 pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut passport_url = None;
-    let mut passport_receiver = None;
+    let mut passport_receiver: Option<std::sync::mpsc::Receiver<blora_auth::PassportUser>> = None;
     let mut passport_browser_opened = false;
     // Pending device-flow login, shown as a centered dialog; hidden with Esc.
     let mut passport_dialog: Option<view::PassportDialog> = None;
@@ -92,6 +92,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     // PassPort user token of the logged-in user; drives the default provider.
     let mut passport_user_token: Option<String> = None;
     let mut passport_username = String::from("you");
+    let mut passport_needs_login = false;
     if let Ok(users) = runtime.list_users() {
         passport_user_token = users.iter().find_map(|user| {
             let token = user.passport_app_token.as_deref()?.trim();
@@ -109,20 +110,10 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
         if let Some(name) = users.iter().find_map(passport_display_name) {
             passport_username = name;
         }
-        // Username without an app token still cannot call the PassPort AI API.
+        // Do not start an interactive login on every TUI launch. An expired
+        // access token is reported as unavailable; the user can run /login.
         if passport_user_token.is_none() {
-            if let Some((device, receiver)) = start_passport_login()? {
-                eprintln!("需要登录 Bloret PassPort");
-                eprintln!("设备码：{}", device.user_code);
-                eprintln!("登录链接：{}", device.verification_uri);
-                passport_url = Some(device.verification_uri.clone());
-                passport_receiver = Some(receiver);
-                passport_dialog = Some(view::PassportDialog {
-                    user_code: device.user_code.clone(),
-                    verification_uri: device.verification_uri.clone(),
-                    opened_browser: false,
-                });
-            }
+            passport_needs_login = true;
         }
     }
     let mut sessions = runtime.list_sessions()?;
@@ -148,7 +139,11 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).map_err(blora_types::BloraError::exec)?;
     let mut input = String::new();
-    let mut status = String::new();
+    let mut status = if passport_needs_login {
+        "PassPort 未登录或令牌已过期，请执行 /login".to_owned()
+    } else {
+        String::new()
+    };
     let mut auto_approve = false;
     let mut scroll = 0usize;
     let mut search: Option<String> = None;
@@ -189,6 +184,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                     .filter(|token| !token.trim().is_empty());
                 passport_receiver = None;
                 passport_dialog = None;
+                passport_needs_login = false;
                 passport_username = user
                     .nickname
                     .as_deref()
@@ -695,6 +691,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                                 notice = None;
                                                 status = text;
                                                 passport_user_token = None;
+                                                passport_needs_login = true;
                                                 passport_username = "you".to_owned();
                                             }
                                             SlashOutcome::Panel { status: text, body } => {
@@ -715,6 +712,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                                 status = url;
                                                 passport_receiver = Some(receiver);
                                                 passport_browser_opened = false;
+                                                passport_needs_login = false;
                                             }
                                             SlashOutcome::ProviderDialog => {
                                                 theme_dialog = None;
