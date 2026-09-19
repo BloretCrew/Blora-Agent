@@ -144,6 +144,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut notice: Option<String> = None;
     let mut tick = 0u64;
     let mut last_window_title = String::new();
+    let mut last_routing_session: Option<SessionId> = None;
     let mut pointer: Option<(u16, u16)> = None;
     let mut hits = view::HitMap::default();
     let mut cancel = CancelToken::new();
@@ -192,6 +193,16 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                 cached = None;
             }
             let projection = cached.as_ref().map(|(_, projection)| projection);
+            if session_id.as_ref() != last_routing_session.as_ref() {
+                last_routing_session = session_id.clone();
+                if let Some(projection) = projection {
+                    provider_override = projection.provider.clone().unwrap_or_default();
+                    model_override = projection.model.clone().unwrap_or_default();
+                } else {
+                    provider_override.clear();
+                    model_override.clear();
+                }
+            }
             let pending = session_id
                 .as_ref()
                 .and_then(|id| runtime.pending_approvals(id).ok())
@@ -417,6 +428,8 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                                 &mut model_override,
                                                 &mut provider_dialog,
                                                 logged_in,
+                                                runtime,
+                                                session_id.as_ref(),
                                             );
                                             add_provider_dialog = None;
                                         }
@@ -578,6 +591,8 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                         dialog,
                                         &mut provider_override,
                                         &mut model_override,
+                                        runtime,
+                                        session_id.as_ref(),
                                     ) {
                                         provider_dialog = None;
                                         status = status_text;
@@ -850,6 +865,8 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                             dialog,
                                             &mut provider_override,
                                             &mut model_override,
+                                            runtime,
+                                            session_id.as_ref(),
                                         ) {
                                             provider_dialog = None;
                                             status = status_text;
@@ -871,6 +888,8 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                                             &mut model_override,
                                                             &mut provider_dialog,
                                                             logged_in,
+                                                            runtime,
+                                                            session_id.as_ref(),
                                                         );
                                                         add_provider_dialog = None;
                                                     }
@@ -1448,6 +1467,8 @@ fn commit_provider_dialog(
     dialog: &view::ProviderDialog,
     provider_override: &mut String,
     model_override: &mut String,
+    runtime: &Runtime,
+    session_id: Option<&SessionId>,
 ) -> Option<String> {
     let option = dialog.current()?;
     if option.id == blora_catalog::ADD_PROVIDER_ID {
@@ -1459,6 +1480,13 @@ fn commit_provider_dialog(
     *provider_override = option.id.clone();
     if let Some(model) = option.models.get(dialog.model_selected) {
         *model_override = model.id.clone();
+    }
+    if let Some(session_id) = session_id {
+        if let Err(err) =
+            runtime.set_session_routing(session_id, option.id.clone(), model_override.clone())
+        {
+            return Some(err.to_string());
+        }
     }
     Some(if model_override.is_empty() {
         format!("provider={}", option.display)
@@ -1535,10 +1563,19 @@ fn accept_saved_provider(
     model_override: &mut String,
     provider_dialog: &mut Option<view::ProviderDialog>,
     logged_in: bool,
+    runtime: &Runtime,
+    session_id: Option<&SessionId>,
 ) -> String {
     *provider_override = saved.id.clone();
     if let Some(model) = saved.models.first() {
         *model_override = model.id.clone();
+    }
+    if let Some(session_id) = session_id {
+        let _ = runtime.set_session_routing(
+            session_id,
+            provider_override.clone(),
+            model_override.clone(),
+        );
     }
     *provider_dialog = Some(open_provider_dialog(
         provider_override,

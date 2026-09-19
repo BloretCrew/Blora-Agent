@@ -5,7 +5,8 @@ use blora_context::{EnvSnapshot, compile_messages, estimate_messages};
 use blora_events::{
     AssistantDelta, AssistantMessageCompleted, ContextSnapshotCreated, EventEnvelope,
     HookCompleted, KnownPayload, ModelRequested, ModelResponseCompleted, NewEvent, ProviderChanged,
-    RetryStarted, RunCancelRequested, RunCancelled, RunCompleted, RunCreated, RunFailed,
+    RetryStarted, RoutingChanged, RunCancelRequested, RunCancelled, RunCompleted, RunCreated,
+    RunFailed,
     RunStarted, SessionArchived, SessionResumed, ToolCompleted, ToolFailed, ToolOutput,
     ToolRequested, ToolStarted, UsageRecorded, UserInput,
 };
@@ -180,6 +181,40 @@ impl Runtime {
         )
     }
 
+    /// Record a provider/model switch on the session. Later runs use this
+    /// routing until it is changed again.
+    pub fn set_session_routing(
+        &self,
+        session_id: &SessionId,
+        to_provider: impl Into<String>,
+        to_model: impl Into<String>,
+    ) -> Result<()> {
+        let to_provider = to_provider.into();
+        let to_model = to_model.into();
+        if to_provider.trim().is_empty() {
+            return Err(BloraError::Other("provider is empty".to_owned()));
+        }
+        let projection = self.store.load_projection(session_id)?;
+        let from_provider = projection.provider;
+        let from_model = projection.model;
+        if from_provider.as_deref() == Some(to_provider.as_str())
+            && from_model.as_deref() == Some(to_model.as_str())
+        {
+            return Ok(());
+        }
+        self.emit(
+            session_id,
+            None,
+            None,
+            KnownPayload::RoutingChanged(RoutingChanged {
+                from_provider,
+                to_provider,
+                from_model,
+                to_model,
+            }),
+        )
+    }
+
     pub fn resume_session(&self, session_id: &SessionId) -> Result<()> {
         self.emit(
             session_id,
@@ -307,6 +342,22 @@ impl Runtime {
                     }
                     blora_session::TranscriptItem::System { summary, .. } => {
                         summary.to_ascii_lowercase().contains(&needle)
+                    }
+                    blora_session::TranscriptItem::Routing {
+                        to_provider,
+                        to_model,
+                        from_provider,
+                        from_model,
+                        ..
+                    } => {
+                        to_provider.to_ascii_lowercase().contains(&needle)
+                            || to_model.to_ascii_lowercase().contains(&needle)
+                            || from_provider
+                                .as_deref()
+                                .is_some_and(|value| value.to_ascii_lowercase().contains(&needle))
+                            || from_model
+                                .as_deref()
+                                .is_some_and(|value| value.to_ascii_lowercase().contains(&needle))
                     }
                 });
             if hay.contains(&needle) || in_transcript {
@@ -470,22 +521,31 @@ impl Runtime {
         }
         let policy = Policy::new(&exec_root, options.auto_approve)?;
         let backend = LocalBackend::new(policy).with_isolation(Isolation::from_env());
+        let requested_provider = if options.provider.trim().is_empty() {
+            projection.provider.clone().unwrap_or_default()
+        } else {
+            options.provider.clone()
+        };
         let providers = resolve_provider_chain(
             options.mock,
-            &options.provider,
+            &requested_provider,
             options.passport_user_token.as_deref(),
         );
         let mut provider_index = 0;
-        let model = if options.model.is_empty() {
-            if options.mock || providers[provider_index].name() == "mock" {
-                "mock".to_owned()
-            } else if providers[provider_index].name() == "blora" {
-                blora_model::PASSPORT_MODEL_NAME.to_owned()
-            } else {
-                std::env::var("BLORA_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_owned())
-            }
-        } else {
+        let model = if !options.model.trim().is_empty() {
             options.model.clone()
+        } else if let Some(saved) = projection
+            .model
+            .as_deref()
+            .filter(|model| !model.trim().is_empty())
+        {
+            saved.to_owned()
+        } else if options.mock || providers[provider_index].name() == "mock" {
+            "mock".to_owned()
+        } else if providers[provider_index].name() == "blora" {
+            blora_model::PASSPORT_MODEL_NAME.to_owned()
+        } else {
+            std::env::var("BLORA_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_owned())
         };
 
         // Prompt-submit hook may block or enrich the prompt before anything is logged.

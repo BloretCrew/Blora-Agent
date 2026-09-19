@@ -21,7 +21,7 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use blora_auth::PassportConfig;
 use blora_runtime::{CancelToken, RunOptions, Runtime};
-use blora_session::TranscriptItem;
+use blora_session::{TranscriptItem, format_routing_switch, relative_zh};
 use blora_storage::{CreateSession, CreateTask};
 use blora_types::{ApprovalId, Mode, SessionId, TaskId};
 use serde::{Deserialize, Serialize};
@@ -1140,6 +1140,23 @@ fn to_json(state: &AppState, id: &SessionId) -> Result<SessionJson, ApiError> {
                     kind: "system".to_owned(),
                     text: summary,
                 },
+                TranscriptItem::Routing {
+                    from_provider,
+                    to_provider,
+                    from_model,
+                    to_model,
+                    at,
+                    ..
+                } => TranscriptJson {
+                    kind: "routing".to_owned(),
+                    text: format_routing_notice(
+                        from_provider.as_deref(),
+                        &to_provider,
+                        from_model.as_deref(),
+                        &to_model,
+                        at,
+                    ),
+                },
             })
             .collect(),
         tasks: projection
@@ -1166,6 +1183,20 @@ fn to_json(state: &AppState, id: &SessionId) -> Result<SessionJson, ApiError> {
             })
             .collect(),
     })
+}
+
+fn format_routing_notice(
+    from_provider: Option<&str>,
+    to_provider: &str,
+    from_model: Option<&str>,
+    to_model: &str,
+    at: chrono::DateTime<chrono::Utc>,
+) -> String {
+    format!(
+        "{}  {}",
+        relative_zh(at, chrono::Utc::now()),
+        format_routing_switch(from_provider, to_provider, from_model, to_model)
+    )
 }
 
 fn bearer_token(headers: &HttpHeaderMap) -> String {

@@ -799,6 +799,22 @@ fn transcript_lines(
                     TranscriptItem::System { summary, .. } => {
                         summary.to_ascii_lowercase().contains(needle)
                     }
+                    TranscriptItem::Routing {
+                        to_provider,
+                        to_model,
+                        from_provider,
+                        from_model,
+                        ..
+                    } => {
+                        to_provider.to_ascii_lowercase().contains(needle)
+                            || to_model.to_ascii_lowercase().contains(needle)
+                            || from_provider
+                                .as_deref()
+                                .is_some_and(|value| value.to_ascii_lowercase().contains(needle))
+                            || from_model
+                                .as_deref()
+                                .is_some_and(|value| value.to_ascii_lowercase().contains(needle))
+                    }
                 },
             }
     }) {
@@ -869,6 +885,35 @@ fn transcript_lines(
                     Span::styled("  ", theme.mute()),
                     Span::styled(summary.clone(), theme.mute().add_modifier(Modifier::ITALIC)),
                 ]));
+            }
+            TranscriptItem::Routing {
+                from_provider,
+                to_provider,
+                from_model,
+                to_model,
+                at,
+                ..
+            } => {
+                let when = blora_session::relative_zh(*at, chrono::Utc::now());
+                let from_p = from_provider.as_deref().map(pretty_route_id);
+                let to_p = pretty_route_id(to_provider);
+                let body = blora_session::format_routing_switch(
+                    from_p.as_deref(),
+                    &to_p,
+                    from_model.as_deref(),
+                    to_model,
+                );
+                out.push(Line::from(vec![
+                    Span::styled("┃ ", theme.fg(theme.amber)),
+                    Span::styled(when, theme.fg(theme.amber)),
+                ]));
+                let body_width = width.saturating_sub(2).max(8);
+                for line in wrap_text(&body, body_width) {
+                    out.push(Line::from(vec![
+                        Span::styled("  ", theme.mute()),
+                        Span::styled(line, theme.fg(theme.text_dim)),
+                    ]));
+                }
             }
         }
     }
@@ -2095,6 +2140,19 @@ fn pad_right(text: &str, width: usize) -> String {
     } else {
         format!("{text}{}", " ".repeat(width - w))
     }
+}
+
+fn pretty_route_id(id: &str) -> String {
+    if id.eq_ignore_ascii_case("blora")
+        || id.eq_ignore_ascii_case("passport")
+        || id.eq_ignore_ascii_case("bloret-passport")
+    {
+        return "Bloret PassPort".to_owned();
+    }
+    blora_catalog::find_saved(id)
+        .map(|saved| saved.name)
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| id.to_owned())
 }
 
 fn short_id(id: &str) -> String {

@@ -61,6 +61,14 @@ pub enum TranscriptItem {
         summary: String,
         event_id: EventId,
     },
+    Routing {
+        from_provider: Option<String>,
+        to_provider: String,
+        from_model: Option<String>,
+        to_model: String,
+        at: DateTime<Utc>,
+        event_id: EventId,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -97,6 +105,10 @@ pub struct SessionProjection {
     pub last_sequence: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
     #[serde(skip)]
     open_assistant: String,
 }
@@ -109,6 +121,57 @@ impl SessionProjection {
 
     pub fn apply(&mut self, event: &EventEnvelope) -> Result<()> {
         apply_event(self, event)
+    }
+}
+
+/// Human-readable routing switch, without the relative timestamp.
+#[must_use]
+pub fn format_routing_switch(
+    from_provider: Option<&str>,
+    to_provider: &str,
+    from_model: Option<&str>,
+    to_model: &str,
+) -> String {
+    let mut parts = Vec::new();
+    match from_provider.filter(|value| !value.is_empty()) {
+        Some(from) if from != to_provider => {
+            parts.push(format!("供应商 {from} 从这里切换为 {to_provider}"));
+        }
+        None => parts.push(format!("供应商切换为 {to_provider}")),
+        Some(_) => {}
+    }
+    match from_model.filter(|value| !value.is_empty()) {
+        Some(from) if from != to_model => {
+            parts.push(format!("模型 {from} 从这里切换为 {to_model}"));
+        }
+        None => parts.push(format!("模型切换为 {to_model}")),
+        Some(_) => {}
+    }
+    if parts.is_empty() {
+        return format!(
+            "供应商 {to_provider}，模型 {to_model}。接下来的消息将使用该供应商与模型进行请求，直到再次切换。"
+        );
+    }
+    format!(
+        "{}。接下来的消息将使用新的供应商与模型进行请求，直到再次切换。",
+        parts.join("，")
+    )
+}
+
+#[must_use]
+pub fn relative_zh(then: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    let secs = (now - then).num_seconds();
+    let secs = if secs < 0 { 0 } else { secs };
+    if secs < 10 {
+        "刚刚".to_owned()
+    } else if secs < 60 {
+        format!("{secs} 秒前")
+    } else if secs < 3600 {
+        format!("{} 分钟前", secs / 60)
+    } else if secs < 86_400 {
+        format!("{} 小时前", secs / 3600)
+    } else {
+        format!("{} 天前", secs / 86_400)
     }
 }
 
@@ -431,6 +494,34 @@ pub fn apply_event(projection: &mut SessionProjection, event: &EventEnvelope) ->
                 event_id: event.event_id.clone(),
             });
         }
+        KnownPayload::ModelRequested(requested) => {
+            projection.provider = Some(requested.provider);
+            projection.model = Some(requested.model);
+            touch_run(projection, event)?;
+        }
+        KnownPayload::RoutingChanged(changed) => {
+            apply_routing(
+                projection,
+                changed.from_provider,
+                changed.to_provider,
+                changed.from_model,
+                changed.to_model,
+                event.timestamp,
+                event.event_id.clone(),
+            );
+        }
+        KnownPayload::ProviderChanged(changed) => {
+            apply_routing(
+                projection,
+                projection.provider.clone(),
+                changed.provider,
+                projection.model.clone(),
+                changed.model,
+                event.timestamp,
+                event.event_id.clone(),
+            );
+            touch_run(projection, event)?;
+        }
         KnownPayload::SubagentFailed(failed) => {
             if let Some(view) = projection
                 .subagents
@@ -463,6 +554,32 @@ pub fn apply_event(projection: &mut SessionProjection, event: &EventEnvelope) ->
         session.updated_at = event.timestamp;
     }
     Ok(())
+}
+
+fn apply_routing(
+    projection: &mut SessionProjection,
+    from_provider: Option<String>,
+    to_provider: String,
+    from_model: Option<String>,
+    to_model: String,
+    at: DateTime<Utc>,
+    event_id: EventId,
+) {
+    let unchanged = from_provider.as_deref() == Some(to_provider.as_str())
+        && from_model.as_deref() == Some(to_model.as_str());
+    projection.provider = Some(to_provider.clone());
+    projection.model = Some(to_model.clone());
+    if unchanged {
+        return;
+    }
+    projection.transcript.push(TranscriptItem::Routing {
+        from_provider,
+        to_provider,
+        from_model,
+        to_model,
+        at,
+        event_id,
+    });
 }
 
 fn compact_tool_args(value: &impl ToString) -> Option<String> {
@@ -626,5 +743,46 @@ mod tests {
         let projection = rebuild(&[created, unknown]).unwrap();
         assert_eq!(projection.last_sequence, 2);
         assert!(projection.session.is_some());
+    }
+
+    #[test]
+    fn routing_changed_is_in_transcript() {
+        let session_id = SessionId::generate();
+        let created = envelope(
+            &session_id,
+            1,
+            KnownPayload::SessionCreated(SessionCreated {
+                title: None,
+                workspace_path: "/tmp/ws".to_owned(),
+                mode: Mode::Code,
+                parent_session_id: None,
+            }),
+        );
+        let routing = envelope(
+            &session_id,
+            2,
+            KnownPayload::RoutingChanged(blora_events::RoutingChanged {
+                from_provider: Some("blora".to_owned()),
+                to_provider: "crewrouter".to_owned(),
+                from_model: Some("blora".to_owned()),
+                to_model: "claude-fable-5".to_owned(),
+            }),
+        );
+        let projection = rebuild(&[created, routing]).unwrap();
+        assert_eq!(projection.provider.as_deref(), Some("crewrouter"));
+        assert_eq!(projection.model.as_deref(), Some("claude-fable-5"));
+        assert!(matches!(
+            &projection.transcript[0],
+            TranscriptItem::Routing { to_provider, .. } if to_provider == "crewrouter"
+        ));
+        let notice = format_routing_switch(
+            Some("blora"),
+            "crewrouter",
+            Some("blora"),
+            "claude-fable-5",
+        );
+        assert!(notice.contains("供应商 blora 从这里切换为 crewrouter"));
+        assert!(notice.contains("模型 blora 从这里切换为 claude-fable-5"));
+        assert!(notice.contains("接下来的消息将使用新的供应商与模型"));
     }
 }

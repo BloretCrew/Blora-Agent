@@ -228,6 +228,9 @@ function renderTranscript(items) {
     } else if (item.kind === "assistant") {
       bubble.setAttribute("author", "Blora");
       bubble.setAttribute("avatar", "BA");
+    } else if (item.kind === "routing") {
+      bubble.setAttribute("author", "路由");
+      bubble.setAttribute("avatar", "⇄");
     } else {
       bubble.setAttribute("author", item.kind);
       bubble.setAttribute("avatar", item.kind.slice(0, 1).toUpperCase());
@@ -358,6 +361,7 @@ async function handleSessionEvent(id, data) {
     kind === "assistant.message.completed" ||
     kind === "tool.completed" ||
     kind === "tool.failed" ||
+    kind === "routing.changed" ||
     kind.startsWith("run.") ||
     kind.startsWith("subagent.") ||
     kind.startsWith("context.") ||

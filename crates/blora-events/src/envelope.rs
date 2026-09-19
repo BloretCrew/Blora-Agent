@@ -192,4 +192,24 @@ mod tests {
         let decoded = envelope.decode_payload().unwrap().unwrap();
         assert_eq!(decoded.event_type(), "user.input");
     }
+
+    #[test]
+    fn routing_changed_roundtrip() {
+        let session_id = SessionId::generate();
+        let envelope = EventEnvelope::stamped(
+            NewEvent::new(
+                session_id,
+                KnownPayload::RoutingChanged(crate::RoutingChanged {
+                    from_provider: Some("blora".to_owned()),
+                    to_provider: "crewrouter".to_owned(),
+                    from_model: Some("blora".to_owned()),
+                    to_model: "fusion".to_owned(),
+                }),
+            ),
+            1,
+        )
+        .unwrap();
+        let decoded = envelope.decode_payload().unwrap().unwrap();
+        assert_eq!(decoded.event_type(), "routing.changed");
+    }
 }

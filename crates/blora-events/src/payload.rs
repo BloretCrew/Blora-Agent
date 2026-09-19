@@ -295,6 +295,17 @@ pub struct ProviderChanged {
     pub model: String,
 }
 
+/// User (or fallback) selected a provider/model for subsequent turns.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RoutingChanged {
+    #[serde(default)]
+    pub from_provider: Option<String>,
+    pub to_provider: String,
+    #[serde(default)]
+    pub from_model: Option<String>,
+    pub to_model: String,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct UsageRecorded {
     pub input_tokens: u64,
@@ -361,6 +372,7 @@ pub enum KnownPayload {
     HookCompleted(HookCompleted),
     RetryStarted(RetryStarted),
     ProviderChanged(ProviderChanged),
+    RoutingChanged(RoutingChanged),
     UsageRecorded(UsageRecorded),
     ArtifactCreated(ArtifactCreated),
     CheckpointCreated(CheckpointCreated),
@@ -413,6 +425,7 @@ impl KnownPayload {
             Self::HookCompleted(_) => "hook.completed",
             Self::RetryStarted(_) => "retry.started",
             Self::ProviderChanged(_) => "provider.changed",
+            Self::RoutingChanged(_) => "routing.changed",
             Self::UsageRecorded(_) => "usage.recorded",
             Self::ArtifactCreated(_) => "artifact.created",
             Self::CheckpointCreated(_) => "checkpoint.created",
@@ -490,6 +503,7 @@ impl KnownPayload {
             Self::HookCompleted(v) => serde_json::to_value(v),
             Self::RetryStarted(v) => serde_json::to_value(v),
             Self::ProviderChanged(v) => serde_json::to_value(v),
+            Self::RoutingChanged(v) => serde_json::to_value(v),
             Self::UsageRecorded(v) => serde_json::to_value(v),
             Self::ArtifactCreated(v) => serde_json::to_value(v),
             Self::CheckpointCreated(v) => serde_json::to_value(v),
@@ -543,6 +557,7 @@ impl KnownPayload {
             "hook.completed" => Self::HookCompleted(from_value(value)?),
             "retry.started" => Self::RetryStarted(from_value(value)?),
             "provider.changed" => Self::ProviderChanged(from_value(value)?),
+            "routing.changed" => Self::RoutingChanged(from_value(value)?),
             "usage.recorded" => Self::UsageRecorded(from_value(value)?),
             "artifact.created" => Self::ArtifactCreated(from_value(value)?),
             "checkpoint.created" => Self::CheckpointCreated(from_value(value)?),

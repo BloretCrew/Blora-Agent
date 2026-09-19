@@ -584,6 +584,19 @@ fn print_projection(
                 }
             }
             TranscriptItem::System { summary, .. } => println!("  system: {summary}"),
+            TranscriptItem::Routing {
+                from_provider,
+                to_provider,
+                from_model,
+                to_model,
+                ..
+            } => {
+                println!(
+                    "  routing: provider {} -> {to_provider}, model {} -> {to_model}",
+                    from_provider.as_deref().unwrap_or("-"),
+                    from_model.as_deref().unwrap_or("-"),
+                );
+            }
         }
     }
     Ok(())
