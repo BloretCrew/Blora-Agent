@@ -304,6 +304,29 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             KeyCode::Char('n') if input.is_empty() && !pending.is_empty() => {
                                 let _ = runtime.resolve_approval(&pending[0].id, false);
                             }
+                            KeyCode::Up if provider_dialog.is_some() => {
+                                if let Some(dialog) = provider_dialog.as_mut() {
+                                    dialog.selected = dialog.selected.saturating_sub(1);
+                                }
+                            }
+                            KeyCode::Down if provider_dialog.is_some() => {
+                                if let Some(dialog) = provider_dialog.as_mut() {
+                                    dialog.selected =
+                                        (dialog.selected + 1).min(dialog.options.len() - 1);
+                                }
+                            }
+                            KeyCode::Enter if provider_dialog.is_some() => {
+                                if let Some(dialog) = provider_dialog.take() {
+                                    if let Some(option) = dialog.options.get(dialog.selected) {
+                                        provider_override = option.id.clone();
+                                        status = if option.id.is_empty() {
+                                            format!("provider=默认（跟随登录与环境）")
+                                        } else {
+                                            format!("provider={}", option.display)
+                                        };
+                                    }
+                                }
+                            }
                             KeyCode::Up if slash::is_open(&input) => {
                                 slash_selected = slash_selected.saturating_sub(1);
                             }
@@ -438,6 +461,9 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             KeyCode::Esc if passport_dialog.is_some() => {
                                 passport_dialog = None;
                             }
+                            KeyCode::Esc if provider_dialog.is_some() => {
+                                provider_dialog = None;
+                            }
                             KeyCode::Esc if notice.is_some() => {
                                 notice = None;
                             }
@@ -469,14 +495,34 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 }
                             }
                             MouseEventKind::Moved => {
-                                if let Some(view::Hit::Slash(idx)) =
-                                    hits.hit(mouse.column, mouse.row)
-                                {
-                                    slash_selected = idx;
+                                match hits.hit(mouse.column, mouse.row) {
+                                    Some(view::Hit::Slash(idx)) => {
+                                        slash_selected = idx;
+                                    }
+                                    Some(view::Hit::ProviderRow(idx)) => {
+                                        if let Some(dialog) = provider_dialog.as_mut() {
+                                            dialog.selected = idx;
+                                        }
+                                    }
+                                    _ => {}
                                 }
                             }
                             MouseEventKind::Down(MouseButton::Left) => {
                                 let hit = hits.hit(mouse.column, mouse.row);
+                                // Provider dialog rows: click selects and confirms.
+                                if let Some(view::Hit::ProviderRow(idx)) = hit {
+                                    if let Some(dialog) = provider_dialog.take() {
+                                        if let Some(option) = dialog.options.get(idx) {
+                                            provider_override = option.id.clone();
+                                            status = if option.id.is_empty() {
+                                                format!("provider=默认（跟随登录与环境）")
+                                            } else {
+                                                format!("provider={}", option.display)
+                                            };
+                                        }
+                                    }
+                                    continue;
+                                }
                                 if let Some(view::Hit::Slash(idx)) = hit {
                                     slash_selected = idx;
                                     if let Some(cmd) = slash_hits.get(idx) {
@@ -909,14 +955,14 @@ fn apply_theme(args: &str) -> SlashOutcome {
     let current = theme::pref();
     if args.is_empty() {
         let next = if theme::Theme::current().is_dark() {
-            theme::ThemePref::Dawn
+            theme::ThemePref::Light
         } else {
-            theme::ThemePref::Dusk
+            theme::ThemePref::Dark
         };
         theme::set_pref(next);
         write_cursor();
         return SlashOutcome::Status(format!(
-            "theme={} (was {}; /theme dusk|dawn|auto)",
+            "theme={} (was {}; /theme dark|light|auto)",
             next.as_str(),
             current.as_str()
         ));
@@ -929,13 +975,13 @@ fn apply_theme(args: &str) -> SlashOutcome {
             let resolved = if resolved == theme::Theme::plain() {
                 "plain"
             } else if resolved.is_dark() {
-                "dusk"
+                "dark"
             } else {
-                "dawn"
+                "light"
             };
             SlashOutcome::Status(format!("theme={} (resolved {resolved})", pref.as_str()))
         }
-        None => SlashOutcome::Status("usage: /theme [dusk|dawn|auto|plain]".to_owned()),
+        None => SlashOutcome::Status("usage: /theme [dark|light|auto|plain]".to_owned()),
     }
 }
 

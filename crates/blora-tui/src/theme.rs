@@ -1,22 +1,27 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Blora Agent contributors
 
-//! Warm dusk / dawn palettes. Rose and sage follow Blora Design; the rest is TUI-only.
+//! Coral light/dark palettes from `@bloret-crew/blora-design` tokens.
+//!
+//! Hex values are copied from:
+//! - `blora-design/packages/tokens/src/primitive/color.tokens.json` (light)
+//! - `blora-design/packages/tokens/src/semantic/color-dark.tokens.json` (dark)
+//! - semantic roles in `semantic/color-light.tokens.json`
 
 use std::sync::Mutex;
 
 use ratatui::style::{Color, Modifier, Style};
 
-const fn rgb(r: u8, g: u8, b: u8) -> Color {
-    Color::Rgb(r, g, b)
+const fn hex(n: u32) -> Color {
+    Color::Rgb(((n >> 16) & 0xff) as u8, ((n >> 8) & 0xff) as u8, (n & 0xff) as u8)
 }
 
 /// How the TUI chooses a palette. Session override wins over `BLORA_THEME`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ThemePref {
     Auto,
-    Dusk,
-    Dawn,
+    Dark,
+    Light,
     Plain,
 }
 
@@ -25,8 +30,8 @@ impl ThemePref {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Auto => "auto",
-            Self::Dusk => "dusk",
-            Self::Dawn => "dawn",
+            Self::Dark => "dark",
+            Self::Light => "light",
             Self::Plain => "plain",
         }
     }
@@ -35,8 +40,8 @@ impl ThemePref {
     pub fn parse(raw: &str) -> Option<Self> {
         match raw.trim().to_ascii_lowercase().as_str() {
             "auto" => Some(Self::Auto),
-            "dusk" | "dark" | "night" => Some(Self::Dusk),
-            "dawn" | "light" | "day" => Some(Self::Dawn),
+            "dark" | "dusk" | "night" => Some(Self::Dark),
+            "light" | "dawn" | "day" => Some(Self::Light),
             "plain" | "none" | "off" => Some(Self::Plain),
             _ => None,
         }
@@ -65,7 +70,21 @@ pub fn pref() -> ThemePref {
         .unwrap_or(ThemePref::Auto)
 }
 
-/// Semantic colors for the TUI. `dusk` is the dark default; `dawn` is light.
+/// Semantic colors for the TUI, mapped from Blora Design Coral tokens.
+///
+/// | field      | light token              | dark token               |
+/// |------------|--------------------------|--------------------------|
+/// | bg         | surface.canvas           | surface.canvas           |
+/// | bg_raised  | surface.raised           | surface.raised           |
+/// | bg_select  | surface.sunken           | surface.sunken           |
+/// | text       | text.primary             | text.primary             |
+/// | text_dim   | text.emphasis            | text.muted               |
+/// | text_mute  | text.muted               | text.subtle              |
+/// | rose       | action.primary.default   | action.primary.default   |
+/// | sage       | status.success           | status.success           |
+/// | amber      | status.warning           | status.warning           |
+/// | rust       | status.danger            | status.danger            |
+/// | hairline   | border.subtle            | border.subtle            |
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Theme {
     pub bg: Color,
@@ -82,39 +101,48 @@ pub struct Theme {
 }
 
 impl Theme {
-    /// Warm near-black field, rose for the human, sage for the agent.
-    pub const fn dusk() -> Self {
+    /// Coral dark scheme (`color-dark.tokens.json`).
+    pub const fn dark() -> Self {
         Self {
-            bg: rgb(18, 15, 16),
-            bg_raised: rgb(32, 26, 28),
-            bg_select: rgb(48, 38, 42),
-            text: rgb(244, 238, 239),
-            text_dim: rgb(186, 168, 172),
-            text_mute: rgb(122, 106, 110),
-            rose: rgb(201, 123, 134),
-            sage: rgb(138, 171, 156),
-            amber: rgb(212, 165, 116),
-            rust: rgb(196, 92, 92),
-            hairline: rgb(56, 46, 50),
+            bg: hex(0x1716_1C),
+            bg_raised: hex(0x2C29_31),
+            bg_select: hex(0x3A36_3F),
+            text: hex(0xF8F2_F4),
+            text_dim: hex(0xA197_9D),
+            text_mute: hex(0x786F_75),
+            rose: hex(0xD18A_94),
+            sage: hex(0x86A3_99),
+            amber: hex(0xBBA2_7B),
+            rust: hex(0xD277_79),
+            hairline: hex(0x413C_41),
         }
     }
 
-    /// Warm paper field for light terminals. Raised panels stay light so the
-    /// slash menu does not punch a dark hole into a pale background.
-    pub const fn dawn() -> Self {
+    /// Coral light scheme (`color.tokens.json` / `color-light.tokens.json`).
+    pub const fn light() -> Self {
         Self {
-            bg: rgb(250, 247, 244),
-            bg_raised: rgb(236, 230, 226),
-            bg_select: rgb(214, 200, 196),
-            text: rgb(42, 34, 36),
-            text_dim: rgb(92, 78, 82),
-            text_mute: rgb(132, 116, 120),
-            rose: rgb(168, 78, 92),
-            sage: rgb(62, 118, 98),
-            amber: rgb(158, 102, 48),
-            rust: rgb(176, 64, 64),
-            hairline: rgb(214, 204, 200),
+            bg: hex(0xFAF7_F8),
+            bg_raised: hex(0xF4EC_EE),
+            bg_select: hex(0xE9DE_E1),
+            text: hex(0x3031_43),
+            text_dim: hex(0x5555_65),
+            text_mute: hex(0x7471_7C),
+            rose: hex(0x9F59_64),
+            sage: hex(0x5B75_6B),
+            amber: hex(0x806C_4F),
+            rust: hex(0x9E55_59),
+            hairline: hex(0xD9D2_D6),
         }
+    }
+
+    /// Alias kept for `/theme dusk`.
+    pub const fn dusk() -> Self {
+        Self::dark()
+    }
+
+    /// Alias kept for `/theme dawn`.
+    pub const fn dawn() -> Self {
+        Self::light()
     }
 
     pub const fn plain() -> Self {
@@ -145,27 +173,27 @@ impl Theme {
         }
         match pref() {
             ThemePref::Plain => Self::plain(),
-            ThemePref::Dusk => Self::dusk(),
-            ThemePref::Dawn => Self::dawn(),
+            ThemePref::Dark => Self::dark(),
+            ThemePref::Light => Self::light(),
             ThemePref::Auto => {
                 if terminal_is_light() {
-                    Self::dawn()
+                    Self::light()
                 } else {
-                    Self::dusk()
+                    Self::dark()
                 }
             }
         }
     }
 
-    /// OSC 12 sequence matching the active rose, or reset under `NO_COLOR`.
+    /// OSC 12 sequence matching Coral primary, or reset under `NO_COLOR`.
     #[must_use]
     pub fn cursor_osc(self) -> &'static str {
         if self == Self::plain() {
             CURSOR_RESET
-        } else if self == Self::dawn() {
-            CURSOR_ROSE_DAWN
+        } else if self == Self::light() {
+            CURSOR_PRIMARY_LIGHT
         } else {
-            CURSOR_ROSE
+            CURSOR_PRIMARY_DARK
         }
     }
 
@@ -200,9 +228,9 @@ impl Theme {
     }
 }
 
-/// OSC 12 cursor color matching dusk rose. Reset with [`CURSOR_RESET`].
-pub const CURSOR_ROSE: &str = "\x1b]12;#c97b86\x07";
-pub const CURSOR_ROSE_DAWN: &str = "\x1b]12;#a84e5c\x07";
+/// OSC 12 cursor = Coral `action.primary.default`. Reset with [`CURSOR_RESET`].
+pub const CURSOR_PRIMARY_DARK: &str = "\x1b]12;#D18A94\x07";
+pub const CURSOR_PRIMARY_LIGHT: &str = "\x1b]12;#9F5964\x07";
 pub const CURSOR_RESET: &str = "\x1b]112\x07";
 
 /// `COLORFGBG` is `fg;bg` with ANSI color indexes. 7 and 15 are white-ish.
@@ -221,21 +249,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dusk_is_truecolor() {
-        let theme = Theme::dusk();
-        assert!(matches!(theme.bg, Color::Rgb(_, _, _)));
-        assert_ne!(theme.rose, theme.sage);
-        assert_ne!(theme.bg, theme.text);
+    fn dark_matches_coral_tokens() {
+        let theme = Theme::dark();
+        assert_eq!(theme.bg, hex(0x1716_1C));
+        assert_eq!(theme.bg_raised, hex(0x2C29_31));
+        assert_eq!(theme.rose, hex(0xD18A_94));
+        assert_eq!(theme.sage, hex(0x86A3_99));
+        assert_eq!(theme.rust, hex(0xD277_79));
+        assert_eq!(theme.amber, hex(0xBBA2_7B));
         assert!(theme.is_dark());
+        assert_eq!(Theme::dusk(), theme);
     }
 
     #[test]
-    fn dawn_contrasts_on_paper() {
-        let theme = Theme::dawn();
-        assert_ne!(theme.bg, theme.text);
-        assert_ne!(theme.bg_raised, theme.text);
-        assert_ne!(theme.rose, theme.sage);
+    fn light_matches_coral_tokens() {
+        let theme = Theme::light();
+        assert_eq!(theme.bg, hex(0xFAF7_F8));
+        assert_eq!(theme.bg_raised, hex(0xF4EC_EE));
+        assert_eq!(theme.rose, hex(0x9F59_64));
+        assert_eq!(theme.sage, hex(0x5B75_6B));
+        assert_eq!(theme.rust, hex(0x9E55_59));
+        assert_eq!(theme.amber, hex(0x806C_4F));
         assert!(!theme.is_dark());
+        assert_eq!(Theme::dawn(), theme);
     }
 
     #[test]
@@ -247,8 +283,10 @@ mod tests {
 
     #[test]
     fn pref_parses_aliases() {
-        assert_eq!(ThemePref::parse("dark"), Some(ThemePref::Dusk));
-        assert_eq!(ThemePref::parse("light"), Some(ThemePref::Dawn));
+        assert_eq!(ThemePref::parse("dark"), Some(ThemePref::Dark));
+        assert_eq!(ThemePref::parse("dusk"), Some(ThemePref::Dark));
+        assert_eq!(ThemePref::parse("light"), Some(ThemePref::Light));
+        assert_eq!(ThemePref::parse("dawn"), Some(ThemePref::Light));
         assert_eq!(ThemePref::parse("AUTO"), Some(ThemePref::Auto));
         assert_eq!(ThemePref::parse("nope"), None);
     }
