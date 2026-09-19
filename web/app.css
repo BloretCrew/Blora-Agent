@@ -89,6 +89,21 @@
   gap: var(--blora-space-3);
 }
 
+.ba-composer {
+  grid-template-columns: auto 1fr auto;
+  align-items: end;
+}
+
+.ba-work-orb {
+  width: 20px;
+  height: 20px;
+  margin-bottom: 0.7rem;
+}
+
+.ba-composer:has(#work-orb[hidden]) {
+  grid-template-columns: 1fr auto;
+}
+
 .ba-task-form {
   grid-template-columns: 1fr minmax(8rem, 10rem) minmax(8rem, 12rem) auto;
   align-items: end;

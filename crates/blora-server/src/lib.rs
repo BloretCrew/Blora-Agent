@@ -33,6 +33,8 @@ use tower_http::cors::CorsLayer;
 const INDEX_HTML: &str = include_str!("../../../web/index.html");
 const APP_JS: &str = include_str!("../../../web/app.js");
 const APP_CSS: &str = include_str!("../../../web/app.css");
+const THINKING_ORBS_ENGINE: &str = include_str!("../../../web/vendor/thinking-orbs.engine.js");
+const THINKING_ORBS_HOST: &str = include_str!("../../../web/thinking-orbs-host.js");
 #[derive(Clone)]
 struct AppState {
     runtime: Arc<Runtime>,
@@ -157,6 +159,8 @@ fn app(state: AppState) -> Router {
         .route("/", get(index))
         .route("/app.js", get(app_js))
         .route("/app.css", get(app_css))
+        .route("/thinking-orbs-host.js", get(thinking_orbs_host))
+        .route("/vendor/thinking-orbs.engine.js", get(thinking_orbs_engine))
         .route("/vendor/{*path}", get(vendor_asset))
         .route("/favicon.svg", get(favicon))
         .route("/favicon.ico", get(favicon))
@@ -446,6 +450,14 @@ async fn app_js() -> Response {
 
 async fn app_css() -> Response {
     css(APP_CSS)
+}
+
+async fn thinking_orbs_engine() -> Response {
+    js(THINKING_ORBS_ENGINE)
+}
+
+async fn thinking_orbs_host() -> Response {
+    js(THINKING_ORBS_HOST)
 }
 
 async fn vendor_asset(Path(path): Path<String>) -> Response {
@@ -1450,6 +1462,8 @@ mod tests {
         assert_eq!(css_status, 200);
         assert!(session_id.starts_with("ses_"));
         assert_eq!(contents, "hello");
+        assert!(THINKING_ORBS_ENGINE.contains("resolvePreset"));
+        assert!(THINKING_ORBS_HOST.contains("attachThinkingOrb"));
     }
 
     #[test]

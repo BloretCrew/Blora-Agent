@@ -518,6 +518,32 @@ document.querySelector("#composer").addEventListener("submit", async (event) => 
   await selectSession(state.sessionId);
 });
 
+let workOrbHandle = null;
+
+function ensureWorkOrb() {
+  const canvas = document.querySelector("#work-orb");
+  const api = window.BloraThinkingOrb;
+  if (!canvas || !api) {
+    return null;
+  }
+  if (!workOrbHandle) {
+    workOrbHandle = api.attachThinkingOrb(canvas, { state: "working", size: 20 });
+  }
+  return { canvas, handle: workOrbHandle };
+}
+
+window.addEventListener("blora-orb-ready", () => setWorkOrb(state.running));
+
+function setWorkOrb(running) {
+  const orb = ensureWorkOrb();
+  if (!orb) {
+    return;
+  }
+  orb.canvas.hidden = !running;
+  orb.canvas.setAttribute("aria-hidden", running ? "false" : "true");
+  orb.handle.setPaused(!running);
+}
+
 function setRunning(running) {
   state.running = running;
   const send = document.querySelector("#send");
@@ -530,6 +556,7 @@ function setRunning(running) {
       ? "运行中：输入的内容会在下一轮送达模型"
       : "描述你想在工作区完成的事";
   }
+  setWorkOrb(running);
 }
 
 function renderSubagents(items) {

@@ -114,6 +114,14 @@
               <button type="submit" class="blora-button" data-variant="secondary">排队</button>
             </form>
             <form class="ba-composer" id="composer">
+              <canvas
+                id="work-orb"
+                class="ba-work-orb"
+                width="20"
+                height="20"
+                hidden
+                aria-hidden="true"
+              ></canvas>
               <blora-field label="向 Blora 发送" name="prompt" required>
                 <textarea
                   class="blora-textarea"
@@ -181,5 +189,6 @@
     <script src="/vendor/layout.global.js"></script>
     <script src="/vendor/theming.global.js"></script>
     <script src="/app.js"></script>
+    <script type="module" src="/thinking-orbs-host.js"></script>
   </body>
 </html>

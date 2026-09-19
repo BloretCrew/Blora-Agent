@@ -15,3 +15,6 @@ You should have received a copy of the GNU General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 SPDX-License-Identifier: GPL-3.0-or-later
+
+Third-party: thinking-orbs (MIT) by Jakub Antalik / Libraries.dev,
+vendored at web/vendor/thinking-orbs.engine.js. See web/vendor/thinking-orbs.LICENSE.
