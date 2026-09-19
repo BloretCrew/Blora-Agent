@@ -44,7 +44,7 @@ pub const COMMANDS: &[SlashCommand] = &[
         "theme",
         &["appearance"],
         "[dark|light|auto]",
-        "Show or set the TUI color theme (Blora Coral)",
+        "Open the theme picker, or set dark/light/auto",
         "system",
     ),
     cmd("new", &[], "", "Create a new session", "session"),

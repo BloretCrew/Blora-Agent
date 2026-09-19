@@ -49,6 +49,22 @@ pub struct ProviderDialog {
     pub selected: usize,
 }
 
+/// One selectable scheme inside the theme picker.
+#[derive(Clone, Debug)]
+pub struct ThemeOption {
+    /// `auto`, `dark`, `light`, or `plain`.
+    pub id: String,
+    pub display: String,
+    pub hint: String,
+}
+
+/// Color-scheme picker shown via `/theme` with no arguments.
+#[derive(Clone, Debug)]
+pub struct ThemeDialog {
+    pub options: Vec<ThemeOption>,
+    pub selected: usize,
+}
+
 pub struct FrameModel<'a> {
     pub workspace: &'a Path,
     pub sessions: &'a [SessionSummary],
@@ -62,6 +78,8 @@ pub struct FrameModel<'a> {
     pub passport_dialog: Option<&'a PassportDialog>,
     /// Model-provider switch dialog; renders as a centered modal dialog.
     pub provider_dialog: Option<&'a ProviderDialog>,
+    /// Color-scheme picker; renders as a centered modal dialog.
+    pub theme_dialog: Option<&'a ThemeDialog>,
     pub slash_hits: &'a [&'static SlashCommand],
     pub slash_selected: usize,
     pub search: Option<&'a str>,
@@ -95,6 +113,8 @@ pub enum Hit {
     TrafficOpenBrowser,
     /// A provider row inside the provider-switch dialog.
     ProviderRow(usize),
+    /// A scheme row inside the theme picker.
+    ThemeRow(usize),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -130,6 +150,8 @@ pub struct HitMap {
     pub traffic_lights: [Option<Rect>; 3],
     /// Provider rows of the provider-switch dialog.
     pub provider_rows: Vec<(Rect, usize)>,
+    /// Scheme rows of the theme picker.
+    pub theme_rows: Vec<(Rect, usize)>,
 }
 
 impl HitMap {
@@ -154,6 +176,11 @@ impl HitMap {
         for (rect, idx) in &self.provider_rows {
             if contains(*rect, col, row) {
                 return Some(Hit::ProviderRow(*idx));
+            }
+        }
+        for (rect, idx) in &self.theme_rows {
+            if contains(*rect, col, row) {
+                return Some(Hit::ThemeRow(*idx));
             }
         }
         if self.notice && self.overlay.is_some_and(|rect| contains(rect, col, row)) {
@@ -300,6 +327,9 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
     if let Some(dialog) = model.passport_dialog {
         let dialog_hits = render_passport_dialog(frame, area, dialog, model.pointer, &theme);
         hits.traffic_lights = dialog_hits.traffic_lights;
+    } else if let Some(dialog) = model.theme_dialog {
+        let dialog_hits = render_theme_dialog(frame, area, dialog, model.pointer, &theme);
+        hits.theme_rows = dialog_hits.theme_rows;
     } else if let Some(dialog) = model.provider_dialog {
         let dialog_hits = render_provider_dialog(frame, area, dialog, model.pointer, &theme);
         hits.provider_rows = dialog_hits.provider_rows;
@@ -1008,6 +1038,106 @@ fn render_provider_dialog(
     hits
 }
 
+/// Color-scheme picker. Same chrome as the provider dialog; rows pick Coral
+/// light/dark, terminal auto, or plain.
+fn render_theme_dialog(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    dialog: &ThemeDialog,
+    pointer: Option<(u16, u16)>,
+    theme: &Theme,
+) -> HitMap {
+    let mut hits = HitMap::default();
+    let row_count = dialog.options.len().clamp(1, 8) as u16;
+    let dialog_height = row_count + 5;
+    if area.width < 30 || area.height < dialog_height + 2 || dialog.options.is_empty() {
+        return hits;
+    }
+    let content_width = dialog
+        .options
+        .iter()
+        .map(|option| option.display.width() + option.hint.width() + 8)
+        .max()
+        .unwrap_or(24) as u16;
+    let dialog_width = (content_width + 6).clamp(46, area.width.saturating_sub(4));
+    let [_, frame_x, _] = Layout::horizontal([
+        Constraint::Min(0),
+        Constraint::Length(dialog_width),
+        Constraint::Min(0),
+    ])
+    .flex(Flex::Center)
+    .areas(area);
+    let [_, frame_y, _] = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(dialog_height),
+        Constraint::Min(0),
+    ])
+    .flex(Flex::Center)
+    .areas(frame_x);
+
+    frame.render_widget(Clear, frame_y);
+    let block = Block::bordered()
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(theme.fg(theme.hairline));
+    let inner = block.inner(frame_y);
+    frame.render_widget(block, frame_y);
+
+    if inner.height == 0 {
+        return hits;
+    }
+    let mut rows: Vec<Rect> = split_dialog_rows(inner, row_count + 1).to_vec();
+    let title_row = rows.remove(0);
+
+    let mut title_line = vec![Span::styled(" ", theme.base())];
+    for (index, color) in [theme.rust, theme.amber, theme.sage].iter().enumerate() {
+        if index > 0 {
+            title_line.push(Span::styled(" ", theme.base()));
+        }
+        title_line.push(Span::styled("●".to_owned(), theme.fg(*color)));
+    }
+    title_line.push(Span::styled("  ".to_owned(), theme.mute()));
+    title_line.push(Span::styled("选择外观", theme.fg(theme.text_dim)));
+    frame.render_widget(
+        Paragraph::new(Line::from(title_line)).style(theme.base()),
+        title_row,
+    );
+
+    for (index, option) in dialog.options.iter().enumerate() {
+        let rect = rows
+            .get(index)
+            .copied()
+            .unwrap_or(Rect::new(inner.x, inner.y, 0, 0));
+        if rect.height == 0 {
+            continue;
+        }
+        hits.theme_rows.push((rect, index));
+        let is_selected = index == dialog.selected;
+        let hovered = pointer
+            .map(|(col, row)| contains(rect, col, row))
+            .unwrap_or(false);
+        if is_selected || hovered {
+            frame.render_widget(
+                Block::default().style(Style::default().bg(theme.bg_select)),
+                rect,
+            );
+        }
+        let marker = if is_selected || hovered { "❯" } else { " " };
+        let name_style = if is_selected {
+            theme.fg(theme.text)
+        } else {
+            theme.fg(theme.text_dim)
+        };
+        let line = Line::from(vec![
+            Span::styled(format!(" {marker} "), theme.fg(theme.rose)),
+            Span::styled(option.display.clone(), name_style),
+            Span::styled("  ·  ".to_owned(), theme.mute()),
+            Span::styled(option.hint.clone(), theme.mute()),
+        ]);
+        frame.render_widget(Paragraph::new(line).style(theme.base()), rect);
+    }
+    hits
+}
+
 /// Even rows of the dialog inner area; the first row gets the remainder so the
 /// layout is stable when the inner height is not a multiple of the row count.
 fn split_dialog_rows(inner: Rect, count: u16) -> [Rect; 5] {
@@ -1623,6 +1753,104 @@ mod tests {
         let (lines, hits) = render_provider_with_hits(Rect::new(0, 0, 20, 4), &dialog, None);
         assert!(lines.iter().all(|line| line.trim().is_empty()));
         assert!(hits.provider_rows.is_empty());
+    }
+
+    fn sample_theme_dialog() -> ThemeDialog {
+        ThemeDialog {
+            options: vec![
+                ThemeOption {
+                    id: "auto".to_owned(),
+                    display: "自动".to_owned(),
+                    hint: "跟随终端背景".to_owned(),
+                },
+                ThemeOption {
+                    id: "dark".to_owned(),
+                    display: "深色".to_owned(),
+                    hint: "当前 · Coral dark".to_owned(),
+                },
+                ThemeOption {
+                    id: "light".to_owned(),
+                    display: "浅色".to_owned(),
+                    hint: "Coral light".to_owned(),
+                },
+                ThemeOption {
+                    id: "plain".to_owned(),
+                    display: "纯色".to_owned(),
+                    hint: "终端默认色".to_owned(),
+                },
+            ],
+            selected: 1,
+        }
+    }
+
+    fn render_theme_with_hits(
+        area: Rect,
+        dialog: &ThemeDialog,
+        pointer: Option<(u16, u16)>,
+    ) -> (Vec<String>, HitMap) {
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut hits = HitMap::default();
+        terminal
+            .draw(|frame| {
+                hits = render_theme_dialog(frame, area, dialog, pointer, &Theme::dark());
+            })
+            .unwrap();
+        let mut lines = Vec::new();
+        for row in 0..area.height {
+            let mut line = String::new();
+            for col in 0..area.width {
+                let cell = terminal
+                    .backend()
+                    .buffer()
+                    .cell((col, row))
+                    .cloned()
+                    .unwrap_or_default();
+                line.push_str(cell.symbol());
+            }
+            lines.push(line);
+        }
+        (lines, hits)
+    }
+
+    #[test]
+    fn theme_dialog_renders_rows_and_marks_selection() {
+        let dialog = sample_theme_dialog();
+        let area = Rect::new(0, 0, 80, 24);
+        let (lines, hits) = render_theme_with_hits(area, &dialog, None);
+        assert_eq!(hits.theme_rows.len(), 4);
+        let find_row = |needle: &str| {
+            lines
+                .iter()
+                .position(|line| flatten(line).contains(needle))
+                .unwrap_or_else(|| panic!("{needle} rendered"))
+        };
+        let title_row = find_row("选择外观");
+        let dark_row = find_row("深色");
+        let light_row = find_row("浅色");
+        assert!(dark_row > title_row);
+        assert!(light_row > dark_row);
+        assert!(
+            lines[dark_row].contains('❯'),
+            "selected dark row has ❯, got {}",
+            lines[dark_row]
+        );
+        assert!(
+            !lines[light_row].contains('❯'),
+            "unselected light row has no ❯, got {}",
+            lines[light_row]
+        );
+        for (rect, index) in &hits.theme_rows {
+            assert_eq!(hits.hit(rect.x, rect.y), Some(Hit::ThemeRow(*index)));
+        }
+    }
+
+    #[test]
+    fn theme_dialog_skips_tiny_screens() {
+        let dialog = sample_theme_dialog();
+        let (lines, hits) = render_theme_with_hits(Rect::new(0, 0, 20, 4), &dialog, None);
+        assert!(lines.iter().all(|line| line.trim().is_empty()));
+        assert!(hits.theme_rows.is_empty());
     }
 
     #[test]

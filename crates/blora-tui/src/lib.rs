@@ -58,6 +58,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut passport_dialog: Option<view::PassportDialog> = None;
     // Model-provider switch dialog opened via `/provider`.
     let mut provider_dialog: Option<view::ProviderDialog> = None;
+    let mut theme_dialog: Option<view::ThemeDialog> = None;
     // PassPort user token of the logged-in user; drives the default provider.
     let mut passport_user_token: Option<String> = None;
     if let Ok(users) = runtime.list_users() {
@@ -208,6 +209,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             notice: notice.as_deref(),
                             passport_dialog: passport_dialog.as_ref(),
                             provider_dialog: provider_dialog.as_ref(),
+                            theme_dialog: theme_dialog.as_ref(),
                             slash_hits: &slash_hits,
                             slash_selected,
                             search: search.as_deref(),
@@ -303,6 +305,24 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             }
                             KeyCode::Char('n') if input.is_empty() && !pending.is_empty() => {
                                 let _ = runtime.resolve_approval(&pending[0].id, false);
+                            }
+                            KeyCode::Up if theme_dialog.is_some() => {
+                                if let Some(dialog) = theme_dialog.as_mut() {
+                                    dialog.selected = dialog.selected.saturating_sub(1);
+                                }
+                            }
+                            KeyCode::Down if theme_dialog.is_some() => {
+                                if let Some(dialog) = theme_dialog.as_mut() {
+                                    dialog.selected =
+                                        (dialog.selected + 1).min(dialog.options.len() - 1);
+                                }
+                            }
+                            KeyCode::Enter if theme_dialog.is_some() => {
+                                if let Some(dialog) = theme_dialog.take() {
+                                    if let Some(option) = dialog.options.get(dialog.selected) {
+                                        status = apply_theme_id(&option.id);
+                                    }
+                                }
                             }
                             KeyCode::Up if provider_dialog.is_some() => {
                                 if let Some(dialog) = provider_dialog.as_mut() {
@@ -403,6 +423,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                                 passport_browser_opened = false;
                                             }
                                             SlashOutcome::ProviderDialog => {
+                                                theme_dialog = None;
                                                 provider_dialog = Some(view::ProviderDialog {
                                                     options: provider_option_list.clone(),
                                                     selected: provider_option_list
@@ -410,6 +431,10 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                                         .position(|option| !option.id.is_empty())
                                                         .unwrap_or(0),
                                                 });
+                                            }
+                                            SlashOutcome::ThemeDialog => {
+                                                provider_dialog = None;
+                                                theme_dialog = Some(open_theme_dialog());
                                             }
                                         }
                                     }
@@ -461,6 +486,9 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             KeyCode::Esc if passport_dialog.is_some() => {
                                 passport_dialog = None;
                             }
+                            KeyCode::Esc if theme_dialog.is_some() => {
+                                theme_dialog = None;
+                            }
                             KeyCode::Esc if provider_dialog.is_some() => {
                                 provider_dialog = None;
                             }
@@ -503,11 +531,24 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                         dialog.selected = idx;
                                     }
                                 }
+                                Some(view::Hit::ThemeRow(idx)) => {
+                                    if let Some(dialog) = theme_dialog.as_mut() {
+                                        dialog.selected = idx;
+                                    }
+                                }
                                 _ => {}
                             },
                             MouseEventKind::Down(MouseButton::Left) => {
                                 let hit = hits.hit(mouse.column, mouse.row);
                                 // Provider dialog rows: click selects and confirms.
+                                if let Some(view::Hit::ThemeRow(idx)) = hit {
+                                    if let Some(dialog) = theme_dialog.take() {
+                                        if let Some(option) = dialog.options.get(idx) {
+                                            status = apply_theme_id(&option.id);
+                                        }
+                                    }
+                                    continue;
+                                }
                                 if let Some(view::Hit::ProviderRow(idx)) = hit {
                                     if let Some(dialog) = provider_dialog.take() {
                                         if let Some(option) = dialog.options.get(idx) {
@@ -551,6 +592,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                                 &mut status,
                                                 &mut provider_dialog,
                                                 &provider_option_list,
+                                                &mut theme_dialog,
                                             ) {
                                                 break Ok(());
                                             }
@@ -689,6 +731,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                                 &mut status,
                                                 &mut provider_dialog,
                                                 &provider_option_list,
+                                                &mut theme_dialog,
                                             ) {
                                                 break Ok(());
                                             }
@@ -800,6 +843,8 @@ enum SlashOutcome {
     },
     /// Open the model-provider switch dialog.
     ProviderDialog,
+    /// Open the color-scheme picker.
+    ThemeDialog,
     Quit,
 }
 
@@ -810,6 +855,7 @@ fn apply_slash(
     status: &mut String,
     provider_dialog: &mut Option<view::ProviderDialog>,
     provider_options: &[view::ProviderOption],
+    theme_dialog: &mut Option<view::ThemeDialog>,
 ) -> bool {
     match outcome {
         SlashOutcome::Quit => {
@@ -831,6 +877,7 @@ fn apply_slash(
             false
         }
         SlashOutcome::ProviderDialog => {
+            *theme_dialog = None;
             let selected = provider_options
                 .iter()
                 .position(|option| !option.id.is_empty());
@@ -838,6 +885,11 @@ fn apply_slash(
                 options: provider_options.to_vec(),
                 selected: selected.unwrap_or(0),
             });
+            false
+        }
+        SlashOutcome::ThemeDialog => {
+            *provider_dialog = None;
+            *theme_dialog = Some(open_theme_dialog());
             false
         }
     }
@@ -946,37 +998,62 @@ fn workspace_key(workspace: &Path) -> String {
 }
 
 fn apply_theme(args: &str) -> SlashOutcome {
-    let current = theme::pref();
     if args.is_empty() {
-        let next = if theme::Theme::current().is_dark() {
-            theme::ThemePref::Light
-        } else {
-            theme::ThemePref::Dark
-        };
-        theme::set_pref(next);
-        write_cursor();
-        return SlashOutcome::Status(format!(
-            "theme={} (was {}; /theme dark|light|auto)",
-            next.as_str(),
-            current.as_str()
-        ));
+        return SlashOutcome::ThemeDialog;
     }
     match theme::ThemePref::parse(args) {
-        Some(pref) => {
-            theme::set_pref(pref);
-            write_cursor();
-            let resolved = theme::Theme::current();
-            let resolved = if resolved == theme::Theme::plain() {
-                "plain"
-            } else if resolved.is_dark() {
-                "dark"
-            } else {
-                "light"
-            };
-            SlashOutcome::Status(format!("theme={} (resolved {resolved})", pref.as_str()))
-        }
+        Some(pref) => SlashOutcome::Status(apply_theme_pref(pref)),
         None => SlashOutcome::Status("usage: /theme [dark|light|auto|plain]".to_owned()),
     }
+}
+
+fn open_theme_dialog() -> view::ThemeDialog {
+    let current = theme::pref();
+    let options = vec![
+        ("auto", "自动", "跟随终端 COLORFGBG"),
+        ("dark", "深色", "Coral dark"),
+        ("light", "浅色", "Coral light"),
+        ("plain", "纯色", "终端默认色"),
+    ]
+    .into_iter()
+    .map(|(id, display, hint)| {
+        let current_mark = if current.as_str() == id {
+            format!("当前 · {hint}")
+        } else {
+            hint.to_owned()
+        };
+        view::ThemeOption {
+            id: id.to_owned(),
+            display: display.to_owned(),
+            hint: current_mark,
+        }
+    })
+    .collect::<Vec<_>>();
+    let selected = options
+        .iter()
+        .position(|option| option.id == current.as_str())
+        .unwrap_or(0);
+    view::ThemeDialog { options, selected }
+}
+
+fn apply_theme_id(id: &str) -> String {
+    theme::ThemePref::parse(id)
+        .map(apply_theme_pref)
+        .unwrap_or_else(|| format!("unknown theme {id}"))
+}
+
+fn apply_theme_pref(pref: theme::ThemePref) -> String {
+    theme::set_pref(pref);
+    write_cursor();
+    let resolved = theme::Theme::current();
+    let resolved = if resolved == theme::Theme::plain() {
+        "plain"
+    } else if resolved.is_dark() {
+        "dark"
+    } else {
+        "light"
+    };
+    format!("theme={} (resolved {resolved})", pref.as_str())
 }
 
 fn write_cursor() {
