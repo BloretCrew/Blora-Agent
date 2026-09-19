@@ -15,7 +15,7 @@ use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::slash::{self, SlashCommand};
-use crate::theme::Theme;
+use crate::theme::{Palette, Scheme, Theme, ThemePref};
 
 const PAD: u16 = 2;
 const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -67,6 +67,10 @@ pub struct ThemeOption {
 pub struct ThemeDialog {
     pub options: Vec<ThemeOption>,
     pub selected: usize,
+    /// Auto / light / dark section currently shown.
+    pub scheme: Scheme,
+    /// Preference restored if the picker is cancelled.
+    pub original: ThemePref,
     pub fullscreen: bool,
     pub minimized: bool,
 }
@@ -121,6 +125,8 @@ pub enum Hit {
     ProviderRow(usize),
     /// A scheme row inside the theme picker.
     ThemeRow(usize),
+    /// Auto / light / dark section tab (`0` auto, `1` light, `2` dark).
+    ThemeTab(usize),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -158,6 +164,8 @@ pub struct HitMap {
     pub provider_rows: Vec<(Rect, usize)>,
     /// Scheme rows of the theme picker.
     pub theme_rows: Vec<(Rect, usize)>,
+    /// Auto / light / dark section tabs.
+    pub theme_tabs: Vec<(Rect, usize)>,
 }
 
 impl HitMap {
@@ -182,6 +190,11 @@ impl HitMap {
         for (rect, idx) in &self.provider_rows {
             if contains(*rect, col, row) {
                 return Some(Hit::ProviderRow(*idx));
+            }
+        }
+        for (rect, idx) in &self.theme_tabs {
+            if contains(*rect, col, row) {
+                return Some(Hit::ThemeTab(*idx));
             }
         }
         for (rect, idx) in &self.theme_rows {
@@ -336,6 +349,7 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
     } else if let Some(dialog) = model.theme_dialog {
         let dialog_hits = render_theme_dialog(frame, area, dialog, model.pointer, &theme);
         hits.theme_rows = dialog_hits.theme_rows;
+        hits.theme_tabs = dialog_hits.theme_tabs;
         hits.traffic_lights = dialog_hits.traffic_lights;
     } else if let Some(dialog) = model.provider_dialog {
         let dialog_hits = render_provider_dialog(frame, area, dialog, model.pointer, &theme);
@@ -1091,8 +1105,13 @@ fn render_provider_dialog(
     hits
 }
 
-/// Color-scheme picker. Same chrome as the provider dialog; rows pick Coral
-/// light/dark, terminal auto, or plain.
+const THEME_TABS: [(Scheme, &str); 3] = [
+    (Scheme::Auto, "自动"),
+    (Scheme::Light, "浅色"),
+    (Scheme::Dark, "深色"),
+];
+
+/// Color-scheme picker: three scheme sections, then the six palettes.
 fn render_theme_dialog(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -1101,7 +1120,8 @@ fn render_theme_dialog(
     theme: &Theme,
 ) -> HitMap {
     let mut hits = HitMap::default();
-    let row_count = dialog.options.len().clamp(1, 12) as u16;
+    let palette_count = dialog.options.len().clamp(1, 12) as u16;
+    let row_count = palette_count + 1;
     let compact_height = row_count + 5;
     if dialog.options.is_empty() {
         return hits;
@@ -1115,10 +1135,10 @@ fn render_theme_dialog(
     let content_width = dialog
         .options
         .iter()
-        .map(|option| option.display.width() + option.hint.width() + 8)
+        .map(|option| option.display.width() + option.hint.width() + 14)
         .max()
         .unwrap_or(24) as u16;
-    let compact_width = (content_width + 6).clamp(46, area.width.saturating_sub(4).max(46));
+    let compact_width = (content_width + 6).clamp(52, area.width.saturating_sub(4).max(52));
     let Some(frame_y) = dialog_outer(
         area,
         compact_width,
@@ -1144,6 +1164,11 @@ fn render_theme_dialog(
     paint_traffic_title(frame, title_row, "主题配色", pointer, theme, &mut hits);
     if dialog.minimized {
         return hits;
+    }
+
+    if let Some(tab_row) = rows.first().copied() {
+        rows.remove(0);
+        paint_theme_tabs(frame, tab_row, dialog, pointer, theme, &mut hits);
     }
 
     for (index, option) in dialog.options.iter().enumerate() {
@@ -1186,6 +1211,53 @@ fn render_theme_dialog(
         frame.render_widget(Paragraph::new(Line::from(spans)).style(theme.base()), rect);
     }
     hits
+}
+
+fn paint_theme_tabs(
+    frame: &mut Frame<'_>,
+    tab_row: Rect,
+    dialog: &ThemeDialog,
+    pointer: Option<(u16, u16)>,
+    theme: &Theme,
+    hits: &mut HitMap,
+) {
+    let tab_w = (tab_row.width / 3).max(6);
+    for (index, (scheme, label)) in THEME_TABS.iter().enumerate() {
+        let x = tab_row
+            .x
+            .saturating_add(u16::try_from(index).unwrap_or(0).saturating_mul(tab_w));
+        let rect = Rect {
+            x,
+            y: tab_row.y,
+            width: tab_w,
+            height: tab_row.height.max(1),
+        };
+        hits.theme_tabs.push((rect, index));
+        let hovered = pointer
+            .map(|(col, row)| contains(rect, col, row))
+            .unwrap_or(false);
+        let selected = dialog.scheme == *scheme;
+        if selected || hovered {
+            frame.render_widget(
+                Block::default().style(Style::default().bg(theme.bg_select)),
+                rect,
+            );
+        }
+        let style = if selected {
+            theme.fg(theme.text).add_modifier(Modifier::BOLD)
+        } else {
+            theme.mute()
+        };
+        let marker = if selected { "▸ " } else { "  " };
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(marker.to_owned(), theme.fg(theme.rose)),
+                Span::styled((*label).to_owned(), style),
+            ]))
+            .style(theme.base()),
+            rect,
+        );
+    }
 }
 
 fn split_n_rows(inner: Rect, count: u16) -> Vec<Rect> {
@@ -1867,6 +1939,11 @@ mod tests {
                 },
             ],
             selected: 0,
+            scheme: Scheme::Light,
+            original: ThemePref {
+                palette: Palette::Coral,
+                scheme: Scheme::Light,
+            },
             fullscreen: false,
             minimized: false,
         }
@@ -1915,10 +1992,25 @@ mod tests {
                 .unwrap_or_else(|| panic!("{needle} rendered"))
         };
         let title_row = find_row("主题配色");
+        let auto_tab = find_row("自动");
+        let light_tab = find_row("浅色");
+        let dark_tab = find_row("深色");
         let coral_row = find_row("珊瑚");
         let indigo_row = find_row("靛蓝");
-        assert!(coral_row > title_row);
+        assert!(auto_tab > title_row);
+        assert_eq!(auto_tab, light_tab);
+        assert_eq!(light_tab, dark_tab);
+        assert!(coral_row > auto_tab);
         assert!(indigo_row > coral_row);
+        assert_eq!(hits.theme_tabs.len(), 3);
+        assert_eq!(
+            hits.hit(hits.theme_tabs[0].0.x, hits.theme_tabs[0].0.y),
+            Some(Hit::ThemeTab(0))
+        );
+        assert_eq!(
+            hits.hit(hits.theme_tabs[2].0.x, hits.theme_tabs[2].0.y),
+            Some(Hit::ThemeTab(2))
+        );
         assert!(
             lines[coral_row].contains('❯'),
             "selected coral row has ❯, got {}",

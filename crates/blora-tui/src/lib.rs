@@ -306,22 +306,34 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             KeyCode::Char('n') if input.is_empty() && !pending.is_empty() => {
                                 let _ = runtime.resolve_approval(&pending[0].id, false);
                             }
+                            KeyCode::Left if theme_dialog.is_some() => {
+                                if let Some(dialog) = theme_dialog.as_mut() {
+                                    dialog.scheme = cycle_scheme(dialog.scheme, -1);
+                                    preview_theme_dialog(dialog);
+                                }
+                            }
+                            KeyCode::Right if theme_dialog.is_some() => {
+                                if let Some(dialog) = theme_dialog.as_mut() {
+                                    dialog.scheme = cycle_scheme(dialog.scheme, 1);
+                                    preview_theme_dialog(dialog);
+                                }
+                            }
                             KeyCode::Up if theme_dialog.is_some() => {
                                 if let Some(dialog) = theme_dialog.as_mut() {
                                     dialog.selected = dialog.selected.saturating_sub(1);
+                                    preview_theme_dialog(dialog);
                                 }
                             }
                             KeyCode::Down if theme_dialog.is_some() => {
                                 if let Some(dialog) = theme_dialog.as_mut() {
                                     dialog.selected =
                                         (dialog.selected + 1).min(dialog.options.len() - 1);
+                                    preview_theme_dialog(dialog);
                                 }
                             }
                             KeyCode::Enter if theme_dialog.is_some() => {
                                 if let Some(dialog) = theme_dialog.take() {
-                                    if let Some(option) = dialog.options.get(dialog.selected) {
-                                        status = apply_theme_id(&option.id);
-                                    }
+                                    status = commit_theme_dialog(&dialog);
                                 }
                             }
                             KeyCode::Up if provider_dialog.is_some() => {
@@ -489,7 +501,10 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 passport_dialog = None;
                             }
                             KeyCode::Esc if theme_dialog.is_some() => {
-                                theme_dialog = None;
+                                if let Some(dialog) = theme_dialog.take() {
+                                    cancel_theme_dialog(&dialog);
+                                    status = "theme picker cancelled".to_owned();
+                                }
                             }
                             KeyCode::Esc if provider_dialog.is_some() => {
                                 provider_dialog = None;
@@ -533,9 +548,16 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                         dialog.selected = idx;
                                     }
                                 }
+                                Some(view::Hit::ThemeTab(idx)) => {
+                                    if let Some(dialog) = theme_dialog.as_mut() {
+                                        dialog.scheme = scheme_from_tab(idx);
+                                        preview_theme_dialog(dialog);
+                                    }
+                                }
                                 Some(view::Hit::ThemeRow(idx)) => {
                                     if let Some(dialog) = theme_dialog.as_mut() {
                                         dialog.selected = idx;
+                                        preview_theme_dialog(dialog);
                                     }
                                 }
                                 _ => {}
@@ -543,11 +565,18 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             MouseEventKind::Down(MouseButton::Left) => {
                                 let hit = hits.hit(mouse.column, mouse.row);
                                 // Provider dialog rows: click selects and confirms.
+                                if let Some(view::Hit::ThemeTab(idx)) = hit {
+                                    if let Some(dialog) = theme_dialog.as_mut() {
+                                        dialog.scheme = scheme_from_tab(idx);
+                                        preview_theme_dialog(dialog);
+                                    }
+                                    continue;
+                                }
                                 if let Some(view::Hit::ThemeRow(idx)) = hit {
                                     if let Some(dialog) = theme_dialog.take() {
-                                        if let Some(option) = dialog.options.get(idx) {
-                                            status = apply_theme_id(&option.id);
-                                        }
+                                        let mut dialog = dialog;
+                                        dialog.selected = idx;
+                                        status = commit_theme_dialog(&dialog);
                                     }
                                     continue;
                                 }
@@ -637,7 +666,8 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 } else if hit == Some(view::Hit::TrafficClose) {
                                     // Red: close the front dialog. Login still
                                     // quits the TUI (the dialog is the session).
-                                    if theme_dialog.take().is_some() {
+                                    if let Some(dialog) = theme_dialog.take() {
+                                        cancel_theme_dialog(&dialog);
                                         status = "theme picker closed".to_owned();
                                     } else if provider_dialog.take().is_some() {
                                         status = "provider picker closed".to_owned();
@@ -1043,11 +1073,19 @@ fn apply_theme(args: &str) -> SlashOutcome {
 }
 
 fn open_theme_dialog() -> view::ThemeDialog {
-    let current = theme::palette();
+    let current_palette = theme::palette();
+    let current_scheme = match theme::scheme() {
+        theme::Scheme::Plain => theme::Scheme::Auto,
+        other => other,
+    };
+    let original = theme::ThemePref {
+        palette: current_palette,
+        scheme: theme::scheme(),
+    };
     let options = theme::Palette::ALL
         .into_iter()
         .map(|palette| {
-            let hint = if palette == current {
+            let hint = if palette == current_palette {
                 format!("当前 · {}", palette.about_zh())
             } else {
                 palette.about_zh().to_owned()
@@ -1062,20 +1100,68 @@ fn open_theme_dialog() -> view::ThemeDialog {
         .collect::<Vec<_>>();
     let selected = options
         .iter()
-        .position(|option| option.id == current.as_str())
+        .position(|option| option.id == current_palette.as_str())
         .unwrap_or(0);
     view::ThemeDialog {
         options,
         selected,
+        scheme: current_scheme,
+        original,
         fullscreen: false,
         minimized: false,
     }
 }
 
-fn apply_theme_id(id: &str) -> String {
-    theme::ThemePref::parse(id)
-        .map(apply_theme_pref)
-        .unwrap_or_else(|| format!("unknown theme {id}"))
+fn scheme_from_tab(index: usize) -> theme::Scheme {
+    match index {
+        1 => theme::Scheme::Light,
+        2 => theme::Scheme::Dark,
+        _ => theme::Scheme::Auto,
+    }
+}
+
+fn cycle_scheme(current: theme::Scheme, delta: i8) -> theme::Scheme {
+    let tabs = [
+        theme::Scheme::Auto,
+        theme::Scheme::Light,
+        theme::Scheme::Dark,
+    ];
+    let idx = tabs
+        .iter()
+        .position(|scheme| *scheme == current)
+        .unwrap_or(0) as i8;
+    let next = (idx + delta).rem_euclid(3) as usize;
+    tabs[next]
+}
+
+fn preview_theme_dialog(dialog: &view::ThemeDialog) {
+    let palette = dialog
+        .options
+        .get(dialog.selected)
+        .and_then(|option| theme::Palette::parse(&option.id))
+        .unwrap_or(theme::Palette::Coral);
+    theme::set_pref(theme::ThemePref {
+        palette,
+        scheme: dialog.scheme,
+    });
+    write_cursor();
+}
+
+fn commit_theme_dialog(dialog: &view::ThemeDialog) -> String {
+    preview_theme_dialog(dialog);
+    apply_theme_pref(theme::ThemePref {
+        palette: dialog
+            .options
+            .get(dialog.selected)
+            .and_then(|option| theme::Palette::parse(&option.id))
+            .unwrap_or(theme::Palette::Coral),
+        scheme: dialog.scheme,
+    })
+}
+
+fn cancel_theme_dialog(dialog: &view::ThemeDialog) {
+    theme::set_pref(dialog.original);
+    write_cursor();
 }
 
 fn apply_theme_pref(pref: theme::ThemePref) -> String {
