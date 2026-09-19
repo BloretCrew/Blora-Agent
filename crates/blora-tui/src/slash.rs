@@ -43,8 +43,8 @@ pub const COMMANDS: &[SlashCommand] = &[
     cmd(
         "theme",
         &["appearance"],
-        "[dark|light|auto]",
-        "Open the theme picker, or set dark/light/auto",
+        "[coral|indigo|…|dark|light]",
+        "Open the Blora Design palette picker",
         "system",
     ),
     cmd("new", &[], "", "Create a new session", "session"),

@@ -54,10 +54,12 @@ pub struct ProviderDialog {
 /// One selectable scheme inside the theme picker.
 #[derive(Clone, Debug)]
 pub struct ThemeOption {
-    /// `auto`, `dark`, `light`, or `plain`.
+    /// Palette id (`coral`, `indigo`, …) or scheme id (`dark`, `light`, …).
     pub id: String,
     pub display: String,
     pub hint: String,
+    /// Five-swatch preview from Blora Design `THEME_PRESETS`.
+    pub swatches: Vec<Color>,
 }
 
 /// Color-scheme picker shown via `/theme` with no arguments.
@@ -1099,7 +1101,7 @@ fn render_theme_dialog(
     theme: &Theme,
 ) -> HitMap {
     let mut hits = HitMap::default();
-    let row_count = dialog.options.len().clamp(1, 8) as u16;
+    let row_count = dialog.options.len().clamp(1, 12) as u16;
     let compact_height = row_count + 5;
     if dialog.options.is_empty() {
         return hits;
@@ -1137,9 +1139,9 @@ fn render_theme_dialog(
     if inner.height == 0 {
         return hits;
     }
-    let mut rows: Vec<Rect> = split_dialog_rows(inner, row_count + 1).to_vec();
+    let mut rows = split_n_rows(inner, row_count + 1);
     let title_row = rows.remove(0);
-    paint_traffic_title(frame, title_row, "选择外观", pointer, theme, &mut hits);
+    paint_traffic_title(frame, title_row, "主题配色", pointer, theme, &mut hits);
     if dialog.minimized {
         return hits;
     }
@@ -1169,15 +1171,40 @@ fn render_theme_dialog(
         } else {
             theme.fg(theme.text_dim)
         };
-        let line = Line::from(vec![
+        let mut spans = vec![
             Span::styled(format!(" {marker} "), theme.fg(theme.rose)),
             Span::styled(option.display.clone(), name_style),
-            Span::styled("  ·  ".to_owned(), theme.mute()),
+            Span::styled("  ".to_owned(), theme.mute()),
             Span::styled(option.hint.clone(), theme.mute()),
-        ]);
-        frame.render_widget(Paragraph::new(line).style(theme.base()), rect);
+        ];
+        if !option.swatches.is_empty() {
+            spans.push(Span::styled("  ".to_owned(), theme.mute()));
+            for color in &option.swatches {
+                spans.push(Span::styled("●", Style::default().fg(*color)));
+            }
+        }
+        frame.render_widget(Paragraph::new(Line::from(spans)).style(theme.base()), rect);
     }
     hits
+}
+
+fn split_n_rows(inner: Rect, count: u16) -> Vec<Rect> {
+    if count == 0 {
+        return Vec::new();
+    }
+    let height = inner.height;
+    let base = height / count;
+    let remainder = height % count;
+    let mut y = inner.y;
+    (0..count)
+        .map(|index| {
+            let extra = u16::from(index < remainder);
+            let row_height = base + extra;
+            let row = Rect::new(inner.x, y, inner.width, row_height);
+            y = y.saturating_add(row_height);
+            row
+        })
+        .collect()
 }
 
 /// Even rows of the dialog inner area; the first row gets the remainder so the
@@ -1803,27 +1830,43 @@ mod tests {
         ThemeDialog {
             options: vec![
                 ThemeOption {
-                    id: "auto".to_owned(),
-                    display: "自动".to_owned(),
-                    hint: "跟随终端背景".to_owned(),
+                    id: "coral".to_owned(),
+                    display: "珊瑚".to_owned(),
+                    hint: "当前 · 深靛灰与柔和珊瑚红".to_owned(),
+                    swatches: vec![],
                 },
                 ThemeOption {
-                    id: "dark".to_owned(),
-                    display: "深色".to_owned(),
-                    hint: "当前 · Coral dark".to_owned(),
+                    id: "indigo".to_owned(),
+                    display: "靛蓝".to_owned(),
+                    hint: "冷灰基底与沉静蓝".to_owned(),
+                    swatches: vec![],
                 },
                 ThemeOption {
-                    id: "light".to_owned(),
-                    display: "浅色".to_owned(),
-                    hint: "Coral light".to_owned(),
+                    id: "graphite".to_owned(),
+                    display: "石墨".to_owned(),
+                    hint: "冷灰界面与低饱和钢蓝".to_owned(),
+                    swatches: vec![],
                 },
                 ThemeOption {
-                    id: "plain".to_owned(),
-                    display: "纯色".to_owned(),
-                    hint: "终端默认色".to_owned(),
+                    id: "mono".to_owned(),
+                    display: "单色".to_owned(),
+                    hint: "纯中性灰与近黑主色".to_owned(),
+                    swatches: vec![],
+                },
+                ThemeOption {
+                    id: "circuit".to_owned(),
+                    display: "电路".to_owned(),
+                    hint: "碳灰界面与克制青色".to_owned(),
+                    swatches: vec![],
+                },
+                ThemeOption {
+                    id: "dusk".to_owned(),
+                    display: "暮色".to_owned(),
+                    hint: "暮色灰紫".to_owned(),
+                    swatches: vec![],
                 },
             ],
-            selected: 1,
+            selected: 0,
             fullscreen: false,
             minimized: false,
         }
@@ -1864,27 +1907,27 @@ mod tests {
         let dialog = sample_theme_dialog();
         let area = Rect::new(0, 0, 80, 24);
         let (lines, hits) = render_theme_with_hits(area, &dialog, None);
-        assert_eq!(hits.theme_rows.len(), 4);
+        assert_eq!(hits.theme_rows.len(), 6);
         let find_row = |needle: &str| {
             lines
                 .iter()
                 .position(|line| flatten(line).contains(needle))
                 .unwrap_or_else(|| panic!("{needle} rendered"))
         };
-        let title_row = find_row("选择外观");
-        let dark_row = find_row("深色");
-        let light_row = find_row("浅色");
-        assert!(dark_row > title_row);
-        assert!(light_row > dark_row);
+        let title_row = find_row("主题配色");
+        let coral_row = find_row("珊瑚");
+        let indigo_row = find_row("靛蓝");
+        assert!(coral_row > title_row);
+        assert!(indigo_row > coral_row);
         assert!(
-            lines[dark_row].contains('❯'),
-            "selected dark row has ❯, got {}",
-            lines[dark_row]
+            lines[coral_row].contains('❯'),
+            "selected coral row has ❯, got {}",
+            lines[coral_row]
         );
         assert!(
-            !lines[light_row].contains('❯'),
-            "unselected light row has no ❯, got {}",
-            lines[light_row]
+            !lines[indigo_row].contains('❯'),
+            "unselected indigo row has no ❯, got {}",
+            lines[indigo_row]
         );
         for (rect, index) in &hits.theme_rows {
             assert_eq!(hits.hit(rect.x, rect.y), Some(Hit::ThemeRow(*index)));
@@ -1933,18 +1976,18 @@ mod tests {
         assert!(hits.theme_rows.is_empty(), "minimized has no option rows");
         assert!(hits.traffic_lights[0].is_some());
         assert!(
-            lines.iter().any(|line| flatten(line).contains("选择外观")),
+            lines.iter().any(|line| flatten(line).contains("主题配色")),
             "title bar remains"
         );
         assert!(
-            !lines.iter().any(|line| flatten(line).contains("Coral")),
-            "option hints are hidden while minimized"
+            !lines.iter().any(|line| flatten(line).contains("靛蓝")),
+            "option names are hidden while minimized"
         );
 
         dialog.minimized = false;
         dialog.fullscreen = true;
         let (_, hits) = render_theme_with_hits(area, &dialog, None);
-        assert_eq!(hits.theme_rows.len(), 4);
+        assert_eq!(hits.theme_rows.len(), 6);
         let first = hits.theme_rows[0].0;
         // Fullscreen inner content starts near the terminal edge, not mid-screen.
         assert!(first.x <= 4, "fullscreen hugs the left, x={}", first.x);

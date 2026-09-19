@@ -1035,32 +1035,31 @@ fn apply_theme(args: &str) -> SlashOutcome {
     }
     match theme::ThemePref::parse(args) {
         Some(pref) => SlashOutcome::Status(apply_theme_pref(pref)),
-        None => SlashOutcome::Status("usage: /theme [dark|light|auto|plain]".to_owned()),
+        None => SlashOutcome::Status(
+            "usage: /theme [coral|indigo|graphite|mono|circuit|dusk|dark|light|auto]"
+                .to_owned(),
+        ),
     }
 }
 
 fn open_theme_dialog() -> view::ThemeDialog {
-    let current = theme::pref();
-    let options = vec![
-        ("auto", "自动", "跟随终端 COLORFGBG"),
-        ("dark", "深色", "Coral dark"),
-        ("light", "浅色", "Coral light"),
-        ("plain", "纯色", "终端默认色"),
-    ]
-    .into_iter()
-    .map(|(id, display, hint)| {
-        let current_mark = if current.as_str() == id {
-            format!("当前 · {hint}")
-        } else {
-            hint.to_owned()
-        };
-        view::ThemeOption {
-            id: id.to_owned(),
-            display: display.to_owned(),
-            hint: current_mark,
-        }
-    })
-    .collect::<Vec<_>>();
+    let current = theme::palette();
+    let options = theme::Palette::ALL
+        .into_iter()
+        .map(|palette| {
+            let hint = if palette == current {
+                format!("当前 · {}", palette.about_zh())
+            } else {
+                palette.about_zh().to_owned()
+            };
+            view::ThemeOption {
+                id: palette.as_str().to_owned(),
+                display: palette.name_zh().to_owned(),
+                hint,
+                swatches: palette.swatches().to_vec(),
+            }
+        })
+        .collect::<Vec<_>>();
     let selected = options
         .iter()
         .position(|option| option.id == current.as_str())
@@ -1082,15 +1081,18 @@ fn apply_theme_id(id: &str) -> String {
 fn apply_theme_pref(pref: theme::ThemePref) -> String {
     theme::set_pref(pref);
     write_cursor();
-    let resolved = theme::Theme::current();
-    let resolved = if resolved == theme::Theme::plain() {
-        "plain"
-    } else if resolved.is_dark() {
+    let resolved = if theme::Theme::current().is_dark() {
         "dark"
+    } else if theme::scheme() == theme::Scheme::Plain {
+        "plain"
     } else {
         "light"
     };
-    format!("theme={} (resolved {resolved})", pref.as_str())
+    format!(
+        "theme={} scheme={} (resolved {resolved})",
+        pref.palette.as_str(),
+        pref.scheme.as_str()
+    )
 }
 
 fn write_cursor() {
@@ -1537,7 +1539,7 @@ fn slash(
                 } else {
                     model.as_str()
                 },
-                theme::pref().as_str(),
+                format!("{} {}", theme::palette().as_str(), theme::scheme().as_str()),
                 env_flag("BLORA_EXEC", "local"),
                 env_flag("BLORA_WORKTREE", "0"),
                 env_flag("BLORA_NETWORK", "0"),
