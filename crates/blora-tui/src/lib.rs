@@ -188,7 +188,13 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                     .filter(|token| !token.trim().is_empty());
                 passport_receiver = None;
                 passport_dialog = None;
-                passport_username = user.username.clone();
+                passport_username = user
+                    .nickname
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or("you")
+                    .to_owned();
                 status = format!("PassPort 登录成功：{}", user.display_name());
                 if provider_dialog.is_some() {
                     provider_dialog = Some(open_provider_dialog(
@@ -1538,7 +1544,7 @@ fn commit_provider_dialog(
 }
 
 fn passport_display_name(user: &blora_storage::UserRecord) -> Option<String> {
-    user.passport_username
+    user.passport_nickname
         .as_deref()
         .map(str::trim)
         .filter(|name| !name.is_empty())
