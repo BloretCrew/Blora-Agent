@@ -18,7 +18,11 @@ use crate::slash::{self, SlashCommand};
 use crate::theme::{Palette, Scheme, Theme, ThemePref};
 
 const PAD: u16 = 2;
-const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+/// Work indicator: ping-pong through this star sequence.
+const SPINNER: &[char] = &[
+    '✦', '✧', '✩', '✪', '✫', '✬', '✭', '✮', '✯', '✰', '✴', '✵', '✶', '✷', '✸',
+    '✹', '✺', '✻', '✼', '✽',
+];
 
 /// Bloret PassPort device-flow login dialog shown while a login is pending.
 #[derive(Clone, Debug)]
@@ -2058,7 +2062,17 @@ fn short_id(id: &str) -> String {
 }
 
 fn spinner(tick: u64) -> char {
-    SPINNER[(tick as usize) % SPINNER.len()]
+    let n = SPINNER.len();
+    if n == 0 {
+        return '✦';
+    }
+    if n == 1 {
+        return SPINNER[0];
+    }
+    let period = 2 * (n - 1);
+    let t = (tick as usize) % period;
+    let index = if t < n { t } else { period - t };
+    SPINNER[index]
 }
 
 fn line_count(text: &str) -> usize {
@@ -2070,6 +2084,16 @@ mod tests {
     use super::*;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+
+    #[test]
+    fn spinner_ping_pongs_star_sequence() {
+        assert_eq!(spinner(0), '✦');
+        assert_eq!(spinner(1), '✧');
+        assert_eq!(spinner(19), '✽');
+        assert_eq!(spinner(20), '✼');
+        assert_eq!(spinner(38), '✦');
+        assert_eq!(spinner(39), '✧');
+    }
 
     /// Double-width CJK cells leave a placeholder space in the buffer, so
     /// text assertions compare with all spaces removed.
