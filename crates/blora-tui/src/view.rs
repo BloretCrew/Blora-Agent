@@ -2165,10 +2165,15 @@ const CONTEXT_BAR_CELLS: usize = 10;
 fn context_usage_line(used: u64, window: u64, theme: &Theme) -> Line<'static> {
     let window = window.max(1);
     let ratio = (used as f64 / window as f64).clamp(0.0, 1.0);
-    let filled = ((ratio * CONTEXT_BAR_CELLS as f64).round() as usize).min(CONTEXT_BAR_CELLS);
+    let exact = ratio * CONTEXT_BAR_CELLS as f64;
+    let filled = exact.floor() as usize;
+    let filled = filled.min(CONTEXT_BAR_CELLS);
+    let has_partial = exact.fract() >= 0.05 && filled < CONTEXT_BAR_CELLS;
+    let empty = CONTEXT_BAR_CELLS - filled - usize::from(has_partial);
     let pct = (ratio * 100.0).round() as u16;
-    let fill = "▰".repeat(filled);
-    let rest = "▱".repeat(CONTEXT_BAR_CELLS - filled);
+    let fill = "■".repeat(filled);
+    let partial = if has_partial { "▣" } else { "" };
+    let rest = "▢".repeat(empty);
     let color = if pct >= 90 {
         theme.rust
     } else if pct >= 85 {
@@ -2178,6 +2183,7 @@ fn context_usage_line(used: u64, window: u64, theme: &Theme) -> Line<'static> {
     };
     Line::from(vec![
         Span::styled(fill, theme.fg(color)),
+        Span::styled(partial.to_owned(), theme.fg(color)),
         Span::styled(rest, theme.mute()),
         Span::styled(format!(" {pct}%"), theme.mute()),
     ])
@@ -2335,12 +2341,16 @@ mod tests {
         let theme = Theme::current();
         let empty = context_usage_line(0, 100_000, &theme);
         let empty_text: String = empty.spans.iter().map(|span| span.content.as_ref()).collect();
-        assert!(empty_text.contains("▱"), "{empty_text}");
+        assert!(empty_text.contains("▢"), "{empty_text}");
         assert!(empty_text.contains("0%"), "{empty_text}");
         let full = context_usage_line(100_000, 100_000, &theme);
         let full_text: String = full.spans.iter().map(|span| span.content.as_ref()).collect();
-        assert!(full_text.contains("▰▰▰▰▰▰▰▰▰▰"), "{full_text}");
+        assert!(full_text.contains("■■■■■■■■■■"), "{full_text}");
         assert!(full_text.contains("100%"), "{full_text}");
+        let mid = context_usage_line(35_000, 100_000, &theme);
+        let mid_text: String = mid.spans.iter().map(|span| span.content.as_ref()).collect();
+        assert!(mid_text.contains("▣"), "{mid_text}");
+        assert!(mid_text.contains("▢"), "{mid_text}");
     }
 
     #[test]
