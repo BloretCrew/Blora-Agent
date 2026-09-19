@@ -171,7 +171,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
             let env_model = std::env::var("BLORA_MODEL").unwrap_or_default();
             let env_provider = std::env::var("BLORA_PROVIDER").unwrap_or_default();
             let logged_in = passport_user_token.is_some();
-            let provider_option_list = provider_options(runtime, &provider_override, logged_in);
+            let provider_option_list = provider_options(&provider_override, logged_in);
             let model = if model_override.is_empty() {
                 env_model.as_str()
             } else {
@@ -494,19 +494,17 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     scroll = scroll.saturating_sub(3);
                                 }
                             }
-                            MouseEventKind::Moved => {
-                                match hits.hit(mouse.column, mouse.row) {
-                                    Some(view::Hit::Slash(idx)) => {
-                                        slash_selected = idx;
-                                    }
-                                    Some(view::Hit::ProviderRow(idx)) => {
-                                        if let Some(dialog) = provider_dialog.as_mut() {
-                                            dialog.selected = idx;
-                                        }
-                                    }
-                                    _ => {}
+                            MouseEventKind::Moved => match hits.hit(mouse.column, mouse.row) {
+                                Some(view::Hit::Slash(idx)) => {
+                                    slash_selected = idx;
                                 }
-                            }
+                                Some(view::Hit::ProviderRow(idx)) => {
+                                    if let Some(dialog) = provider_dialog.as_mut() {
+                                        dialog.selected = idx;
+                                    }
+                                }
+                                _ => {}
+                            },
                             MouseEventKind::Down(MouseButton::Left) => {
                                 let hit = hits.hit(mouse.column, mouse.row);
                                 // Provider dialog rows: click selects and confirms.
@@ -847,11 +845,7 @@ fn apply_slash(
 
 /// Build the provider list for the switch dialog. `provider_override` and the
 /// login/API-key state decide which entries are marked available.
-fn provider_options(
-    runtime: &Runtime,
-    provider_override: &str,
-    logged_in: bool,
-) -> Vec<view::ProviderOption> {
+fn provider_options(provider_override: &str, logged_in: bool) -> Vec<view::ProviderOption> {
     let env_provider = std::env::var("BLORA_PROVIDER").unwrap_or_default();
     let default_display = if logged_in {
         "Blora"

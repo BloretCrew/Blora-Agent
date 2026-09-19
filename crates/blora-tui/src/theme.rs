@@ -13,7 +13,11 @@ use std::sync::Mutex;
 use ratatui::style::{Color, Modifier, Style};
 
 const fn hex(n: u32) -> Color {
-    Color::Rgb(((n >> 16) & 0xff) as u8, ((n >> 8) & 0xff) as u8, (n & 0xff) as u8)
+    Color::Rgb(
+        ((n >> 16) & 0xff) as u8,
+        ((n >> 8) & 0xff) as u8,
+        (n & 0xff) as u8,
+    )
 }
 
 /// How the TUI chooses a palette. Session override wins over `BLORA_THEME`.
