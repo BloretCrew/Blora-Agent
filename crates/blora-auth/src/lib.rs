@@ -425,7 +425,7 @@ mod tests {
     }
 
     #[test]
-    fn refresh_token_response_is_available_for_storage {
+    fn refresh_token_response_is_available_for_storage() {
         let token = RefreshedToken {
             access_token: "access-new".to_owned(),
             refresh_token: Some("refresh-new".to_owned()),
