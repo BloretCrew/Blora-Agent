@@ -317,7 +317,8 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                 cancel = CancelToken::new();
             }
 
-            if event::poll(Duration::from_millis(200)).map_err(blora_types::BloraError::exec)? {
+            let wait_ms = if job.is_some() { 50 } else { 200 };
+            if event::poll(Duration::from_millis(wait_ms)).map_err(blora_types::BloraError::exec)? {
                 match event::read().map_err(blora_types::BloraError::exec)? {
                     Event::Key(key) if key.kind == KeyEventKind::Press => {
                         if key.modifiers.contains(KeyModifiers::CONTROL)

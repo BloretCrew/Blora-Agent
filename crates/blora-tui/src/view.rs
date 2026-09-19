@@ -736,6 +736,8 @@ fn render_transcript(frame: &mut Frame<'_>, area: Rect, model: &FrameModel<'_>, 
                 model.search,
                 model.hide_tools,
                 width.max(8),
+                model.running,
+                model.tick,
                 theme,
             );
             if rendered.is_empty() {
@@ -770,6 +772,8 @@ fn transcript_lines(
     search: Option<&str>,
     hide_tools: bool,
     width: usize,
+    running: bool,
+    tick: u64,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
     let needle = search.map(str::to_ascii_lowercase);
@@ -914,6 +918,32 @@ fn transcript_lines(
                         Span::styled(line, theme.fg(theme.text_dim)),
                     ]));
                 }
+            }
+        }
+    }
+    if let Some(live) = projection.live_assistant() {
+        let show = match needle.as_deref() {
+            None => true,
+            Some(needle) => live.to_ascii_lowercase().contains(needle),
+        };
+        if show {
+            if !out.is_empty() {
+                out.push(Line::default());
+            }
+            push_block(
+                &mut out,
+                "blora",
+                theme.sage,
+                live,
+                width,
+                needle.as_deref(),
+                theme,
+            );
+            if running {
+                out.push(Line::from(vec![
+                    Span::styled("  ", theme.mute()),
+                    Span::styled(spinner(tick).to_string(), theme.fg(theme.sage)),
+                ]));
             }
         }
     }

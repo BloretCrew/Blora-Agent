@@ -122,6 +122,16 @@ impl SessionProjection {
     pub fn apply(&mut self, event: &EventEnvelope) -> Result<()> {
         apply_event(self, event)
     }
+
+    /// Text streamed since the last completed assistant message.
+    #[must_use]
+    pub fn live_assistant(&self) -> Option<&str> {
+        if self.open_assistant.is_empty() {
+            None
+        } else {
+            Some(self.open_assistant.as_str())
+        }
+    }
 }
 
 /// Human-readable routing switch, without the relative timestamp.
@@ -743,6 +753,50 @@ mod tests {
         let projection = rebuild(&[created, unknown]).unwrap();
         assert_eq!(projection.last_sequence, 2);
         assert!(projection.session.is_some());
+    }
+
+    #[test]
+    fn assistant_deltas_are_visible_before_completion() {
+        let session_id = SessionId::generate();
+        let created = envelope(
+            &session_id,
+            1,
+            KnownPayload::SessionCreated(SessionCreated {
+                title: None,
+                workspace_path: "/tmp/ws".to_owned(),
+                mode: Mode::Code,
+                parent_session_id: None,
+            }),
+        );
+        let mut run_event = envelope(
+            &session_id,
+            2,
+            KnownPayload::RunCreated(RunCreated {
+                mode: Mode::Code,
+                model: Some("mock".to_owned()),
+            }),
+        );
+        let run_id = RunId::generate();
+        run_event.run_id = Some(run_id.clone());
+        let mut delta = envelope(
+            &session_id,
+            3,
+            KnownPayload::AssistantDelta(blora_events::AssistantDelta {
+                text: "Hel".to_owned(),
+            }),
+        );
+        delta.run_id = Some(run_id.clone());
+        let mut delta2 = envelope(
+            &session_id,
+            4,
+            KnownPayload::AssistantDelta(blora_events::AssistantDelta {
+                text: "lo".to_owned(),
+            }),
+        );
+        delta2.run_id = Some(run_id);
+        let projection = rebuild(&[created, run_event, delta, delta2]).unwrap();
+        assert_eq!(projection.live_assistant(), Some("Hello"));
+        assert!(projection.transcript.is_empty());
     }
 
     #[test]
