@@ -20,12 +20,53 @@ pub struct UserRecord {
     pub passport_avatar: Option<String>,
     pub passport_email: Option<String>,
     pub passport_app_token: Option<String>,
+    pub passport_refresh_token: Option<String>,
+    pub passport_token_expires_at: Option<DateTime<Utc>>,
 }
 
 #[must_use]
 pub fn hash_token(token: &str) -> String {
     let digest = Sha256::digest(token.as_bytes());
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+const USER_COLUMNS: &str = "id, name, token_hash, created_at, passport_username, passport_nickname, passport_avatar, passport_email, passport_app_token, passport_refresh_token, passport_token_expires_at";
+
+fn map_user_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<UserRecord> {
+    let created: String = row.get(3)?;
+    let created_at = DateTime::parse_from_rfc3339(&created)
+        .map(|dt| dt.with_timezone(&Utc))
+        .map_err(|err| {
+            rusqlite::Error::InvalidColumnType(3, err.to_string(), rusqlite::types::Type::Text)
+        })?;
+    let expires: Option<String> = row.get(10)?;
+    let passport_token_expires_at = expires
+        .as_deref()
+        .map(|value| {
+            DateTime::parse_from_rfc3339(value)
+                .map(|dt| dt.with_timezone(&Utc))
+                .map_err(|err| {
+                    rusqlite::Error::InvalidColumnType(
+                        10,
+                        err.to_string(),
+                        rusqlite::types::Type::Text,
+                    )
+                })
+        })
+        .transpose()?;
+    Ok(UserRecord {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        token_hash: row.get(2)?,
+        created_at,
+        passport_username: row.get(4)?,
+        passport_nickname: row.get(5)?,
+        passport_avatar: row.get(6)?,
+        passport_email: row.get(7)?,
+        passport_app_token: row.get(8)?,
+        passport_refresh_token: row.get(9)?,
+        passport_token_expires_at,
+    })
 }
 
 impl SqliteStore {
@@ -36,6 +77,8 @@ impl SqliteStore {
         avatar: Option<&str>,
         email: Option<&str>,
         app_token: Option<&str>,
+        refresh_token: Option<&str>,
+        token_expires_at: Option<DateTime<Utc>>,
     ) -> Result<UserRecord> {
         let username = username.trim();
         if username.is_empty() {
@@ -76,41 +119,31 @@ impl SqliteStore {
             .map(|row| row.3.clone())
             .unwrap_or_else(|| now.to_rfc3339());
         conn.execute(
-            "INSERT INTO users (id, name, token_hash, created_at, passport_username, passport_nickname, passport_avatar, passport_email, passport_app_token)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-             ON CONFLICT(passport_username) DO UPDATE SET name=excluded.name, passport_nickname=excluded.passport_nickname, passport_avatar=excluded.passport_avatar, passport_email=excluded.passport_email, passport_app_token=excluded.passport_app_token",
-            params![id, name, token_hash, created_at, username, nickname, avatar, email, app_token],
+            "INSERT INTO users (id, name, token_hash, created_at, passport_username, passport_nickname, passport_avatar, passport_email, passport_app_token, passport_refresh_token, passport_token_expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             ON CONFLICT(passport_username) DO UPDATE SET name=excluded.name, passport_nickname=excluded.passport_nickname, passport_avatar=excluded.passport_avatar, passport_email=excluded.passport_email, passport_app_token=excluded.passport_app_token, passport_refresh_token=excluded.passport_refresh_token, passport_token_expires_at=excluded.passport_token_expires_at",
+            params![
+                id,
+                name,
+                token_hash,
+                created_at,
+                username,
+                nickname,
+                avatar,
+                email,
+                app_token,
+                refresh_token,
+                token_expires_at.map(|value| value.to_rfc3339())
+            ],
         )
         .map_err(BloraError::storage)?;
         // Must not call user_by_passport_username here: it re-locks the same
         // non-reentrant connection mutex and would deadlock the caller.
         let row = conn
             .query_row(
-                "SELECT id, name, token_hash, created_at, passport_username, passport_nickname, passport_avatar, passport_email, passport_app_token FROM users WHERE passport_username = ?1",
+                &format!("SELECT {USER_COLUMNS} FROM users WHERE passport_username = ?1"),
                 params![username],
-                |row| {
-                    let created: String = row.get(3)?;
-                    let created_at = DateTime::parse_from_rfc3339(&created)
-                        .map(|dt| dt.with_timezone(&Utc))
-                        .map_err(|err| {
-                            rusqlite::Error::InvalidColumnType(
-                                3,
-                                err.to_string(),
-                                rusqlite::types::Type::Text,
-                            )
-                        })?;
-                    Ok(UserRecord {
-                        id: row.get(0)?,
-                        name: row.get(1)?,
-                        token_hash: row.get(2)?,
-                        created_at,
-                        passport_username: row.get(4)?,
-                        passport_nickname: row.get(5)?,
-                        passport_avatar: row.get(6)?,
-                        passport_email: row.get(7)?,
-                        passport_app_token: row.get(8)?,
-                    })
-                },
+                map_user_row,
             )
             .optional()
             .map_err(BloraError::storage)?;
@@ -125,42 +158,15 @@ impl SqliteStore {
 
     pub fn user_by_passport_username(&self, username: &str) -> Result<Option<UserRecord>> {
         let conn = self.lock();
-        let row = conn.query_row(
-            "SELECT id, name, token_hash, created_at, passport_username, passport_nickname, passport_avatar, passport_email, passport_app_token FROM users WHERE passport_username = ?1",
-            params![username],
-            |row| Ok((
-                row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?,
-                row.get::<_, Option<String>>(4)?, row.get::<_, Option<String>>(5)?, row.get::<_, Option<String>>(6)?, row.get::<_, Option<String>>(7)?, row.get::<_, Option<String>>(8)?,
-            )),
-        ).optional().map_err(BloraError::storage)?;
-        row.map(
-            |(
-                id,
-                name,
-                token_hash,
-                created,
-                passport_username,
-                passport_nickname,
-                passport_avatar,
-                passport_email,
-                passport_app_token,
-            )| {
-                Ok(UserRecord {
-                    id,
-                    name,
-                    token_hash,
-                    created_at: DateTime::parse_from_rfc3339(&created)
-                        .map(|dt| dt.with_timezone(&Utc))
-                        .map_err(BloraError::storage)?,
-                    passport_username,
-                    passport_nickname,
-                    passport_avatar,
-                    passport_email,
-                    passport_app_token,
-                })
-            },
-        )
-        .transpose()
+        let row = conn
+            .query_row(
+                &format!("SELECT {USER_COLUMNS} FROM users WHERE passport_username = ?1"),
+                params![username],
+                map_user_row,
+            )
+            .optional()
+            .map_err(BloraError::storage)?;
+        Ok(row)
     }
 
     pub fn create_user(&self, name: &str) -> Result<(UserRecord, String)> {
@@ -189,6 +195,8 @@ impl SqliteStore {
                 passport_avatar: None,
                 passport_email: None,
                 passport_app_token: None,
+                passport_refresh_token: None,
+                passport_token_expires_at: None,
             },
             token,
         ))
@@ -199,100 +207,26 @@ impl SqliteStore {
         let conn = self.lock();
         let row = conn
             .query_row(
-                "SELECT id, name, token_hash, created_at, passport_username, passport_nickname, passport_avatar, passport_email, passport_app_token FROM users WHERE token_hash = ?1",
+                &format!("SELECT {USER_COLUMNS} FROM users WHERE token_hash = ?1"),
                 params![hash],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, Option<String>>(4)?,
-                        row.get::<_, Option<String>>(5)?,
-                        row.get::<_, Option<String>>(6)?,
-                        row.get::<_, Option<String>>(7)?,
-                        row.get::<_, Option<String>>(8)?,
-                    ))
-                },
+                map_user_row,
             )
             .optional()
             .map_err(BloraError::storage)?;
-        row.map(
-            |(
-                id,
-                name,
-                token_hash,
-                created,
-                passport_username,
-                passport_nickname,
-                passport_avatar,
-                passport_email,
-                passport_app_token,
-            )| {
-                Ok(UserRecord {
-                    id,
-                    name,
-                    token_hash,
-                    created_at: DateTime::parse_from_rfc3339(&created)
-                        .map(|dt| dt.with_timezone(&Utc))
-                        .map_err(BloraError::storage)?,
-                    passport_username,
-                    passport_nickname,
-                    passport_avatar,
-                    passport_email,
-                    passport_app_token,
-                })
-            },
-        )
-        .transpose()
+        Ok(row)
     }
 
     pub fn list_users(&self) -> Result<Vec<UserRecord>> {
         let conn = self.lock();
         let mut stmt = conn
-            .prepare("SELECT id, name, token_hash, created_at, passport_username, passport_nickname, passport_avatar, passport_email, passport_app_token FROM users ORDER BY created_at ASC")
+            .prepare(&format!("SELECT {USER_COLUMNS} FROM users ORDER BY created_at ASC"))
             .map_err(BloraError::storage)?;
         let rows = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, Option<String>>(5)?,
-                    row.get::<_, Option<String>>(6)?,
-                    row.get::<_, Option<String>>(7)?,
-                    row.get::<_, Option<String>>(8)?,
-                ))
-            })
+            .query_map([], map_user_row)
             .map_err(BloraError::storage)?;
         let mut out = Vec::new();
         for row in rows {
-            let (
-                id,
-                name,
-                token_hash,
-                created,
-                passport_username,
-                passport_nickname,
-                passport_avatar,
-                passport_email,
-                passport_app_token,
-            ) = row.map_err(BloraError::storage)?;
-            out.push(UserRecord {
-                id,
-                name,
-                token_hash,
-                created_at: DateTime::parse_from_rfc3339(&created)
-                    .map(|dt| dt.with_timezone(&Utc))
-                    .map_err(BloraError::storage)?,
-                passport_username,
-                passport_nickname,
-                passport_avatar,
-                passport_email,
-                passport_app_token,
-            });
+            out.push(row.map_err(BloraError::storage)?);
         }
         Ok(out)
     }
@@ -380,6 +314,8 @@ mod tests {
                         .upsert_passport_user(
                             "rhedar",
                             Some(&format!("Rhedar {round}")),
+                            None,
+                            None,
                             None,
                             None,
                             None,

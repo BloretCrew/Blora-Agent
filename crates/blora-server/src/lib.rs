@@ -302,6 +302,10 @@ async fn passport_device_poll(
             user.avatar.as_deref(),
             user.email.as_deref(),
             user.apptoken.as_deref(),
+            user.refresh_token.as_deref(),
+            user.expires_in.map(|secs| {
+                chrono::Utc::now() + chrono::Duration::seconds(secs as i64)
+            }),
         )
         .map_err(ApiError::from)?;
     let cookie = format!(
@@ -384,6 +388,10 @@ async fn passport_callback(
         user.avatar.as_deref(),
         user.email.as_deref(),
         user.apptoken.as_deref(),
+        user.refresh_token.as_deref(),
+        user.expires_in.map(|secs| {
+            chrono::Utc::now() + chrono::Duration::seconds(secs as i64)
+        }),
     ) {
         return ApiError::from(err).into_response();
     }
@@ -605,9 +613,16 @@ async fn run_session(
     ensure_session(&state, &headers, &session_id)?;
     // Logged-in PassPort users run on the PassPort provider by default, so
     // they never fall back to the mock provider for lack of an API key.
-    let passport_user_token = current_user(&state, &headers)?
-        .and_then(|user| user.passport_app_token)
-        .filter(|token| !token.trim().is_empty());
+    let passport_user_token = current_user(&state, &headers)?.and_then(|user| {
+        let token = user.passport_app_token.filter(|token| !token.trim().is_empty())?;
+        if user
+            .passport_token_expires_at
+            .is_some_and(|expires| expires <= chrono::Utc::now())
+        {
+            return None;
+        }
+        Some(token)
+    });
     let runtime = state.runtime.clone();
     let prompt = body.prompt;
     let cancel = CancelToken::new();

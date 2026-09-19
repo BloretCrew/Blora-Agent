@@ -140,6 +140,8 @@ impl SqliteStore {
             "ALTER TABLE users ADD COLUMN passport_avatar TEXT",
             "ALTER TABLE users ADD COLUMN passport_email TEXT",
             "ALTER TABLE users ADD COLUMN passport_app_token TEXT",
+            "ALTER TABLE users ADD COLUMN passport_refresh_token TEXT",
+            "ALTER TABLE users ADD COLUMN passport_token_expires_at TEXT",
         ] {
             let _ = conn.execute(statement, []);
         }

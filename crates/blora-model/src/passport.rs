@@ -70,7 +70,18 @@ impl Provider for PassportProvider {
             cache_key: request.cache_key.clone(),
         };
         let body = chat_completions_body(&user_request, PASSPORT_MODEL_NAME);
-        let reader = post_chat_completions(PASSPORT_API_BASE_URL, &self.api_key, body)?;
+        let reader = post_chat_completions(PASSPORT_API_BASE_URL, &self.api_key, body).map_err(
+            |err| {
+                let text = err.to_string();
+                if text.contains("401") {
+                    BloraError::provider(
+                        "PassPort 认证失败：OAuth access_token 无效或已过期，请使用 /login 重新登录",
+                    )
+                } else {
+                    err
+                }
+            },
+        )?;
         crate::openai::parse_sse(reader, cancel, on_event)
     }
 }

@@ -73,8 +73,9 @@ impl PassportConfig {
 
     pub fn request_device_code(&self) -> Result<DeviceCode, AuthError> {
         let body = format!(
-            "client_id={}&scope={}",
+            "client_id={}&client_secret={}&scope={}",
             encode_form(&self.app_id),
+            encode_form(&self.app_secret),
             encode_form("user:name user:head user:email app:usertoken"),
         );
         let response = ureq::post(&format!("{}/oauth/device/code", self.base_url))
@@ -138,8 +139,9 @@ impl PassportConfig {
             }
             thread::sleep(Duration::from_secs(interval));
             let body = format!(
-                "client_id={}&grant_type={}&device_code={}",
+                "client_id={}&client_secret={}&grant_type={}&device_code={}",
                 encode_form(&self.app_id),
+                encode_form(&self.app_secret),
                 encode_form("urn:ietf:params:oauth:grant-type:device_code"),
                 encode_form(&device.device_code),
             );
@@ -156,9 +158,14 @@ impl PassportConfig {
                 .map_err(|err| AuthError::Protocol(err.to_string()))?;
             if let Some(access_token) = value.get("access_token").and_then(Value::as_str) {
                 let mut user = self.userinfo(access_token)?;
-                // PassPort AI accepts the OAuth access_token as Bearer. Store
-                // that credential rather than a profile-only apptoken.
+                // PassPort AI accepts the OAuth access_token as Bearer.
                 user.apptoken = Some(access_token.to_owned());
+                user.refresh_token = value
+                    .get("refresh_token")
+                    .and_then(Value::as_str)
+                    .filter(|token| !token.is_empty())
+                    .map(ToOwned::to_owned);
+                user.expires_in = value.get("expires_in").and_then(Value::as_u64);
                 return Ok(user);
             }
             let error = value.get("error").and_then(Value::as_str).unwrap_or("");
@@ -262,6 +269,10 @@ pub struct PassportUser {
     pub avatar: Option<String>,
     pub email: Option<String>,
     pub apptoken: Option<String>,
+    #[serde(default)]
+    pub refresh_token: Option<String>,
+    #[serde(default)]
+    pub expires_in: Option<u64>,
 }
 
 impl PassportUser {
@@ -298,6 +309,8 @@ fn parse_user(value: Value) -> Result<PassportUser, AuthError> {
         avatar: string_field(&value, "avatar"),
         email: string_field(&value, "email"),
         apptoken: first_string_field(&value, &["apptoken", "app_token", "usertoken", "user_token"]),
+        refresh_token: None,
+        expires_in: None,
     })
 }
 

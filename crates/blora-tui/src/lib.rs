@@ -90,10 +90,19 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     // PassPort user token of the logged-in user; drives the default provider.
     let mut passport_user_token: Option<String> = None;
     if let Ok(users) = runtime.list_users() {
-        passport_user_token = users
-            .iter()
-            .find_map(|user| user.passport_app_token.clone())
-            .filter(|token| !token.trim().is_empty());
+        passport_user_token = users.iter().find_map(|user| {
+            let token = user.passport_app_token.as_deref()?.trim();
+            if token.is_empty() {
+                return None;
+            }
+            if user
+                .passport_token_expires_at
+                .is_some_and(|expires| expires <= chrono::Utc::now())
+            {
+                return None;
+            }
+            Some(token.to_owned())
+        });
         // Username without an app token still cannot call the PassPort AI API.
         if passport_user_token.is_none() {
             if let Some((device, receiver)) = start_passport_login()? {
@@ -163,6 +172,10 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                     user.avatar.as_deref(),
                     user.email.as_deref(),
                     user.apptoken.as_deref(),
+                    user.refresh_token.as_deref(),
+                    user.expires_in.map(|secs| {
+                        chrono::Utc::now() + chrono::Duration::seconds(secs as i64)
+                    }),
                 )?;
                 passport_user_token = user
                     .apptoken
