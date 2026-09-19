@@ -150,6 +150,37 @@ impl SqliteStore {
         row.ok_or_else(|| BloraError::Other("Passport user was not stored".to_owned()))
     }
 
+    pub fn update_passport_tokens(
+        &self,
+        username: &str,
+        app_token: &str,
+        refresh_token: Option<&str>,
+        token_expires_at: Option<DateTime<Utc>>,
+    ) -> Result<Option<UserRecord>> {
+        let conn = self.lock();
+        let changed = conn
+            .execute(
+                "UPDATE users SET passport_app_token = ?1, passport_refresh_token = COALESCE(?2, passport_refresh_token), passport_token_expires_at = ?3 WHERE passport_username = ?4",
+                params![
+                    app_token,
+                    refresh_token,
+                    token_expires_at.map(|value| value.to_rfc3339()),
+                    username.trim()
+                ],
+            )
+            .map_err(BloraError::storage)?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        conn.query_row(
+            &format!("SELECT {USER_COLUMNS} FROM users WHERE passport_username = ?1"),
+            params![username.trim()],
+            map_user_row,
+        )
+        .optional()
+        .map_err(BloraError::storage)
+    }
+
     pub fn clear_passport_users(&self) -> Result<usize> {
         let conn = self.lock();
         conn.execute("DELETE FROM users WHERE passport_username IS NOT NULL", [])

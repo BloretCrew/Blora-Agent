@@ -130,6 +130,52 @@ impl PassportConfig {
         &device.verification_uri
     }
 
+    /// Exchange a refresh token for a new OAuth access token.
+    pub fn refresh_access_token(
+        &self,
+        refresh_token: &str,
+    ) -> Result<RefreshedToken, AuthError> {
+        let refresh_token = refresh_token.trim();
+        if refresh_token.is_empty() {
+            return Err(AuthError::Protocol("Passport refresh token is empty".to_owned()));
+        }
+        let body = format!(
+            "client_id={}&client_secret={}&grant_type={}&refresh_token={}",
+            encode_form(&self.app_id),
+            encode_form(&self.app_secret),
+            encode_form("refresh_token"),
+            encode_form(refresh_token),
+        );
+        let response = ureq::post(&format!("{}/oauth/token", self.base_url))
+            .set("Content-Type", "application/x-www-form-urlencoded")
+            .set("Accept", "application/json")
+            .timeout(Duration::from_secs(20))
+            .send_string(&body)
+            .or_any_status()
+            .map_err(|err| AuthError::Network(err.to_string()))?;
+        let status = response.status();
+        let value: Value = response
+            .into_json()
+            .map_err(|err| AuthError::Protocol(err.to_string()))?;
+        if !(200..300).contains(&status) {
+            return Err(AuthError::Rejected(error_message(&value, status)));
+        }
+        let access_token = value
+            .get("access_token")
+            .and_then(Value::as_str)
+            .filter(|token| !token.is_empty())
+            .ok_or_else(|| AuthError::Protocol("Passport refresh response has no access_token".to_owned()))?;
+        Ok(RefreshedToken {
+            access_token: access_token.to_owned(),
+            refresh_token: value
+                .get("refresh_token")
+                .and_then(Value::as_str)
+                .filter(|token| !token.is_empty())
+                .map(ToOwned::to_owned),
+            expires_in: value.get("expires_in").and_then(Value::as_u64),
+        })
+    }
+
     pub fn poll_device(&self, device: &DeviceCode) -> Result<PassportUser, AuthError> {
         let deadline = std::time::Instant::now() + Duration::from_secs(device.expires_in);
         let mut interval = device.interval.max(1);
@@ -232,6 +278,13 @@ impl PassportConfig {
         }
         parse_user(value)
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RefreshedToken {
+    pub access_token: String,
+    pub refresh_token: Option<String>,
+    pub expires_in: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -369,6 +422,18 @@ mod tests {
         assert!(url.contains("app_id=bp_app"));
         assert!(url.contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A4000%2Fauth%2Fcallback"));
         assert!(!url.contains("bs_secret"));
+    }
+
+    #[test]
+    fn refresh_token_response_is_available_for_storage {
+        let token = RefreshedToken {
+            access_token: "access-new".to_owned(),
+            refresh_token: Some("refresh-new".to_owned()),
+            expires_in: Some(3600),
+        };
+        assert_eq!(token.access_token, "access-new");
+        assert_eq!(token.refresh_token.as_deref(), Some("refresh-new"));
+        assert_eq!(token.expires_in, Some(3600));
     }
 
     #[test]

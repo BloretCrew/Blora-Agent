@@ -302,6 +302,21 @@ impl Runtime {
         self.store.user_by_token(token)
     }
 
+    pub fn refresh_passport_token(
+        &self,
+        username: &str,
+        app_token: &str,
+        refresh_token: Option<&str>,
+        token_expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<Option<blora_storage::UserRecord>> {
+        self.store.update_passport_tokens(
+            username,
+            app_token,
+            refresh_token,
+            token_expires_at,
+        )
+    }
+
     pub fn upsert_passport_user(
         &self,
         username: &str,

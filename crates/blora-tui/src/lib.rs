@@ -94,19 +94,12 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut passport_username = String::from("you");
     let mut passport_needs_login = false;
     if let Ok(users) = runtime.list_users() {
-        passport_user_token = users.iter().find_map(|user| {
-            let token = user.passport_app_token.as_deref()?.trim();
-            if token.is_empty() {
-                return None;
+        for user in &users {
+            if let Some(token) = usable_passport_token(runtime, user)? {
+                passport_user_token = Some(token);
+                break;
             }
-            if user
-                .passport_token_expires_at
-                .is_some_and(|expires| expires <= chrono::Utc::now())
-            {
-                return None;
-            }
-            Some(token.to_owned())
-        });
+        }
         if let Some(name) = users.iter().find_map(passport_display_name) {
             passport_username = name;
         }
@@ -1588,6 +1581,51 @@ fn commit_provider_dialog(
     } else {
         format!("provider={}  model={model_override}", option.display)
     })
+}
+
+fn usable_passport_token(
+    runtime: &Runtime,
+    user: &blora_storage::UserRecord,
+) -> Result<Option<String>> {
+    let Some(access_token) = user
+        .passport_app_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+    else {
+        return Ok(None);
+    };
+    let refresh_soon = user
+        .passport_token_expires_at
+        .is_some_and(|expires| expires <= chrono::Utc::now() + chrono::Duration::minutes(2));
+    if !refresh_soon {
+        return Ok(Some(access_token.to_owned()));
+    }
+    let Some(refresh_token) = user
+        .passport_refresh_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+    else {
+        return Ok(None);
+    };
+    let config = blora_auth::PassportConfig::from_env()
+        .map_err(|err| blora_types::BloraError::Other(err.to_string()))?;
+    match config.refresh_access_token(refresh_token) {
+        Ok(refreshed) => {
+            let expires_at = refreshed
+                .expires_in
+                .map(|seconds| chrono::Utc::now() + chrono::Duration::seconds(seconds as i64));
+            runtime.refresh_passport_token(
+                user.passport_username.as_deref().unwrap_or_default(),
+                &refreshed.access_token,
+                refreshed.refresh_token.as_deref(),
+                expires_at,
+            )?;
+            Ok(Some(refreshed.access_token))
+        }
+        Err(_) => Ok(None),
+    }
 }
 
 fn passport_display_name(user: &blora_storage::UserRecord) -> Option<String> {
