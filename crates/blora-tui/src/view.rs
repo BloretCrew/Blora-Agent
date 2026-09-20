@@ -976,11 +976,9 @@ fn transcript_lines(
             let failed = group.iter().any(|item| matches!(item, TranscriptItem::Tool { status, .. } if status == "failed" || status == "error"));
             let color = if failed {
                 theme.rust
-            } else if running
-                && group.iter().any(|item| {
-                    matches!(item, TranscriptItem::Tool { status, .. } if status == "running" || status == "requested")
-                })
-            {
+            } else if group.iter().any(|item| {
+                matches!(item, TranscriptItem::Tool { status, .. } if status == "running" || status == "requested")
+            }) {
                 theme.amber
             } else {
                 theme.text_dim
@@ -2531,6 +2529,7 @@ fn line_count(text: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::theme::Palette;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 

@@ -24,7 +24,7 @@ enum Verb {
 /// One-line Chinese summary of a consecutive tool run, e.g.
 /// `搜索了 5 次，编辑了 23 个文件，提交了 79sk7e，更新了任务清单。`
 #[must_use]
-pub fn summarize_tool_run(items: &[&TranscriptItem], running: bool) -> String {
+pub fn summarize_tool_run(items: &[&TranscriptItem], _running: bool) -> String {
     let mut order: Vec<Verb> = Vec::new();
     let mut search = 0usize;
     let mut reads = BTreeSet::new();
@@ -37,7 +37,7 @@ pub fn summarize_tool_run(items: &[&TranscriptItem], running: bool) -> String {
     let mut delegates = 0usize;
     let mut others = 0usize;
     let mut failed = 0usize;
-    let mut inflight = running;
+    let mut inflight = false;
 
     for item in items {
         let TranscriptItem::Tool {
@@ -252,5 +252,14 @@ mod tests {
         assert!(text.contains("编辑了 2 个文件"), "{text}");
         assert!(text.contains("提交了 79abcdef"), "{text}");
         assert!(text.contains("更新了任务清单"), "{text}");
+    }
+
+    #[test]
+    fn historical_tools_stay_past_even_while_another_run_is_active() {
+        let read = tool("read_file", "{\"path\":\"README.md\"}", None);
+        let items = vec![&read];
+        let text = summarize_tool_run(&items, true);
+        assert!(text.contains("读取了 1 个文件"), "{text}");
+        assert!(!text.contains("正在"), "{text}");
     }
 }
