@@ -121,7 +121,7 @@ impl SqliteStore {
         conn.execute(
             "INSERT INTO users (id, name, token_hash, created_at, passport_username, passport_nickname, passport_avatar, passport_email, passport_app_token, passport_refresh_token, passport_token_expires_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
-             ON CONFLICT(passport_username) DO UPDATE SET name=excluded.name, passport_nickname=excluded.passport_nickname, passport_avatar=excluded.passport_avatar, passport_email=excluded.passport_email, passport_app_token=excluded.passport_app_token, passport_refresh_token=excluded.passport_refresh_token, passport_token_expires_at=excluded.passport_token_expires_at",
+             ON CONFLICT(passport_username) DO UPDATE SET name=excluded.name, passport_nickname=excluded.passport_nickname, passport_avatar=excluded.passport_avatar, passport_email=excluded.passport_email, passport_app_token=excluded.passport_app_token, passport_refresh_token=COALESCE(excluded.passport_refresh_token, passport_refresh_token), passport_token_expires_at=COALESCE(excluded.passport_token_expires_at, passport_token_expires_at)",
             params![
                 id,
                 name,
@@ -321,6 +321,36 @@ mod tests {
         let found = store.user_by_token(&token).unwrap().unwrap();
         assert_eq!(found.id, user.id);
         assert!(store.user_by_token("blt_nope").unwrap().is_none());
+    }
+
+    #[test]
+    fn upsert_preserves_existing_refresh_token_when_login_omits_one() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let first = store
+            .upsert_passport_user(
+                "rhedar",
+                Some("Rhedar"),
+                None,
+                None,
+                Some("access-1"),
+                Some("refresh-1"),
+                None,
+            )
+            .unwrap();
+        assert_eq!(first.passport_refresh_token.as_deref(), Some("refresh-1"));
+        let second = store
+            .upsert_passport_user(
+                "rhedar",
+                Some("Rhedar"),
+                None,
+                None,
+                Some("access-2"),
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(second.passport_app_token.as_deref(), Some("access-2"));
+        assert_eq!(second.passport_refresh_token.as_deref(), Some("refresh-1"));
     }
 
     #[test]
