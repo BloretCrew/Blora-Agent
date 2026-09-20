@@ -4,16 +4,15 @@
 use blora_context::{EnvSnapshot, compile_messages, estimate_messages};
 use blora_events::{
     AssistantDelta, AssistantMessageCompleted, ContextSnapshotCreated, EventEnvelope,
-    HookCompleted, KnownPayload, ModeChanged, ModelRequested, ModelResponseCompleted, NewEvent, ProviderChanged,
-    RetryStarted, RoutingChanged, RunCancelRequested, RunCancelled, RunCompleted, RunCreated,
-    RunFailed,
-    RunStarted, SessionArchived, SessionResumed, SessionTitleChanged, ToolCompleted, ToolFailed, ToolOutput,
-    ToolRequested, ToolStarted, UsageRecorded, UserInput,
+    HookCompleted, KnownPayload, ModeChanged, ModelRequested, ModelResponseCompleted, NewEvent,
+    ProviderChanged, RetryStarted, RoutingChanged, RunCancelRequested, RunCancelled, RunCompleted,
+    RunCreated, RunFailed, RunStarted, SessionArchived, SessionResumed, SessionTitleChanged,
+    ToolCompleted, ToolFailed, ToolOutput, ToolRequested, ToolStarted, UsageRecorded, UserInput,
 };
 use blora_exec::{Isolation, LocalBackend, WorktreeHandle};
 use blora_model::retry::{self, RetryClass};
 use blora_model::{
-    Completion, CompletionRequest, Provider, StreamEvent, ToolCall, ToolDeclaration,
+    ChatMessage, Completion, CompletionRequest, Provider, StreamEvent, ToolCall, ToolDeclaration,
     resolve_provider_chain,
 };
 use blora_policy::Policy;
@@ -215,7 +214,11 @@ impl Runtime {
         }
         if generated {
             let projection = self.store.load_projection(session_id)?;
-            if projection.session.and_then(|session| session.title).is_some() {
+            if projection
+                .session
+                .and_then(|session| session.title)
+                .is_some()
+            {
                 return Ok(());
             }
         }
@@ -340,12 +343,8 @@ impl Runtime {
         refresh_token: Option<&str>,
         token_expires_at: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Result<Option<blora_storage::UserRecord>> {
-        self.store.update_passport_tokens(
-            username,
-            app_token,
-            refresh_token,
-            token_expires_at,
-        )
+        self.store
+            .update_passport_tokens(username, app_token, refresh_token, token_expires_at)
     }
 
     pub fn upsert_passport_user(
@@ -686,7 +685,17 @@ impl Runtime {
             KnownPayload::UserInput(UserInput { text: prompt }),
         )?;
         if should_generate_title {
-            let title = derive_session_title(&title_prompt);
+            let title = if providers[provider_index].name() == "mock" {
+                derive_session_title(&title_prompt)
+            } else {
+                generate_session_title(
+                    providers[provider_index].as_ref(),
+                    &model,
+                    &title_prompt,
+                    cancel,
+                )
+                .unwrap_or_else(|_| derive_session_title(&title_prompt))
+            };
             if !title.is_empty() {
                 self.set_session_title(session_id, title, true)?;
             }
@@ -1502,6 +1511,51 @@ fn wall_clock_exceeded(started: std::time::Instant) -> bool {
     max > 0 && started.elapsed().as_secs() > max
 }
 
+const SESSION_TITLE_PROMPT: &str = "You generate conversation titles. Output only one concise title on a single line, no quotes or explanation. Use the user's language. Keep it under 50 characters. Focus on the user's main goal or question. Never mention tools, summarization, or title generation. Always return a meaningful title, even for a short greeting.";
+
+fn generate_session_title(
+    provider: &dyn Provider,
+    model: &str,
+    prompt: &str,
+    cancel: &CancelToken,
+) -> Result<String> {
+    let request = CompletionRequest {
+        model: model.to_owned(),
+        messages: vec![
+            ChatMessage::text("system", SESSION_TITLE_PROMPT),
+            ChatMessage::text("user", prompt),
+        ],
+        max_output_tokens: Some(32),
+        ..CompletionRequest::default()
+    };
+    let mut stream = String::new();
+    let completion = provider.complete(&request, cancel, &mut |event| {
+        if let StreamEvent::TextDelta(text) = event {
+            stream.push_str(&text);
+        }
+        Ok(())
+    })?;
+    let raw = if completion.text.trim().is_empty() {
+        stream
+    } else {
+        completion.text
+    };
+    Ok(clean_generated_title(&raw))
+}
+
+fn clean_generated_title(raw: &str) -> String {
+    let title = raw
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default()
+        .trim_matches(|ch: char| ch == '"' || ch == '\'' || ch == '`' || ch == '#')
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    truncate_title(&title, 50)
+}
+
 fn derive_session_title(prompt: &str) -> String {
     let title = prompt
         .lines()
@@ -1512,10 +1566,14 @@ fn derive_session_title(prompt: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
-    if title.len() <= 80 {
-        return title;
+    truncate_title(&title, 80)
+}
+
+fn truncate_title(title: &str, max_bytes: usize) -> String {
+    if title.len() <= max_bytes {
+        return title.to_owned();
     }
-    let mut end = 80usize.saturating_sub("…".len());
+    let mut end = max_bytes.saturating_sub("…".len());
     while !title.is_char_boundary(end) {
         end = end.saturating_sub(1);
     }
@@ -1544,8 +1602,37 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     #[test]
+    fn cleans_model_generated_title() {
+        assert_eq!(
+            clean_generated_title("  \"修复登录问题\"  \n不要输出这行"),
+            "修复登录问题"
+        );
+        assert!(clean_generated_title(&"a".repeat(60)).len() <= 50);
+    }
+
+    #[test]
+    fn generates_title_with_provider() {
+        let provider = MockProvider::new();
+        provider.push(Completion {
+            text: "修复登录问题：刷新令牌失败".to_owned(),
+            ..Completion::default()
+        });
+        let title = generate_session_title(
+            &provider,
+            "mock",
+            "登录后刷新令牌失败，请修复",
+            &CancelToken::new(),
+        )
+        .unwrap();
+        assert_eq!(title, "修复登录问题：刷新令牌失败");
+    }
+
+    #[test]
     fn derives_title_from_first_prompt_line() {
-        assert_eq!(derive_session_title("# 修复登录问题\n请检查令牌"), "修复登录问题");
+        assert_eq!(
+            derive_session_title("# 修复登录问题\n请检查令牌"),
+            "修复登录问题"
+        );
         assert_eq!(derive_session_title("   "), "");
     }
 
@@ -1573,7 +1660,10 @@ mod tests {
             )
             .unwrap();
         let projection = runtime.show_session(&id).unwrap();
-        assert_eq!(projection.session.unwrap().title.as_deref(), Some("整理 README"));
+        assert_eq!(
+            projection.session.unwrap().title.as_deref(),
+            Some("整理 README")
+        );
     }
 
     fn session(runtime: &Runtime, mode: Mode, workspace: &str) -> SessionId {
