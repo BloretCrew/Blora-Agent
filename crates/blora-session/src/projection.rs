@@ -109,8 +109,23 @@ pub struct SessionProjection {
     pub provider: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
+    /// Latest checklist from `update_plan`; empty when the agent never planned.
+    #[serde(default)]
+    pub plan: Vec<PlanStepView>,
+    #[serde(default)]
+    pub plan_note: Option<String>,
+    /// Permission mode of the most recent run (`plan`, `ask`, `auto-edit`, `yolo`).
+    #[serde(default)]
+    pub permission_mode: Option<String>,
     #[serde(skip)]
     open_assistant: String,
+}
+
+/// One row of the agent's working checklist.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PlanStepView {
+    pub title: String,
+    pub status: String,
 }
 
 impl SessionProjection {
@@ -252,6 +267,9 @@ pub fn apply_event(projection: &mut SessionProjection, event: &EventEnvelope) ->
                 .run_id
                 .clone()
                 .ok_or_else(|| BloraError::event("run.created requires run_id"))?;
+            if created.permission_mode.is_some() {
+                projection.permission_mode.clone_from(&created.permission_mode);
+            }
             projection.runs.push(RunRecord {
                 id: run_id,
                 session_id: event.session_id.clone(),
@@ -556,6 +574,21 @@ pub fn apply_event(projection: &mut SessionProjection, event: &EventEnvelope) ->
                 event_id: event.event_id.clone(),
             });
         }
+        KnownPayload::PlanUpdated(plan) => {
+            projection.plan = plan
+                .steps
+                .into_iter()
+                .map(|step| PlanStepView {
+                    title: step.title,
+                    status: step.status,
+                })
+                .collect();
+            projection.plan_note = plan.note;
+            if event.run_id.is_some() {
+                let run = run_mut(projection, event)?;
+                run.updated_at = event.timestamp;
+            }
+        }
         other => {
             apply_run_transition(projection, event, &other)?;
             if matches!(
@@ -720,6 +753,7 @@ mod tests {
             KnownPayload::RunCreated(RunCreated {
                 mode: Mode::Code,
                 model: Some("mock".to_owned()),
+                permission_mode: None,
             }),
         );
         let run_id = RunId::generate();
@@ -784,6 +818,7 @@ mod tests {
             KnownPayload::RunCreated(RunCreated {
                 mode: Mode::Code,
                 model: Some("mock".to_owned()),
+                permission_mode: None,
             }),
         );
         let run_id = RunId::generate();
@@ -839,12 +874,8 @@ mod tests {
             &projection.transcript[0],
             TranscriptItem::Routing { to_provider, .. } if to_provider == "crewrouter"
         ));
-        let notice = format_routing_switch(
-            Some("blora"),
-            "crewrouter",
-            Some("blora"),
-            "claude-fable-5",
-        );
+        let notice =
+            format_routing_switch(Some("blora"), "crewrouter", Some("blora"), "claude-fable-5");
         assert!(notice.contains("供应商 blora 从这里切换为 crewrouter"));
         assert!(notice.contains("模型 blora 从这里切换为 claude-fable-5"));
         assert!(notice.contains("接下来的消息将使用新的供应商与模型"));

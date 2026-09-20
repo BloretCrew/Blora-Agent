@@ -37,6 +37,23 @@ paths:
           name: id
           required: true
           schema: { type: string }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [prompt]
+              properties:
+                prompt: { type: string }
+                permission_mode:
+                  type: string
+                  enum: [plan, ask, auto-edit, yolo]
+                  description: Overrides auto_approve when present.
+                auto_approve: { type: boolean, description: Legacy; true means yolo. }
+                provider: { type: string }
+                model: { type: string }
+                worktree: { type: boolean }
+                mock: { type: boolean }
       responses:
         "200": { description: Updated session }
   /api/sessions/{id}/events:

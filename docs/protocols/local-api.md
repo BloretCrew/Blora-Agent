@@ -7,7 +7,7 @@ GET    /api/sessions
 GET    /api/sessions?q=
 POST   /api/sessions
 GET    /api/sessions/:id
-POST   /api/sessions/:id/run
+POST   /api/sessions/:id/run         {"prompt", "permission_mode": "plan|ask|auto-edit|yolo", ...}
 GET    /api/sessions/:id/events
 POST   /api/sessions/:id/fork
 GET    /api/sessions/:id/export

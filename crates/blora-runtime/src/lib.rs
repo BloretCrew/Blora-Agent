@@ -16,6 +16,7 @@ mod plugins;
 mod work;
 
 pub use agents::{MAX_RUNNING_CHILDREN, MAX_SUBAGENT_DEPTH, SUBAGENT_TURNS};
+pub use blora_policy::PermissionMode;
 pub use blora_types::CancelToken;
 pub use compact::{COMPACTION_BREAKER, CompactionReport};
 pub use coordinator::{MockRunOptions, RunOptions, Runtime, WorkspaceInfo};

@@ -9,7 +9,7 @@ mod tool_summary;
 
 pub use machine::transition_run;
 pub use projection::{
-    ApprovalView, RunRecord, SessionProjection, SessionRecord, SubagentView, TaskView,
-    TranscriptItem, apply_event, format_routing_switch, rebuild, relative_zh,
+    ApprovalView, PlanStepView, RunRecord, SessionProjection, SessionRecord, SubagentView,
+    TaskView, TranscriptItem, apply_event, format_routing_switch, rebuild, relative_zh,
 };
 pub use tool_summary::summarize_tool_run;

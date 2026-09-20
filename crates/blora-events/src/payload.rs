@@ -48,6 +48,9 @@ pub struct SessionArchived {
 pub struct RunCreated {
     pub mode: Mode,
     pub model: Option<String>,
+    /// Permission mode the run started under (`plan`, `ask`, `auto-edit`, `yolo`).
+    #[serde(default)]
+    pub permission_mode: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -339,6 +342,27 @@ pub struct CheckpointCreated {
     pub note: Option<String>,
 }
 
+/// One entry of the agent's working checklist.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PlanStep {
+    pub title: String,
+    /// `pending`, `in_progress`, or `done`.
+    #[serde(default = "default_step_status")]
+    pub status: String,
+}
+
+fn default_step_status() -> String {
+    "pending".to_owned()
+}
+
+/// The agent replaced its checklist. The latest event is the whole plan.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PlanUpdated {
+    pub steps: Vec<PlanStep>,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
 /// Strongly-typed payloads. Unknown wire types stay as raw JSON on the envelope.
 #[derive(Clone, Debug, PartialEq)]
 pub enum KnownPayload {
@@ -391,6 +415,7 @@ pub enum KnownPayload {
     UsageRecorded(UsageRecorded),
     ArtifactCreated(ArtifactCreated),
     CheckpointCreated(CheckpointCreated),
+    PlanUpdated(PlanUpdated),
 }
 
 impl KnownPayload {
@@ -446,6 +471,7 @@ impl KnownPayload {
             Self::UsageRecorded(_) => "usage.recorded",
             Self::ArtifactCreated(_) => "artifact.created",
             Self::CheckpointCreated(_) => "checkpoint.created",
+            Self::PlanUpdated(_) => "plan.updated",
         }
     }
 
@@ -455,7 +481,8 @@ impl KnownPayload {
             Self::UserInput(_) | Self::ApprovalResolved(_) => Actor::User,
             Self::AssistantDelta(_)
             | Self::AssistantMessageCompleted(_)
-            | Self::AssistantReasoning(_) => Actor::Assistant,
+            | Self::AssistantReasoning(_)
+            | Self::PlanUpdated(_) => Actor::Assistant,
             Self::ToolRequested(_)
             | Self::ToolStarted(_)
             | Self::ToolOutput(_)
@@ -526,6 +553,7 @@ impl KnownPayload {
             Self::UsageRecorded(v) => serde_json::to_value(v),
             Self::ArtifactCreated(v) => serde_json::to_value(v),
             Self::CheckpointCreated(v) => serde_json::to_value(v),
+            Self::PlanUpdated(v) => serde_json::to_value(v),
         };
         value.map_err(|err| BloraError::event(err.to_string()))
     }
@@ -582,6 +610,7 @@ impl KnownPayload {
             "usage.recorded" => Self::UsageRecorded(from_value(value)?),
             "artifact.created" => Self::ArtifactCreated(from_value(value)?),
             "checkpoint.created" => Self::CheckpointCreated(from_value(value)?),
+            "plan.updated" => Self::PlanUpdated(from_value(value)?),
             _ => return Ok(None),
         };
         Ok(Some(known))

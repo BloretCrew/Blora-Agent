@@ -79,8 +79,10 @@ impl LocalBackend {
     }
 
     pub fn write_file(&self, path: &str, contents: &str) -> Result<()> {
-        self.policy
-            .require(self.policy.file_write(), &format!("write_file {path}"))?;
+        self.policy.require(
+            self.policy.file_write_path(path),
+            &format!("write_file {path}"),
+        )?;
         let path = self.resolve_for_write(path)?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(BloraError::exec)?;

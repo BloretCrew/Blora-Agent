@@ -5,9 +5,10 @@ use blora_context::{EnvSnapshot, compile_messages, estimate_messages};
 use blora_events::{
     AssistantDelta, AssistantMessageCompleted, ContextSnapshotCreated, EventEnvelope,
     HookCompleted, KnownPayload, ModeChanged, ModelRequested, ModelResponseCompleted, NewEvent,
-    ProviderChanged, RetryStarted, RoutingChanged, RunCancelRequested, RunCancelled, RunCompleted,
-    RunCreated, RunFailed, RunStarted, SessionArchived, SessionResumed, SessionTitleChanged,
-    ToolCompleted, ToolFailed, ToolOutput, ToolRequested, ToolStarted, UsageRecorded, UserInput,
+    PlanStep, PlanUpdated, ProviderChanged, RetryStarted, RoutingChanged, RunCancelRequested,
+    RunCancelled, RunCompleted, RunCreated, RunFailed, RunStarted, SessionArchived,
+    SessionResumed, SessionTitleChanged, ToolCompleted, ToolFailed, ToolOutput, ToolRequested,
+    ToolStarted, UsageRecorded, UserInput,
 };
 use blora_exec::{Isolation, LocalBackend, WorktreeHandle};
 use blora_model::retry::{self, RetryClass};
@@ -15,7 +16,7 @@ use blora_model::{
     ChatMessage, Completion, CompletionRequest, Provider, StreamEvent, ToolCall, ToolDeclaration,
     resolve_provider_chain,
 };
-use blora_policy::Policy;
+use blora_policy::{PermissionMode, Policy};
 use blora_session::SessionProjection;
 use blora_storage::{CreateSession, CreateTask, SessionSummary, SqliteStore};
 use blora_tools::ToolRegistry;
@@ -61,6 +62,8 @@ pub struct WorkspaceInfo {
 pub struct RunOptions {
     pub model: String,
     pub mock: bool,
+    /// Legacy switch: `true` means [`PermissionMode::Yolo`] unless `permission`
+    /// is set explicitly.
     pub auto_approve: bool,
     pub interactive: bool,
     pub max_turns: u32,
@@ -70,6 +73,27 @@ pub struct RunOptions {
     /// PassPort user token of the owner of this run; logged-in users default
     /// to the PassPort provider (`blora`) when no provider is requested.
     pub passport_user_token: Option<String>,
+    /// Explicit permission mode. `None` derives from `read_only` / `auto_approve`.
+    pub permission: Option<PermissionMode>,
+}
+
+impl RunOptions {
+    /// Effective permission mode: explicit `permission` wins, then `read_only`
+    /// forces plan mode, then the legacy `auto_approve` flag.
+    #[must_use]
+    pub fn permission_mode(&self) -> PermissionMode {
+        if let Some(mode) = self.permission {
+            return mode;
+        }
+        if self.read_only {
+            return PermissionMode::Plan;
+        }
+        if self.auto_approve {
+            PermissionMode::Yolo
+        } else {
+            PermissionMode::Ask
+        }
+    }
 }
 
 impl Default for RunOptions {
@@ -84,6 +108,7 @@ impl Default for RunOptions {
             read_only: false,
             worktree: false,
             passport_user_token: None,
+            permission: None,
         }
     }
 }
@@ -507,6 +532,7 @@ impl Runtime {
             KnownPayload::RunCreated(RunCreated {
                 mode: Mode::Code,
                 model: Some(options.model.clone()),
+                permission_mode: None,
             }),
         )?;
         if cancel.is_cancelled() {
@@ -594,7 +620,8 @@ impl Runtime {
         if token_budget_exceeded(used) {
             return Err(BloraError::Other(format!("token budget exceeded ({used})")));
         }
-        let policy = Policy::new(&exec_root, options.auto_approve)?;
+        let permission_mode = options.permission_mode();
+        let policy = Policy::with_mode(&exec_root, permission_mode)?;
         let backend = LocalBackend::new(policy).with_isolation(Isolation::from_env());
         let requested_provider = if options.provider.trim().is_empty() {
             projection.provider.clone().unwrap_or_default()
@@ -665,6 +692,7 @@ impl Runtime {
             KnownPayload::RunCreated(RunCreated {
                 mode,
                 model: Some(model.clone()),
+                permission_mode: Some(permission_mode.as_str().to_owned()),
             }),
         )?;
         if cancel.is_cancelled() {
@@ -700,7 +728,7 @@ impl Runtime {
                 self.set_session_title(session_id, title, true)?;
             }
         }
-        let env = EnvSnapshot::capture(&exec_root);
+        let env = EnvSnapshot::capture_with_mode(&exec_root, permission_mode.as_str());
         self.emit(
             session_id,
             Some(&run_id),
@@ -1080,19 +1108,26 @@ impl Runtime {
                 let handles: Vec<_> = calls
                     .iter()
                     .map(|call| {
-                        scope.spawn(move || {
+                        // Tools the runtime handles itself (memory, plan) must
+                        // not be precomputed by the registry.
+                        if runtime_handled_tool(&call.name) {
+                            return None;
+                        }
+                        Some(scope.spawn(move || {
                             let arguments: Value = serde_json::from_str(&call.arguments)
                                 .unwrap_or_else(|_| json!({ "raw": call.arguments }));
                             ToolRegistry::execute(backend, &call.name, &arguments)
-                        })
+                        }))
                     })
                     .collect();
                 handles
                     .into_iter()
                     .map(|handle| {
-                        Some(handle.join().unwrap_or_else(|_| {
-                            Err(BloraError::Other("tool thread panicked".to_owned()))
-                        }))
+                        handle.map(|handle| {
+                            handle.join().unwrap_or_else(|_| {
+                                Err(BloraError::Other("tool thread panicked".to_owned()))
+                            })
+                        })
                     })
                     .collect()
             })
@@ -1317,6 +1352,47 @@ impl Runtime {
                 self.store.delete_memory(workspace, key)?;
                 Ok(format!("forgot {key}"))
             }
+            "update_plan" => {
+                let steps: Vec<PlanStep> = arguments
+                    .get("steps")
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .transpose()
+                    .map_err(|err| BloraError::Other(format!("update_plan steps: {err}")))?
+                    .unwrap_or_default();
+                let steps: Vec<PlanStep> = steps
+                    .into_iter()
+                    .filter(|step| !step.title.trim().is_empty())
+                    .take(40)
+                    .map(|step| PlanStep {
+                        title: step.title.trim().chars().take(200).collect(),
+                        status: match step.status.as_str() {
+                            "done" | "completed" => "done".to_owned(),
+                            "in_progress" | "active" => "in_progress".to_owned(),
+                            _ => "pending".to_owned(),
+                        },
+                    })
+                    .collect();
+                if steps.is_empty() {
+                    return Err(BloraError::Other(
+                        "update_plan needs at least one step".to_owned(),
+                    ));
+                }
+                let done = steps.iter().filter(|s| s.status == "done").count();
+                let total = steps.len();
+                let note = arguments
+                    .get("note")
+                    .and_then(Value::as_str)
+                    .map(|n| n.trim().chars().take(300).collect::<String>())
+                    .filter(|n| !n.is_empty());
+                self.emit(
+                    session_id,
+                    Some(run_id),
+                    Some(turn_id),
+                    KnownPayload::PlanUpdated(PlanUpdated { steps, note }),
+                )?;
+                Ok(format!("plan recorded ({done}/{total} done)"))
+            }
             _ => ToolRegistry::execute(backend, &call.name, &arguments),
         };
         let first = match precomputed {
@@ -1479,6 +1555,12 @@ impl Runtime {
 
 trait ClonedResult {
     fn cloned_result(self) -> Option<Result<String>>;
+}
+
+/// Tools whose execution lives in `dispatch_tool` (they touch the store or emit
+/// events) rather than in `ToolRegistry::execute`.
+fn runtime_handled_tool(name: &str) -> bool {
+    matches!(name, "recall" | "update_plan")
 }
 
 impl ClonedResult for Option<&Result<String>> {
@@ -1947,6 +2029,106 @@ mod tests {
     }
 
     #[test]
+    fn plan_mode_blocks_workspace_writes_but_records_the_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = Runtime::new(SqliteStore::open_in_memory().unwrap());
+        let session = session(&runtime, Mode::Code, dir.path().to_str().unwrap());
+        runtime
+            .run(
+                &session,
+                "WRITE_FILE please",
+                &CancelToken::new(),
+                &RunOptions {
+                    mock: true,
+                    permission: Some(PermissionMode::Plan),
+                    ..RunOptions::default()
+                },
+            )
+            .unwrap();
+        assert!(
+            !dir.path().join("ok.txt").exists(),
+            "plan mode must not write"
+        );
+        let projection = runtime.show_session(&session).unwrap();
+        assert_eq!(projection.permission_mode.as_deref(), Some("plan"));
+        assert!(projection.transcript.iter().any(|item| matches!(
+            item,
+            TranscriptItem::Tool { name, status, output, .. }
+                if name == "write_file"
+                    && status == "failed"
+                    && output.as_deref().is_some_and(|text| text.contains("plan mode"))
+        )));
+        let events = runtime.events(&session).unwrap();
+        let created = events
+            .iter()
+            .find(|e| e.event_type == "run.created")
+            .unwrap();
+        assert_eq!(created.payload["permission_mode"], "plan");
+    }
+
+    #[test]
+    fn update_plan_tool_emits_plan_updated() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = Runtime::new(SqliteStore::open_in_memory().unwrap());
+        let session = session(&runtime, Mode::Code, dir.path().to_str().unwrap());
+        let run_id = RunId::generate();
+        let turn_id = TurnId::generate();
+        runtime
+            .emit(
+                &session,
+                Some(&run_id),
+                Some(&turn_id),
+                KnownPayload::RunCreated(RunCreated {
+                    mode: Mode::Code,
+                    model: Some("mock".to_owned()),
+                    permission_mode: Some("ask".to_owned()),
+                }),
+            )
+            .unwrap();
+        let backend = LocalBackend::new(Policy::new(dir.path(), true).unwrap());
+        let call = ToolCall {
+            id: "call_plan".to_owned(),
+            name: "update_plan".to_owned(),
+            arguments: json!({
+                "steps": [
+                    {"title": "read code", "status": "done"},
+                    {"title": "write fix", "status": "in_progress"},
+                    {"title": "", "status": "pending"}
+                ],
+                "note": "first pass"
+            })
+            .to_string(),
+        };
+        runtime
+            .dispatch_tool(
+                &session,
+                &run_id,
+                &turn_id,
+                &backend,
+                &call,
+                &RunOptions::default(),
+                &CancelToken::new(),
+                None,
+                &[],
+                dir.path().to_str().unwrap(),
+                None,
+                false,
+            )
+            .unwrap();
+        let projection = runtime.show_session(&session).unwrap();
+        assert_eq!(projection.plan.len(), 2, "blank titles are dropped");
+        assert_eq!(projection.plan[1].status, "in_progress");
+        assert_eq!(projection.plan_note.as_deref(), Some("first pass"));
+        assert!(projection.transcript.iter().any(|item| matches!(
+            item,
+            TranscriptItem::Tool { name, status, output, .. }
+                if name == "update_plan"
+                    && status == "completed"
+                    && output.as_deref().is_some_and(|text| text.contains("1/2 done"))
+        )));
+    }
+
+    #[test]
     fn steer_is_delivered_between_turns() {
         let dir = tempfile::tempdir().unwrap();
         let runtime = Runtime::new(SqliteStore::open_in_memory().unwrap());
@@ -2008,6 +2190,7 @@ mod tests {
                 KnownPayload::RunCreated(RunCreated {
                     mode: Mode::Code,
                     model: Some("mock".to_owned()),
+                    permission_mode: None,
                 }),
             )
             .unwrap();

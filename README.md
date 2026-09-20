@@ -11,7 +11,8 @@
 - Canonical Event Log + SQLite 追加写存储
 - 可恢复 Session / Run 状态机
 - 本地工具：`read_file`、`write_file`、`list_dir`、`search`、`shell`、`apply_patch`、`process`
-- 工作区路径沙箱，写入和命令默认需要 `--yes`
+- 工作区路径沙箱；权限模式 `plan` / `ask` / `auto-edit` / `yolo`（`--permission`，`--yes` = yolo），shell 命令按只读 / 改动 / 危险分级，危险命令永远要确认
+- 模型用 `update_plan` 维护清单，`plan.updated` 事件进投影，CLI 与 Web API 可见
 - Mock Provider 与 OpenAI Chat / Responses / Anthropic 流式接口
 - CLI、TUI、本地 Web UI（Blora Design；会话 / 任务 / 审批 / 工作区 / 设置）
 - Work 模式：延迟任务、cron、暂停/恢复、`blora task pump`

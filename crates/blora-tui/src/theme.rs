@@ -6,6 +6,9 @@
 //! Hex values come from `blora-design/packages/tokens/src/themes/*.tokens.json`.
 //! Names and blurbs match `packages/blora-design/src/locales/zh-CN.ts`.
 
+// The palette literals are written as `0xRRGG_BB` to mirror the token files.
+#![allow(clippy::unusual_byte_groupings, clippy::mistyped_literal_suffixes)]
+
 use std::sync::Mutex;
 
 use ratatui::style::{Color, Modifier, Style};

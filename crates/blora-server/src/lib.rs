@@ -20,7 +20,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use blora_auth::PassportConfig;
-use blora_runtime::{CancelToken, RunOptions, Runtime};
+use blora_runtime::{CancelToken, PermissionMode, RunOptions, Runtime};
 use blora_session::{TranscriptItem, format_routing_switch, relative_zh};
 use blora_storage::{CreateSession, CreateTask};
 use blora_types::{ApprovalId, Mode, SessionId, TaskId};
@@ -59,6 +59,9 @@ struct RunBody {
     mock: bool,
     #[serde(default)]
     auto_approve: bool,
+    /// `plan`, `ask`, `auto-edit`, or `yolo`. Overrides `auto_approve` when set.
+    #[serde(default)]
+    permission_mode: Option<String>,
     #[serde(default)]
     provider: Option<String>,
     #[serde(default)]
@@ -77,9 +80,18 @@ struct SessionJson {
     last_sequence: u64,
     input_tokens: u64,
     output_tokens: u64,
+    permission_mode: Option<String>,
+    plan: Vec<PlanStepJson>,
+    plan_note: Option<String>,
     transcript: Vec<TranscriptJson>,
     tasks: Vec<TaskJson>,
     subagents: Vec<SubagentJson>,
+}
+
+#[derive(Serialize)]
+struct PlanStepJson {
+    title: String,
+    status: String,
 }
 
 #[derive(Serialize)]
@@ -303,9 +315,8 @@ async fn passport_device_poll(
             user.email.as_deref(),
             user.apptoken.as_deref(),
             user.refresh_token.as_deref(),
-            user.expires_in.map(|secs| {
-                chrono::Utc::now() + chrono::Duration::seconds(secs as i64)
-            }),
+            user.expires_in
+                .map(|secs| chrono::Utc::now() + chrono::Duration::seconds(secs as i64)),
         )
         .map_err(ApiError::from)?;
     let cookie = format!(
@@ -389,9 +400,8 @@ async fn passport_callback(
         user.email.as_deref(),
         user.apptoken.as_deref(),
         user.refresh_token.as_deref(),
-        user.expires_in.map(|secs| {
-            chrono::Utc::now() + chrono::Duration::seconds(secs as i64)
-        }),
+        user.expires_in
+            .map(|secs| chrono::Utc::now() + chrono::Duration::seconds(secs as i64)),
     ) {
         return ApiError::from(err).into_response();
     }
@@ -614,7 +624,9 @@ async fn run_session(
     // Logged-in PassPort users run on the PassPort provider by default, so
     // they never fall back to the mock provider for lack of an API key.
     let passport_user_token = current_user(&state, &headers)?.and_then(|user| {
-        let token = user.passport_app_token.filter(|token| !token.trim().is_empty())?;
+        let token = user
+            .passport_app_token
+            .filter(|token| !token.trim().is_empty())?;
         if user
             .passport_token_expires_at
             .is_some_and(|expires| expires <= chrono::Utc::now())
@@ -632,15 +644,23 @@ async fn run_session(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .insert(id.clone(), cancel.clone());
     let provider = body.provider.unwrap_or_default();
+    let permission = match body.permission_mode.as_deref() {
+        None | Some("") => None,
+        Some(text) => Some(
+            PermissionMode::parse(text)
+                .ok_or_else(|| ApiError(format!("unknown permission_mode: {text}")))?,
+        ),
+    };
+    let auto_approve = permission.map_or(body.auto_approve, PermissionMode::auto_approve);
     let options = RunOptions {
-        mock: body.mock
-            || blora_model::should_auto_mock(&provider, passport_user_token.as_deref()),
-        auto_approve: body.auto_approve,
-        interactive: !body.auto_approve,
+        mock: body.mock || blora_model::should_auto_mock(&provider, passport_user_token.as_deref()),
+        auto_approve,
+        interactive: !auto_approve,
         provider,
         model: body.model.unwrap_or_default(),
         worktree: body.worktree,
         passport_user_token,
+        permission,
         ..RunOptions::default()
     };
     let result =
@@ -1123,6 +1143,16 @@ fn to_json(state: &AppState, id: &SessionId) -> Result<SessionJson, ApiError> {
         last_sequence: projection.last_sequence,
         input_tokens: projection.input_tokens,
         output_tokens: projection.output_tokens,
+        permission_mode: projection.permission_mode.clone(),
+        plan: projection
+            .plan
+            .iter()
+            .map(|step| PlanStepJson {
+                title: step.title.clone(),
+                status: step.status.clone(),
+            })
+            .collect(),
+        plan_note: projection.plan_note.clone(),
         transcript: {
             let items = projection.transcript;
             let mut out = Vec::new();

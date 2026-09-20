@@ -26,17 +26,25 @@ pub struct EnvSnapshot {
     pub date: String,
     pub os: String,
     pub git: Option<String>,
+    /// Permission mode for this run (`plan`, `ask`, `auto-edit`, `yolo`).
+    pub permission_mode: String,
 }
 
 impl EnvSnapshot {
     /// Capture the workspace environment. Git output is bounded and best-effort.
     #[must_use]
     pub fn capture(workspace: &str) -> Self {
+        Self::capture_with_mode(workspace, "ask")
+    }
+
+    #[must_use]
+    pub fn capture_with_mode(workspace: &str, permission_mode: &str) -> Self {
         Self {
             workspace: workspace.to_owned(),
             date: chrono::Utc::now().date_naive().to_string(),
             os: std::env::consts::OS.to_owned(),
             git: git_snapshot(workspace),
+            permission_mode: permission_mode.to_owned(),
         }
     }
 
@@ -46,6 +54,19 @@ impl EnvSnapshot {
         out.push_str(&format!("Workspace: {}\n", self.workspace));
         out.push_str(&format!("OS: {}\n", self.os));
         out.push_str(&format!("Date: {}\n", self.date));
+        if !self.permission_mode.is_empty() {
+            out.push_str(&format!("Permission mode: {}\n", self.permission_mode));
+            out.push_str(match self.permission_mode.as_str() {
+                "plan" => {
+                    "Plan mode is read-only: explore with read_file, list_dir, search, and inspection-only shell commands, then write the plan to .blora/plan.md (the only writable path) and finish with a summary of the plan. Do not attempt other edits.\n"
+                }
+                "ask" => "Writes and mutating shell commands will pause for user approval.\n",
+                "auto-edit" => {
+                    "File edits inside the workspace are pre-approved; mutating shell commands still pause for approval.\n"
+                }
+                _ => "Writes and shell commands are pre-approved; dangerous commands still pause for approval.\n",
+            });
+        }
         if let Some(git) = &self.git {
             out.push_str("Git status (snapshot at run start; run git_status for live state):\n");
             out.push_str(git);
@@ -87,6 +108,7 @@ pub fn stable_prompt(mode: &str) -> String {
         "You are Blora Agent, a local {mode} harness.\n\
          Stay inside the workspace. Prefer read_file, list_dir, and search before write_file or shell.\n\
          Use apply_patch for targeted edits; only use write_file to create files or replace them wholesale.\n\
+         For work with three or more steps, keep a short checklist with update_plan and mark steps done as you go.\n\
          Tool results may be truncated or cleared; re-read a file if you need details again.\n\
          Return a concise final answer when the task is done.\n\
          Do not exfiltrate secrets. Unknown event types in history must be ignored."
@@ -98,7 +120,7 @@ pub fn stable_prompt(mode: &str) -> String {
 pub fn context_prompt(workspace: &str, mode: &str) -> String {
     let mut out = format!(
         "Mode: {mode}\n\
-         Tools: read_file, write_file, list_dir, search, shell, apply_patch, git_status, git_diff, git_log, git_branch, git_worktree, process, schedule_task, delegate, handoff, remember, recall, forget."
+         Tools: read_file, write_file, list_dir, search, shell, apply_patch, git_status, git_diff, git_log, git_branch, git_worktree, process, schedule_task, delegate, handoff, remember, recall, forget, update_plan."
     );
     if let Some(rules) = project_rules(workspace) {
         out.push_str("\n\nProject rules:\n");
@@ -497,6 +519,7 @@ mod tests {
             date: "2026-09-14".to_owned(),
             os: "linux".to_owned(),
             git: Some("## main".to_owned()),
+            permission_mode: "plan".to_owned(),
         }
     }
 
@@ -523,6 +546,7 @@ mod tests {
         assert!(!stable.contains("Date:"));
         assert!(!context_prompt("/tmp", "code").contains("Date:"));
         assert!(env().render().contains("Date: 2026-09-14"));
+        assert!(env().render().contains("Plan mode is read-only"));
     }
 
     #[test]

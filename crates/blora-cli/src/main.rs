@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use blora_runtime::{CancelToken, RunOptions, Runtime};
+use blora_runtime::{CancelToken, PermissionMode, RunOptions, Runtime};
 use blora_session::TranscriptItem;
 use blora_storage::{CreateSession, CreateTask, SqliteStore};
 use blora_types::{Mode, SessionId, TaskId};
@@ -67,9 +67,12 @@ enum Commands {
         /// Force the mock provider.
         #[arg(long)]
         mock: bool,
-        /// Auto-approve write_file and shell.
+        /// Auto-approve write_file and shell (same as `--permission yolo`).
         #[arg(long)]
         yes: bool,
+        /// Permission mode: plan, ask, auto-edit, or yolo. Overrides --yes.
+        #[arg(long, value_parser = parse_permission)]
+        permission: Option<PermissionMode>,
         /// Model name override.
         #[arg(long)]
         model: Option<String>,
@@ -501,11 +504,13 @@ fn dispatch(
             prompt,
             mock,
             yes,
+            permission,
             model,
             provider,
             worktree,
         } => {
             let session_id = SessionId::parse(&session)?;
+            let auto_approve = permission.map_or(yes, PermissionMode::auto_approve);
             let run_id = runtime.run(
                 &session_id,
                 &prompt,
@@ -513,13 +518,14 @@ fn dispatch(
                 &RunOptions {
                     model: model.unwrap_or_default(),
                     mock,
-                    auto_approve: yes,
+                    auto_approve,
                     interactive: false,
                     max_turns: 12,
                     provider: provider.unwrap_or_default(),
                     read_only: false,
                     worktree,
                     passport_user_token: None,
+                    permission,
                 },
             )?;
             println!("run {run_id}");
@@ -599,7 +605,23 @@ fn print_projection(
             }
         }
     }
+    if !projection.plan.is_empty() {
+        println!("  plan:");
+        for step in projection.plan {
+            let mark = match step.status.as_str() {
+                "done" => "x",
+                "in_progress" => ">",
+                _ => " ",
+            };
+            println!("    [{mark}] {}", step.title);
+        }
+    }
     Ok(())
+}
+
+fn parse_permission(text: &str) -> Result<PermissionMode, String> {
+    PermissionMode::parse(text)
+        .ok_or_else(|| format!("expected plan, ask, auto-edit, or yolo (got {text})"))
 }
 
 fn serve_web(
@@ -727,6 +749,30 @@ fn open_store(home: Option<&std::path::Path>) -> Result<SqliteStore, Box<dyn std
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn run_accepts_permission_mode() {
+        let cli = Cli::try_parse_from([
+            "blora",
+            "run",
+            "--session",
+            "ses_x",
+            "--permission",
+            "auto-edit",
+            "hi",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Commands::Run { permission, .. }) => {
+                assert_eq!(permission, Some(PermissionMode::AutoEdit));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        assert!(
+            Cli::try_parse_from(["blora", "run", "--session", "s", "--permission", "x", "hi"])
+                .is_err()
+        );
+    }
 
     #[test]
     fn bare_blora_has_no_subcommand() {

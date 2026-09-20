@@ -230,6 +230,29 @@ impl ToolRegistry {
                 }),
                 read_only: true,
             },
+            ToolSpec {
+                name: "update_plan",
+                description: "Replace your working checklist. Send the full list every time; keep at most one step in_progress. Use it for multi-step work so the user can follow progress.",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "steps": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "title": {"type": "string"},
+                                    "status": {"type": "string", "enum": ["pending", "in_progress", "done"]}
+                                },
+                                "required": ["title", "status"]
+                            }
+                        },
+                        "note": {"type": "string", "description": "Optional one-line explanation of the change"}
+                    },
+                    "required": ["steps"]
+                }),
+                read_only: true,
+            },
         ]
     }
 
@@ -364,6 +387,7 @@ mod tests {
     fn read_only_classification() {
         assert!(ToolRegistry::is_read_only("read_file"));
         assert!(ToolRegistry::is_read_only("search"));
+        assert!(ToolRegistry::is_read_only("update_plan"));
         assert!(!ToolRegistry::is_read_only("shell"));
         assert!(!ToolRegistry::is_read_only("apply_patch"));
     }

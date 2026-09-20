@@ -102,6 +102,11 @@ impl Runtime {
             read_only,
             worktree: false,
             passport_user_token: options.passport_user_token.clone(),
+            permission: if read_only {
+                Some(blora_policy::PermissionMode::Plan)
+            } else {
+                options.permission
+            },
         };
         let can_spawn = depth < MAX_SUBAGENT_DEPTH;
         let child_prompt = if can_spawn {
