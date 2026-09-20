@@ -7,7 +7,7 @@ use blora_events::{
     HookCompleted, KnownPayload, ModeChanged, ModelRequested, ModelResponseCompleted, NewEvent, ProviderChanged,
     RetryStarted, RoutingChanged, RunCancelRequested, RunCancelled, RunCompleted, RunCreated,
     RunFailed,
-    RunStarted, SessionArchived, SessionResumed, ToolCompleted, ToolFailed, ToolOutput,
+    RunStarted, SessionArchived, SessionResumed, SessionTitleChanged, ToolCompleted, ToolFailed, ToolOutput,
     ToolRequested, ToolStarted, UsageRecorded, UserInput,
 };
 use blora_exec::{Isolation, LocalBackend, WorktreeHandle};
@@ -195,6 +195,37 @@ impl Runtime {
             None,
             KnownPayload::SessionArchived(SessionArchived {
                 reason: Some("user".to_owned()),
+            }),
+        )
+    }
+
+    /// Record a provider/model switch on the session. Later runs use this
+    /// routing until it is changed again.
+    /// Persist a generated or explicitly selected session title.
+    pub fn set_session_title(
+        &self,
+        session_id: &SessionId,
+        title: impl Into<String>,
+        generated: bool,
+    ) -> Result<()> {
+        let title = title.into();
+        let title = title.trim();
+        if title.is_empty() {
+            return Err(BloraError::Other("session title is empty".to_owned()));
+        }
+        if generated {
+            let projection = self.store.load_projection(session_id)?;
+            if projection.session.and_then(|session| session.title).is_some() {
+                return Ok(());
+            }
+        }
+        self.emit(
+            session_id,
+            None,
+            None,
+            KnownPayload::SessionTitleChanged(SessionTitleChanged {
+                title: title.to_owned(),
+                generated,
             }),
         )
     }
@@ -546,6 +577,9 @@ impl Runtime {
             .as_ref()
             .ok_or_else(|| BloraError::SessionNotFound(session_id.to_string()))?;
         let workspace = session.workspace_path.clone();
+        let should_generate_title = session.title.is_none()
+            && projection.transcript.is_empty()
+            && session.parent_session_id.is_none();
         let mode = session.mode;
         let worktree = if options.worktree || env_flag("BLORA_WORKTREE") {
             WorktreeHandle::create(&workspace, session_id.as_str()).ok()
@@ -591,6 +625,7 @@ impl Runtime {
         };
 
         // Prompt-submit hook may block or enrich the prompt before anything is logged.
+        let title_prompt = prompt.to_owned();
         let mut prompt = prompt.to_owned();
         let submit = hooks::run(
             hooks::USER_PROMPT_SUBMIT,
@@ -650,6 +685,12 @@ impl Runtime {
             Some(&turn_id),
             KnownPayload::UserInput(UserInput { text: prompt }),
         )?;
+        if should_generate_title {
+            let title = derive_session_title(&title_prompt);
+            if !title.is_empty() {
+                self.set_session_title(session_id, title, true)?;
+            }
+        }
         let env = EnvSnapshot::capture(&exec_root);
         self.emit(
             session_id,
@@ -1461,6 +1502,26 @@ fn wall_clock_exceeded(started: std::time::Instant) -> bool {
     max > 0 && started.elapsed().as_secs() > max
 }
 
+fn derive_session_title(prompt: &str) -> String {
+    let title = prompt
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default()
+        .trim_start_matches(|ch: char| ch == '#' || ch == '-' || ch == '*' || ch.is_whitespace())
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if title.len() <= 80 {
+        return title;
+    }
+    let mut end = 80usize.saturating_sub("…".len());
+    while !title.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    format!("{}…", title[..end].trim_end())
+}
+
 fn token_budget_exceeded(used: u64) -> bool {
     std::env::var("BLORA_MAX_TOKENS")
         .ok()
@@ -1481,6 +1542,39 @@ mod tests {
     use blora_session::TranscriptItem;
     use blora_storage::SqliteStore;
     use std::sync::atomic::{AtomicU32, Ordering};
+
+    #[test]
+    fn derives_title_from_first_prompt_line() {
+        assert_eq!(derive_session_title("# 修复登录问题\n请检查令牌"), "修复登录问题");
+        assert_eq!(derive_session_title("   "), "");
+    }
+
+    #[test]
+    fn run_generates_title_for_untitled_root_session() {
+        let runtime = Runtime::new(SqliteStore::open_in_memory().unwrap());
+        let id = runtime
+            .create_session(CreateSession {
+                title: None,
+                workspace_path: ".".to_owned(),
+                mode: Mode::Code,
+                parent_session_id: None,
+            })
+            .unwrap();
+        runtime
+            .run(
+                &id,
+                "整理 README",
+                &CancelToken::new(),
+                &RunOptions {
+                    mock: true,
+                    auto_approve: true,
+                    ..RunOptions::default()
+                },
+            )
+            .unwrap();
+        let projection = runtime.show_session(&id).unwrap();
+        assert_eq!(projection.session.unwrap().title.as_deref(), Some("整理 README"));
+    }
 
     fn session(runtime: &Runtime, mode: Mode, workspace: &str) -> SessionId {
         runtime

@@ -113,7 +113,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut sessions = runtime.list_sessions()?;
     if sessions.is_empty() {
         let id = runtime.create_session(CreateSession {
-            title: Some("tui".to_owned()),
+            title: None,
             workspace_path: workspace.display().to_string(),
             mode: Mode::Code,
             parent_session_id: None,
@@ -1325,7 +1325,7 @@ fn create_session(
     title: Option<&str>,
 ) -> Result<SessionId> {
     runtime.create_session(CreateSession {
-        title: Some(title.unwrap_or("tui").to_owned()),
+        title: title.map(str::to_owned),
         workspace_path: workspace.display().to_string(),
         mode,
         parent_session_id: None,

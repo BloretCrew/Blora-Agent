@@ -22,6 +22,13 @@ pub struct SessionResumed {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SessionTitleChanged {
+    pub title: String,
+    #[serde(default)]
+    pub generated: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ModeChanged {
     pub from: Mode,
     pub to: Mode,
@@ -337,6 +344,7 @@ pub struct CheckpointCreated {
 pub enum KnownPayload {
     SessionCreated(SessionCreated),
     SessionResumed(SessionResumed),
+    SessionTitleChanged(SessionTitleChanged),
     ModeChanged(ModeChanged),
     SessionForked(SessionForked),
     SessionArchived(SessionArchived),
@@ -391,6 +399,7 @@ impl KnownPayload {
         match self {
             Self::SessionCreated(_) => "session.created",
             Self::SessionResumed(_) => "session.resumed",
+            Self::SessionTitleChanged(_) => "session.title.changed",
             Self::ModeChanged(_) => "mode.changed",
             Self::SessionForked(_) => "session.forked",
             Self::SessionArchived(_) => "session.archived",
@@ -470,6 +479,7 @@ impl KnownPayload {
         let value = match self {
             Self::SessionCreated(v) => serde_json::to_value(v),
             Self::SessionResumed(v) => serde_json::to_value(v),
+            Self::SessionTitleChanged(v) => serde_json::to_value(v),
             Self::ModeChanged(v) => serde_json::to_value(v),
             Self::SessionForked(v) => serde_json::to_value(v),
             Self::SessionArchived(v) => serde_json::to_value(v),
@@ -525,6 +535,7 @@ impl KnownPayload {
         let known = match event_type {
             "session.created" => Self::SessionCreated(from_value(value)?),
             "session.resumed" => Self::SessionResumed(from_value(value)?),
+            "session.title.changed" => Self::SessionTitleChanged(from_value(value)?),
             "mode.changed" => Self::ModeChanged(from_value(value)?),
             "session.forked" => Self::SessionForked(from_value(value)?),
             "session.archived" => Self::SessionArchived(from_value(value)?),

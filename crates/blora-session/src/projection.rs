@@ -226,6 +226,11 @@ pub fn apply_event(projection: &mut SessionProjection, event: &EventEnvelope) ->
             projection.session = Some(record);
         }
         KnownPayload::SessionResumed(_) => touch_session(projection, event.timestamp)?,
+        KnownPayload::SessionTitleChanged(changed) => {
+            let session = session_mut(projection)?;
+            session.title = Some(changed.title);
+            session.updated_at = event.timestamp;
+        }
         KnownPayload::ModeChanged(changed) => {
             let session = session_mut(projection)?;
             session.mode = changed.to;

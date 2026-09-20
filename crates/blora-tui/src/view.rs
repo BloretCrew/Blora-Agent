@@ -798,7 +798,7 @@ fn render_header(
     let title = session
         .and_then(|item| item.title.clone())
         .filter(|text| !text.is_empty())
-        .unwrap_or_else(|| id.clone());
+        .unwrap_or_else(|| "未命名会话".to_owned());
     let mode_session_indices: Vec<usize> = model
         .sessions
         .iter()
@@ -2524,7 +2524,7 @@ pub(crate) fn title_label(
         .map(str::trim)
         .filter(|text| !text.is_empty() && *text != "tui")
         .map(|text| ellipsize(text, 32))
-        .unwrap_or_default()
+        .unwrap_or_else(|| "未命名会话".to_owned())
 }
 
 fn line_count(text: &str) -> usize {
