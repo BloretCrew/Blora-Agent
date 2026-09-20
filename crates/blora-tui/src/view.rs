@@ -241,6 +241,11 @@ impl ModeMenu {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct SessionPicker {
+    pub selected: usize,
+}
+
 pub struct FrameModel<'a> {
     pub workspace: &'a Path,
     pub sessions: &'a [SessionSummary],
@@ -267,6 +272,7 @@ pub struct FrameModel<'a> {
     pub model: &'a str,
     pub provider: &'a str,
     pub mode_menu: Option<&'a ModeMenu>,
+    pub session_picker: Option<&'a SessionPicker>,
     pub user_label: &'a str,
     pub running: bool,
     pub tick: u64,
@@ -283,6 +289,8 @@ pub enum Hit {
     Deny,
     PrevSession,
     NextSession,
+    SessionPicker,
+    SessionPickerRow(usize),
     Mode,
     ModeRow(usize),
     CancelRun,
@@ -333,6 +341,8 @@ pub struct HitMap {
     pub deny: Option<Rect>,
     pub prev_session: Option<Rect>,
     pub next_session: Option<Rect>,
+    pub session_picker: Option<Rect>,
+    pub session_picker_rows: Vec<(Rect, usize)>,
     pub mode: Option<Rect>,
     pub mode_rows: Vec<(Rect, usize)>,
     pub cancel_run: Option<Rect>,
@@ -395,6 +405,14 @@ impl HitMap {
             if contains(*rect, col, row) {
                 return Some(Hit::ThemeRow(*idx));
             }
+        }
+        for (rect, idx) in &self.session_picker_rows {
+            if contains(*rect, col, row) {
+                return Some(Hit::SessionPickerRow(*idx));
+            }
+        }
+        if self.session_picker.is_some_and(|rect| contains(rect, col, row)) {
+            return Some(Hit::SessionPicker);
         }
         for (rect, idx) in &self.mode_rows {
             if contains(*rect, col, row) {
@@ -545,6 +563,52 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
     render_composer(frame, composer, model, &theme, &mut hits);
     render_status(frame, status, model, &theme);
     render_hints(frame, hints, model, &theme, &mut hits);
+    if let Some(picker) = model.session_picker {
+        let current_mode = model
+            .projection
+            .and_then(|projection| projection.session.as_ref())
+            .map(|session| session.mode)
+            .unwrap_or(Mode::Code);
+        let matching: Vec<(usize, &SessionSummary)> = model
+            .sessions
+            .iter()
+            .enumerate()
+            .filter(|(_, session)| session.mode == current_mode)
+            .collect();
+        let visible = matching.len().clamp(1, 12) as u16;
+        let menu_width = 64u16.min(area.width.saturating_sub(4));
+        let menu_height = (visible + 2).min(area.height.saturating_sub(4));
+        let Some(menu_area) = dialog_rect(area, menu_width, menu_height) else {
+            return hits;
+        };
+        frame.render_widget(Clear, menu_area);
+        let block = Block::bordered()
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .title(format!("{} 会话", mode_label(current_mode.as_str())))
+            .style(theme.base())
+            .border_style(theme.fg(theme.hairline).bg(theme.bg));
+        let inner = block.inner(menu_area);
+        frame.render_widget(block, menu_area);
+        let rows = split_n_rows(inner, visible);
+        for (row_index, (session_index, session)) in matching.iter().take(visible as usize).enumerate() {
+            if let Some(rect) = rows.get(row_index).copied() {
+                hits.session_picker_rows.push((rect, *session_index));
+                let selected = row_index == picker.selected;
+                if selected {
+                    frame.render_widget(Block::default().style(Style::default().bg(theme.bg_select)), rect);
+                }
+                let marker = if selected { "❯ " } else { "  " };
+                let title = session.title.as_deref().filter(|title| !title.is_empty()).unwrap_or("未命名会话");
+                let line = Line::from(vec![
+                    Span::styled(marker, theme.fg(theme.rose)),
+                    Span::styled(ellipsize(title, 30), theme.fg(theme.text)),
+                    Span::styled("  ", theme.mute()),
+                    Span::styled(short_id(session.id.as_str()), theme.mute()),
+                ]);
+                frame.render_widget(Paragraph::new(line).style(theme.base()), rect);
+            }
+        }
+    }
     if let Some(menu) = model.mode_menu {
         let menu_width = 58u16.min(area.width.saturating_sub(4));
         let menu_height = (MODE_OPTIONS.len() as u16 * 3 + 2).min(area.height.saturating_sub(4));
@@ -773,6 +837,16 @@ fn render_header(
         x,
         y: inner.y,
         width: 1,
+        height: 1,
+    });
+    let counter_x = inner.x + u16::try_from(
+        "Blora".width() + "  ·  ".width() + mode_title.width() + "  ·  ".width() + 2,
+    )
+    .unwrap_or(0);
+    hits.session_picker = Some(Rect {
+        x: counter_x,
+        y: inner.y,
+        width: u16::try_from(counter.width()).unwrap_or(3),
         height: 1,
     });
     frame.render_widget(Paragraph::new(left).style(theme.base()), inner);
@@ -2468,7 +2542,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_passport_model_displays_blora_not_mock {
+    fn empty_passport_model_displays_blora_not_mock() {
         assert_eq!(display_model_name("", "Bloret PassPort"), "blora");
         assert_eq!(display_model_name("", "blora"), "blora");
         assert_eq!(display_model_name("", "crewrouter"), "—");

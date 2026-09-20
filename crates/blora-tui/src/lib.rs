@@ -89,6 +89,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut add_provider_dialog: Option<view::AddProviderDialog> = None;
     let mut theme_dialog: Option<view::ThemeDialog> = None;
     let mut mode_menu: Option<view::ModeMenu> = None;
+    let mut session_picker: Option<view::SessionPicker> = None;
     // PassPort user token of the logged-in user; drives the default provider.
     let mut passport_user_token: Option<String> = None;
     let mut passport_username = String::from("you");
@@ -303,6 +304,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             model,
                             provider,
                             mode_menu: mode_menu.as_ref(),
+                            session_picker: session_picker.as_ref(),
                             user_label: &passport_username,
                             running: job.is_some(),
                             tick,
@@ -761,6 +763,30 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             }
                             // The login dialog is only hidden: polling keeps
                             // running so completing authorization still lands.
+                            KeyCode::Enter if session_picker.is_some() => {
+                                if let Some(picker) = session_picker.take() {
+                                    select_mode_session(
+                                        runtime,
+                                        &sessions,
+                                        &mut index,
+                                        current_mode_session_indices(&sessions, session_id.as_ref()),
+                                        picker.selected,
+                                    );
+                                }
+                            }
+                            KeyCode::Up if session_picker.is_some() => {
+                                if let Some(picker) = session_picker.as_mut() {
+                                    picker.selected = picker.selected.saturating_sub(1);
+                                }
+                            }
+                            KeyCode::Down if session_picker.is_some() => {
+                                if let Some(picker) = session_picker.as_mut() {
+                                    picker.selected = (picker.selected + 1).min(mode_session_count(&sessions, session_id.as_ref()).saturating_sub(1));
+                                }
+                            }
+                            KeyCode::Esc if session_picker.is_some() => {
+                                session_picker = None;
+                            }
                             KeyCode::Enter if mode_menu.is_some() => {
                                 if let Some(menu) = mode_menu.take()
                                     && let Some(id) = session_id.as_ref()
@@ -872,6 +898,24 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             },
                             MouseEventKind::Down(MouseButton::Left) => {
                                 let hit = hits.hit(mouse.column, mouse.row);
+                                if let Some(view::Hit::SessionPickerRow(session_index)) = hit {
+                                    index = session_index;
+                                    session_picker = None;
+                                    cached = None;
+                                    continue;
+                                }
+                                if matches!(hit, Some(view::Hit::SessionPicker)) {
+                                    let current_mode = projection
+                                        .and_then(|projection| projection.session.as_ref())
+                                        .map(|session| session.mode)
+                                        .unwrap_or(Mode::Code);
+                                    let selected = sessions[..index]
+                                        .iter()
+                                        .filter(|session| session.mode == current_mode)
+                                        .count();
+                                    session_picker = Some(view::SessionPicker { selected });
+                                    continue;
+                                }
                                 if let Some(view::Hit::ModeRow(index)) = hit {
                                     if let Some(id) = session_id.as_ref() {
                                         let option = view::MODE_OPTIONS[index.min(view::MODE_OPTIONS.len() - 1)];
@@ -1625,6 +1669,42 @@ fn usable_passport_token(
             Ok(Some(refreshed.access_token))
         }
         Err(_) => Ok(None),
+    }
+}
+
+fn mode_session_count(sessions: &[blora_storage::SessionSummary], session_id: Option<&SessionId>) -> usize {
+    let mode = session_id
+        .and_then(|id| sessions.iter().find(|session| session.id == *id))
+        .map(|session| session.mode)
+        .unwrap_or(Mode::Code);
+    sessions.iter().filter(|session| session.mode == mode).count()
+}
+
+fn current_mode_session_indices(
+    sessions: &[blora_storage::SessionSummary],
+    session_id: Option<&SessionId>,
+) -> Vec<usize> {
+    let mode = session_id
+        .and_then(|id| sessions.iter().find(|session| session.id == *id))
+        .map(|session| session.mode)
+        .unwrap_or(Mode::Code);
+    sessions
+        .iter()
+        .enumerate()
+        .filter(|(_, session)| session.mode == mode)
+        .map(|(index, _)| index)
+        .collect()
+}
+
+fn select_mode_session(
+    _runtime: &Runtime,
+    _sessions: &[blora_storage::SessionSummary],
+    index: &mut usize,
+    indices: Vec<usize>,
+    selected: usize,
+) {
+    if let Some(session_index) = indices.get(selected) {
+        *index = *session_index;
     }
 }
 
