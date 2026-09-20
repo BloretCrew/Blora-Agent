@@ -2089,11 +2089,7 @@ fn render_composer(
     };
     frame.render_widget(Paragraph::new(prompt_line).style(theme.base()), prompt);
 
-    let model_name = if model.model.is_empty() {
-        "mock"
-    } else {
-        model.model
-    };
+    let model_name = display_model_name(model.model, model.provider);
     let perm = if model.auto_approve { "yolo" } else { "ask" };
     let provider = if model.provider.is_empty() {
         "—"
@@ -2365,6 +2361,21 @@ fn sanitize_title(text: &str) -> String {
         .collect()
 }
 
+fn display_model_name<'a>(model: &'a str, provider: &str) -> &'a str {
+    if !model.is_empty() {
+        return model;
+    }
+    if provider.eq_ignore_ascii_case("blora")
+        || provider.eq_ignore_ascii_case("passport")
+        || provider.eq_ignore_ascii_case("bloret-passport")
+        || provider.eq_ignore_ascii_case("bloret passport")
+    {
+        "blora"
+    } else {
+        "—"
+    }
+}
+
 fn dialog_rect(area: Rect, width: u16, height: u16) -> Option<Rect> {
     if width == 0 || height == 0 || width > area.width || height > area.height {
         return None;
@@ -2454,6 +2465,15 @@ mod tests {
         let mid_text: String = mid.spans.iter().map(|span| span.content.as_ref()).collect();
         assert!(mid_text.contains("▣"), "{mid_text}");
         assert!(mid_text.contains("▢"), "{mid_text}");
+    }
+
+    #[test]
+    #[test]
+    fn empty_passport_model_displays_blora_not_mock() {
+        assert_eq!(display_model_name("", "Bloret PassPort"), "blora");
+        assert_eq!(display_model_name("", "blora"), "blora");
+        assert_eq!(display_model_name("", "crewrouter"), "—");
+        assert_eq!(display_model_name("fusion", "crewrouter"), "fusion");
     }
 
     #[test]
