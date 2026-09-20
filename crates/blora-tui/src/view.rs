@@ -843,7 +843,7 @@ fn render_transcript(frame: &mut Frame<'_>, area: Rect, model: &FrameModel<'_>, 
 fn welcome_lines(theme: &Theme) -> Vec<Line<'static>> {
     vec![
         Line::default(),
-        Line::from(Span::styled("blora", theme.rose_bold())),
+        Line::from(Span::styled("Blora", theme.rose_bold())),
         Line::from(Span::styled(
             "local-first code, work, and agent",
             theme.mute(),
@@ -929,7 +929,7 @@ fn transcript_lines(
             TranscriptItem::Assistant { text, .. } => {
                 push_block(
                     &mut out,
-                    "blora",
+                    "Blora",
                     theme.sage,
                     text,
                     width,
