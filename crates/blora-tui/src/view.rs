@@ -950,12 +950,22 @@ fn render_context_dialog(
             Span::styled(format!("{} / {} tokens ({used_pct}%)", fmt_tokens(used), fmt_tokens(window)), theme.fg(theme.sage)),
         ]),
         Line::from(Span::styled("总量进度", theme.mute())),
-        progress_line(used, window, inner.width as usize, theme),
+        progress_line(
+            &[
+                (system, theme.rose),
+                (messages, theme.sage),
+                (output, theme.amber),
+                (free, theme.text_mute),
+            ],
+            window,
+            inner.width as usize,
+            theme,
+        ),
         Line::default(),
-        usage_row("系统提示", system, window, theme),
-        usage_row("消息内容", messages, window, theme),
-        usage_row("输出与工具", output, window, theme),
-        usage_row("可用空间", free, window, theme),
+        usage_row("系统提示", system, window, theme.rose, theme),
+        usage_row("消息内容", messages, window, theme.sage, theme),
+        usage_row("输出与工具", output, window, theme.amber, theme),
+        usage_row("可用空间", free, window, theme.text_mute, theme),
         Line::default(),
         Line::from(Span::styled("数据来自当前会话的累计 token 使用量；百分比按上下文窗口估算。", theme.mute())),
         Line::from(Span::styled("Esc 关闭 · ↑/↓ 滚动", theme.dim())),
@@ -981,19 +991,44 @@ fn percentage(value: u64, total: u64) -> u64 {
     ((value as f64 / total.max(1) as f64) * 100.0).round() as u64
 }
 
-fn progress_line(value: u64, total: u64, width: usize, theme: &Theme) -> Line<'static> {
+fn progress_line(
+    parts: &[(u64, ratatui::style::Color)],
+    total: u64,
+    width: usize,
+    theme: &Theme,
+) -> Line<'static> {
     let width = width.max(10);
-    let filled = ((value.min(total) as f64 / total.max(1) as f64) * width as f64).round() as usize;
-    let filled = filled.min(width);
-    Line::from(vec![
-        Span::styled("█".repeat(filled), theme.fg(theme.sage)),
-        Span::styled("░".repeat(width - filled), theme.mute()),
-    ])
+    let total = total.max(1);
+    let mut cells = Vec::new();
+    let mut used = 0usize;
+    for (index, (value, color)) in parts.iter().enumerate() {
+        let cells_for_part = if index + 1 == parts.len() {
+            width.saturating_sub(used)
+        } else {
+            ((*value as f64 / total as f64) * width as f64).round() as usize
+        };
+        let cells_for_part = cells_for_part.min(width.saturating_sub(used));
+        if cells_for_part > 0 {
+            cells.push(Span::styled("█".repeat(cells_for_part), theme.fg(*color)));
+            used += cells_for_part;
+        }
+    }
+    if used < width {
+        cells.push(Span::styled("░".repeat(width - used), theme.mute()));
+    }
+    Line::from(cells)
 }
 
-fn usage_row(label: &str, value: u64, total: u64, theme: &Theme) -> Line<'static> {
+fn usage_row(
+    label: &str,
+    value: u64,
+    total: u64,
+    color: ratatui::style::Color,
+    theme: &Theme,
+) -> Line<'static> {
     Line::from(vec![
-        Span::styled(format!("{label:<14}"), theme.fg(theme.text)),
+        Span::styled("◆ ", theme.fg(color)),
+        Span::styled(format!("{label:<12}"), theme.fg(theme.text)),
         Span::styled(format!("{:>8} tokens  ", fmt_tokens(value)), theme.fg(theme.text_dim)),
         Span::styled(format!("{:>3}%", percentage(value, total)), theme.mute()),
     ])
