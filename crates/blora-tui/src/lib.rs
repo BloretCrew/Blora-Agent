@@ -4,6 +4,7 @@
 //! Terminal UI. Renders session projections, never provider payloads.
 
 mod markdown;
+mod selection;
 mod slash;
 mod theme;
 mod view;
@@ -151,6 +152,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut last_window_title = String::new();
     let mut last_routing_session: Option<SessionId> = None;
     let mut pointer: Option<(u16, u16)> = None;
+    let mut text_selection: Option<selection::Selection> = None;
     let mut hits = view::HitMap::default();
     let mut cancel = CancelToken::new();
     let mut cached: Option<(SessionId, blora_session::SessionProjection)> = None;
@@ -853,7 +855,11 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     scroll = scroll.saturating_sub(3);
                                 }
                             }
-                            MouseEventKind::Moved => match hits.hit(mouse.column, mouse.row) {
+                            MouseEventKind::Moved | MouseEventKind::Drag(MouseButton::Left) => {
+                                if let Some(selection) = text_selection.as_mut() {
+                                    selection.end = (mouse.column, mouse.row);
+                                }
+                                match hits.hit(mouse.column, mouse.row) {
                                 Some(view::Hit::Slash(idx)) => {
                                     slash_selected = idx;
                                 }
@@ -895,9 +901,33 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     }
                                 }
                                 _ => {}
-                            },
+                                }
+                            }
+                            MouseEventKind::Up(MouseButton::Left) => {
+                                if let Some(selection) = text_selection.take() {
+                                    if let Some(projection) = projection {
+                                        let text = selection::selected_text(
+                                            projection,
+                                            hits.transcript,
+                                            selection,
+                                            scroll,
+                                            hide_tools,
+                                        );
+                                        if !text.is_empty() {
+                                            status = copy_text_to_clipboard(&text);
+                                        }
+                                    }
+                                }
+                            }
                             MouseEventKind::Down(MouseButton::Left) => {
                                 let hit = hits.hit(mouse.column, mouse.row);
+                                if hits.transcript.contains((mouse.column, mouse.row).into()) {
+                                    text_selection = Some(selection::Selection {
+                                        start: (mouse.column, mouse.row),
+                                        end: (mouse.column, mouse.row),
+                                    });
+                                    continue;
+                                }
                                 if let Some(view::Hit::SessionPickerRow(session_index)) = hit {
                                     index = session_index;
                                     session_picker = None;
@@ -2918,6 +2948,30 @@ fn write_rules(workspace: &Path) -> String {
     }
 }
 
+fn copy_text_to_clipboard(text: &str) -> String {
+    for (program, args) in [
+        ("wl-copy", &[] as &[&str]),
+        ("xclip", &["-selection", "clipboard"] as &[&str]),
+        ("xsel", &["--clipboard", "--input"] as &[&str]),
+        ("pbcopy", &[] as &[&str]),
+    ] {
+        if let Ok(mut child) = std::process::Command::new(program)
+            .args(args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(text.as_bytes());
+            }
+            let _ = child.wait();
+            return format!("copied {} chars", text.chars().count());
+        }
+    }
+    format!("no clipboard tool; selected {} chars", text.chars().count())
+}
+
 fn copy_last_assistant(runtime: &Runtime, session_id: &SessionId) -> String {
     let text = runtime
         .show_session(session_id)
@@ -2938,6 +2992,7 @@ fn copy_last_assistant(runtime: &Runtime, session_id: &SessionId) -> String {
     for (program, args) in [
         ("wl-copy", &[] as &[&str]),
         ("xclip", &["-selection", "clipboard"] as &[&str]),
+        ("xsel", &["--clipboard", "--input"] as &[&str]),
         ("pbcopy", &[] as &[&str]),
     ] {
         if let Ok(mut child) = std::process::Command::new(program)

@@ -359,6 +359,7 @@ dependencies = [
  "blora-auth",
  "blora-catalog",
  "blora-context",
+ "blora-events",
  "blora-model",
  "blora-runtime",
  "blora-session",

@@ -16,7 +16,7 @@ use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::slash::{self, SlashCommand};
-use crate::theme::{Palette, Scheme, Theme, ThemePref};
+use crate::theme::{Scheme, Theme, ThemePref};
 
 const PAD: u16 = 2;
 /// Work indicator: ping-pong through this star sequence.
@@ -792,9 +792,6 @@ fn render_header(
         .projection
         .and_then(|projection| projection.session.as_ref());
     let mode = session.map(|item| item.mode.as_str()).unwrap_or("code");
-    let id = session
-        .map(|item| short_id(item.id.as_str()))
-        .unwrap_or_else(|| "—".to_owned());
     let title = session
         .and_then(|item| item.title.clone())
         .filter(|text| !text.is_empty())
