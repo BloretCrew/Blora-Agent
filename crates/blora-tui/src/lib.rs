@@ -937,7 +937,11 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             MouseEventKind::Down(MouseButton::Left) => {
                                 let hit = hits.hit(mouse.column, mouse.row);
                                 if matches!(hit, Some(view::Hit::ContextUsage)) {
-                                    context_dialog = Some(view::ContextDialog { scroll: 0 });
+                                    context_dialog = Some(view::ContextDialog {
+                                        scroll: 0,
+                                        fullscreen: false,
+                                        minimized: false,
+                                    });
                                     continue;
                                 }
                                 if matches!(hit, Some(view::Hit::ProviderTarget)) {
@@ -1182,8 +1186,9 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     } else if let Some(dialog) = provider_dialog.as_mut() {
                                         dialog.minimized = true;
                                         dialog.fullscreen = false;
-                                    } else if context_dialog.is_some() {
-                                        context_dialog = None;
+                                    } else if let Some(dialog) = context_dialog.as_mut() {
+                                        dialog.minimized = true;
+                                        dialog.fullscreen = false;
                                     } else {
                                         passport_dialog = None;
                                     }
@@ -1208,8 +1213,12 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                         } else {
                                             dialog.fullscreen = !dialog.fullscreen;
                                         }
-                                    } else if context_dialog.is_some() {
-                                        context_dialog = None;
+                                    } else if let Some(dialog) = context_dialog.as_mut() {
+                                        if dialog.minimized {
+                                            dialog.minimized = false;
+                                        } else {
+                                            dialog.fullscreen = !dialog.fullscreen;
+                                        }
                                     } else if let Some(url) = passport_url.as_deref() {
                                         let _ =
                                             std::process::Command::new("xdg-open").arg(url).spawn();
