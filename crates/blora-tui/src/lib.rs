@@ -3,6 +3,7 @@
 
 //! Terminal UI. Renders session projections, never provider payloads.
 
+mod i18n;
 mod markdown;
 mod selection;
 mod slash;
@@ -80,6 +81,7 @@ fn start_passport_login() -> Result<
 }
 
 pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
+    let _ = i18n::init();
     let mut passport_url = None;
     let mut passport_receiver: Option<std::sync::mpsc::Receiver<blora_auth::PassportUser>> = None;
     let mut passport_browser_opened = false;

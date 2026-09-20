@@ -21,6 +21,8 @@ chrono.workspace = true
 crossterm.workspace = true
 ratatui.workspace = true
 unicode-width.workspace = true
+ureq.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true
