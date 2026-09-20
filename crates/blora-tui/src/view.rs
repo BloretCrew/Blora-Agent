@@ -682,7 +682,8 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
         hits.provider_model_rows = dialog_hits.provider_model_rows;
         hits.traffic_lights = dialog_hits.traffic_lights;
     } else if let Some(dialog) = model.context_dialog {
-        render_context_dialog(frame, area, model.projection, dialog, &theme);
+        let dialog_hits = render_context_dialog(frame, area, model.projection, dialog, model.pointer, &theme);
+        hits.traffic_lights = dialog_hits.traffic_lights;
     }
     hits
 }
@@ -922,9 +923,11 @@ fn render_context_dialog(
     area: Rect,
     projection: Option<&SessionProjection>,
     dialog: &ContextDialog,
+    pointer: Option<(u16, u16)>,
     theme: &Theme,
-) {
-    let Some(projection) = projection else { return };
+) -> HitMap {
+    let mut hits = HitMap::default();
+    let Some(projection) = projection else { return hits };
     let window = blora_context::context_window().max(1);
     let used = projection.input_tokens.saturating_add(projection.output_tokens);
     let input = projection.input_tokens.min(used);
@@ -934,7 +937,7 @@ fn render_context_dialog(
     let free = window.saturating_sub(used);
     let modal_width = 72u16.min(area.width.saturating_sub(4)).max(40);
     let modal_height = 17u16.min(area.height.saturating_sub(4)).max(10);
-    let Some(modal) = dialog_rect(area, modal_width, modal_height) else { return };
+    let Some(modal) = dialog_rect(area, modal_width, modal_height) else { return hits };
     frame.render_widget(Clear, modal);
     let block = Block::bordered()
         .border_type(ratatui::widgets::BorderType::Rounded)
@@ -943,6 +946,9 @@ fn render_context_dialog(
         .border_style(theme.fg(theme.hairline).bg(theme.bg));
     let inner = block.inner(modal);
     frame.render_widget(block, modal);
+    let title_row = Rect::new(inner.x, inner.y, inner.width, 1);
+    paint_traffic_title(frame, title_row, "上下文用量", pointer, theme, &mut hits);
+    let content = Rect::new(inner.x, inner.y.saturating_add(1), inner.width, inner.height.saturating_sub(1));
     let used_pct = percentage(used, window);
     let mut lines = vec![
         Line::from(vec![
@@ -958,7 +964,7 @@ fn render_context_dialog(
                 (free, theme.text_mute),
             ],
             window,
-            inner.width as usize,
+            content.width as usize,
             theme,
         ),
         Line::default(),
@@ -970,10 +976,11 @@ fn render_context_dialog(
         Line::from(Span::styled("数据来自当前会话的累计 token 使用量；百分比按上下文窗口估算。", theme.mute())),
         Line::from(Span::styled("Esc 关闭 · ↑/↓ 滚动", theme.dim())),
     ];
-    let visible = lines.len().saturating_sub(inner.height as usize);
+    let visible = lines.len().saturating_sub(content.height as usize);
     let start = dialog.scroll.min(visible);
     lines.drain(0..start);
-    frame.render_widget(Paragraph::new(lines).style(theme.base()), inner);
+    frame.render_widget(Paragraph::new(lines).style(theme.base()), content);
+    hits
 }
 
 fn estimate_system_tokens(projection: &SessionProjection) -> u64 {

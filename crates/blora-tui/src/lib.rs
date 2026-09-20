@@ -1164,6 +1164,8 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                         status = "add provider cancelled".to_owned();
                                     } else if provider_dialog.take().is_some() {
                                         status = "provider picker closed".to_owned();
+                                    } else if context_dialog.take().is_some() {
+                                        status = "context dialog closed".to_owned();
                                     } else {
                                         cancel.cancel();
                                         break Ok(());
@@ -1180,6 +1182,8 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     } else if let Some(dialog) = provider_dialog.as_mut() {
                                         dialog.minimized = true;
                                         dialog.fullscreen = false;
+                                    } else if context_dialog.is_some() {
+                                        context_dialog = None;
                                     } else {
                                         passport_dialog = None;
                                     }
@@ -1204,6 +1208,8 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                         } else {
                                             dialog.fullscreen = !dialog.fullscreen;
                                         }
+                                    } else if context_dialog.is_some() {
+                                        context_dialog = None;
                                     } else if let Some(url) = passport_url.as_deref() {
                                         let _ =
                                             std::process::Command::new("xdg-open").arg(url).spawn();
