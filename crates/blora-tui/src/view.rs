@@ -799,7 +799,20 @@ fn render_header(
         .and_then(|item| item.title.clone())
         .filter(|text| !text.is_empty())
         .unwrap_or_else(|| id.clone());
-    let counter = format!("{}/{}", model.index + 1, model.sessions.len().max(1));
+    let mode_session_indices: Vec<usize> = model
+        .sessions
+        .iter()
+        .enumerate()
+        .filter(|(_, session)| session.mode.as_str() == mode)
+        .map(|(index, _)| index)
+        .collect();
+    let mode_position = mode_session_indices
+        .iter()
+        .position(|index| *index == model.index)
+        .map(|position| position + 1)
+        .unwrap_or(1);
+    let mode_count = mode_session_indices.len().max(1);
+    let counter = format!("{mode_position}/{mode_count}");
     let left = Line::from(vec![
         Span::styled("Blora", theme.rose_bold()),
         Span::styled("  ·  ", theme.mute()),
