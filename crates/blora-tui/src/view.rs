@@ -208,6 +208,8 @@ pub struct ThemeDialog {
 #[derive(Clone, Debug)]
 pub struct ModeMenu {
     pub selected: usize,
+    pub fullscreen: bool,
+    pub minimized: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -245,6 +247,8 @@ impl ModeMenu {
 #[derive(Clone, Debug)]
 pub struct SessionPicker {
     pub selected: usize,
+    pub fullscreen: bool,
+    pub minimized: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -603,8 +607,14 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
             .collect();
         let visible = matching.len().clamp(1, 12) as u16;
         let menu_width = 64u16.min(area.width.saturating_sub(4));
-        let menu_height = (visible + 2).min(area.height.saturating_sub(4));
-        let Some(menu_area) = dialog_rect(area, menu_width, menu_height) else {
+        let menu_height = (visible + 4).min(area.height.saturating_sub(4));
+        let Some(menu_area) = dialog_outer(
+            area,
+            menu_width,
+            menu_height,
+            picker.fullscreen,
+            picker.minimized,
+        ) else {
             return hits;
         };
         frame.render_widget(Clear, menu_area);
@@ -615,7 +625,26 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
             .border_style(theme.fg(theme.hairline).bg(theme.bg));
         let inner = block.inner(menu_area);
         frame.render_widget(block, menu_area);
-        let rows = split_n_rows(inner, visible);
+        let [title_row, body, hint_row] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Min(2),
+            Constraint::Length(1),
+        ])
+        .areas(inner);
+        let mut dialog_hits = HitMap::default();
+        paint_traffic_title(
+            frame,
+            title_row,
+            &format!("{} 会话", mode_label(current_mode.as_str())),
+            model.pointer,
+            &theme,
+            &mut dialog_hits,
+        );
+        hits.traffic_lights = dialog_hits.traffic_lights;
+        if picker.minimized {
+            return hits;
+        }
+        let rows = split_n_rows(body, visible);
         for (row_index, (session_index, session)) in matching.iter().take(visible as usize).enumerate() {
             if let Some(rect) = rows.get(row_index).copied() {
                 hits.session_picker_rows.push((rect, *session_index));
@@ -634,11 +663,22 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
                 frame.render_widget(Paragraph::new(line).style(theme.base()), rect);
             }
         }
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled("↑/↓ 选择 · Enter 确认 · Esc 关闭", theme.mute())))
+                .style(theme.base()),
+            hint_row,
+        );
     }
     if let Some(menu) = model.mode_menu {
         let menu_width = 58u16.min(area.width.saturating_sub(4));
-        let menu_height = (MODE_OPTIONS.len() as u16 * 3 + 2).min(area.height.saturating_sub(4));
-        let Some(menu_area) = dialog_rect(area, menu_width, menu_height) else {
+        let menu_height = (MODE_OPTIONS.len() as u16 * 3 + 4).min(area.height.saturating_sub(4));
+        let Some(menu_area) = dialog_outer(
+            area,
+            menu_width,
+            menu_height,
+            menu.fullscreen,
+            menu.minimized,
+        ) else {
             return hits;
         };
         frame.render_widget(Clear, menu_area);
@@ -649,7 +689,19 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
             .border_style(theme.fg(theme.hairline).bg(theme.bg));
         let inner = block.inner(menu_area);
         frame.render_widget(block, menu_area);
-        let rows = split_n_rows(inner, MODE_OPTIONS.len() as u16);
+        let [title_row, body, hint_row] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Min(3),
+            Constraint::Length(1),
+        ])
+        .areas(inner);
+        let mut dialog_hits = HitMap::default();
+        paint_traffic_title(frame, title_row, "运行模式", model.pointer, &theme, &mut dialog_hits);
+        hits.traffic_lights = dialog_hits.traffic_lights;
+        if menu.minimized {
+            return hits;
+        }
+        let rows = split_n_rows(body, MODE_OPTIONS.len() as u16);
         for (index, option) in MODE_OPTIONS.iter().enumerate() {
             if let Some(rect) = rows.get(index).copied() {
                 hits.mode_rows.push((rect, index));
@@ -667,6 +719,11 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
                 frame.render_widget(Paragraph::new(line).style(theme.base()), rect);
             }
         }
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled("↑/↓ 选择 · Enter 确认 · Esc 关闭", theme.mute())))
+                .style(theme.base()),
+            hint_row,
+        );
     }
     if let Some(dialog) = model.passport_dialog {
         let dialog_hits = render_passport_dialog(frame, area, dialog, model.pointer, &theme);
@@ -2692,6 +2749,7 @@ fn display_model_name<'a>(model: &'a str, provider: &str) -> &'a str {
     }
 }
 
+#[allow(dead_code)]
 fn dialog_rect(area: Rect, width: u16, height: u16) -> Option<Rect> {
     if width == 0 || height == 0 || width > area.width || height > area.height {
         return None;

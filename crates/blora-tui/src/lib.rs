@@ -771,6 +771,11 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             }
                             // The login dialog is only hidden: polling keeps
                             // running so completing authorization still lands.
+                            KeyCode::Enter if session_picker.as_ref().is_some_and(|picker| picker.minimized) => {
+                                if let Some(picker) = session_picker.as_mut() {
+                                    picker.minimized = false;
+                                }
+                            }
                             KeyCode::Enter if session_picker.is_some() => {
                                 if let Some(picker) = session_picker.take() {
                                     select_mode_session(
@@ -794,6 +799,11 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             }
                             KeyCode::Esc if session_picker.is_some() => {
                                 session_picker = None;
+                            }
+                            KeyCode::Enter if mode_menu.as_ref().is_some_and(|menu| menu.minimized) => {
+                                if let Some(menu) = mode_menu.as_mut() {
+                                    menu.minimized = false;
+                                }
                             }
                             KeyCode::Enter if mode_menu.is_some() => {
                                 if let Some(menu) = mode_menu.take()
@@ -978,7 +988,11 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                         .iter()
                                         .filter(|session| session.mode == current_mode)
                                         .count();
-                                    session_picker = Some(view::SessionPicker { selected });
+                                    session_picker = Some(view::SessionPicker {
+                                        selected,
+                                        fullscreen: false,
+                                        minimized: false,
+                                    });
                                     continue;
                                 }
                                 if let Some(view::Hit::ModeRow(index)) = hit {
@@ -1001,7 +1015,11 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                         .iter()
                                         .position(|option| option.mode == current)
                                         .unwrap_or(0);
-                                    mode_menu = Some(view::ModeMenu { selected });
+                                    mode_menu = Some(view::ModeMenu {
+                                        selected,
+                                        fullscreen: false,
+                                        minimized: false,
+                                    });
                                     continue;
                                 }
                                 // Provider dialog rows: click selects and confirms.
