@@ -313,6 +313,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             running: job.is_some(),
                             tick,
                             pointer,
+                            text_selection,
                         },
                     );
                 })
@@ -377,6 +378,9 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             continue;
                         }
                         match key.code {
+                            KeyCode::Esc if text_selection.is_some() => {
+                                text_selection = None;
+                            }
                             KeyCode::Esc if add_provider_dialog.is_some() => {
                                 if let Some(dialog) = add_provider_dialog.as_mut() {
                                     dialog.error = None;
@@ -919,7 +923,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 }
                             }
                             MouseEventKind::Up(MouseButton::Left) => {
-                                if let Some(selection) = text_selection.take() {
+                                if let Some(selection) = text_selection {
                                     if let Some(projection) = projection {
                                         let text = selection::selected_text(
                                             projection,

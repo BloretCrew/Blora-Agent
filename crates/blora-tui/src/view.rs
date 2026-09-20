@@ -15,6 +15,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use crate::selection::Selection;
 use crate::slash::{self, SlashCommand};
 use crate::theme::{Scheme, Theme, ThemePref};
 
@@ -285,6 +286,7 @@ pub struct FrameModel<'a> {
     pub running: bool,
     pub tick: u64,
     pub pointer: Option<(u16, u16)>,
+    pub text_selection: Option<Selection>,
 }
 
 /// A clickable region from the last painted frame.
@@ -1080,6 +1082,7 @@ fn render_transcript(frame: &mut Frame<'_>, area: Rect, model: &FrameModel<'_>, 
                 model.running,
                 model.tick,
                 model.user_label,
+                model.text_selection,
                 theme,
             );
             if rendered.is_empty() {
@@ -1090,6 +1093,7 @@ fn render_transcript(frame: &mut Frame<'_>, area: Rect, model: &FrameModel<'_>, 
         },
     );
     let visible = transcript_window(lines, inner.height as usize, model.scroll);
+    let visible = highlight_selection(visible, inner, model.text_selection, theme);
     frame.render_widget(Paragraph::new(visible).style(theme.base()), inner);
 }
 
@@ -1117,6 +1121,7 @@ fn transcript_lines(
     running: bool,
     tick: u64,
     user_label: &str,
+    _selection: Option<Selection>,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
     let needle = search.map(str::to_ascii_lowercase);
@@ -1292,6 +1297,53 @@ fn transcript_lines(
 
 /// Keep the latest lines in view. `scroll` is how many lines above the bottom
 /// to reveal; 0 always shows the newest message.
+fn highlight_selection(
+    lines: Vec<Line<'static>>,
+    rect: Rect,
+    selection: Option<Selection>,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let Some(selection) = selection else { return lines };
+    let start_row = selection.start.1.min(selection.end.1);
+    let end_row = selection.start.1.max(selection.end.1);
+    lines
+        .into_iter()
+        .enumerate()
+        .map(|(index, line)| {
+            let row = rect.y.saturating_add(index as u16);
+            if row < start_row || row > end_row {
+                return line;
+            }
+            let start_col = if row == start_row {
+                if selection.start.1 <= selection.end.1 { selection.start.0 } else { selection.end.0 }
+            } else { rect.x };
+            let end_col = if row == end_row {
+                if selection.start.1 <= selection.end.1 { selection.end.0 } else { selection.start.0 }
+            } else { rect.right() };
+            let from = start_col.saturating_sub(rect.x) as usize;
+            let to = end_col.saturating_sub(rect.x) as usize;
+            let text = line.spans.iter().map(|span| span.content.as_ref()).collect::<String>();
+            let chars: Vec<char> = text.chars().collect();
+            let from = from.min(chars.len());
+            let to = to.min(chars.len()).max(from);
+            let mut spans = Vec::new();
+            if from > 0 {
+                spans.push(Span::styled(chars[..from].iter().collect::<String>(), theme.base()));
+            }
+            if to > from {
+                spans.push(Span::styled(
+                    chars[from..to].iter().collect::<String>(),
+                    theme.fg(theme.bg).bg(theme.sage).add_modifier(Modifier::BOLD),
+                ));
+            }
+            if to < chars.len() {
+                spans.push(Span::styled(chars[to..].iter().collect::<String>(), theme.base()));
+            }
+            Line::from(spans)
+        })
+        .collect()
+}
+
 fn item_matches(item: &TranscriptItem, needle: Option<&str>) -> bool {
     let Some(needle) = needle else {
         return true;
