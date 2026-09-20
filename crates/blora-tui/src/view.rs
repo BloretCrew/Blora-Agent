@@ -246,6 +246,11 @@ pub struct SessionPicker {
     pub selected: usize,
 }
 
+#[derive(Clone, Debug)]
+pub struct ContextDialog {
+    pub scroll: usize,
+}
+
 pub struct FrameModel<'a> {
     pub workspace: &'a Path,
     pub sessions: &'a [SessionSummary],
@@ -263,6 +268,7 @@ pub struct FrameModel<'a> {
     pub add_provider_dialog: Option<&'a AddProviderDialog>,
     /// Color-scheme picker; renders as a centered modal dialog.
     pub theme_dialog: Option<&'a ThemeDialog>,
+    pub context_dialog: Option<&'a ContextDialog>,
     pub slash_hits: &'a [&'static SlashCommand],
     pub slash_selected: usize,
     pub search: Option<&'a str>,
@@ -295,6 +301,7 @@ pub enum Hit {
     ModeRow(usize),
     CancelRun,
     ToggleApprove,
+    ContextUsage,
     ProviderTarget,
     Hint(HintAction),
     Notice,
@@ -349,6 +356,7 @@ pub struct HitMap {
     pub cancel_run: Option<Rect>,
     pub toggle_approve: Option<Rect>,
     pub provider_target: Option<Rect>,
+    pub context_usage: Option<Rect>,
     pub hints: Vec<(Rect, HintAction)>,
     /// macOS-style traffic-light dots of the login dialog.
     pub traffic_lights: [Option<Rect>; 3],
@@ -449,6 +457,12 @@ impl HitMap {
             .is_some_and(|rect| contains(rect, col, row))
         {
             return Some(Hit::ProviderTarget);
+        }
+        if self
+            .context_usage
+            .is_some_and(|rect| contains(rect, col, row))
+        {
+            return Some(Hit::ContextUsage);
         }
         if self.cancel_run.is_some_and(|rect| contains(rect, col, row)) {
             return Some(Hit::CancelRun);
@@ -667,6 +681,8 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
         hits.provider_rows = dialog_hits.provider_rows;
         hits.provider_model_rows = dialog_hits.provider_model_rows;
         hits.traffic_lights = dialog_hits.traffic_lights;
+    } else if let Some(dialog) = model.context_dialog {
+        render_context_dialog(frame, area, model.projection, dialog, &theme);
     }
     hits
 }
@@ -895,8 +911,92 @@ fn render_header(
     };
     if model.running {
         hits.cancel_run = Some(rect);
+    } else {
+        hits.context_usage = Some(rect);
     }
     frame.render_widget(Paragraph::new(right).style(theme.base()), rect);
+}
+
+fn render_context_dialog(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    projection: Option<&SessionProjection>,
+    dialog: &ContextDialog,
+    theme: &Theme,
+) {
+    let Some(projection) = projection else { return };
+    let window = blora_context::context_window().max(1);
+    let used = projection.input_tokens.saturating_add(projection.output_tokens);
+    let input = projection.input_tokens.min(used);
+    let output = projection.output_tokens.min(used.saturating_sub(input));
+    let system = estimate_system_tokens(projection).min(input);
+    let messages = input.saturating_sub(system);
+    let free = window.saturating_sub(used);
+    let modal_width = 72u16.min(area.width.saturating_sub(4)).max(40);
+    let modal_height = 17u16.min(area.height.saturating_sub(4)).max(10);
+    let Some(modal) = dialog_rect(area, modal_width, modal_height) else { return };
+    frame.render_widget(Clear, modal);
+    let block = Block::bordered()
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .title("上下文用量")
+        .style(theme.base())
+        .border_style(theme.fg(theme.hairline).bg(theme.bg));
+    let inner = block.inner(modal);
+    frame.render_widget(block, modal);
+    let used_pct = percentage(used, window);
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("当前上下文  ", theme.fg(theme.text).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("{} / {} tokens ({used_pct}%)", fmt_tokens(used), fmt_tokens(window)), theme.fg(theme.sage)),
+        ]),
+        Line::from(Span::styled("总量进度", theme.mute())),
+        progress_line(used, window, inner.width as usize, theme),
+        Line::default(),
+        usage_row("系统提示", system, window, theme),
+        usage_row("消息内容", messages, window, theme),
+        usage_row("输出与工具", output, window, theme),
+        usage_row("可用空间", free, window, theme),
+        Line::default(),
+        Line::from(Span::styled("数据来自当前会话的累计 token 使用量；百分比按上下文窗口估算。", theme.mute())),
+        Line::from(Span::styled("Esc 关闭 · ↑/↓ 滚动", theme.dim())),
+    ];
+    let visible = lines.len().saturating_sub(inner.height as usize);
+    let start = dialog.scroll.min(visible);
+    lines.drain(0..start);
+    frame.render_widget(Paragraph::new(lines).style(theme.base()), inner);
+}
+
+fn estimate_system_tokens(projection: &SessionProjection) -> u64 {
+    projection
+        .transcript
+        .iter()
+        .filter_map(|item| match item {
+            TranscriptItem::System { summary, .. } => Some(blora_context::estimate_tokens(summary)),
+            _ => None,
+        })
+        .sum()
+}
+
+fn percentage(value: u64, total: u64) -> u64 {
+    ((value as f64 / total.max(1) as f64) * 100.0).round() as u64
+}
+
+fn progress_line(value: u64, total: u64, width: usize, theme: &Theme) -> Line<'static> {
+    let width = width.max(10);
+    let filled = ((value.min(total) as f64 / total.max(1) as f64) * width as f64).round() as usize;
+    let filled = filled.min(width);
+    Line::from(vec![
+        Span::styled("█".repeat(filled), theme.fg(theme.sage)),
+        Span::styled("░".repeat(width - filled), theme.mute()),
+    ])
+}
+
+fn usage_row(label: &str, value: u64, total: u64, theme: &Theme) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(format!("{label:<14}"), theme.fg(theme.text)),
+        Span::styled(format!("{:>8} tokens  ", fmt_tokens(value)), theme.fg(theme.text_dim)),
+        Span::styled(format!("{:>3}%", percentage(value, total)), theme.mute()),
+    ])
 }
 
 fn render_rule(frame: &mut Frame<'_>, area: Rect, theme: &Theme) {

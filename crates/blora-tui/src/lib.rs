@@ -89,6 +89,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut provider_dialog: Option<view::ProviderDialog> = None;
     let mut add_provider_dialog: Option<view::AddProviderDialog> = None;
     let mut theme_dialog: Option<view::ThemeDialog> = None;
+    let mut context_dialog: Option<view::ContextDialog> = None;
     let mut mode_menu: Option<view::ModeMenu> = None;
     let mut session_picker: Option<view::SessionPicker> = None;
     // PassPort user token of the logged-in user; drives the default provider.
@@ -297,6 +298,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             provider_dialog: provider_dialog.as_ref(),
                             add_provider_dialog: add_provider_dialog.as_ref(),
                             theme_dialog: theme_dialog.as_ref(),
+                            context_dialog: context_dialog.as_ref(),
                             slash_hits: &slash_hits,
                             slash_selected,
                             search: search.as_deref(),
@@ -825,6 +827,19 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             KeyCode::Esc if provider_dialog.is_some() => {
                                 provider_dialog = None;
                             }
+                            KeyCode::Esc if context_dialog.is_some() => {
+                                context_dialog = None;
+                            }
+                            KeyCode::Up if context_dialog.is_some() => {
+                                if let Some(dialog) = context_dialog.as_mut() {
+                                    dialog.scroll = dialog.scroll.saturating_sub(1);
+                                }
+                            }
+                            KeyCode::Down if context_dialog.is_some() => {
+                                if let Some(dialog) = context_dialog.as_mut() {
+                                    dialog.scroll = dialog.scroll.saturating_add(1);
+                                }
+                            }
                             KeyCode::Esc if notice.is_some() => {
                                 notice = None;
                             }
@@ -921,6 +936,10 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             }
                             MouseEventKind::Down(MouseButton::Left) => {
                                 let hit = hits.hit(mouse.column, mouse.row);
+                                if matches!(hit, Some(view::Hit::ContextUsage)) {
+                                    context_dialog = Some(view::ContextDialog { scroll: 0 });
+                                    continue;
+                                }
                                 if matches!(hit, Some(view::Hit::ProviderTarget)) {
                                     provider_dialog = Some(open_provider_dialog(
                                         &provider_override,
