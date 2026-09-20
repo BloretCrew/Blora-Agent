@@ -2468,8 +2468,7 @@ mod tests {
     }
 
     #[test]
-    #[test]
-    fn empty_passport_model_displays_blora_not_mock() {
+    fn empty_passport_model_displays_blora_not_mock {
         assert_eq!(display_model_name("", "Bloret PassPort"), "blora");
         assert_eq!(display_model_name("", "blora"), "blora");
         assert_eq!(display_model_name("", "crewrouter"), "—");
