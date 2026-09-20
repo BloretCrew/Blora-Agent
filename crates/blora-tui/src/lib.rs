@@ -921,6 +921,14 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             }
                             MouseEventKind::Down(MouseButton::Left) => {
                                 let hit = hits.hit(mouse.column, mouse.row);
+                                if matches!(hit, Some(view::Hit::ProviderTarget)) {
+                                    provider_dialog = Some(open_provider_dialog(
+                                        &provider_override,
+                                        &model_override,
+                                        logged_in,
+                                    ));
+                                    continue;
+                                }
                                 if hits.transcript.contains((mouse.column, mouse.row).into()) {
                                     text_selection = Some(selection::Selection {
                                         start: (mouse.column, mouse.row),

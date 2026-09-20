@@ -295,6 +295,7 @@ pub enum Hit {
     ModeRow(usize),
     CancelRun,
     ToggleApprove,
+    ProviderTarget,
     Hint(HintAction),
     Notice,
     /// macOS-style window dots on the login dialog.
@@ -347,6 +348,7 @@ pub struct HitMap {
     pub mode_rows: Vec<(Rect, usize)>,
     pub cancel_run: Option<Rect>,
     pub toggle_approve: Option<Rect>,
+    pub provider_target: Option<Rect>,
     pub hints: Vec<(Rect, HintAction)>,
     /// macOS-style traffic-light dots of the login dialog.
     pub traffic_lights: [Option<Rect>; 3],
@@ -441,6 +443,12 @@ impl HitMap {
             .is_some_and(|rect| contains(rect, col, row))
         {
             return Some(Hit::ToggleApprove);
+        }
+        if self
+            .provider_target
+            .is_some_and(|rect| contains(rect, col, row))
+        {
+            return Some(Hit::ProviderTarget);
         }
         if self.cancel_run.is_some_and(|rect| contains(rect, col, row)) {
             return Some(Hit::CancelRun);
@@ -2178,6 +2186,19 @@ fn render_composer(
     } else {
         model.provider
     };
+    let model_x = inner.x + 2;
+    let model_width = u16::try_from(model_name.width()).unwrap_or(0);
+    let provider_width = u16::try_from(provider.width()).unwrap_or(1).max(1);
+    hits.provider_target = Some(Rect {
+        x: model_x,
+        y: info.y,
+        width: model_width
+            .saturating_add("  ·  ".width() as u16)
+            .saturating_add(u16::try_from(perm.width()).unwrap_or(0))
+            .saturating_add("  ·  ".width() as u16)
+            .saturating_add(provider_width),
+        height: 1,
+    });
     let perm_x = inner.x + u16::try_from(2 + model_name.width() + "  ·  ".width()).unwrap_or(8);
     hits.toggle_approve = Some(Rect {
         x: perm_x,
