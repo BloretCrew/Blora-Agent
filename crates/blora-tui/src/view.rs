@@ -15,6 +15,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use crate::i18n;
 use crate::selection::Selection;
 use crate::slash::{self, SlashCommand};
 use crate::theme::{Scheme, Theme, ThemePref};
@@ -620,7 +621,7 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
         frame.render_widget(Clear, menu_area);
         let block = Block::bordered()
             .border_type(ratatui::widgets::BorderType::Rounded)
-            .title(format!("{} 会话", mode_label(current_mode.as_str())))
+            .title(format!("{} {}", mode_label(current_mode.as_str()), i18n::tr("dialog.sessions", "会话")))
             .style(theme.base())
             .border_style(theme.fg(theme.hairline).bg(theme.bg));
         let inner = block.inner(menu_area);
@@ -635,7 +636,7 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
         paint_traffic_title(
             frame,
             title_row,
-            &format!("{} 会话", mode_label(current_mode.as_str())),
+            &format!("{} {}", mode_label(current_mode.as_str()), i18n::tr("dialog.sessions", "会话")),
             model.pointer,
             &theme,
             &mut dialog_hits,
@@ -653,7 +654,12 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
                     frame.render_widget(Block::default().style(Style::default().bg(theme.bg_select)), rect);
                 }
                 let marker = if selected { "❯ " } else { "  " };
-                let title = session.title.as_deref().filter(|title| !title.is_empty()).unwrap_or("未命名会话");
+                let fallback_title = i18n::tr("session.untitled", "未命名会话");
+                let title = session
+                    .title
+                    .as_deref()
+                    .filter(|title| !title.is_empty())
+                    .unwrap_or(&fallback_title);
                 let line = Line::from(vec![
                     Span::styled(marker, theme.fg(theme.rose)),
                     Span::styled(ellipsize(title, 30), theme.fg(theme.text)),
@@ -664,7 +670,7 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
             }
         }
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled("↑/↓ 选择 · Enter 确认 · Esc 关闭", theme.mute())))
+            Paragraph::new(Line::from(Span::styled(i18n::tr("hint.select_confirm_close", "↑/↓ 选择 · Enter 确认 · Esc 关闭"), theme.mute())))
                 .style(theme.base()),
             hint_row,
         );
@@ -684,7 +690,7 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
         frame.render_widget(Clear, menu_area);
         let block = Block::bordered()
             .border_type(ratatui::widgets::BorderType::Rounded)
-            .title("运行模式")
+            .title(i18n::tr("dialog.mode", "运行模式"))
             .style(theme.base())
             .border_style(theme.fg(theme.hairline).bg(theme.bg));
         let inner = block.inner(menu_area);
@@ -696,7 +702,14 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
         ])
         .areas(inner);
         let mut dialog_hits = HitMap::default();
-        paint_traffic_title(frame, title_row, "运行模式", model.pointer, &theme, &mut dialog_hits);
+        paint_traffic_title(
+            frame,
+            title_row,
+            &i18n::tr("dialog.mode", "运行模式"),
+            model.pointer,
+            &theme,
+            &mut dialog_hits,
+        );
         hits.traffic_lights = dialog_hits.traffic_lights;
         if menu.minimized {
             return hits;
@@ -720,7 +733,7 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
             }
         }
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled("↑/↓ 选择 · Enter 确认 · Esc 关闭", theme.mute())))
+            Paragraph::new(Line::from(Span::styled(i18n::tr("hint.select_confirm_close", "↑/↓ 选择 · Enter 确认 · Esc 关闭"), theme.mute())))
                 .style(theme.base()),
             hint_row,
         );
@@ -881,7 +894,7 @@ fn render_header(
     let title = session
         .and_then(|item| item.title.clone())
         .filter(|text| !text.is_empty())
-        .unwrap_or_else(|| "未命名会话".to_owned());
+        .unwrap_or_else(|| i18n::tr("session.untitled", "未命名会话"));
     let mode_session_indices: Vec<usize> = model
         .sessions
         .iter()
@@ -1008,7 +1021,7 @@ fn render_context_dialog(
     frame.render_widget(Clear, modal);
     let block = Block::bordered()
         .border_type(ratatui::widgets::BorderType::Rounded)
-        .title("上下文用量")
+        .title(i18n::tr("dialog.context_usage", "上下文用量"))
         .style(theme.base())
         .border_style(theme.fg(theme.hairline).bg(theme.bg));
     let inner = block.inner(modal);
@@ -1019,17 +1032,24 @@ fn render_context_dialog(
         Constraint::Length(1),
     ])
     .areas(inner);
-    paint_traffic_title(frame, title_row, "上下文用量", pointer, theme, &mut hits);
+    paint_traffic_title(
+        frame,
+        title_row,
+        &i18n::tr("dialog.context_usage", "上下文用量"),
+        pointer,
+        theme,
+        &mut hits,
+    );
     if dialog.minimized {
         return hits;
     }
     let used_pct = percentage(used, window);
     let mut lines = vec![
         Line::from(vec![
-            Span::styled("当前上下文  ", theme.fg(theme.text).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("{}  ", i18n::tr("dialog.context_current", "当前上下文")), theme.fg(theme.text).add_modifier(Modifier::BOLD)),
             Span::styled(format!("{} / {} tokens ({used_pct}%)", fmt_tokens(used), fmt_tokens(window)), theme.fg(theme.sage)),
         ]),
-        Line::from(Span::styled("总量进度", theme.mute())),
+        Line::from(Span::styled(i18n::tr("dialog.context_total_progress", "总量进度"), theme.mute())),
         progress_line(
             &[
                 (system, theme.rose),
@@ -1042,12 +1062,12 @@ fn render_context_dialog(
             theme,
         ),
         Line::default(),
-        usage_row("系统提示", system, window, theme.rose, theme),
-        usage_row("消息内容", messages, window, theme.sage, theme),
-        usage_row("输出与工具", output, window, theme.amber, theme),
-        usage_row("可用空间", free, window, theme.text_mute, theme),
+        usage_row(&i18n::tr("context.system_prompt", "系统提示"), system, window, theme.rose, theme),
+        usage_row(&i18n::tr("context.messages", "消息内容"), messages, window, theme.sage, theme),
+        usage_row(&i18n::tr("context.output_tools", "输出与工具"), output, window, theme.amber, theme),
+        usage_row(&i18n::tr("context.free", "可用空间"), free, window, theme.text_mute, theme),
         Line::default(),
-        Line::from(Span::styled("数据来自当前会话的累计 token 使用量；百分比按上下文窗口估算。", theme.mute())),
+        Line::from(Span::styled(i18n::tr("context.estimate_note", "数据来自当前会话的累计 token 使用量；百分比按上下文窗口估算。"), theme.mute())),
     ];
     let visible = lines.len().saturating_sub(content.height as usize);
     let start = dialog.scroll.min(visible);
@@ -1711,7 +1731,7 @@ fn render_passport_dialog(
     paint_traffic_title(
         frame,
         rows[0],
-        "Bloret PassPort 登录",
+        &i18n::tr("dialog.passport_login", "Bloret PassPort 登录"),
         pointer,
         theme,
         &mut hits,
@@ -1719,7 +1739,7 @@ fn render_passport_dialog(
 
     // Row 1: instructions.
     let instructions = wrap_text(
-        "在浏览器打开下面的链接并输入设备码，授权后这里会自动登录。",
+        &i18n::tr("passport.instructions", "在浏览器打开下面的链接并输入设备码，授权后这里会自动登录。"),
         wrap_width,
     );
     let mut instruction_lines: Vec<Line> = instructions
@@ -1754,13 +1774,13 @@ fn render_passport_dialog(
 
     // Row 4: status + key hint, everything muted.
     let waiting = if dialog.opened_browser {
-        "已打开浏览器"
+        i18n::tr("passport.browser_opened", "已打开浏览器")
     } else {
-        "等待授权"
+        i18n::tr("passport.waiting", "等待授权")
     };
     let hint = Line::from(vec![
         Span::styled("esc", theme.mute()),
-        Span::styled(" 隐藏对话框 · ", theme.mute()),
+        Span::styled(i18n::tr("passport.hide_hint", " 隐藏对话框 · "), theme.mute()),
         Span::styled(waiting.to_owned(), theme.mute()),
     ]);
     frame.render_widget(Paragraph::new(hint).style(theme.base()), rows[4]);
@@ -1812,7 +1832,7 @@ fn render_provider_dialog(
     paint_traffic_title(
         frame,
         title_row,
-        "选择供应商与模型",
+        &i18n::tr("dialog.provider_model", "选择供应商与模型"),
         pointer,
         theme,
         &mut hits,
@@ -1883,7 +1903,7 @@ fn render_provider_dialog(
         );
     } else if models.is_empty() {
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled("  没有可列出的模型", theme.mute())))
+            Paragraph::new(Line::from(Span::styled(format!("  {}", i18n::tr("provider.no_models", "没有可列出的模型")), theme.mute())))
                 .style(theme.base()),
             right,
         );
@@ -1930,7 +1950,7 @@ fn render_provider_dialog(
 
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            " ←/→ 切换栏  ·  enter 确认  ·  esc 关闭",
+            &format!(" ←/→ {} · {}", i18n::tr("provider.switch_hint", "切换栏 · enter 确认 · esc 关闭"), i18n::tr("action.close", "关闭")),
             theme.mute(),
         )))
         .style(theme.base()),
@@ -1971,13 +1991,13 @@ fn render_add_provider_dialog(
     ])
     .areas(inner);
     let title = match dialog.step {
-        AddProviderStep::Catalog => "添加供应商 · 选择来源",
-        AddProviderStep::CustomId => "添加供应商 · 标识",
-        AddProviderStep::CustomBase => "添加供应商 · 接口地址",
-        AddProviderStep::ApiKey => "添加供应商 · API 密钥",
-        AddProviderStep::Review => "添加供应商 · 确认",
+        AddProviderStep::Catalog => i18n::tr("dialog.add_provider.catalog", "添加供应商 · 选择来源"),
+        AddProviderStep::CustomId => i18n::tr("dialog.add_provider.id", "添加供应商 · 标识"),
+        AddProviderStep::CustomBase => i18n::tr("dialog.add_provider.base", "添加供应商 · 接口地址"),
+        AddProviderStep::ApiKey => i18n::tr("dialog.add_provider.key", "添加供应商 · API 密钥"),
+        AddProviderStep::Review => i18n::tr("dialog.add_provider.review", "添加供应商 · 确认"),
     };
-    paint_traffic_title(frame, title_row, title, pointer, theme, &mut hits);
+    paint_traffic_title(frame, title_row, &title, pointer, theme, &mut hits);
     if dialog.minimized {
         return hits;
     }
@@ -2175,9 +2195,9 @@ fn render_add_provider_dialog(
         );
     } else {
         let footer = match dialog.step {
-            AddProviderStep::Catalog => " 输入筛选  ·  enter 下一步  ·  esc 关闭",
-            AddProviderStep::Review => " enter 保存  ·  ←→ 切换格式  ·  esc 返回",
-            _ => " enter 下一步  ·  esc 上一步",
+            AddProviderStep::Catalog => i18n::tr("hint.add_provider.catalog", " 输入筛选  ·  enter 下一步  ·  esc 关闭"),
+            AddProviderStep::Review => i18n::tr("hint.add_provider.review", " enter 保存  ·  ←→ 切换格式  ·  esc 返回"),
+            _ => i18n::tr("hint.add_provider.next", " enter 下一步  ·  esc 上一步"),
         };
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(footer, theme.mute()))).style(theme.base()),

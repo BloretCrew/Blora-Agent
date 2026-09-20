@@ -88,7 +88,7 @@ fn transcript_lines(projection: &SessionProjection, hide_tools: bool) -> Vec<Str
                 to_model,
                 ..
             } => {
-                vec![format!("切换到 {to_provider} / {to_model}")]
+                vec![format!("{} {to_provider} / {to_model}", crate::i18n::tr("routing.switch_to", "切换到"))]
             }
         })
         .collect()

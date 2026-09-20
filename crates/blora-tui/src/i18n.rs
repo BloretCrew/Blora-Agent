@@ -43,6 +43,7 @@ pub fn init() -> String {
     locale
 }
 
+#[allow(dead_code)]
 pub fn locale() -> String {
     CATALOG
         .get()
@@ -50,6 +51,7 @@ pub fn locale() -> String {
         .unwrap_or_else(|| "zh-CN".to_owned())
 }
 
+#[allow(dead_code)]
 pub fn tr(key: &str, fallback: &str) -> String {
     CATALOG
         .get()
@@ -113,5 +115,6 @@ mod tests {
         let values = embedded_source();
         assert_eq!(values.get("dialog.context_usage").map(String::as_str), Some("上下文用量"));
         assert_eq!(values.get("action.close").map(String::as_str), Some("关闭"));
+        assert_eq!(values.get("dialog.mode").map(String::as_str), Some("运行模式"));
     }
 }
