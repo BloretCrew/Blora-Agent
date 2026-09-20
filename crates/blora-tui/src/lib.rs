@@ -952,6 +952,28 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             }
                             MouseEventKind::Down(MouseButton::Left) => {
                                 let hit = hits.hit(mouse.column, mouse.row);
+                                if matches!(
+                                    hit,
+                                    Some(
+                                        view::Hit::TrafficClose
+                                            | view::Hit::TrafficMinimize
+                                            | view::Hit::TrafficOpenBrowser,
+                                    )
+                                ) {
+                                    handle_traffic_light(
+                                        hit,
+                                        &mut theme_dialog,
+                                        &mut add_provider_dialog,
+                                        &mut provider_dialog,
+                                        &mut context_dialog,
+                                        &mut passport_dialog,
+                                        &mut passport_browser_opened,
+                                        passport_url.as_deref(),
+                                        &mut cancel,
+                                        &mut status,
+                                    );
+                                    continue;
+                                }
                                 if matches!(hit, Some(view::Hit::ContextUsage)) {
                                     context_dialog = Some(view::ContextDialog {
                                         scroll: 0,
@@ -3011,6 +3033,75 @@ fn write_rules(workspace: &Path) -> String {
     ) {
         Ok(()) => format!("wrote {}", path.display()),
         Err(err) => err.to_string(),
+    }
+}
+
+fn handle_traffic_light(
+    hit: Option<view::Hit>,
+    theme_dialog: &mut Option<view::ThemeDialog>,
+    add_provider_dialog: &mut Option<view::AddProviderDialog>,
+    provider_dialog: &mut Option<view::ProviderDialog>,
+    context_dialog: &mut Option<view::ContextDialog>,
+    passport_dialog: &mut Option<view::PassportDialog>,
+    passport_browser_opened: &mut bool,
+    passport_url: Option<&str>,
+    cancel: &mut CancelToken,
+    status: &mut String,
+) {
+    match hit {
+        Some(view::Hit::TrafficClose) => {
+            if let Some(dialog) = theme_dialog.take() {
+                cancel_theme_dialog(&dialog);
+                *status = "theme picker closed".to_owned();
+            } else if add_provider_dialog.take().is_some() {
+                *status = "add provider cancelled".to_owned();
+            } else if provider_dialog.take().is_some() {
+                *status = "provider picker closed".to_owned();
+            } else if context_dialog.take().is_some() {
+                *status = "context dialog closed".to_owned();
+            } else if passport_dialog.take().is_some() {
+                *status = "login dialog closed".to_owned();
+            } else {
+                cancel.cancel();
+            }
+        }
+        Some(view::Hit::TrafficMinimize) => {
+            if let Some(dialog) = theme_dialog.as_mut() {
+                dialog.minimized = true;
+                dialog.fullscreen = false;
+            } else if let Some(dialog) = add_provider_dialog.as_mut() {
+                dialog.minimized = true;
+                dialog.fullscreen = false;
+            } else if let Some(dialog) = provider_dialog.as_mut() {
+                dialog.minimized = true;
+                dialog.fullscreen = false;
+            } else if let Some(dialog) = context_dialog.as_mut() {
+                dialog.minimized = true;
+                dialog.fullscreen = false;
+            } else if passport_dialog.is_some() {
+                *passport_dialog = None;
+            }
+        }
+        Some(view::Hit::TrafficOpenBrowser) => {
+            if let Some(dialog) = theme_dialog.as_mut() {
+                if dialog.minimized { dialog.minimized = false; } else { dialog.fullscreen = !dialog.fullscreen; }
+            } else if let Some(dialog) = add_provider_dialog.as_mut() {
+                if dialog.minimized { dialog.minimized = false; } else { dialog.fullscreen = !dialog.fullscreen; }
+            } else if let Some(dialog) = provider_dialog.as_mut() {
+                if dialog.minimized { dialog.minimized = false; } else { dialog.fullscreen = !dialog.fullscreen; }
+            } else if let Some(dialog) = context_dialog.as_mut() {
+                if dialog.minimized { dialog.minimized = false; } else { dialog.fullscreen = !dialog.fullscreen; }
+            } else if let Some(url) = passport_url {
+                let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+                let _ = std::process::Command::new("open").arg(url).spawn();
+                *passport_browser_opened = true;
+                if let Some(dialog) = passport_dialog.as_mut() {
+                    dialog.opened_browser = true;
+                }
+                *status = format!("已打开 {url}");
+            }
+        }
+        _ => {}
     }
 }
 

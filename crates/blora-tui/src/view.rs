@@ -843,10 +843,12 @@ fn paint_traffic_title(
         ("●", "+", theme.sage),
     ];
     for (index, _) in dot_glyphs.iter().enumerate() {
+        // Use a two-cell hit target so the dots remain clickable with terminal
+        // mouse coordinate rounding and narrow glyph metrics.
         hits.traffic_lights[index] = Some(Rect {
             x: title_row.x.saturating_add(1 + (index as u16) * 2),
             y: title_row.y,
-            width: 1,
+            width: 2,
             height: 1,
         });
     }
