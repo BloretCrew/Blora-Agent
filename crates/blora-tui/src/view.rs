@@ -412,14 +412,14 @@ impl HitMap {
                 });
             }
         }
-        for (rect, idx) in &self.provider_rows {
-            if contains(*rect, col, row) {
-                return Some(Hit::ProviderRow(*idx));
-            }
-        }
         for (rect, idx) in &self.provider_model_rows {
             if contains(*rect, col, row) {
                 return Some(Hit::ProviderModelRow(*idx));
+            }
+        }
+        for (rect, idx) in &self.provider_rows {
+            if contains(*rect, col, row) {
+                return Some(Hit::ProviderRow(*idx));
             }
         }
         for (rect, idx) in &self.add_provider_rows {
