@@ -1412,13 +1412,18 @@ fn render_transcript(
             }
         },
     );
-    let visible = transcript_window(lines, inner.height as usize, model.scroll);
+    let visible = transcript_window(lines.clone(), inner.height as usize, model.scroll);
     let visible = highlight_selection(visible, inner, model.text_selection, theme);
     frame.render_widget(Paragraph::new(visible).style(theme.base()), inner);
     hits.tool_summary_rows = tool_summary_hit_rows(
         model.projection,
-        model.hide_tools,
         model.search,
+        model.hide_tools,
+        width.max(8),
+        model.running,
+        model.tick,
+        model.user_label,
+        &lines,
         inner,
         model.scroll,
     );
@@ -1426,8 +1431,13 @@ fn render_transcript(
 
 fn tool_summary_hit_rows(
     projection: Option<&SessionProjection>,
-    hide_tools: bool,
     search: Option<&str>,
+    hide_tools: bool,
+    width: usize,
+    running: bool,
+    tick: u64,
+    user_label: &str,
+    lines: &[Line<'static>],
     rect: Rect,
     scroll: usize,
 ) -> Vec<(Rect, Vec<usize>)> {
@@ -1444,46 +1454,49 @@ fn tool_summary_hit_rows(
                 && item_matches(item, needle.as_deref())
         })
         .collect();
-    let mut rows = Vec::new();
-    let mut rendered_row = 0usize;
+    let mut groups: Vec<(usize, Vec<usize>)> = Vec::new();
     let mut index = 0usize;
     while index < visible.len() {
-        if rendered_row > 0 {
-            rendered_row += 1;
-        }
         if matches!(visible[index].1, TranscriptItem::Tool { .. }) {
             let start = index;
             index += 1;
             while index < visible.len() && matches!(visible[index].1, TranscriptItem::Tool { .. }) {
                 index += 1;
             }
-            let indices = visible[start..index]
-                .iter()
-                .map(|(i, _)| *i)
-                .collect::<Vec<_>>();
-            if rendered_row < rect.height as usize {
-                rows.push((
-                    Rect::new(rect.x, rect.y + rendered_row as u16, rect.width, 1),
-                    indices,
-                ));
-            }
-            rendered_row += 1;
-            continue;
+            groups.push((
+                start,
+                visible[start..index].iter().map(|(i, _)| *i).collect(),
+            ));
+        } else {
+            index += 1;
         }
-        index += 1;
-        rendered_row += 1;
     }
-    let total = rendered_row;
-    let window_start = total
+    let rendered = transcript_lines(
+        projection,
+        search,
+        hide_tools,
+        width,
+        running,
+        tick,
+        user_label,
+        None,
+        &Theme::current(),
+    );
+    let rendered_len = rendered.len().max(lines.len());
+    let start = rendered_len
         .saturating_sub(rect.height as usize)
         .saturating_sub(scroll);
-    rows.into_iter()
-        .filter_map(|(row, indices)| {
-            let offset = row.y.saturating_sub(rect.y) as usize;
-            let visible_offset = offset.saturating_sub(window_start);
-            (visible_offset < rect.height as usize).then(|| {
+    groups
+        .into_iter()
+        .filter_map(|(group_start, indices)| {
+            let row = rendered
+                .iter()
+                .take(group_start.saturating_add(1).min(rendered.len()))
+                .count();
+            let visible_row = row.saturating_sub(start);
+            (visible_row < rect.height as usize).then(|| {
                 (
-                    Rect::new(rect.x, rect.y + visible_offset as u16, rect.width, 1),
+                    Rect::new(rect.x, rect.y + visible_row as u16, rect.width, 1),
                     indices,
                 )
             })
