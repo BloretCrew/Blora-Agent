@@ -437,6 +437,11 @@ impl HitMap {
                 return Some(Hit::ThemeRow(*idx));
             }
         }
+        for (rect, idx) in &self.mode_rows {
+            if contains(*rect, col, row) {
+                return Some(Hit::ModeRow(*idx));
+            }
+        }
         for (rect, idx) in &self.project_picker_rows {
             if contains(*rect, col, row) {
                 return Some(Hit::ProjectPickerRow(*idx));
@@ -458,11 +463,6 @@ impl HitMap {
             .is_some_and(|rect| contains(rect, col, row))
         {
             return Some(Hit::SessionPicker);
-        }
-        for (rect, idx) in &self.mode_rows {
-            if contains(*rect, col, row) {
-                return Some(Hit::ModeRow(*idx));
-            }
         }
         if self.mode.is_some_and(|rect| contains(rect, col, row)) {
             return Some(Hit::Mode);

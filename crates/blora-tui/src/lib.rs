@@ -1015,30 +1015,11 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                             | view::Hit::TrafficOpenBrowser,
                                     )
                                 ) {
-                                    if project_picker.is_some() {
-                                        match hit {
-                                            Some(view::Hit::TrafficClose) => project_picker = None,
-                                            Some(view::Hit::TrafficMinimize) => {
-                                                if let Some(picker) = project_picker.as_mut() {
-                                                    picker.minimized = true;
-                                                    picker.fullscreen = false;
-                                                }
-                                            }
-                                            Some(view::Hit::TrafficOpenBrowser) => {
-                                                if let Some(picker) = project_picker.as_mut() {
-                                                    if picker.minimized {
-                                                        picker.minimized = false;
-                                                    } else {
-                                                        picker.fullscreen = !picker.fullscreen;
-                                                    }
-                                                }
-                                            }
-                                            _ => {}
-                                        }
-                                        continue;
-                                    }
                                     handle_traffic_light(
                                         hit,
+                                        &mut project_picker,
+                                        &mut session_picker,
+                                        &mut mode_menu,
                                         &mut theme_dialog,
                                         &mut add_provider_dialog,
                                         &mut provider_dialog,
@@ -1049,33 +1030,6 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                         &mut cancel,
                                         &mut status,
                                     );
-                                    continue;
-                                }
-                                if matches!(hit, Some(view::Hit::TrafficClose))
-                                    && project_picker.is_some()
-                                {
-                                    project_picker = None;
-                                    continue;
-                                }
-                                if matches!(hit, Some(view::Hit::TrafficMinimize))
-                                    && project_picker.is_some()
-                                {
-                                    if let Some(picker) = project_picker.as_mut() {
-                                        picker.minimized = true;
-                                        picker.fullscreen = false;
-                                    }
-                                    continue;
-                                }
-                                if matches!(hit, Some(view::Hit::TrafficOpenBrowser))
-                                    && project_picker.is_some()
-                                {
-                                    if let Some(picker) = project_picker.as_mut() {
-                                        if picker.minimized {
-                                            picker.minimized = false;
-                                        } else {
-                                            picker.fullscreen = !picker.fullscreen;
-                                        }
-                                    }
                                     continue;
                                 }
                                 if matches!(hit, Some(view::Hit::ContextUsage)) {
@@ -3154,6 +3108,9 @@ fn write_rules(workspace: &Path) -> String {
 
 fn handle_traffic_light(
     hit: Option<view::Hit>,
+    project_picker: &mut Option<view::ProjectPicker>,
+    session_picker: &mut Option<view::SessionPicker>,
+    mode_menu: &mut Option<view::ModeMenu>,
     theme_dialog: &mut Option<view::ThemeDialog>,
     add_provider_dialog: &mut Option<view::AddProviderDialog>,
     provider_dialog: &mut Option<view::ProviderDialog>,
@@ -3166,7 +3123,13 @@ fn handle_traffic_light(
 ) {
     match hit {
         Some(view::Hit::TrafficClose) => {
-            if let Some(dialog) = theme_dialog.take() {
+            if project_picker.take().is_some() {
+                *status = "项目选择器已关闭".to_owned();
+            } else if session_picker.take().is_some() {
+                *status = "会话选择器已关闭".to_owned();
+            } else if mode_menu.take().is_some() {
+                *status = "运行模式选择器已关闭".to_owned();
+            } else if let Some(dialog) = theme_dialog.take() {
                 cancel_theme_dialog(&dialog);
                 *status = "theme picker closed".to_owned();
             } else if add_provider_dialog.take().is_some() {
@@ -3182,7 +3145,16 @@ fn handle_traffic_light(
             }
         }
         Some(view::Hit::TrafficMinimize) => {
-            if let Some(dialog) = theme_dialog.as_mut() {
+            if let Some(dialog) = project_picker.as_mut() {
+                dialog.minimized = true;
+                dialog.fullscreen = false;
+            } else if let Some(dialog) = session_picker.as_mut() {
+                dialog.minimized = true;
+                dialog.fullscreen = false;
+            } else if let Some(dialog) = mode_menu.as_mut() {
+                dialog.minimized = true;
+                dialog.fullscreen = false;
+            } else if let Some(dialog) = theme_dialog.as_mut() {
                 dialog.minimized = true;
                 dialog.fullscreen = false;
             } else if let Some(dialog) = add_provider_dialog.as_mut() {
@@ -3199,7 +3171,25 @@ fn handle_traffic_light(
             }
         }
         Some(view::Hit::TrafficOpenBrowser) => {
-            if let Some(dialog) = theme_dialog.as_mut() {
+            if let Some(dialog) = project_picker.as_mut() {
+                if dialog.minimized {
+                    dialog.minimized = false;
+                } else {
+                    dialog.fullscreen = !dialog.fullscreen;
+                }
+            } else if let Some(dialog) = session_picker.as_mut() {
+                if dialog.minimized {
+                    dialog.minimized = false;
+                } else {
+                    dialog.fullscreen = !dialog.fullscreen;
+                }
+            } else if let Some(dialog) = mode_menu.as_mut() {
+                if dialog.minimized {
+                    dialog.minimized = false;
+                } else {
+                    dialog.fullscreen = !dialog.fullscreen;
+                }
+            } else if let Some(dialog) = theme_dialog.as_mut() {
                 if dialog.minimized {
                     dialog.minimized = false;
                 } else {
