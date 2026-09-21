@@ -2368,7 +2368,15 @@ fn render_tool_dialog(
         let selected = dialog.selected == Some(index);
         let row_rect = Rect::new(body.x, body.y + row as u16, body.width, 1);
         if row >= dialog.scroll && row - dialog.scroll < body.height as usize {
-            hits.tool_detail_rows.push((row_rect, index));
+            hits.tool_detail_rows.push((
+                Rect::new(
+                    row_rect.x,
+                    row_rect.y - dialog.scroll as u16,
+                    row_rect.width,
+                    1,
+                ),
+                index,
+            ));
         }
         lines.push(Line::from(vec![
             Span::styled(format!("{}  ", index + 1), theme.fg(theme.rose)),

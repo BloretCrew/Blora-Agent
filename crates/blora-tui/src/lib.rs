@@ -1073,6 +1073,9 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     dialog.scroll = 0;
                                     continue;
                                 }
+                                if tool_dialog.is_some() {
+                                    continue;
+                                }
                                 let modal_open = project_picker.is_some()
                                     || session_picker.is_some()
                                     || mode_menu.is_some()
