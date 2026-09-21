@@ -1059,10 +1059,18 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                         .unwrap_or_default();
                                     tool_dialog = Some(view::ToolDialog {
                                         tools,
+                                        selected: None,
                                         scroll: 0,
                                         fullscreen: false,
                                         minimized: false,
                                     });
+                                    continue;
+                                }
+                                if let Some(view::Hit::ToolDetailRow(index)) = hit.clone()
+                                    && let Some(dialog) = tool_dialog.as_mut()
+                                {
+                                    dialog.selected = Some(index);
+                                    dialog.scroll = 0;
                                     continue;
                                 }
                                 let modal_open = project_picker.is_some()

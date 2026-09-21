@@ -270,6 +270,7 @@ pub struct ToolCallDetail {
 #[derive(Clone, Debug)]
 pub struct ToolDialog {
     pub tools: Vec<ToolCallDetail>,
+    pub selected: Option<usize>,
     pub scroll: usize,
     pub fullscreen: bool,
     pub minimized: bool,
@@ -324,6 +325,7 @@ pub struct FrameModel<'a> {
 pub enum Hit {
     Transcript,
     ToolSummary(Vec<usize>),
+    ToolDetailRow(usize),
     Composer,
     Slash(usize),
     Allow,
@@ -404,6 +406,7 @@ pub struct HitMap {
     pub provider_rows: Vec<(Rect, usize)>,
     /// Model rows of the provider-switch dialog.
     pub provider_model_rows: Vec<(Rect, usize)>,
+    pub tool_detail_rows: Vec<(Rect, usize)>,
     /// Catalog rows of the add-provider wizard.
     pub add_provider_rows: Vec<(Rect, usize)>,
     /// Scheme rows of the theme picker.
@@ -434,6 +437,11 @@ impl HitMap {
                     1 => Hit::TrafficMinimize,
                     _ => Hit::TrafficOpenBrowser,
                 });
+            }
+        }
+        for (rect, idx) in &self.tool_detail_rows {
+            if contains(*rect, col, row) {
+                return Some(Hit::ToolDetailRow(*idx));
             }
         }
         for (rect, idx) in &self.provider_model_rows {
@@ -2355,28 +2363,29 @@ fn render_tool_dialog(
         return hits;
     }
     let mut lines = Vec::new();
+    let mut row = 0usize;
     for (index, tool) in dialog.tools.iter().enumerate() {
+        let selected = dialog.selected == Some(index);
+        let row_rect = Rect::new(body.x, body.y + row as u16, body.width, 1);
+        if row >= dialog.scroll && row - dialog.scroll < body.height as usize {
+            hits.tool_detail_rows.push((row_rect, index));
+        }
         lines.push(Line::from(vec![
             Span::styled(format!("{}  ", index + 1), theme.fg(theme.rose)),
             Span::styled(
-                tool.name.clone(),
+                tool_label(&tool.name),
                 theme.fg(theme.text).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(format!("  {}", tool.status), theme.mute()),
+            Span::styled(format!("  {}", status_label(&tool.status)), theme.mute()),
         ]));
-        if let Some(arguments) = &tool.arguments {
-            lines.push(Line::from(Span::styled(
-                format!("  参数: {arguments}"),
-                theme.mute(),
-            )));
-        }
-        if let Some(output) = &tool.output {
-            lines.push(Line::from(Span::styled(
-                format!("  输出: {output}"),
-                theme.fg(theme.text_dim),
-            )));
+        row += 1;
+        if selected {
+            let detail = tool_detail_lines(tool, theme);
+            row += detail.len();
+            lines.extend(detail);
         }
         lines.push(Line::default());
+        row += 1;
     }
     let visible = lines
         .into_iter()
@@ -2393,6 +2402,52 @@ fn render_tool_dialog(
         hint_row,
     );
     hits
+}
+
+fn tool_label(name: &str) -> String {
+    match name {
+        "update_plan" => "更新任务计划".to_owned(),
+        "read_file" => "读取文件".to_owned(),
+        "write_file" => "写入文件".to_owned(),
+        "apply_patch" | "edit" => "编辑文件".to_owned(),
+        "search" | "grep" => "搜索内容".to_owned(),
+        "glob" => "查找文件".to_owned(),
+        "list_dir" => "列出目录".to_owned(),
+        "git_status" => "查看 Git 状态".to_owned(),
+        "git_diff" => "查看 Git 差异".to_owned(),
+        "git_log" => "查看 Git 提交记录".to_owned(),
+        "shell" | "bash" | "exec" => "执行命令".to_owned(),
+        "todo_write" | "todo" => "更新任务清单".to_owned(),
+        "delegate" => "派发子代理".to_owned(),
+        _ => name.to_owned(),
+    }
+}
+
+fn status_label(status: &str) -> &str {
+    match status {
+        "completed" => "已完成",
+        "running" => "执行中",
+        "requested" => "等待执行",
+        "failed" | "error" => "失败",
+        _ => status,
+    }
+}
+
+fn tool_detail_lines(tool: &ToolCallDetail, theme: &Theme) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    if let Some(arguments) = &tool.arguments {
+        lines.push(Line::from(Span::styled(
+            format!("  参数：{arguments}"),
+            theme.mute(),
+        )));
+    }
+    if let Some(output) = &tool.output {
+        lines.push(Line::from(Span::styled(
+            format!("  输出：{output}"),
+            theme.fg(theme.text_dim),
+        )));
+    }
+    lines
 }
 
 fn render_add_provider_dialog(
