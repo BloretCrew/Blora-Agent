@@ -1419,10 +1419,7 @@ fn render_transcript(
         model.projection,
         model.search,
         model.hide_tools,
-        width.max(8),
         model.running,
-        model.tick,
-        model.user_label,
         &lines,
         inner,
         model.scroll,
@@ -1433,10 +1430,7 @@ fn tool_summary_hit_rows(
     projection: Option<&SessionProjection>,
     search: Option<&str>,
     hide_tools: bool,
-    width: usize,
     running: bool,
-    tick: u64,
-    user_label: &str,
     lines: &[Line<'static>],
     rect: Rect,
     scroll: usize,
@@ -1454,7 +1448,7 @@ fn tool_summary_hit_rows(
                 && item_matches(item, needle.as_deref())
         })
         .collect();
-    let mut groups: Vec<(usize, Vec<usize>)> = Vec::new();
+    let mut groups = Vec::new();
     let mut index = 0usize;
     while index < visible.len() {
         if matches!(visible[index].1, TranscriptItem::Tool { .. }) {
@@ -1463,45 +1457,52 @@ fn tool_summary_hit_rows(
             while index < visible.len() && matches!(visible[index].1, TranscriptItem::Tool { .. }) {
                 index += 1;
             }
-            groups.push((
-                start,
-                visible[start..index].iter().map(|(i, _)| *i).collect(),
-            ));
+            let items = visible[start..index]
+                .iter()
+                .map(|(_, item)| *item)
+                .collect::<Vec<_>>();
+            let summary = blora_session::summarize_tool_run(&items, running);
+            let indices = visible[start..index]
+                .iter()
+                .map(|(i, _)| *i)
+                .collect::<Vec<_>>();
+            groups.push((summary, indices));
         } else {
             index += 1;
         }
     }
-    let rendered = transcript_lines(
-        projection,
-        search,
-        hide_tools,
-        width,
-        running,
-        tick,
-        user_label,
-        None,
-        &Theme::current(),
-    );
-    let rendered_len = rendered.len().max(lines.len());
-    let start = rendered_len
+    let window_start = lines
+        .len()
         .saturating_sub(rect.height as usize)
         .saturating_sub(scroll);
-    groups
-        .into_iter()
-        .filter_map(|(group_start, indices)| {
-            let row = rendered
-                .iter()
-                .take(group_start.saturating_add(1).min(rendered.len()))
-                .count();
-            let visible_row = row.saturating_sub(start);
-            (visible_row < rect.height as usize).then(|| {
-                (
-                    Rect::new(rect.x, rect.y + visible_row as u16, rect.width, 1),
-                    indices,
-                )
+    let mut cursor = 0usize;
+    let mut rows = Vec::new();
+    for (summary, indices) in groups {
+        let Some(row) = lines
+            .iter()
+            .enumerate()
+            .skip(cursor)
+            .find_map(|(row, line)| {
+                let text = line
+                    .spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>();
+                text.contains(&summary).then_some(row)
             })
-        })
-        .collect()
+        else {
+            continue;
+        };
+        cursor = row.saturating_add(1);
+        let visible_row = row.saturating_sub(window_start);
+        if visible_row < rect.height as usize {
+            rows.push((
+                Rect::new(rect.x, rect.y + visible_row as u16, rect.width, 1),
+                indices,
+            ));
+        }
+    }
+    rows
 }
 
 fn welcome_lines(theme: &Theme) -> Vec<Line<'static>> {
