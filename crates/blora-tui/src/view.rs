@@ -6,8 +6,8 @@
 use std::path::Path;
 
 use blora_session::{SessionProjection, TranscriptItem};
-use blora_types::Mode;
 use blora_storage::{ApprovalRecord, SessionSummary};
+use blora_types::Mode;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -23,8 +23,8 @@ use crate::theme::{Scheme, Theme, ThemePref};
 const PAD: u16 = 2;
 /// Work indicator: ping-pong through this star sequence.
 const SPINNER: &[char] = &[
-    '✦', '✧', '✩', '✪', '✫', '✬', '✭', '✮', '✯', '✰', '✴', '✵', '✶', '✷', '✸',
-    '✹', '✺', '✻', '✼', '✽',
+    '✦', '✧', '✩', '✪', '✫', '✬', '✭', '✮', '✯', '✰', '✴', '✵', '✶', '✷', '✸', '✹', '✺', '✻', '✼',
+    '✽',
 ];
 
 /// Bloret PassPort device-flow login dialog shown while a login is pending.
@@ -246,6 +246,13 @@ impl ModeMenu {
 }
 
 #[derive(Clone, Debug)]
+pub struct ProjectPicker {
+    pub selected: usize,
+    pub fullscreen: bool,
+    pub minimized: bool,
+}
+
+#[derive(Clone, Debug)]
 pub struct SessionPicker {
     pub selected: usize,
     pub fullscreen: bool,
@@ -286,6 +293,7 @@ pub struct FrameModel<'a> {
     pub model: &'a str,
     pub provider: &'a str,
     pub mode_menu: Option<&'a ModeMenu>,
+    pub project_picker: Option<&'a ProjectPicker>,
     pub session_picker: Option<&'a SessionPicker>,
     pub user_label: &'a str,
     pub running: bool,
@@ -304,6 +312,8 @@ pub enum Hit {
     Deny,
     PrevSession,
     NextSession,
+    ProjectPicker,
+    ProjectPickerRow(usize),
     SessionPicker,
     SessionPickerRow(usize),
     Mode,
@@ -358,6 +368,8 @@ pub struct HitMap {
     pub deny: Option<Rect>,
     pub prev_session: Option<Rect>,
     pub next_session: Option<Rect>,
+    pub project_picker: Option<Rect>,
+    pub project_picker_rows: Vec<(Rect, usize)>,
     pub session_picker: Option<Rect>,
     pub session_picker_rows: Vec<(Rect, usize)>,
     pub mode: Option<Rect>,
@@ -425,12 +437,26 @@ impl HitMap {
                 return Some(Hit::ThemeRow(*idx));
             }
         }
+        for (rect, idx) in &self.project_picker_rows {
+            if contains(*rect, col, row) {
+                return Some(Hit::ProjectPickerRow(*idx));
+            }
+        }
+        if self
+            .project_picker
+            .is_some_and(|rect| contains(rect, col, row))
+        {
+            return Some(Hit::ProjectPicker);
+        }
         for (rect, idx) in &self.session_picker_rows {
             if contains(*rect, col, row) {
                 return Some(Hit::SessionPickerRow(*idx));
             }
         }
-        if self.session_picker.is_some_and(|rect| contains(rect, col, row)) {
+        if self
+            .session_picker
+            .is_some_and(|rect| contains(rect, col, row))
+        {
             return Some(Hit::SessionPicker);
         }
         for (rect, idx) in &self.mode_rows {
@@ -594,18 +620,93 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
     render_composer(frame, composer, model, &theme, &mut hits);
     render_status(frame, status, model, &theme);
     render_hints(frame, hints, model, &theme, &mut hits);
-    if let Some(picker) = model.session_picker {
-        let current_mode = model
-            .projection
-            .and_then(|projection| projection.session.as_ref())
-            .map(|session| session.mode)
-            .unwrap_or(Mode::Code);
-        let matching: Vec<(usize, &SessionSummary)> = model
+    if let Some(picker) = model.project_picker {
+        let mut projects: Vec<String> = model
             .sessions
             .iter()
-            .enumerate()
-            .filter(|(_, session)| session.mode == current_mode)
+            .map(|session| session.workspace_path.clone())
+            .filter(|path| !path.trim().is_empty())
             .collect();
+        projects.sort();
+        projects.dedup();
+        let visible = projects.len().clamp(1, 12) as u16;
+        let menu_width = 72u16.min(area.width.saturating_sub(4));
+        let menu_height = (visible + 4).min(area.height.saturating_sub(4));
+        let Some(menu_area) = dialog_outer(
+            area,
+            menu_width,
+            menu_height,
+            picker.fullscreen,
+            picker.minimized,
+        ) else {
+            return hits;
+        };
+        frame.render_widget(Clear, menu_area);
+        let block = Block::bordered()
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .title(i18n::tr("dialog.projects", "项目"))
+            .style(theme.base())
+            .border_style(theme.fg(theme.hairline).bg(theme.bg));
+        let inner = block.inner(menu_area);
+        frame.render_widget(block, menu_area);
+        let [title_row, body, hint_row] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Min(2),
+            Constraint::Length(1),
+        ])
+        .areas(inner);
+        let mut dialog_hits = HitMap::default();
+        paint_traffic_title(
+            frame,
+            title_row,
+            &i18n::tr("dialog.projects", "项目"),
+            model.pointer,
+            &theme,
+            &mut dialog_hits,
+        );
+        hits.traffic_lights = dialog_hits.traffic_lights;
+        if picker.minimized {
+            return hits;
+        }
+        let rows = split_n_rows(body, visible);
+        for (row_index, project) in projects.iter().take(visible as usize).enumerate() {
+            if let Some(rect) = rows.get(row_index).copied() {
+                hits.project_picker_rows.push((rect, row_index));
+                if row_index == picker.selected {
+                    frame.render_widget(
+                        Block::default().style(Style::default().bg(theme.bg_select)),
+                        rect,
+                    );
+                }
+                let marker = if row_index == picker.selected {
+                    "❯ "
+                } else {
+                    "  "
+                };
+                frame.render_widget(
+                    Paragraph::new(Line::from(vec![
+                        Span::styled(marker, theme.fg(theme.rose)),
+                        Span::styled(ellipsize(project, 60), theme.fg(theme.text)),
+                    ]))
+                    .style(theme.base()),
+                    rect,
+                );
+            }
+        }
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                i18n::tr(
+                    "hint.select_confirm_close",
+                    "↑/↓ 选择 · Enter 确认 · Esc 关闭",
+                ),
+                theme.mute(),
+            )))
+            .style(theme.base()),
+            hint_row,
+        );
+    }
+    if let Some(picker) = model.session_picker {
+        let matching: Vec<(usize, &SessionSummary)> = model.sessions.iter().enumerate().collect();
         let visible = matching.len().clamp(1, 12) as u16;
         let menu_width = 64u16.min(area.width.saturating_sub(4));
         let menu_height = (visible + 4).min(area.height.saturating_sub(4));
@@ -621,7 +722,7 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
         frame.render_widget(Clear, menu_area);
         let block = Block::bordered()
             .border_type(ratatui::widgets::BorderType::Rounded)
-            .title(format!("{} {}", mode_label(current_mode.as_str()), i18n::tr("dialog.sessions", "会话")))
+            .title(i18n::tr("dialog.sessions", "会话"))
             .style(theme.base())
             .border_style(theme.fg(theme.hairline).bg(theme.bg));
         let inner = block.inner(menu_area);
@@ -636,7 +737,7 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
         paint_traffic_title(
             frame,
             title_row,
-            &format!("{} {}", mode_label(current_mode.as_str()), i18n::tr("dialog.sessions", "会话")),
+            &i18n::tr("dialog.sessions", "会话"),
             model.pointer,
             &theme,
             &mut dialog_hits,
@@ -646,12 +747,17 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
             return hits;
         }
         let rows = split_n_rows(body, visible);
-        for (row_index, (session_index, session)) in matching.iter().take(visible as usize).enumerate() {
+        for (row_index, (session_index, session)) in
+            matching.iter().take(visible as usize).enumerate()
+        {
             if let Some(rect) = rows.get(row_index).copied() {
                 hits.session_picker_rows.push((rect, *session_index));
                 let selected = row_index == picker.selected;
                 if selected {
-                    frame.render_widget(Block::default().style(Style::default().bg(theme.bg_select)), rect);
+                    frame.render_widget(
+                        Block::default().style(Style::default().bg(theme.bg_select)),
+                        rect,
+                    );
                 }
                 let marker = if selected { "❯ " } else { "  " };
                 let fallback_title = i18n::tr("session.untitled", "未命名会话");
@@ -670,8 +776,14 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
             }
         }
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(i18n::tr("hint.select_confirm_close", "↑/↓ 选择 · Enter 确认 · Esc 关闭"), theme.mute())))
-                .style(theme.base()),
+            Paragraph::new(Line::from(Span::styled(
+                i18n::tr(
+                    "hint.select_confirm_close",
+                    "↑/↓ 选择 · Enter 确认 · Esc 关闭",
+                ),
+                theme.mute(),
+            )))
+            .style(theme.base()),
             hint_row,
         );
     }
@@ -720,12 +832,18 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
                 hits.mode_rows.push((rect, index));
                 let selected = index == menu.selected;
                 if selected {
-                    frame.render_widget(Block::default().style(Style::default().bg(theme.bg_select)), rect);
+                    frame.render_widget(
+                        Block::default().style(Style::default().bg(theme.bg_select)),
+                        rect,
+                    );
                 }
                 let marker = if selected { "❯ " } else { "  " };
                 let line = Line::from(vec![
                     Span::styled(marker, theme.fg(theme.rose)),
-                    Span::styled(option.title, theme.fg(theme.text).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        option.title,
+                        theme.fg(theme.text).add_modifier(Modifier::BOLD),
+                    ),
                     Span::styled("  ", theme.mute()),
                     Span::styled(option.description, theme.mute()),
                 ]);
@@ -733,8 +851,14 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
             }
         }
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(i18n::tr("hint.select_confirm_close", "↑/↓ 选择 · Enter 确认 · Esc 关闭"), theme.mute())))
-                .style(theme.base()),
+            Paragraph::new(Line::from(Span::styled(
+                i18n::tr(
+                    "hint.select_confirm_close",
+                    "↑/↓ 选择 · Enter 确认 · Esc 关闭",
+                ),
+                theme.mute(),
+            )))
+            .style(theme.base()),
             hint_row,
         );
     }
@@ -756,7 +880,8 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
         hits.provider_model_rows = dialog_hits.provider_model_rows;
         hits.traffic_lights = dialog_hits.traffic_lights;
     } else if let Some(dialog) = model.context_dialog {
-        let dialog_hits = render_context_dialog(frame, area, model.projection, dialog, model.pointer, &theme);
+        let dialog_hits =
+            render_context_dialog(frame, area, model.projection, dialog, model.pointer, &theme);
         hits.traffic_lights = dialog_hits.traffic_lights;
     }
     hits
@@ -893,6 +1018,12 @@ fn render_header(
         .projection
         .and_then(|projection| projection.session.as_ref());
     let mode = session.map(|item| item.mode.as_str()).unwrap_or("code");
+    let project_name = model
+        .workspace
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("项目");
     let title = session
         .and_then(|item| item.title.clone())
         .filter(|text| !text.is_empty())
@@ -911,18 +1042,46 @@ fn render_header(
         .unwrap_or(1);
     let mode_count = mode_session_indices.len().max(1);
     let counter = format!("{mode_position}/{mode_count}");
+    let mode_title = mode_label(mode);
     let left = Line::from(vec![
         Span::styled("Blora", theme.rose_bold()),
         Span::styled("  ·  ", theme.mute()),
-        Span::styled(mode_label(mode), theme.fg(theme.sage)),
+        Span::styled(&mode_title, theme.fg(theme.sage)),
         Span::styled("  ·  ", theme.mute()),
         Span::styled("‹ ", theme.dim()),
         Span::styled(counter.clone(), theme.dim()),
         Span::styled(" ›", theme.dim()),
-        Span::styled("  ", theme.mute()),
-        Span::styled(ellipsize(&title, 28), theme.dim()),
+        Span::styled("  ·  ", theme.mute()),
+        Span::styled(project_name, theme.fg(theme.sage)),
+        Span::styled("  ·  ", theme.mute()),
+        Span::styled(ellipsize(&title, 28), theme.fg(theme.text_dim)),
     ]);
-    let mode_title = mode_label(mode);
+    let project_start = inner.x
+        + u16::try_from(
+            "Blora".width()
+                + "  ·  ".width()
+                + mode_title.width()
+                + "  ·  ".width()
+                + counter.width()
+                + 5,
+        )
+        .unwrap_or(0);
+    let project_width = u16::try_from(project_name.width()).unwrap_or(4);
+    hits.project_picker = Some(Rect {
+        x: project_start,
+        y: inner.y,
+        width: project_width,
+        height: 1,
+    });
+    let title_start = project_start
+        .saturating_add(project_width)
+        .saturating_add(6);
+    hits.session_picker = Some(Rect {
+        x: title_start,
+        y: inner.y,
+        width: u16::try_from(ellipsize(&title, 28).width()).unwrap_or(8),
+        height: 1,
+    });
     let mut x = inner.x
         + u16::try_from("Blora".width() + "  ·  ".width() + mode_title.width() + "  ·  ".width())
             .unwrap_or(0);
@@ -950,16 +1109,6 @@ fn render_header(
         width: 1,
         height: 1,
     });
-    let counter_x = inner.x + u16::try_from(
-        "Blora".width() + "  ·  ".width() + mode_title.width() + "  ·  ".width() + 2,
-    )
-    .unwrap_or(0);
-    hits.session_picker = Some(Rect {
-        x: counter_x,
-        y: inner.y,
-        width: u16::try_from(counter.width()).unwrap_or(3),
-        height: 1,
-    });
     frame.render_widget(Paragraph::new(left).style(theme.base()), inner);
     if inner.width <= 24 {
         return;
@@ -972,7 +1121,11 @@ fn render_header(
     } else {
         let used = model
             .projection
-            .map(|projection| projection.input_tokens.saturating_add(projection.output_tokens))
+            .map(|projection| {
+                projection
+                    .input_tokens
+                    .saturating_add(projection.output_tokens)
+            })
             .unwrap_or(0);
         context_usage_line(used, blora_context::context_window(), theme)
     };
@@ -1003,9 +1156,13 @@ fn render_context_dialog(
     theme: &Theme,
 ) -> HitMap {
     let mut hits = HitMap::default();
-    let Some(projection) = projection else { return hits };
+    let Some(projection) = projection else {
+        return hits;
+    };
     let window = blora_context::context_window().max(1);
-    let used = projection.input_tokens.saturating_add(projection.output_tokens);
+    let used = projection
+        .input_tokens
+        .saturating_add(projection.output_tokens);
     let input = projection.input_tokens.min(used);
     let output = projection.output_tokens.min(used.saturating_sub(input));
     let system = estimate_system_tokens(projection).min(input);
@@ -1019,7 +1176,9 @@ fn render_context_dialog(
         compact_height,
         dialog.fullscreen,
         dialog.minimized,
-    ) else { return hits };
+    ) else {
+        return hits;
+    };
     frame.render_widget(Clear, modal);
     let block = Block::bordered()
         .border_type(ratatui::widgets::BorderType::Rounded)
@@ -1048,10 +1207,23 @@ fn render_context_dialog(
     let used_pct = percentage(used, window);
     let mut lines = vec![
         Line::from(vec![
-            Span::styled(format!("{}  ", i18n::tr("dialog.context_current", "当前上下文")), theme.fg(theme.text).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("{} / {} tokens ({used_pct}%)", fmt_tokens(used), fmt_tokens(window)), theme.fg(theme.sage)),
+            Span::styled(
+                format!("{}  ", i18n::tr("dialog.context_current", "当前上下文")),
+                theme.fg(theme.text).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(
+                    "{} / {} tokens ({used_pct}%)",
+                    fmt_tokens(used),
+                    fmt_tokens(window)
+                ),
+                theme.fg(theme.sage),
+            ),
         ]),
-        Line::from(Span::styled(i18n::tr("dialog.context_total_progress", "总量进度"), theme.mute())),
+        Line::from(Span::styled(
+            i18n::tr("dialog.context_total_progress", "总量进度"),
+            theme.mute(),
+        )),
         progress_line(
             &[
                 (system, theme.rose),
@@ -1064,20 +1236,53 @@ fn render_context_dialog(
             theme,
         ),
         Line::default(),
-        usage_row(&i18n::tr("context.system_prompt", "系统提示"), system, window, theme.rose, theme),
-        usage_row(&i18n::tr("context.messages", "消息内容"), messages, window, theme.sage, theme),
-        usage_row(&i18n::tr("context.output_tools", "输出与工具"), output, window, theme.amber, theme),
-        usage_row(&i18n::tr("context.free", "可用空间"), free, window, theme.text_mute, theme),
+        usage_row(
+            &i18n::tr("context.system_prompt", "系统提示"),
+            system,
+            window,
+            theme.rose,
+            theme,
+        ),
+        usage_row(
+            &i18n::tr("context.messages", "消息内容"),
+            messages,
+            window,
+            theme.sage,
+            theme,
+        ),
+        usage_row(
+            &i18n::tr("context.output_tools", "输出与工具"),
+            output,
+            window,
+            theme.amber,
+            theme,
+        ),
+        usage_row(
+            &i18n::tr("context.free", "可用空间"),
+            free,
+            window,
+            theme.text_mute,
+            theme,
+        ),
         Line::default(),
-        Line::from(Span::styled(i18n::tr("context.estimate_note", "数据来自当前会话的累计 token 使用量；百分比按上下文窗口估算。"), theme.mute())),
+        Line::from(Span::styled(
+            i18n::tr(
+                "context.estimate_note",
+                "数据来自当前会话的累计 token 使用量；百分比按上下文窗口估算。",
+            ),
+            theme.mute(),
+        )),
     ];
     let visible = lines.len().saturating_sub(content.height as usize);
     let start = dialog.scroll.min(visible);
     lines.drain(0..start);
     frame.render_widget(Paragraph::new(lines).style(theme.base()), content);
     frame.render_widget(
-        Paragraph::new(Line::from(Span::styled("↑/↓ 滚动 · Esc 关闭", theme.mute())))
-            .style(theme.base()),
+        Paragraph::new(Line::from(Span::styled(
+            "↑/↓ 滚动 · Esc 关闭",
+            theme.mute(),
+        )))
+        .style(theme.base()),
         hint_row,
     );
     hits
@@ -1136,7 +1341,10 @@ fn usage_row(
     Line::from(vec![
         Span::styled("◆ ", theme.fg(color)),
         Span::styled(format!("{label:<12}"), theme.fg(theme.text)),
-        Span::styled(format!("{:>8} tokens  ", fmt_tokens(value)), theme.fg(theme.text_dim)),
+        Span::styled(
+            format!("{:>8} tokens  ", fmt_tokens(value)),
+            theme.fg(theme.text_dim),
+        ),
         Span::styled(format!("{:>3}%", percentage(value, total)), theme.mute()),
     ])
 }
@@ -1382,7 +1590,9 @@ fn highlight_selection(
     selection: Option<Selection>,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
-    let Some(selection) = selection else { return lines };
+    let Some(selection) = selection else {
+        return lines;
+    };
     let start_row = selection.start.1.min(selection.end.1);
     let end_row = selection.start.1.max(selection.end.1);
     lines
@@ -1394,29 +1604,54 @@ fn highlight_selection(
                 return line;
             }
             let start_col = if row == start_row {
-                if selection.start.1 <= selection.end.1 { selection.start.0 } else { selection.end.0 }
-            } else { rect.x };
+                if selection.start.1 <= selection.end.1 {
+                    selection.start.0
+                } else {
+                    selection.end.0
+                }
+            } else {
+                rect.x
+            };
             let end_col = if row == end_row {
-                if selection.start.1 <= selection.end.1 { selection.end.0 } else { selection.start.0 }
-            } else { rect.right() };
+                if selection.start.1 <= selection.end.1 {
+                    selection.end.0
+                } else {
+                    selection.start.0
+                }
+            } else {
+                rect.right()
+            };
             let from = start_col.saturating_sub(rect.x) as usize;
             let to = end_col.saturating_sub(rect.x) as usize;
-            let text = line.spans.iter().map(|span| span.content.as_ref()).collect::<String>();
+            let text = line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>();
             let chars: Vec<char> = text.chars().collect();
             let from = from.min(chars.len());
             let to = to.min(chars.len()).max(from);
             let mut spans = Vec::new();
             if from > 0 {
-                spans.push(Span::styled(chars[..from].iter().collect::<String>(), theme.base()));
+                spans.push(Span::styled(
+                    chars[..from].iter().collect::<String>(),
+                    theme.base(),
+                ));
             }
             if to > from {
                 spans.push(Span::styled(
                     chars[from..to].iter().collect::<String>(),
-                    theme.fg(theme.bg).bg(theme.sage).add_modifier(Modifier::BOLD),
+                    theme
+                        .fg(theme.bg)
+                        .bg(theme.sage)
+                        .add_modifier(Modifier::BOLD),
                 ));
             }
             if to < chars.len() {
-                spans.push(Span::styled(chars[to..].iter().collect::<String>(), theme.base()));
+                spans.push(Span::styled(
+                    chars[to..].iter().collect::<String>(),
+                    theme.base(),
+                ));
             }
             Line::from(spans)
         })
@@ -1741,7 +1976,10 @@ fn render_passport_dialog(
 
     // Row 1: instructions.
     let instructions = wrap_text(
-        &i18n::tr("passport.instructions", "在浏览器打开下面的链接并输入设备码，授权后这里会自动登录。"),
+        &i18n::tr(
+            "passport.instructions",
+            "在浏览器打开下面的链接并输入设备码，授权后这里会自动登录。",
+        ),
         wrap_width,
     );
     let mut instruction_lines: Vec<Line> = instructions
@@ -1782,7 +2020,10 @@ fn render_passport_dialog(
     };
     let hint = Line::from(vec![
         Span::styled("esc", theme.mute()),
-        Span::styled(i18n::tr("passport.hide_hint", " 隐藏对话框 · "), theme.mute()),
+        Span::styled(
+            i18n::tr("passport.hide_hint", " 隐藏对话框 · "),
+            theme.mute(),
+        ),
         Span::styled(waiting.to_owned(), theme.mute()),
     ]);
     frame.render_widget(Paragraph::new(hint).style(theme.base()), rows[4]);
@@ -1905,8 +2146,11 @@ fn render_provider_dialog(
         );
     } else if models.is_empty() {
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(format!("  {}", i18n::tr("provider.no_models", "没有可列出的模型")), theme.mute())))
-                .style(theme.base()),
+            Paragraph::new(Line::from(Span::styled(
+                format!("  {}", i18n::tr("provider.no_models", "没有可列出的模型")),
+                theme.mute(),
+            )))
+            .style(theme.base()),
             right,
         );
     } else {
@@ -1952,7 +2196,11 @@ fn render_provider_dialog(
 
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            &format!(" ←/→ {} · {}", i18n::tr("provider.switch_hint", "切换栏 · enter 确认 · esc 关闭"), i18n::tr("action.close", "关闭")),
+            &format!(
+                " ←/→ {} · {}",
+                i18n::tr("provider.switch_hint", "切换栏 · enter 确认 · esc 关闭"),
+                i18n::tr("action.close", "关闭")
+            ),
             theme.mute(),
         )))
         .style(theme.base()),
@@ -1993,9 +2241,13 @@ fn render_add_provider_dialog(
     ])
     .areas(inner);
     let title = match dialog.step {
-        AddProviderStep::Catalog => i18n::tr("dialog.add_provider.catalog", "添加供应商 · 选择来源"),
+        AddProviderStep::Catalog => {
+            i18n::tr("dialog.add_provider.catalog", "添加供应商 · 选择来源")
+        }
         AddProviderStep::CustomId => i18n::tr("dialog.add_provider.id", "添加供应商 · 标识"),
-        AddProviderStep::CustomBase => i18n::tr("dialog.add_provider.base", "添加供应商 · 接口地址"),
+        AddProviderStep::CustomBase => {
+            i18n::tr("dialog.add_provider.base", "添加供应商 · 接口地址")
+        }
         AddProviderStep::ApiKey => i18n::tr("dialog.add_provider.key", "添加供应商 · API 密钥"),
         AddProviderStep::Review => i18n::tr("dialog.add_provider.review", "添加供应商 · 确认"),
     };
@@ -2031,10 +2283,10 @@ fn render_add_provider_dialog(
                 if index >= total {
                     break;
                 }
-                let rect = rows
-                    .get(vis)
-                    .copied()
-                    .unwrap_or(Rect::new(list_body.x, list_body.y, 0, 0));
+                let rect =
+                    rows.get(vis)
+                        .copied()
+                        .unwrap_or(Rect::new(list_body.x, list_body.y, 0, 0));
                 if rect.height == 0 {
                     continue;
                 }
@@ -2165,13 +2417,18 @@ fn render_add_provider_dialog(
                     list_body,
                 );
             } else {
-                let shown = dialog.preview_models.len().clamp(1, list_body.height.max(1) as usize);
+                let shown = dialog
+                    .preview_models
+                    .len()
+                    .clamp(1, list_body.height.max(1) as usize);
                 let rows = split_n_rows(list_body, shown as u16);
                 for (index, model) in dialog.preview_models.iter().take(shown).enumerate() {
-                    let rect = rows
-                        .get(index)
-                        .copied()
-                        .unwrap_or(Rect::new(list_body.x, list_body.y, 0, 0));
+                    let rect = rows.get(index).copied().unwrap_or(Rect::new(
+                        list_body.x,
+                        list_body.y,
+                        0,
+                        0,
+                    ));
                     let label = if model.name == model.id {
                         model.id.clone()
                     } else {
@@ -2197,8 +2454,14 @@ fn render_add_provider_dialog(
         );
     } else {
         let footer = match dialog.step {
-            AddProviderStep::Catalog => i18n::tr("hint.add_provider.catalog", " 输入筛选  ·  enter 下一步  ·  esc 关闭"),
-            AddProviderStep::Review => i18n::tr("hint.add_provider.review", " enter 保存  ·  ←→ 切换格式  ·  esc 返回"),
+            AddProviderStep::Catalog => i18n::tr(
+                "hint.add_provider.catalog",
+                " 输入筛选  ·  enter 下一步  ·  esc 关闭",
+            ),
+            AddProviderStep::Review => i18n::tr(
+                "hint.add_provider.review",
+                " enter 保存  ·  ←→ 切换格式  ·  esc 返回",
+            ),
             _ => i18n::tr("hint.add_provider.next", " enter 下一步  ·  esc 上一步"),
         };
         frame.render_widget(
@@ -2245,7 +2508,8 @@ fn paint_prompt_block(
         input,
     );
     frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(format!(" {hint}"), theme.mute()))).style(theme.base()),
+        Paragraph::new(Line::from(Span::styled(format!(" {hint}"), theme.mute())))
+            .style(theme.base()),
         hint_row,
     );
 }
@@ -2817,14 +3081,18 @@ pub(crate) fn title_label(
     session_title: Option<&str>,
 ) -> String {
     let from_user = projection.and_then(|projection| {
-        projection.transcript.iter().rev().find_map(|item| match item {
-            TranscriptItem::User { text, .. } => text
-                .lines()
-                .map(str::trim)
-                .find(|line| !line.is_empty())
-                .map(|line| ellipsize(line, 32)),
-            _ => None,
-        })
+        projection
+            .transcript
+            .iter()
+            .rev()
+            .find_map(|item| match item {
+                TranscriptItem::User { text, .. } => text
+                    .lines()
+                    .map(str::trim)
+                    .find(|line| !line.is_empty())
+                    .map(|line| ellipsize(line, 32)),
+                _ => None,
+            })
     });
     if let Some(text) = from_user {
         return text;
@@ -2851,11 +3119,19 @@ mod tests {
     fn idle_context_bar_fills_by_usage() {
         let theme = Theme::current();
         let empty = context_usage_line(0, 100_000, &theme);
-        let empty_text: String = empty.spans.iter().map(|span| span.content.as_ref()).collect();
+        let empty_text: String = empty
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
         assert!(empty_text.contains("▢"), "{empty_text}");
         assert!(empty_text.contains("0%"), "{empty_text}");
         let full = context_usage_line(100_000, 100_000, &theme);
-        let full_text: String = full.spans.iter().map(|span| span.content.as_ref()).collect();
+        let full_text: String = full
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
         assert!(full_text.contains("■■■■■■■■■■"), "{full_text}");
         assert!(full_text.contains("100%"), "{full_text}");
         let mid = context_usage_line(35_000, 100_000, &theme);
@@ -2890,8 +3166,14 @@ mod tests {
     #[test]
     fn window_title_cycles_star_while_running() {
         assert_eq!(window_title(true, 0, "code", "问候"), "✦ Blora Code · 问候");
-        assert_eq!(window_title(true, 19, "code", "问候"), "✽ Blora Code · 问候");
-        assert_eq!(window_title(true, 20, "code", "问候"), "✼ Blora Code · 问候");
+        assert_eq!(
+            window_title(true, 19, "code", "问候"),
+            "✽ Blora Code · 问候"
+        );
+        assert_eq!(
+            window_title(true, 20, "code", "问候"),
+            "✼ Blora Code · 问候"
+        );
         assert_eq!(window_title(false, 0, "code", "问候"), "Blora Code · 问候");
     }
 
@@ -3354,7 +3636,10 @@ mod tests {
         dialog.clamp_catalog_selected();
         let (lines, _) = render_add_provider_with_hits(Rect::new(0, 0, 80, 24), &dialog, None);
         let joined: String = lines.iter().map(|line| flatten(line)).collect();
-        assert!(joined.contains("DeepSeek"), "filtered catalog keeps DeepSeek");
+        assert!(
+            joined.contains("DeepSeek"),
+            "filtered catalog keeps DeepSeek"
+        );
         assert!(
             !joined.contains("AcmeAI"),
             "filtered catalog hides AcmeAI, got {joined}"

@@ -19,11 +19,11 @@ use blora_runtime::{CancelToken, RunOptions, Runtime};
 use blora_session::TranscriptItem;
 use blora_storage::{CreateSession, CreateTask};
 use blora_types::{Mode, Result, SessionId, TaskId};
+use crossterm::cursor::{Hide, Show};
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
     MouseButton, MouseEventKind,
 };
-use crossterm::cursor::{Hide, Show};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -47,10 +47,7 @@ fn begin_passport_login(
                 verification_uri: device.verification_uri.clone(),
                 opened_browser: false,
             });
-            format!(
-                "{}\n设备码：{}",
-                device.verification_uri, device.user_code
-            )
+            format!("{}\n设备码：{}", device.verification_uri, device.user_code)
         }
         Ok(None) => "PassPort 登录未配置".to_owned(),
         Err(err) => err.to_string(),
@@ -93,6 +90,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut theme_dialog: Option<view::ThemeDialog> = None;
     let mut context_dialog: Option<view::ContextDialog> = None;
     let mut mode_menu: Option<view::ModeMenu> = None;
+    let mut project_picker: Option<view::ProjectPicker> = None;
     let mut session_picker: Option<view::SessionPicker> = None;
     // PassPort user token of the logged-in user; drives the default provider.
     let mut passport_user_token: Option<String> = None;
@@ -173,9 +171,8 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                     user.email.as_deref(),
                     user.apptoken.as_deref(),
                     user.refresh_token.as_deref(),
-                    user.expires_in.map(|secs| {
-                        chrono::Utc::now() + chrono::Duration::seconds(secs as i64)
-                    }),
+                    user.expires_in
+                        .map(|secs| chrono::Utc::now() + chrono::Duration::seconds(secs as i64)),
                 )?;
                 passport_user_token = user
                     .apptoken
@@ -310,6 +307,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             model,
                             provider,
                             mode_menu: mode_menu.as_ref(),
+                            project_picker: project_picker.as_ref(),
                             session_picker: session_picker.as_ref(),
                             user_label: &passport_username,
                             running: job.is_some(),
@@ -606,7 +604,9 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 if let Some(dialog) = provider_dialog.as_mut() {
                                     if dialog.is_add() {
                                         add_provider_dialog = Some(open_add_provider_dialog());
-                                    } else if dialog.current().is_some_and(|option| !option.available)
+                                    } else if dialog
+                                        .current()
+                                        .is_some_and(|option| !option.available)
                                     {
                                         status = begin_passport_login(
                                             &mut passport_url,
@@ -773,10 +773,52 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             }
                             // The login dialog is only hidden: polling keeps
                             // running so completing authorization still lands.
-                            KeyCode::Enter if session_picker.as_ref().is_some_and(|picker| picker.minimized) => {
+                            KeyCode::Enter
+                                if session_picker
+                                    .as_ref()
+                                    .is_some_and(|picker| picker.minimized) =>
+                            {
                                 if let Some(picker) = session_picker.as_mut() {
                                     picker.minimized = false;
                                 }
+                            }
+                            KeyCode::Enter
+                                if project_picker
+                                    .as_ref()
+                                    .is_some_and(|picker| picker.minimized) =>
+                            {
+                                if let Some(picker) = project_picker.as_mut() {
+                                    picker.minimized = false;
+                                }
+                            }
+                            KeyCode::Enter if project_picker.is_some() => {
+                                if let Some(picker) = project_picker.take() {
+                                    if let Some(path) =
+                                        project_paths(&sessions).get(picker.selected)
+                                    {
+                                        if let Some(found) = sessions
+                                            .iter()
+                                            .position(|session| &session.workspace_path == path)
+                                        {
+                                            index = found;
+                                            cached = None;
+                                        }
+                                    }
+                                }
+                            }
+                            KeyCode::Up if project_picker.is_some() => {
+                                if let Some(picker) = project_picker.as_mut() {
+                                    picker.selected = picker.selected.saturating_sub(1);
+                                }
+                            }
+                            KeyCode::Down if project_picker.is_some() => {
+                                if let Some(picker) = project_picker.as_mut() {
+                                    picker.selected = (picker.selected + 1)
+                                        .min(project_count(&sessions).saturating_sub(1));
+                                }
+                            }
+                            KeyCode::Esc if project_picker.is_some() => {
+                                project_picker = None;
                             }
                             KeyCode::Enter if session_picker.is_some() => {
                                 if let Some(picker) = session_picker.take() {
@@ -784,7 +826,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                         runtime,
                                         &sessions,
                                         &mut index,
-                                        current_mode_session_indices(&sessions, session_id.as_ref()),
+                                        (0..sessions.len()).collect(),
                                         picker.selected,
                                     );
                                 }
@@ -796,13 +838,19 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             }
                             KeyCode::Down if session_picker.is_some() => {
                                 if let Some(picker) = session_picker.as_mut() {
-                                    picker.selected = (picker.selected + 1).min(mode_session_count(&sessions, session_id.as_ref()).saturating_sub(1));
+                                    picker.selected =
+                                        (picker.selected + 1).min(sessions.len().saturating_sub(1));
                                 }
                             }
                             KeyCode::Esc if session_picker.is_some() => {
                                 session_picker = None;
                             }
-                            KeyCode::Enter if mode_menu.as_ref().is_some_and(|menu| menu.minimized) => {
+                            KeyCode::Esc if project_picker.is_some() => {
+                                project_picker = None;
+                            }
+                            KeyCode::Enter
+                                if mode_menu.as_ref().is_some_and(|menu| menu.minimized) =>
+                            {
                                 if let Some(menu) = mode_menu.as_mut() {
                                     menu.minimized = false;
                                 }
@@ -811,9 +859,12 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 if let Some(menu) = mode_menu.take()
                                     && let Some(id) = session_id.as_ref()
                                 {
-                                    let option = view::MODE_OPTIONS[menu.selected.min(view::MODE_OPTIONS.len() - 1)];
+                                    let option = view::MODE_OPTIONS
+                                        [menu.selected.min(view::MODE_OPTIONS.len() - 1)];
                                     match runtime.set_session_mode(id, option.mode) {
-                                        Ok(()) => status = format!("已切换到 {} 模式", option.title),
+                                        Ok(()) => {
+                                            status = format!("已切换到 {} 模式", option.title)
+                                        }
                                         Err(err) => status = err.to_string(),
                                     }
                                 }
@@ -825,7 +876,8 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             }
                             KeyCode::Down if mode_menu.is_some() => {
                                 if let Some(menu) = mode_menu.as_mut() {
-                                    menu.selected = (menu.selected + 1).min(view::MODE_OPTIONS.len() - 1);
+                                    menu.selected =
+                                        (menu.selected + 1).min(view::MODE_OPTIONS.len() - 1);
                                 }
                             }
                             KeyCode::Esc if mode_menu.is_some() => {
@@ -891,47 +943,49 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     selection.end = (mouse.column, mouse.row);
                                 }
                                 match hits.hit(mouse.column, mouse.row) {
-                                Some(view::Hit::Slash(idx)) => {
-                                    slash_selected = idx;
-                                }
-                                Some(view::Hit::ProviderRow(idx)) => {
-                                    if let Some(dialog) = provider_dialog.as_mut() {
-                                        dialog.selected = idx;
-                                        dialog.model_selected = 0;
-                                        dialog.pane = view::ProviderPane::Providers;
+                                    Some(view::Hit::Slash(idx)) => {
+                                        slash_selected = idx;
                                     }
-                                }
-                                Some(view::Hit::ProviderModelRow(idx)) => {
-                                    if let Some(dialog) = provider_dialog.as_mut() {
-                                        dialog.model_selected = idx;
-                                        dialog.pane = view::ProviderPane::Models;
-                                    }
-                                }
-                                Some(view::Hit::AddProviderRow(idx)) => {
-                                    if let Some(dialog) = add_provider_dialog.as_mut() {
-                                        match dialog.step {
-                                            view::AddProviderStep::Catalog => dialog.selected = idx,
-                                            view::AddProviderStep::Review => {
-                                                dialog.format = cycle_format(dialog.format, 1);
-                                                refresh_add_preview(dialog);
-                                            }
-                                            _ => {}
+                                    Some(view::Hit::ProviderRow(idx)) => {
+                                        if let Some(dialog) = provider_dialog.as_mut() {
+                                            dialog.selected = idx;
+                                            dialog.model_selected = 0;
+                                            dialog.pane = view::ProviderPane::Providers;
                                         }
                                     }
-                                }
-                                Some(view::Hit::ThemeTab(idx)) => {
-                                    if let Some(dialog) = theme_dialog.as_mut() {
-                                        dialog.scheme = scheme_from_tab(idx);
-                                        preview_theme_dialog(dialog);
+                                    Some(view::Hit::ProviderModelRow(idx)) => {
+                                        if let Some(dialog) = provider_dialog.as_mut() {
+                                            dialog.model_selected = idx;
+                                            dialog.pane = view::ProviderPane::Models;
+                                        }
                                     }
-                                }
-                                Some(view::Hit::ThemeRow(idx)) => {
-                                    if let Some(dialog) = theme_dialog.as_mut() {
-                                        dialog.selected = idx;
-                                        preview_theme_dialog(dialog);
+                                    Some(view::Hit::AddProviderRow(idx)) => {
+                                        if let Some(dialog) = add_provider_dialog.as_mut() {
+                                            match dialog.step {
+                                                view::AddProviderStep::Catalog => {
+                                                    dialog.selected = idx
+                                                }
+                                                view::AddProviderStep::Review => {
+                                                    dialog.format = cycle_format(dialog.format, 1);
+                                                    refresh_add_preview(dialog);
+                                                }
+                                                _ => {}
+                                            }
+                                        }
                                     }
-                                }
-                                _ => {}
+                                    Some(view::Hit::ThemeTab(idx)) => {
+                                        if let Some(dialog) = theme_dialog.as_mut() {
+                                            dialog.scheme = scheme_from_tab(idx);
+                                            preview_theme_dialog(dialog);
+                                        }
+                                    }
+                                    Some(view::Hit::ThemeRow(idx)) => {
+                                        if let Some(dialog) = theme_dialog.as_mut() {
+                                            dialog.selected = idx;
+                                            preview_theme_dialog(dialog);
+                                        }
+                                    }
+                                    _ => {}
                                 }
                             }
                             MouseEventKind::Up(MouseButton::Left) => {
@@ -960,6 +1014,28 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                             | view::Hit::TrafficOpenBrowser,
                                     )
                                 ) {
+                                    if project_picker.is_some() {
+                                        match hit {
+                                            Some(view::Hit::TrafficClose) => project_picker = None,
+                                            Some(view::Hit::TrafficMinimize) => {
+                                                if let Some(picker) = project_picker.as_mut() {
+                                                    picker.minimized = true;
+                                                    picker.fullscreen = false;
+                                                }
+                                            }
+                                            Some(view::Hit::TrafficOpenBrowser) => {
+                                                if let Some(picker) = project_picker.as_mut() {
+                                                    if picker.minimized {
+                                                        picker.minimized = false;
+                                                    } else {
+                                                        picker.fullscreen = !picker.fullscreen;
+                                                    }
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                        continue;
+                                    }
                                     handle_traffic_light(
                                         hit,
                                         &mut theme_dialog,
@@ -972,6 +1048,33 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                         &mut cancel,
                                         &mut status,
                                     );
+                                    continue;
+                                }
+                                if matches!(hit, Some(view::Hit::TrafficClose))
+                                    && project_picker.is_some()
+                                {
+                                    project_picker = None;
+                                    continue;
+                                }
+                                if matches!(hit, Some(view::Hit::TrafficMinimize))
+                                    && project_picker.is_some()
+                                {
+                                    if let Some(picker) = project_picker.as_mut() {
+                                        picker.minimized = true;
+                                        picker.fullscreen = false;
+                                    }
+                                    continue;
+                                }
+                                if matches!(hit, Some(view::Hit::TrafficOpenBrowser))
+                                    && project_picker.is_some()
+                                {
+                                    if let Some(picker) = project_picker.as_mut() {
+                                        if picker.minimized {
+                                            picker.minimized = false;
+                                        } else {
+                                            picker.fullscreen = !picker.fullscreen;
+                                        }
+                                    }
                                     continue;
                                 }
                                 if matches!(hit, Some(view::Hit::ContextUsage)) {
@@ -997,6 +1100,28 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     });
                                     continue;
                                 }
+                                if let Some(view::Hit::ProjectPickerRow(project_index)) = hit {
+                                    if let Some(path) = project_paths(&sessions).get(project_index)
+                                    {
+                                        if let Some(found) = sessions
+                                            .iter()
+                                            .position(|session| &session.workspace_path == path)
+                                        {
+                                            index = found;
+                                            cached = None;
+                                        }
+                                    }
+                                    project_picker = None;
+                                    continue;
+                                }
+                                if matches!(hit, Some(view::Hit::ProjectPicker)) {
+                                    project_picker = Some(view::ProjectPicker {
+                                        selected: 0,
+                                        fullscreen: false,
+                                        minimized: false,
+                                    });
+                                    continue;
+                                }
                                 if let Some(view::Hit::SessionPickerRow(session_index)) = hit {
                                     index = session_index;
                                     session_picker = None;
@@ -1004,14 +1129,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     continue;
                                 }
                                 if matches!(hit, Some(view::Hit::SessionPicker)) {
-                                    let current_mode = projection
-                                        .and_then(|projection| projection.session.as_ref())
-                                        .map(|session| session.mode)
-                                        .unwrap_or(Mode::Code);
-                                    let selected = sessions[..index]
-                                        .iter()
-                                        .filter(|session| session.mode == current_mode)
-                                        .count();
+                                    let selected = index;
                                     session_picker = Some(view::SessionPicker {
                                         selected,
                                         fullscreen: false,
@@ -1021,9 +1139,12 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 }
                                 if let Some(view::Hit::ModeRow(index)) = hit {
                                     if let Some(id) = session_id.as_ref() {
-                                        let option = view::MODE_OPTIONS[index.min(view::MODE_OPTIONS.len() - 1)];
+                                        let option = view::MODE_OPTIONS
+                                            [index.min(view::MODE_OPTIONS.len() - 1)];
                                         match runtime.set_session_mode(id, option.mode) {
-                                            Ok(()) => status = format!("已切换到 {} 模式", option.title),
+                                            Ok(()) => {
+                                                status = format!("已切换到 {} 模式", option.title)
+                                            }
                                             Err(err) => status = err.to_string(),
                                         }
                                     }
@@ -1068,7 +1189,9 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                         dialog.model_selected = 0;
                                         if dialog.is_add() {
                                             add_provider_dialog = Some(open_add_provider_dialog());
-                                        } else if dialog.current().is_some_and(|option| !option.available)
+                                        } else if dialog
+                                            .current()
+                                            .is_some_and(|option| !option.available)
                                         {
                                             status = begin_passport_login(
                                                 &mut passport_url,
@@ -1413,7 +1536,13 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     });
 
     disable_raw_mode().ok();
-    execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen, Show).ok();
+    execute!(
+        io::stdout(),
+        DisableMouseCapture,
+        LeaveAlternateScreen,
+        Show
+    )
+    .ok();
     if std::env::var_os("NO_COLOR").is_none() {
         let _ = write!(io::stdout(), "{}", theme::TERMINAL_RESET);
         let _ = io::stdout().flush();
@@ -1566,12 +1695,9 @@ fn provider_options(provider_override: &str, logged_in: bool) -> Vec<view::Provi
                 npm: None,
                 models: Vec::new(),
             };
-            if let Ok(models) = blora_catalog::resolve_models(
-                &entry,
-                saved.format,
-                &saved.api_key,
-                &saved.base_url,
-            ) {
+            if let Ok(models) =
+                blora_catalog::resolve_models(&entry, saved.format, &saved.api_key, &saved.base_url)
+            {
                 saved.models = models;
                 if matches!(
                     saved.format,
@@ -1790,28 +1916,18 @@ fn usable_passport_token(
     }
 }
 
-fn mode_session_count(sessions: &[blora_storage::SessionSummary], session_id: Option<&SessionId>) -> usize {
-    let mode = session_id
-        .and_then(|id| sessions.iter().find(|session| session.id == *id))
-        .map(|session| session.mode)
-        .unwrap_or(Mode::Code);
-    sessions.iter().filter(|session| session.mode == mode).count()
+fn project_paths(sessions: &[blora_storage::SessionSummary]) -> Vec<String> {
+    let mut paths: Vec<String> = sessions
+        .iter()
+        .map(|session| session.workspace_path.clone())
+        .collect();
+    paths.sort();
+    paths.dedup();
+    paths
 }
 
-fn current_mode_session_indices(
-    sessions: &[blora_storage::SessionSummary],
-    session_id: Option<&SessionId>,
-) -> Vec<usize> {
-    let mode = session_id
-        .and_then(|id| sessions.iter().find(|session| session.id == *id))
-        .map(|session| session.mode)
-        .unwrap_or(Mode::Code);
-    sessions
-        .iter()
-        .enumerate()
-        .filter(|(_, session)| session.mode == mode)
-        .map(|(index, _)| index)
-        .collect()
+fn project_count(sessions: &[blora_storage::SessionSummary]) -> usize {
+    project_paths(sessions).len().max(1)
 }
 
 fn select_mode_session(
@@ -2040,9 +2156,8 @@ fn refresh_add_preview(dialog: &mut view::AddProviderDialog) {
                 Ok(models) => {
                     dialog.preview_models = models;
                     if dialog.preview_models.is_empty() {
-                        dialog.error = Some(
-                            "没有列出模型。可按 ←→ 切换格式，或返回修改基址。".to_owned(),
-                        );
+                        dialog.error =
+                            Some("没有列出模型。可按 ←→ 切换格式，或返回修改基址。".to_owned());
                     } else {
                         dialog.error = None;
                     }
@@ -3084,13 +3199,29 @@ fn handle_traffic_light(
         }
         Some(view::Hit::TrafficOpenBrowser) => {
             if let Some(dialog) = theme_dialog.as_mut() {
-                if dialog.minimized { dialog.minimized = false; } else { dialog.fullscreen = !dialog.fullscreen; }
+                if dialog.minimized {
+                    dialog.minimized = false;
+                } else {
+                    dialog.fullscreen = !dialog.fullscreen;
+                }
             } else if let Some(dialog) = add_provider_dialog.as_mut() {
-                if dialog.minimized { dialog.minimized = false; } else { dialog.fullscreen = !dialog.fullscreen; }
+                if dialog.minimized {
+                    dialog.minimized = false;
+                } else {
+                    dialog.fullscreen = !dialog.fullscreen;
+                }
             } else if let Some(dialog) = provider_dialog.as_mut() {
-                if dialog.minimized { dialog.minimized = false; } else { dialog.fullscreen = !dialog.fullscreen; }
+                if dialog.minimized {
+                    dialog.minimized = false;
+                } else {
+                    dialog.fullscreen = !dialog.fullscreen;
+                }
             } else if let Some(dialog) = context_dialog.as_mut() {
-                if dialog.minimized { dialog.minimized = false; } else { dialog.fullscreen = !dialog.fullscreen; }
+                if dialog.minimized {
+                    dialog.minimized = false;
+                } else {
+                    dialog.fullscreen = !dialog.fullscreen;
+                }
             } else if let Some(url) = passport_url {
                 let _ = std::process::Command::new("xdg-open").arg(url).spawn();
                 let _ = std::process::Command::new("open").arg(url).spawn();
