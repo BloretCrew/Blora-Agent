@@ -260,6 +260,22 @@ pub struct SessionPicker {
 }
 
 #[derive(Clone, Debug)]
+pub struct ToolCallDetail {
+    pub name: String,
+    pub status: String,
+    pub arguments: Option<String>,
+    pub output: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ToolDialog {
+    pub tools: Vec<ToolCallDetail>,
+    pub scroll: usize,
+    pub fullscreen: bool,
+    pub minimized: bool,
+}
+
+#[derive(Clone, Debug)]
 pub struct ContextDialog {
     pub scroll: usize,
     pub fullscreen: bool,
@@ -284,6 +300,7 @@ pub struct FrameModel<'a> {
     /// Color-scheme picker; renders as a centered modal dialog.
     pub theme_dialog: Option<&'a ThemeDialog>,
     pub context_dialog: Option<&'a ContextDialog>,
+    pub tool_dialog: Option<&'a ToolDialog>,
     pub slash_hits: &'a [&'static SlashCommand],
     pub slash_selected: usize,
     pub search: Option<&'a str>,
@@ -303,9 +320,10 @@ pub struct FrameModel<'a> {
 }
 
 /// A clickable region from the last painted frame.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Hit {
     Transcript,
+    ToolSummary(Vec<usize>),
     Composer,
     Slash(usize),
     Allow,
@@ -359,6 +377,7 @@ pub enum HintAction {
 #[derive(Clone, Debug, Default)]
 pub struct HitMap {
     pub transcript: Rect,
+    pub tool_summary_rows: Vec<(Rect, Vec<usize>)>,
     pub composer: Rect,
     pub overlay: Option<Rect>,
     pub notice: bool,
@@ -396,6 +415,11 @@ pub struct HitMap {
 impl HitMap {
     #[must_use]
     pub fn hit(&self, col: u16, row: u16) -> Option<Hit> {
+        for (rect, indices) in &self.tool_summary_rows {
+            if contains(*rect, col, row) {
+                return Some(Hit::ToolSummary(indices.clone()));
+            }
+        }
         for (rect, idx) in &self.slash_rows {
             if contains(*rect, col, row) {
                 return Some(Hit::Slash(*idx));
@@ -606,7 +630,7 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
     };
     render_header(frame, header, model, &theme, &mut hits);
     render_rule(frame, rule, &theme);
-    render_transcript(frame, transcript, model, &theme);
+    render_transcript(frame, transcript, model, &theme, &mut hits);
     if let Some(rect) = approval {
         render_approval(frame, rect, model, &theme, &mut hits);
     }
@@ -862,7 +886,10 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
             hint_row,
         );
     }
-    if let Some(dialog) = model.passport_dialog {
+    if let Some(dialog) = model.tool_dialog {
+        let dialog_hits = render_tool_dialog(frame, area, dialog, model.pointer, &theme);
+        hits.traffic_lights = dialog_hits.traffic_lights;
+    } else if let Some(dialog) = model.passport_dialog {
         let dialog_hits = render_passport_dialog(frame, area, dialog, model.pointer, &theme);
         hits.traffic_lights = dialog_hits.traffic_lights;
     } else if let Some(dialog) = model.add_provider_dialog {
@@ -1355,7 +1382,13 @@ fn render_rule(frame: &mut Frame<'_>, area: Rect, theme: &Theme) {
     frame.render_widget(Paragraph::new(line).style(theme.fg(theme.hairline)), inner);
 }
 
-fn render_transcript(frame: &mut Frame<'_>, area: Rect, model: &FrameModel<'_>, theme: &Theme) {
+fn render_transcript(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    model: &FrameModel<'_>,
+    theme: &Theme,
+    hits: &mut HitMap,
+) {
     let inner = inset(area);
     let width = inner.width.saturating_sub(2) as usize;
     let lines = model.projection.map_or_else(
@@ -1382,6 +1415,80 @@ fn render_transcript(frame: &mut Frame<'_>, area: Rect, model: &FrameModel<'_>, 
     let visible = transcript_window(lines, inner.height as usize, model.scroll);
     let visible = highlight_selection(visible, inner, model.text_selection, theme);
     frame.render_widget(Paragraph::new(visible).style(theme.base()), inner);
+    hits.tool_summary_rows = tool_summary_hit_rows(
+        model.projection,
+        model.hide_tools,
+        model.search,
+        inner,
+        model.scroll,
+    );
+}
+
+fn tool_summary_hit_rows(
+    projection: Option<&SessionProjection>,
+    hide_tools: bool,
+    search: Option<&str>,
+    rect: Rect,
+    scroll: usize,
+) -> Vec<(Rect, Vec<usize>)> {
+    let Some(projection) = projection else {
+        return Vec::new();
+    };
+    let needle = search.map(str::to_ascii_lowercase);
+    let visible: Vec<(usize, &TranscriptItem)> = projection
+        .transcript
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| {
+            !(hide_tools && matches!(item, TranscriptItem::Tool { .. }))
+                && item_matches(item, needle.as_deref())
+        })
+        .collect();
+    let mut rows = Vec::new();
+    let mut rendered_row = 0usize;
+    let mut index = 0usize;
+    while index < visible.len() {
+        if rendered_row > 0 {
+            rendered_row += 1;
+        }
+        if matches!(visible[index].1, TranscriptItem::Tool { .. }) {
+            let start = index;
+            index += 1;
+            while index < visible.len() && matches!(visible[index].1, TranscriptItem::Tool { .. }) {
+                index += 1;
+            }
+            let indices = visible[start..index]
+                .iter()
+                .map(|(i, _)| *i)
+                .collect::<Vec<_>>();
+            if rendered_row < rect.height as usize {
+                rows.push((
+                    Rect::new(rect.x, rect.y + rendered_row as u16, rect.width, 1),
+                    indices,
+                ));
+            }
+            rendered_row += 1;
+            continue;
+        }
+        index += 1;
+        rendered_row += 1;
+    }
+    let total = rendered_row;
+    let window_start = total
+        .saturating_sub(rect.height as usize)
+        .saturating_sub(scroll);
+    rows.into_iter()
+        .filter_map(|(row, indices)| {
+            let offset = row.y.saturating_sub(rect.y) as usize;
+            let visible_offset = offset.saturating_sub(window_start);
+            (visible_offset < rect.height as usize).then(|| {
+                (
+                    Rect::new(rect.x, rect.y + visible_offset as u16, rect.width, 1),
+                    indices,
+                )
+            })
+        })
+        .collect()
 }
 
 fn welcome_lines(theme: &Theme) -> Vec<Line<'static>> {
@@ -2201,6 +2308,71 @@ fn render_provider_dialog(
                 i18n::tr("provider.switch_hint", "切换栏 · enter 确认 · esc 关闭"),
                 i18n::tr("action.close", "关闭")
             ),
+            theme.mute(),
+        )))
+        .style(theme.base()),
+        hint_row,
+    );
+    hits
+}
+
+fn render_tool_dialog(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    dialog: &ToolDialog,
+    pointer: Option<(u16, u16)>,
+    theme: &Theme,
+) -> HitMap {
+    let mut hits = HitMap::default();
+    let height = (dialog.tools.len() as u16 * 4 + 4).clamp(8, area.height.saturating_sub(2));
+    let Some(frame_area) = dialog_outer(area, 88, height, dialog.fullscreen, dialog.minimized)
+    else {
+        return hits;
+    };
+    let inner = paint_dialog_chrome(frame, frame_area, theme);
+    let [title_row, body, hint_row] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(3),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+    paint_traffic_title(frame, title_row, "详细工具调用", pointer, theme, &mut hits);
+    if dialog.minimized {
+        return hits;
+    }
+    let mut lines = Vec::new();
+    for (index, tool) in dialog.tools.iter().enumerate() {
+        lines.push(Line::from(vec![
+            Span::styled(format!("{}  ", index + 1), theme.fg(theme.rose)),
+            Span::styled(
+                tool.name.clone(),
+                theme.fg(theme.text).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!("  {}", tool.status), theme.mute()),
+        ]));
+        if let Some(arguments) = &tool.arguments {
+            lines.push(Line::from(Span::styled(
+                format!("  参数: {arguments}"),
+                theme.mute(),
+            )));
+        }
+        if let Some(output) = &tool.output {
+            lines.push(Line::from(Span::styled(
+                format!("  输出: {output}"),
+                theme.fg(theme.text_dim),
+            )));
+        }
+        lines.push(Line::default());
+    }
+    let visible = lines
+        .into_iter()
+        .skip(dialog.scroll)
+        .take(body.height as usize)
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(visible).style(theme.base()), body);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "↑/↓ 滚动 · Esc 关闭",
             theme.mute(),
         )))
         .style(theme.base()),
