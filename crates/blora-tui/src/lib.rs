@@ -1027,42 +1027,9 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             }
                             MouseEventKind::Down(MouseButton::Left) => {
                                 let hit = hits.hit(mouse.column, mouse.row);
-                                let modal_open = project_picker.is_some()
-                                    || session_picker.is_some()
-                                    || mode_menu.is_some()
-                                    || theme_dialog.is_some()
-                                    || add_provider_dialog.is_some()
-                                    || provider_dialog.is_some()
-                                    || context_dialog.is_some()
-                                    || tool_dialog.is_some()
-                                    || passport_dialog.is_some();
-                                if matches!(
-                                    hit,
-                                    Some(
-                                        view::Hit::TrafficClose
-                                            | view::Hit::TrafficMinimize
-                                            | view::Hit::TrafficOpenBrowser,
-                                    )
-                                ) {
-                                    handle_traffic_light(
-                                        hit,
-                                        &mut project_picker,
-                                        &mut session_picker,
-                                        &mut mode_menu,
-                                        &mut tool_dialog,
-                                        &mut theme_dialog,
-                                        &mut add_provider_dialog,
-                                        &mut provider_dialog,
-                                        &mut context_dialog,
-                                        &mut passport_dialog,
-                                        &mut passport_browser_opened,
-                                        passport_url.as_deref(),
-                                        &mut cancel,
-                                        &mut status,
-                                    );
-                                    continue;
-                                }
-                                if let Some(view::Hit::ToolSummary(indices)) = hit {
+                                if let Some(view::Hit::ToolSummary(indices)) = hit.clone() {
+                                    selecting_text = false;
+                                    text_selection = None;
                                     let tools = projection
                                         .map(|projection| {
                                             indices
@@ -1096,6 +1063,41 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                         fullscreen: false,
                                         minimized: false,
                                     });
+                                    continue;
+                                }
+                                let modal_open = project_picker.is_some()
+                                    || session_picker.is_some()
+                                    || mode_menu.is_some()
+                                    || theme_dialog.is_some()
+                                    || add_provider_dialog.is_some()
+                                    || provider_dialog.is_some()
+                                    || context_dialog.is_some()
+                                    || tool_dialog.is_some()
+                                    || passport_dialog.is_some();
+                                if matches!(
+                                    hit,
+                                    Some(
+                                        view::Hit::TrafficClose
+                                            | view::Hit::TrafficMinimize
+                                            | view::Hit::TrafficOpenBrowser,
+                                    )
+                                ) {
+                                    handle_traffic_light(
+                                        hit,
+                                        &mut project_picker,
+                                        &mut session_picker,
+                                        &mut mode_menu,
+                                        &mut tool_dialog,
+                                        &mut theme_dialog,
+                                        &mut add_provider_dialog,
+                                        &mut provider_dialog,
+                                        &mut context_dialog,
+                                        &mut passport_dialog,
+                                        &mut passport_browser_opened,
+                                        passport_url.as_deref(),
+                                        &mut cancel,
+                                        &mut status,
+                                    );
                                     continue;
                                 }
                                 if matches!(hit, Some(view::Hit::ContextUsage)) {
