@@ -230,6 +230,7 @@ dependencies = [
  "blora-model",
  "blora-types",
  "chrono",
+ "dirs",
  "tempfile",
 ]
 

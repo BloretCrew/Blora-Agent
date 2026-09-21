@@ -1435,7 +1435,13 @@ impl Runtime {
                 }
                 let truncated = text.chars().count() > MAX_TOOL_RESULT_CHARS;
                 let recorded = if truncated {
-                    blora_context::head_tail(&text, MAX_TOOL_RESULT_CHARS)
+                    let mut cut = blora_context::head_tail(&text, MAX_TOOL_RESULT_CHARS);
+                    if let Some(saved) = spill_tool_output(workspace, &call.id, &text) {
+                        cut.push_str(&format!(
+                            "\n\n[full output saved to {saved}; page through it with read_file offset/limit]"
+                        ));
+                    }
+                    cut
                 } else {
                     text
                 };
@@ -1561,6 +1567,51 @@ trait ClonedResult {
 /// events) rather than in `ToolRegistry::execute`.
 fn runtime_handled_tool(name: &str) -> bool {
     matches!(name, "recall" | "update_plan")
+}
+
+/// Keep at most this many spilled tool outputs per workspace.
+const MAX_SPILLED_OUTPUTS: usize = 50;
+
+/// Persist an oversized tool result under `.blora/tool-output/` so the model
+/// can page through it with `read_file`. Returns the workspace-relative path.
+/// Best-effort: any IO failure just means the result stays truncated.
+fn spill_tool_output(workspace: &str, call_id: &str, text: &str) -> Option<String> {
+    let safe: String = call_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .take(80)
+        .collect();
+    if safe.is_empty() {
+        return None;
+    }
+    let dir = std::path::Path::new(workspace).join(".blora/tool-output");
+    std::fs::create_dir_all(&dir).ok()?;
+    let name = format!("{safe}.txt");
+    std::fs::write(dir.join(&name), text).ok()?;
+    prune_spilled_outputs(&dir);
+    Some(format!(".blora/tool-output/{name}"))
+}
+
+fn prune_spilled_outputs(dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut files: Vec<(std::time::SystemTime, std::path::PathBuf)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let meta = entry.metadata().ok()?;
+            meta.is_file()
+                .then(|| (meta.modified().unwrap_or(std::time::UNIX_EPOCH), entry.path()))
+        })
+        .collect();
+    if files.len() <= MAX_SPILLED_OUTPUTS {
+        return;
+    }
+    let excess = files.len() - MAX_SPILLED_OUTPUTS;
+    files.sort();
+    for (_, path) in files.into_iter().take(excess) {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 impl ClonedResult for Option<&Result<String>> {
@@ -2125,6 +2176,62 @@ mod tests {
                 if name == "update_plan"
                     && status == "completed"
                     && output.as_deref().is_some_and(|text| text.contains("1/2 done"))
+        )));
+    }
+
+    #[test]
+    fn oversized_tool_output_is_spilled_to_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let big = "line\n".repeat(8_000);
+        std::fs::write(dir.path().join("big.txt"), &big).unwrap();
+        let runtime = Runtime::new(SqliteStore::open_in_memory().unwrap());
+        let session = session(&runtime, Mode::Code, dir.path().to_str().unwrap());
+        let run_id = RunId::generate();
+        let turn_id = TurnId::generate();
+        runtime
+            .emit(
+                &session,
+                Some(&run_id),
+                Some(&turn_id),
+                KnownPayload::RunCreated(RunCreated {
+                    mode: Mode::Code,
+                    model: Some("mock".to_owned()),
+                    permission_mode: None,
+                }),
+            )
+            .unwrap();
+        let backend = LocalBackend::new(Policy::new(dir.path(), true).unwrap());
+        let call = ToolCall {
+            id: "call_big".to_owned(),
+            name: "read_file".to_owned(),
+            arguments: json!({"path": "big.txt"}).to_string(),
+        };
+        runtime
+            .dispatch_tool(
+                &session,
+                &run_id,
+                &turn_id,
+                &backend,
+                &call,
+                &RunOptions::default(),
+                &CancelToken::new(),
+                None,
+                &[],
+                dir.path().to_str().unwrap(),
+                None,
+                false,
+            )
+            .unwrap();
+        let spilled = dir.path().join(".blora/tool-output/call_big.txt");
+        assert_eq!(std::fs::read_to_string(&spilled).unwrap(), big);
+        let projection = runtime.show_session(&session).unwrap();
+        assert!(projection.transcript.iter().any(|item| matches!(
+            item,
+            TranscriptItem::Tool { name, output, .. }
+                if name == "read_file"
+                    && output
+                        .as_deref()
+                        .is_some_and(|text| text.contains(".blora/tool-output/call_big.txt"))
         )));
     }
 

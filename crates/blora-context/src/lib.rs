@@ -106,10 +106,10 @@ pub const CLEARED_TOOL_RESULT: &str = "[old tool result cleared to save context]
 pub fn stable_prompt(mode: &str) -> String {
     format!(
         "You are Blora Agent, a local {mode} harness.\n\
-         Stay inside the workspace. Prefer read_file, list_dir, and search before write_file or shell.\n\
+         Stay inside the workspace. Prefer read_file, list_dir, glob, and search before write_file or shell.\n\
          Use apply_patch for targeted edits; only use write_file to create files or replace them wholesale.\n\
          For work with three or more steps, keep a short checklist with update_plan and mark steps done as you go.\n\
-         Tool results may be truncated or cleared; re-read a file if you need details again.\n\
+         Tool results may be truncated or cleared; large results are saved under .blora/tool-output/ and can be paged with read_file offset/limit.\n\
          Return a concise final answer when the task is done.\n\
          Do not exfiltrate secrets. Unknown event types in history must be ignored."
     )
@@ -120,7 +120,7 @@ pub fn stable_prompt(mode: &str) -> String {
 pub fn context_prompt(workspace: &str, mode: &str) -> String {
     let mut out = format!(
         "Mode: {mode}\n\
-         Tools: read_file, write_file, list_dir, search, shell, apply_patch, git_status, git_diff, git_log, git_branch, git_worktree, process, schedule_task, delegate, handoff, remember, recall, forget, update_plan."
+         Tools: read_file, write_file, list_dir, glob, search, shell, apply_patch, git_status, git_diff, git_log, git_branch, git_worktree, process, schedule_task, delegate, handoff, remember, recall, forget, update_plan."
     );
     if let Some(rules) = project_rules(workspace) {
         out.push_str("\n\nProject rules:\n");
@@ -154,19 +154,66 @@ fn read_capped(path: &std::path::Path, max: usize) -> Option<String> {
     Some(text)
 }
 
+/// Project rules, most general first: `$BLORA_HOME/rules.md`, then `AGENTS.md`
+/// / `CLAUDE.md` from the repository root down to the workspace, then the
+/// workspace's own `.blora/rules.md`. The walk stops at the directory that
+/// holds `.git` (or six levels up when there is none).
 fn project_rules(workspace: &str) -> Option<String> {
     let root = std::path::Path::new(workspace);
     let mut chunks = Vec::new();
-    for name in ["AGENTS.md", "CLAUDE.md", ".blora/rules.md"] {
-        if let Some(text) = read_capped(&root.join(name), 4000) {
-            chunks.push(format!("# {name}\n{text}"));
+    if let Some(home) = blora_home()
+        && let Some(text) = read_capped(&home.join("rules.md"), 4000)
+    {
+        chunks.push(format!("# ~/.blora/rules.md (global)\n{text}"));
+    }
+    for dir in rule_dirs(root) {
+        let is_workspace = dir == root;
+        for name in ["AGENTS.md", "CLAUDE.md"] {
+            if let Some(text) = read_capped(&dir.join(name), 4000) {
+                let label = if is_workspace {
+                    name.to_owned()
+                } else {
+                    dir.join(name).display().to_string()
+                };
+                chunks.push(format!("# {label}\n{text}"));
+            }
+        }
+        if is_workspace && let Some(text) = read_capped(&dir.join(".blora/rules.md"), 4000) {
+            chunks.push(format!("# .blora/rules.md\n{text}"));
         }
     }
     if chunks.is_empty() {
         None
     } else {
+        chunks.truncate(10);
         Some(chunks.join("\n\n"))
     }
+}
+
+/// Ancestor directories that may carry rules, outermost first, ending with the
+/// workspace itself.
+fn rule_dirs(workspace: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut dirs = vec![workspace.to_path_buf()];
+    let mut current = workspace;
+    while dirs.len() < 6 && !current.join(".git").exists() {
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        if parent == current || parent.as_os_str().is_empty() {
+            break;
+        }
+        dirs.push(parent.to_path_buf());
+        current = parent;
+    }
+    dirs.reverse();
+    dirs
+}
+
+fn blora_home() -> Option<std::path::PathBuf> {
+    if let Some(home) = std::env::var_os("BLORA_HOME") {
+        return Some(std::path::PathBuf::from(home));
+    }
+    dirs::home_dir().map(|home| home.join(".blora"))
 }
 
 fn skill_summaries(workspace: &str) -> Option<String> {
@@ -556,6 +603,26 @@ mod tests {
         let prompt = context_prompt(dir.path().to_str().unwrap(), "code");
         assert!(prompt.contains("prefer tests"));
         assert!(prompt.contains("AGENTS.md"));
+    }
+
+    #[test]
+    fn discovers_rules_up_to_the_repository_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        let workspace = repo.join("crates").join("app");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "ABOVE-REPO").unwrap();
+        std::fs::write(repo.join("AGENTS.md"), "REPO-WIDE").unwrap();
+        std::fs::write(workspace.join("CLAUDE.md"), "LOCAL").unwrap();
+        let prompt = context_prompt(workspace.to_str().unwrap(), "code");
+        let repo_at = prompt.find("REPO-WIDE").expect("repo rules");
+        let local_at = prompt.find("LOCAL").expect("workspace rules");
+        assert!(repo_at < local_at, "outer rules come first");
+        assert!(
+            !prompt.contains("ABOVE-REPO"),
+            "the walk stops at the .git root"
+        );
     }
 
     #[test]

@@ -12,6 +12,7 @@ blora-events.workspace = true
 blora-model.workspace = true
 blora-types.workspace = true
 chrono.workspace = true
+dirs.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

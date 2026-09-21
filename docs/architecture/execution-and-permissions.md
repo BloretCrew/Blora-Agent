@@ -14,9 +14,9 @@
 
 ## 工具
 
-`read_file`（可选 offset/limit 行范围）、`write_file`（新建或整体替换）、`list_dir`、`search`、`shell`（可 background、pty、timeout_seconds ≤ 600）、`apply_patch`（old_string 必须唯一匹配，或 replace_all）、`git_status`、`git_diff`、`git_log`、`git_branch`、`git_worktree`、`process`、`schedule_task`、`delegate`、`handoff`、`remember`、`recall`、`forget`、`update_plan`。MCP 工具以 `mcp__` 前缀接入，插件以 `plugin__` 前缀接入。
+`read_file`（可选 offset/limit 行范围）、`write_file`（新建或整体替换）、`list_dir`、`glob`（按文件名模式找文件，最新的在前；`*.rs` 匹配任意层级，`src/**/*.ts` 相对 path 匹配）、`search`（正则逐行匹配，`include` 用 glob 限定文件，`max_results` 封顶）、`shell`（可 background、pty、timeout_seconds ≤ 600）、`apply_patch`（old_string 必须唯一匹配，或 replace_all）、`git_status`、`git_diff`、`git_log`、`git_branch`、`git_worktree`、`process`、`schedule_task`、`delegate`、`handoff`、`remember`、`recall`、`forget`、`update_plan`。MCP 工具以 `mcp__` 前缀接入，插件以 `plugin__` 前缀接入。
 
-只读工具（read_file、list_dir、search、git 只读、recall、handoff、update_plan）在同一批次内并发执行；只读角色的子代理只能看到只读工具。工具结果超过 24k 字符时头尾截断并在事件里标记 `truncated`。
+只读工具（read_file、list_dir、glob、search、git 只读、recall、handoff、update_plan）在同一批次内并发执行；只读角色的子代理只能看到只读工具。工具结果超过 24k 字符时头尾截断并在事件里标记 `truncated`，同时把全文写到 `{workspace}/.blora/tool-output/{call_id}.txt`（最多保留 50 份），截断文本末尾告诉模型可用 `read_file` 的 offset/limit 分页读取。
 
 `update_plan` 让模型维护一份清单（`steps[{title,status}]`，status 为 `pending` / `in_progress` / `done`，可附 `note`）。每次调用整体替换，落为 `plan.updated` 事件；投影里保留最新一份（`projection.plan` / `plan_note`），CLI `session show` 打印，Web API 的会话 JSON 带 `plan` / `plan_note`。
 

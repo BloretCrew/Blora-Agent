@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use blora_policy::Policy;
 use blora_types::{BloraError, Result};
+mod glob;
 mod isolation;
 mod process;
 mod worktree;
@@ -19,12 +20,14 @@ mod worktree;
 use regex::Regex;
 use walkdir::WalkDir;
 
+pub use glob::glob_match;
 pub use isolation::{Isolation, remote_command, remote_host, remote_root};
 pub use process::ProcessInfo;
 pub use worktree::WorktreeHandle;
 
 const MAX_FILE_BYTES: usize = 1_000_000;
 const MAX_SEARCH_MATCHES: usize = 80;
+const MAX_GLOB_MATCHES: usize = 200;
 const MAX_SHELL_BYTES: usize = 200_000;
 const DEFAULT_SHELL_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -116,11 +119,28 @@ impl LocalBackend {
     }
 
     pub fn search(&self, pattern: &str, path: Option<&str>) -> Result<String> {
+        self.search_with(pattern, path, None, MAX_SEARCH_MATCHES)
+    }
+
+    /// Regex search over workspace files. `include` is a glob (see
+    /// [`glob_match`]) that narrows which files are scanned; `max` caps the
+    /// number of matching lines returned.
+    pub fn search_with(
+        &self,
+        pattern: &str,
+        path: Option<&str>,
+        include: Option<&str>,
+        max: usize,
+    ) -> Result<String> {
         self.policy.require(self.policy.search(), "search")?;
         let root = self.policy.resolve(path.unwrap_or("."))?;
         let regex = Regex::new(pattern).map_err(BloraError::exec)?;
+        let include = include.map(str::trim).filter(|s| !s.is_empty());
+        let max = max.clamp(1, 1000);
         let mut matches = Vec::new();
+        let mut files_scanned = 0usize;
         for entry in WalkDir::new(&root)
+            .sort_by_file_name()
             .into_iter()
             .filter_map(std::result::Result::ok)
         {
@@ -130,28 +150,85 @@ impl LocalBackend {
             if should_skip(entry.path()) {
                 continue;
             }
+            let rel_to_root = relative_slashes(entry.path(), &root);
+            if include.is_some_and(|glob| !glob_match(glob, &rel_to_root)) {
+                continue;
+            }
             let Ok(text) = std::fs::read_to_string(entry.path()) else {
                 continue;
             };
+            files_scanned += 1;
             for (idx, line) in text.lines().enumerate() {
                 if regex.is_match(line) {
                     let rel = entry
                         .path()
                         .strip_prefix(self.policy.workspace())
                         .unwrap_or(entry.path());
-                    matches.push(format!("{}:{}:{line}", rel.display(), idx + 1));
-                    if matches.len() >= MAX_SEARCH_MATCHES {
-                        matches.push("… truncated …".to_owned());
+                    let shown: String = line.chars().take(400).collect();
+                    matches.push(format!("{}:{}:{shown}", rel.display(), idx + 1));
+                    if matches.len() >= max {
+                        matches.push(format!(
+                            "… truncated at {max} matches; narrow with include (glob) or a tighter pattern …"
+                        ));
                         return Ok(matches.join("\n"));
                     }
                 }
             }
         }
         if matches.is_empty() {
-            Ok("no matches".to_owned())
+            Ok(format!("no matches ({files_scanned} files scanned)"))
         } else {
             Ok(matches.join("\n"))
         }
+    }
+
+    /// Files under `path` whose relative path matches `pattern`, newest first.
+    pub fn glob(&self, pattern: &str, path: Option<&str>) -> Result<String> {
+        self.policy.require(self.policy.search(), "glob")?;
+        let root = self.policy.resolve(path.unwrap_or("."))?;
+        let pattern = pattern.trim();
+        if pattern.is_empty() {
+            return Err(BloraError::Exec("glob pattern must not be empty".to_owned()));
+        }
+        let mut found: Vec<(std::time::SystemTime, String)> = Vec::new();
+        for entry in WalkDir::new(&root)
+            .into_iter()
+            .filter_map(std::result::Result::ok)
+        {
+            if !entry.file_type().is_file() || should_skip(entry.path()) {
+                continue;
+            }
+            let rel_to_root = relative_slashes(entry.path(), &root);
+            if !glob_match(pattern, &rel_to_root) {
+                continue;
+            }
+            let modified = entry
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .unwrap_or(std::time::UNIX_EPOCH);
+            found.push((
+                modified,
+                relative_slashes(entry.path(), self.policy.workspace()),
+            ));
+        }
+        if found.is_empty() {
+            return Ok("no matches".to_owned());
+        }
+        found.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        let total = found.len();
+        let mut lines: Vec<String> = found
+            .into_iter()
+            .take(MAX_GLOB_MATCHES)
+            .map(|(_, path)| path)
+            .collect();
+        if total > MAX_GLOB_MATCHES {
+            lines.push(format!(
+                "… {} more; narrow the pattern or path …",
+                total - MAX_GLOB_MATCHES
+            ));
+        }
+        Ok(lines.join("\n"))
     }
 
     pub fn shell(&self, command: &str) -> Result<String> {
@@ -426,6 +503,15 @@ fn should_skip(path: &Path) -> bool {
     })
 }
 
+/// `path` relative to `base` with forward slashes, for glob matching and output.
+fn relative_slashes(path: &Path, base: &Path) -> String {
+    let rel = path.strip_prefix(base).unwrap_or(path);
+    rel.components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 fn read_capped<R: Read>(reader: Option<R>, max: usize) -> Result<String> {
     let Some(mut reader) = reader else {
         return Ok(String::new());
@@ -489,6 +575,35 @@ mod tests {
             .apply_patch("notes.txt", "hello", "hallo", false)
             .unwrap();
         assert_eq!(backend.read_file("notes.txt").unwrap(), "hallo");
+    }
+
+    #[test]
+    fn glob_and_search_include_filter_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let policy = Policy::new(dir.path(), true).unwrap();
+        let backend = LocalBackend::new(policy);
+        backend.write_file("src/lib.rs", "fn hit() {}\n").unwrap();
+        backend.write_file("src/deep/more.rs", "fn hit() {}\n").unwrap();
+        backend.write_file("notes/hit.md", "hit\n").unwrap();
+        backend.write_file("target/skip.rs", "fn hit() {}\n").unwrap();
+
+        let rs = backend.glob("**/*.rs", None).unwrap();
+        assert!(rs.contains("src/lib.rs"));
+        assert!(rs.contains("src/deep/more.rs"));
+        assert!(!rs.contains("notes/hit.md"));
+        assert!(!rs.contains("target/skip.rs"), "target/ is skipped");
+        let top = backend.glob("src/*.rs", None).unwrap();
+        assert!(top.contains("src/lib.rs"));
+        assert!(!top.contains("more.rs"));
+        assert_eq!(backend.glob("*.py", None).unwrap(), "no matches");
+
+        let only_md = backend
+            .search_with("hit", None, Some("*.md"), 10)
+            .unwrap();
+        assert!(only_md.contains("notes/hit.md"));
+        assert!(!only_md.contains("lib.rs"));
+        let capped = backend.search_with("hit", None, None, 1).unwrap();
+        assert!(capped.contains("truncated at 1 matches"));
     }
 
     #[test]

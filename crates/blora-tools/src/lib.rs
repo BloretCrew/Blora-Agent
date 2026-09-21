@@ -63,12 +63,27 @@ impl ToolRegistry {
             },
             ToolSpec {
                 name: "search",
-                description: "Search workspace files with a regular expression.",
+                description: "Search workspace files with a regular expression (one line per match: path:line:text). include narrows files with a glob such as *.rs or src/**/*.ts; max_results caps matches (default 80).",
                 parameters: json!({
                     "type": "object",
                     "properties": {
                         "pattern": {"type": "string"},
-                        "path": {"type": "string"}
+                        "path": {"type": "string"},
+                        "include": {"type": "string", "description": "Glob filter on file paths, e.g. *.rs"},
+                        "max_results": {"type": "integer", "minimum": 1, "maximum": 1000}
+                    },
+                    "required": ["pattern"]
+                }),
+                read_only: true,
+            },
+            ToolSpec {
+                name: "glob",
+                description: "Find files by name pattern, newest first. Bare patterns like *.rs match anywhere; patterns with / such as src/**/*.ts match relative to path. target/, node_modules/, .git/ are skipped.",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "pattern": {"type": "string"},
+                        "path": {"type": "string", "default": "."}
                     },
                     "required": ["pattern"]
                 }),
@@ -280,7 +295,16 @@ impl ToolRegistry {
                 Ok("wrote file".to_owned())
             }
             "list_dir" => backend.list_dir(optional_str(arguments, "path").unwrap_or(".")),
-            "search" => backend.search(
+            "search" => backend.search_with(
+                required_str(arguments, "pattern")?,
+                optional_str(arguments, "path"),
+                optional_str(arguments, "include"),
+                arguments
+                    .get("max_results")
+                    .and_then(Value::as_u64)
+                    .map_or(80, |n| n as usize),
+            ),
+            "glob" => backend.glob(
                 required_str(arguments, "pattern")?,
                 optional_str(arguments, "path"),
             ),
@@ -387,6 +411,7 @@ mod tests {
     fn read_only_classification() {
         assert!(ToolRegistry::is_read_only("read_file"));
         assert!(ToolRegistry::is_read_only("search"));
+        assert!(ToolRegistry::is_read_only("glob"));
         assert!(ToolRegistry::is_read_only("update_plan"));
         assert!(!ToolRegistry::is_read_only("shell"));
         assert!(!ToolRegistry::is_read_only("apply_patch"));
