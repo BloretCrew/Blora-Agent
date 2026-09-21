@@ -270,7 +270,14 @@ pub struct ToolCallDetail {
 #[derive(Clone, Debug)]
 pub struct ToolDialog {
     pub tools: Vec<ToolCallDetail>,
-    pub selected: Option<usize>,
+    pub scroll: usize,
+    pub fullscreen: bool,
+    pub minimized: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct ToolDetailDialog {
+    pub tool: ToolCallDetail,
     pub scroll: usize,
     pub fullscreen: bool,
     pub minimized: bool,
@@ -302,6 +309,7 @@ pub struct FrameModel<'a> {
     pub theme_dialog: Option<&'a ThemeDialog>,
     pub context_dialog: Option<&'a ContextDialog>,
     pub tool_dialog: Option<&'a ToolDialog>,
+    pub tool_detail_dialog: Option<&'a ToolDetailDialog>,
     pub slash_hits: &'a [&'static SlashCommand],
     pub slash_selected: usize,
     pub search: Option<&'a str>,
@@ -894,7 +902,10 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
             hint_row,
         );
     }
-    if let Some(dialog) = model.tool_dialog {
+    if let Some(dialog) = model.tool_detail_dialog {
+        let dialog_hits = render_tool_detail_dialog(frame, area, dialog, model.pointer, &theme);
+        hits.traffic_lights = dialog_hits.traffic_lights;
+    } else if let Some(dialog) = model.tool_dialog {
         let dialog_hits = render_tool_dialog(frame, area, dialog, model.pointer, &theme);
         hits.traffic_lights = dialog_hits.traffic_lights;
         hits.tool_detail_rows = dialog_hits.tool_detail_rows;
@@ -2366,7 +2377,6 @@ fn render_tool_dialog(
     let mut lines = Vec::new();
     let mut row = 0usize;
     for (index, tool) in dialog.tools.iter().enumerate() {
-        let selected = dialog.selected == Some(index);
         let row_rect = Rect::new(body.x, body.y + row as u16, body.width, 1);
         if row >= dialog.scroll && row - dialog.scroll < body.height as usize {
             hits.tool_detail_rows.push((
@@ -2388,11 +2398,6 @@ fn render_tool_dialog(
             Span::styled(format!("  {}", status_label(&tool.status)), theme.mute()),
         ]));
         row += 1;
-        if selected {
-            let detail = tool_detail_lines(tool, theme);
-            row += detail.len();
-            lines.extend(detail);
-        }
         lines.push(Line::default());
         row += 1;
     }
@@ -2457,6 +2462,47 @@ fn tool_detail_lines(tool: &ToolCallDetail, theme: &Theme) -> Vec<Line<'static>>
         )));
     }
     lines
+}
+
+fn render_tool_detail_dialog(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    dialog: &ToolDetailDialog,
+    pointer: Option<(u16, u16)>,
+    theme: &Theme,
+) -> HitMap {
+    let mut hits = HitMap::default();
+    let frame_area = dialog_outer(area, 88, 14, dialog.fullscreen, dialog.minimized);
+    let Some(frame_area) = frame_area else {
+        return hits;
+    };
+    let inner = paint_dialog_chrome(frame, frame_area, theme);
+    let [title_row, body, hint_row] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(3),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+    paint_traffic_title(frame, title_row, "工具详细信息", pointer, theme, &mut hits);
+    if dialog.minimized {
+        return hits;
+    }
+    let lines = tool_detail_lines(&dialog.tool, theme);
+    let visible = lines
+        .into_iter()
+        .skip(dialog.scroll)
+        .take(body.height as usize)
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(visible).style(theme.base()), body);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "↑/↓ 滚动 · Esc 关闭",
+            theme.mute(),
+        )))
+        .style(theme.base()),
+        hint_row,
+    );
+    hits
 }
 
 fn render_add_provider_dialog(

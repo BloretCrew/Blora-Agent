@@ -90,6 +90,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut theme_dialog: Option<view::ThemeDialog> = None;
     let mut context_dialog: Option<view::ContextDialog> = None;
     let mut tool_dialog: Option<view::ToolDialog> = None;
+    let mut tool_detail_dialog: Option<view::ToolDetailDialog> = None;
     let mut mode_menu: Option<view::ModeMenu> = None;
     let mut project_picker: Option<view::ProjectPicker> = None;
     let mut session_picker: Option<view::SessionPicker> = None;
@@ -301,6 +302,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             theme_dialog: theme_dialog.as_ref(),
                             context_dialog: context_dialog.as_ref(),
                             tool_dialog: tool_dialog.as_ref(),
+                            tool_detail_dialog: tool_detail_dialog.as_ref(),
                             slash_hits: &slash_hits,
                             slash_selected,
                             search: search.as_deref(),
@@ -907,6 +909,19 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     dialog.scroll = dialog.scroll.saturating_sub(1);
                                 }
                             }
+                            KeyCode::Down if tool_detail_dialog.is_some() => {
+                                if let Some(dialog) = tool_detail_dialog.as_mut() {
+                                    dialog.scroll = dialog.scroll.saturating_add(1);
+                                }
+                            }
+                            KeyCode::Up if tool_detail_dialog.is_some() => {
+                                if let Some(dialog) = tool_detail_dialog.as_mut() {
+                                    dialog.scroll = dialog.scroll.saturating_sub(1);
+                                }
+                            }
+                            KeyCode::Esc if tool_detail_dialog.is_some() => {
+                                tool_detail_dialog = None;
+                            }
                             KeyCode::Down if tool_dialog.is_some() => {
                                 if let Some(dialog) = tool_dialog.as_mut() {
                                     dialog.scroll = dialog.scroll.saturating_add(1);
@@ -1059,7 +1074,21 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                         .unwrap_or_default();
                                     tool_dialog = Some(view::ToolDialog {
                                         tools,
-                                        selected: None,
+                                        scroll: 0,
+                                        fullscreen: false,
+                                        minimized: false,
+                                    });
+                                    continue;
+                                }
+                                if tool_detail_dialog.is_some() {
+                                    continue;
+                                }
+                                if let Some(view::Hit::ToolDetailRow(index)) = hit.clone()
+                                    && let Some(dialog) = tool_dialog.as_ref()
+                                    && let Some(tool) = dialog.tools.get(index).cloned()
+                                {
+                                    tool_detail_dialog = Some(view::ToolDetailDialog {
+                                        tool,
                                         scroll: 0,
                                         fullscreen: false,
                                         minimized: false,
@@ -1067,12 +1096,6 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     continue;
                                 }
                                 if tool_dialog.is_some() {
-                                    if let Some(view::Hit::ToolDetailRow(index)) = hit.clone()
-                                        && let Some(dialog) = tool_dialog.as_mut()
-                                    {
-                                        dialog.selected = Some(index);
-                                        dialog.scroll = 0;
-                                    }
                                     continue;
                                 }
                                 let modal_open = project_picker.is_some()
@@ -1083,6 +1106,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     || provider_dialog.is_some()
                                     || context_dialog.is_some()
                                     || tool_dialog.is_some()
+                                    || tool_detail_dialog.is_some()
                                     || passport_dialog.is_some();
                                 if matches!(
                                     hit,
@@ -1098,6 +1122,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                         &mut session_picker,
                                         &mut mode_menu,
                                         &mut tool_dialog,
+                                        &mut tool_detail_dialog,
                                         &mut theme_dialog,
                                         &mut add_provider_dialog,
                                         &mut provider_dialog,
@@ -3193,6 +3218,7 @@ fn handle_traffic_light(
     session_picker: &mut Option<view::SessionPicker>,
     mode_menu: &mut Option<view::ModeMenu>,
     tool_dialog: &mut Option<view::ToolDialog>,
+    tool_detail_dialog: &mut Option<view::ToolDetailDialog>,
     theme_dialog: &mut Option<view::ThemeDialog>,
     add_provider_dialog: &mut Option<view::AddProviderDialog>,
     provider_dialog: &mut Option<view::ProviderDialog>,
@@ -3211,8 +3237,10 @@ fn handle_traffic_light(
                 *status = "会话选择器已关闭".to_owned();
             } else if mode_menu.take().is_some() {
                 *status = "运行模式选择器已关闭".to_owned();
+            } else if tool_detail_dialog.take().is_some() {
+                *status = "工具详细信息已关闭".to_owned();
             } else if tool_dialog.take().is_some() {
-                *status = "工具调用详情已关闭".to_owned();
+                *status = "工具调用列表已关闭".to_owned();
             } else if let Some(dialog) = theme_dialog.take() {
                 cancel_theme_dialog(&dialog);
                 *status = "theme picker closed".to_owned();
@@ -3236,6 +3264,9 @@ fn handle_traffic_light(
                 dialog.minimized = true;
                 dialog.fullscreen = false;
             } else if let Some(dialog) = mode_menu.as_mut() {
+                dialog.minimized = true;
+                dialog.fullscreen = false;
+            } else if let Some(dialog) = tool_detail_dialog.as_mut() {
                 dialog.minimized = true;
                 dialog.fullscreen = false;
             } else if let Some(dialog) = tool_dialog.as_mut() {
@@ -3271,6 +3302,12 @@ fn handle_traffic_light(
                     dialog.fullscreen = !dialog.fullscreen;
                 }
             } else if let Some(dialog) = mode_menu.as_mut() {
+                if dialog.minimized {
+                    dialog.minimized = false;
+                } else {
+                    dialog.fullscreen = !dialog.fullscreen;
+                }
+            } else if let Some(dialog) = tool_detail_dialog.as_mut() {
                 if dialog.minimized {
                     dialog.minimized = false;
                 } else {
