@@ -1066,14 +1066,13 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     });
                                     continue;
                                 }
-                                if let Some(view::Hit::ToolDetailRow(index)) = hit.clone()
-                                    && let Some(dialog) = tool_dialog.as_mut()
-                                {
-                                    dialog.selected = Some(index);
-                                    dialog.scroll = 0;
-                                    continue;
-                                }
                                 if tool_dialog.is_some() {
+                                    if let Some(view::Hit::ToolDetailRow(index)) = hit.clone()
+                                        && let Some(dialog) = tool_dialog.as_mut()
+                                    {
+                                        dialog.selected = Some(index);
+                                        dialog.scroll = 0;
+                                    }
                                     continue;
                                 }
                                 let modal_open = project_picker.is_some()
