@@ -912,8 +912,9 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 notice = None;
                             }
                             KeyCode::Esc => {
-                                cancel.cancel();
-                                break Ok(());
+                                input.clear();
+                                notice = None;
+                                slash_selected = 0;
                             }
                             _ => {}
                         }
