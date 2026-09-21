@@ -154,6 +154,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut last_routing_session: Option<SessionId> = None;
     let mut pointer: Option<(u16, u16)> = None;
     let mut text_selection: Option<selection::Selection> = None;
+    let mut selecting_text = false;
     let mut hits = view::HitMap::default();
     let mut cancel = CancelToken::new();
     let mut cached: Option<(SessionId, blora_session::SessionProjection)> = None;
@@ -380,6 +381,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                         match key.code {
                             KeyCode::Esc if text_selection.is_some() => {
                                 text_selection = None;
+                                selecting_text = false;
                             }
                             KeyCode::Esc if add_provider_dialog.is_some() => {
                                 if let Some(dialog) = add_provider_dialog.as_mut() {
@@ -940,7 +942,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 }
                             }
                             MouseEventKind::Moved | MouseEventKind::Drag(MouseButton::Left) => {
-                                if let Some(selection) = text_selection.as_mut() {
+                                if selecting_text && let Some(selection) = text_selection.as_mut() {
                                     selection.end = (mouse.column, mouse.row);
                                 }
                                 match hits.hit(mouse.column, mouse.row) {
@@ -990,7 +992,9 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 }
                             }
                             MouseEventKind::Up(MouseButton::Left) => {
-                                if let Some(selection) = text_selection {
+                                if let Some(selection) = text_selection
+                                    && selecting_text
+                                {
                                     if let Some(projection) = projection {
                                         let text = selection::selected_text(
                                             projection,
@@ -1004,6 +1008,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                         }
                                     }
                                 }
+                                selecting_text = false;
                             }
                             MouseEventKind::Down(MouseButton::Left) => {
                                 let hit = hits.hit(mouse.column, mouse.row);
@@ -1063,6 +1068,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                         start: (mouse.column, mouse.row),
                                         end: (mouse.column, mouse.row),
                                     });
+                                    selecting_text = true;
                                     continue;
                                 }
                                 if let Some(view::Hit::ProjectPickerRow(project_index)) = hit {
