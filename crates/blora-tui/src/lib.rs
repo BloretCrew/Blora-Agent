@@ -1007,6 +1007,14 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             }
                             MouseEventKind::Down(MouseButton::Left) => {
                                 let hit = hits.hit(mouse.column, mouse.row);
+                                let modal_open = project_picker.is_some()
+                                    || session_picker.is_some()
+                                    || mode_menu.is_some()
+                                    || theme_dialog.is_some()
+                                    || add_provider_dialog.is_some()
+                                    || provider_dialog.is_some()
+                                    || context_dialog.is_some()
+                                    || passport_dialog.is_some();
                                 if matches!(
                                     hit,
                                     Some(
@@ -1048,7 +1056,9 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     ));
                                     continue;
                                 }
-                                if hits.transcript.contains((mouse.column, mouse.row).into()) {
+                                if !modal_open
+                                    && hits.transcript.contains((mouse.column, mouse.row).into())
+                                {
                                     text_selection = Some(selection::Selection {
                                         start: (mouse.column, mouse.row),
                                         end: (mouse.column, mouse.row),
