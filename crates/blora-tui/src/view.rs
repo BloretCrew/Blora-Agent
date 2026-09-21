@@ -1026,8 +1026,8 @@ fn render_header(
         .unwrap_or("项目");
     let title = session
         .and_then(|item| item.title.clone())
-        .filter(|text| !text.is_empty())
-        .unwrap_or_else(|| i18n::tr("session.untitled", "未命名会话"));
+        .filter(|text| !text.is_empty());
+    let display_title = title.as_deref().unwrap_or("");
     let mode_session_indices: Vec<usize> = model
         .sessions
         .iter()
@@ -1054,7 +1054,7 @@ fn render_header(
         Span::styled("  ·  ", theme.mute()),
         Span::styled(project_name, theme.fg(theme.sage)),
         Span::styled("  ·  ", theme.mute()),
-        Span::styled(ellipsize(&title, 28), theme.fg(theme.text_dim)),
+        Span::styled(ellipsize(display_title, 28), theme.fg(theme.text_dim)),
     ]);
     let project_start = inner.x
         + u16::try_from(
@@ -1079,7 +1079,7 @@ fn render_header(
     hits.session_picker = Some(Rect {
         x: title_start,
         y: inner.y,
-        width: u16::try_from(ellipsize(&title, 28).width()).unwrap_or(8),
+        width: u16::try_from(ellipsize(display_title, 28).width()).unwrap_or(0),
         height: 1,
     });
     let mut x = inner.x
@@ -3077,31 +3077,14 @@ pub(crate) fn window_title(running: bool, tick: u64, mode: &str, label: &str) ->
 
 #[must_use]
 pub(crate) fn title_label(
-    projection: Option<&SessionProjection>,
+    _projection: Option<&SessionProjection>,
     session_title: Option<&str>,
 ) -> String {
-    let from_user = projection.and_then(|projection| {
-        projection
-            .transcript
-            .iter()
-            .rev()
-            .find_map(|item| match item {
-                TranscriptItem::User { text, .. } => text
-                    .lines()
-                    .map(str::trim)
-                    .find(|line| !line.is_empty())
-                    .map(|line| ellipsize(line, 32)),
-                _ => None,
-            })
-    });
-    if let Some(text) = from_user {
-        return text;
-    }
     session_title
         .map(str::trim)
         .filter(|text| !text.is_empty() && *text != "tui")
         .map(|text| ellipsize(text, 32))
-        .unwrap_or_else(|| "未命名会话".to_owned())
+        .unwrap_or_default()
 }
 
 fn line_count(text: &str) -> usize {
@@ -3161,6 +3144,13 @@ mod tests {
             older.iter().map(ToString::to_string).collect::<Vec<_>>(),
             vec!["3", "4", "5", "6"]
         );
+    }
+
+    #[test]
+    fn untitled_session_has_no_header_title() {
+        assert_eq!(title_label(None, None), "");
+        assert_eq!(title_label(None, Some("   ")), "");
+        assert_eq!(title_label(None, Some("已命名会话")), "已命名会话");
     }
 
     #[test]

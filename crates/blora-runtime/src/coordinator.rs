@@ -6,9 +6,9 @@ use blora_events::{
     AssistantDelta, AssistantMessageCompleted, ContextSnapshotCreated, EventEnvelope,
     HookCompleted, KnownPayload, ModeChanged, ModelRequested, ModelResponseCompleted, NewEvent,
     PlanStep, PlanUpdated, ProviderChanged, RetryStarted, RoutingChanged, RunCancelRequested,
-    RunCancelled, RunCompleted, RunCreated, RunFailed, RunStarted, SessionArchived,
-    SessionResumed, SessionTitleChanged, ToolCompleted, ToolFailed, ToolOutput, ToolRequested,
-    ToolStarted, UsageRecorded, UserInput,
+    RunCancelled, RunCompleted, RunCreated, RunFailed, RunStarted, SessionArchived, SessionResumed,
+    SessionTitleChanged, ToolCompleted, ToolFailed, ToolOutput, ToolRequested, ToolStarted,
+    UsageRecorded, UserInput,
 };
 use blora_exec::{Isolation, LocalBackend, WorktreeHandle};
 use blora_model::retry::{self, RetryClass};
@@ -713,17 +713,15 @@ impl Runtime {
             KnownPayload::UserInput(UserInput { text: prompt }),
         )?;
         if should_generate_title {
-            let title = if providers[provider_index].name() == "mock" {
-                derive_session_title(&title_prompt)
-            } else {
-                generate_session_title(
-                    providers[provider_index].as_ref(),
-                    &model,
-                    &title_prompt,
-                    cancel,
-                )
-                .unwrap_or_else(|_| derive_session_title(&title_prompt))
-            };
+            let title = generate_session_title(
+                providers[provider_index].as_ref(),
+                &model,
+                &title_prompt,
+                cancel,
+            )
+            .ok()
+            .filter(|title| !title.is_empty())
+            .unwrap_or_else(|| derive_session_title(&title_prompt));
             if !title.is_empty() {
                 self.set_session_title(session_id, title, true)?;
             }
@@ -1600,8 +1598,12 @@ fn prune_spilled_outputs(dir: &std::path::Path) {
         .flatten()
         .filter_map(|entry| {
             let meta = entry.metadata().ok()?;
-            meta.is_file()
-                .then(|| (meta.modified().unwrap_or(std::time::UNIX_EPOCH), entry.path()))
+            meta.is_file().then(|| {
+                (
+                    meta.modified().unwrap_or(std::time::UNIX_EPOCH),
+                    entry.path(),
+                )
+            })
         })
         .collect();
     if files.len() <= MAX_SPILLED_OUTPUTS {
