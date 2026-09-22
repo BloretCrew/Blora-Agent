@@ -3657,10 +3657,9 @@ fn read_clipboard_text() -> Option<String> {
         ("xsel", vec!["--clipboard", "--output"]),
         ("pbpaste", Vec::new()),
     ] {
-        let output = std::process::Command::new(program)
-            .args(args)
-            .output()
-            .ok()?;
+        let Ok(output) = std::process::Command::new(program).args(args).output() else {
+            continue;
+        };
         if output.status.success() {
             return Some(String::from_utf8_lossy(&output.stdout).into_owned());
         }
