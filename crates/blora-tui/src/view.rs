@@ -2447,19 +2447,65 @@ fn status_label(status: &str) -> &str {
     }
 }
 
-fn tool_detail_lines(tool: &ToolCallDetail, theme: &Theme) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
+fn tool_detail_lines(tool: &ToolCallDetail, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let content_width = width.saturating_sub(4).max(12);
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("工具：", theme.fg(theme.text_dim)),
+            Span::styled(
+                tool_label(&tool.name),
+                theme.fg(theme.text).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!("  ({})", tool.name), theme.mute()),
+        ]),
+        Line::from(vec![
+            Span::styled("状态：", theme.fg(theme.text_dim)),
+            Span::styled(status_label(&tool.status).to_owned(), theme.fg(theme.sage)),
+        ]),
+        Line::default(),
+    ];
     if let Some(arguments) = &tool.arguments {
         lines.push(Line::from(Span::styled(
-            format!("  参数：{arguments}"),
-            theme.mute(),
+            "调用参数",
+            theme.fg(theme.rose).add_modifier(Modifier::BOLD),
         )));
+        lines.extend(wrap_labeled_text(
+            "  ",
+            &arguments.clone(),
+            content_width,
+            theme.mute(),
+        ));
+        lines.push(Line::default());
     }
     if let Some(output) = &tool.output {
         lines.push(Line::from(Span::styled(
-            format!("  输出：{output}"),
-            theme.fg(theme.text_dim),
+            "工具输出",
+            theme.fg(theme.rose).add_modifier(Modifier::BOLD),
         )));
+        lines.extend(wrap_labeled_text(
+            "  ",
+            &output.clone(),
+            content_width,
+            theme.fg(theme.text_dim),
+        ));
+    }
+    lines
+}
+
+fn wrap_labeled_text(prefix: &str, text: &str, width: usize, style: Style) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for source_line in text.lines() {
+        let chunks = wrap_text(source_line, width.saturating_sub(prefix.width()).max(8));
+        if chunks.is_empty() {
+            lines.push(Line::from(Span::styled(prefix.to_owned(), style)));
+        } else {
+            for chunk in chunks {
+                lines.push(Line::from(Span::styled(format!("{prefix}{chunk}"), style)));
+            }
+        }
+    }
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled(prefix.to_owned(), style)));
     }
     lines
 }
@@ -2487,7 +2533,7 @@ fn render_tool_detail_dialog(
     if dialog.minimized {
         return hits;
     }
-    let lines = tool_detail_lines(&dialog.tool, theme);
+    let lines = tool_detail_lines(&dialog.tool, body.width as usize, theme);
     let visible = lines
         .into_iter()
         .skip(dialog.scroll)
