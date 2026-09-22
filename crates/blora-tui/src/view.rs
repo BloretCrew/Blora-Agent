@@ -318,6 +318,7 @@ pub struct FrameModel<'a> {
     pub input: &'a str,
     pub status: &'a str,
     pub notice: Option<&'a str>,
+    pub paste_preview: Option<&'a str>,
     /// Pending PassPort login; renders as a centered modal dialog.
     pub passport_dialog: Option<&'a PassportDialog>,
     /// Model-provider switch dialog; renders as a centered modal dialog.
@@ -624,10 +625,13 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
 
     let show_slash = slash::is_open(model.input);
     let show_notice = !show_slash && model.notice.is_some();
+    let show_paste = !show_slash && model.paste_preview.is_some();
     let extra = if show_slash {
         u16::try_from(model.slash_hits.len().clamp(1, slash::MAX_VISIBLE)).unwrap_or(1)
     } else if show_notice {
         u16::try_from(model.notice.map(line_count).unwrap_or(1).clamp(1, 12)).unwrap_or(1)
+    } else if show_paste {
+        u16::try_from(model.paste_preview.map(line_count).unwrap_or(1).clamp(1, 6)).unwrap_or(1)
     } else {
         0
     };
@@ -694,6 +698,8 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
         if show_slash {
             render_slash(frame, rect, model, &theme, &mut hits);
         } else if let Some(body) = model.notice {
+            render_notice(frame, rect, body, &theme);
+        } else if let Some(body) = model.paste_preview {
             render_notice(frame, rect, body, &theme);
         }
     }

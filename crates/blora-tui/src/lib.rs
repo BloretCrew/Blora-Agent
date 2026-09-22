@@ -140,6 +140,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut input = String::new();
     let mut input_history: Vec<String> = Vec::new();
     let mut history_index: Option<usize> = None;
+    let mut paste_preview: Option<String> = None;
     let mut status = if passport_needs_login {
         "PassPort 未登录或令牌已过期，请执行 /login".to_owned()
     } else {
@@ -298,6 +299,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             projection,
                             pending: &pending,
                             input: &input,
+                            paste_preview: paste_preview.as_deref(),
                             status: if let Some(url) = passport_url.as_deref()
                                 && passport_receiver.is_some()
                             {
@@ -361,6 +363,10 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
             let wait_ms = if job.is_some() { 50 } else { 200 };
             if event::poll(Duration::from_millis(wait_ms)).map_err(blora_types::BloraError::exec)? {
                 match event::read().map_err(blora_types::BloraError::exec)? {
+                    Event::Paste(text) => {
+                        insert_pasted_text(&mut input, &mut paste_preview, &text);
+                        history_index = None;
+                    }
                     Event::Key(key) if key.kind == KeyEventKind::Press => {
                         if key.modifiers.contains(KeyModifiers::CONTROL)
                             && (key.code == KeyCode::Char('c') || key.code == KeyCode::Char('q'))
@@ -854,13 +860,22 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             KeyCode::Backspace => {
                                 input.pop();
                                 history_index = None;
+                                paste_preview = None;
                             }
                             KeyCode::Char(ch) => {
                                 input.push(ch);
                                 history_index = None;
+                                paste_preview = None;
+                            }
+                            KeyCode::Insert => {
+                                if let Some(text) = read_clipboard_text() {
+                                    insert_pasted_text(&mut input, &mut paste_preview, &text);
+                                    history_index = None;
+                                }
                             }
                             KeyCode::Esc if slash::is_open(&input) || input.starts_with('/') => {
                                 input.clear();
+                                paste_preview = None;
                                 slash_selected = 0;
                             }
                             // The login dialog is only hidden: polling keeps
@@ -3530,6 +3545,64 @@ fn handle_traffic_light(
         }
         _ => {}
     }
+}
+
+fn insert_pasted_text(input: &mut String, preview: &mut Option<String>, text: &str) {
+    const LARGE_PASTE_BYTES: usize = 512;
+    if text.len() < LARGE_PASTE_BYTES {
+        input.push_str(text);
+        *preview = None;
+        return;
+    }
+    let size = format_bytes(text.len());
+    let first_lines = text.lines().take(6).collect::<Vec<_>>().join("\n");
+    input.push_str(&format!("[粘贴 {size} 内容]"));
+    *preview = Some(format!(
+        "剪贴板内容（预览）：\n{}",
+        truncate_preview(&first_lines, 480)
+    ));
+}
+
+fn format_bytes(bytes: usize) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.1}MB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{:.1}KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{bytes}B")
+    }
+}
+
+fn truncate_preview(text: &str, max_bytes: usize) -> String {
+    let mut out = String::new();
+    for ch in text.chars() {
+        if out.len() + ch.len_utf8() > max_bytes {
+            break;
+        }
+        out.push(ch);
+    }
+    if out.len() < text.len() {
+        out.push_str("…");
+    }
+    out
+}
+
+fn read_clipboard_text() -> Option<String> {
+    for (program, args) in [
+        ("wl-paste", vec!["--no-newline"]),
+        ("xclip", vec!["-selection", "clipboard", "-o"]),
+        ("xsel", vec!["--clipboard", "--output"]),
+        ("pbpaste", Vec::new()),
+    ] {
+        let output = std::process::Command::new(program)
+            .args(args)
+            .output()
+            .ok()?;
+        if output.status.success() {
+            return Some(String::from_utf8_lossy(&output.stdout).into_owned());
+        }
+    }
+    None
 }
 
 fn copy_text_to_clipboard(text: &str) -> String {
