@@ -137,6 +137,8 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).map_err(blora_types::BloraError::exec)?;
     let mut input = String::new();
+    let mut input_history: Vec<String> = Vec::new();
+    let mut history_index: Option<usize> = None;
     let mut status = if passport_needs_login {
         "PassPort 未登录或令牌已过期，请执行 /login".to_owned()
     } else {
@@ -644,11 +646,55 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     slash_selected = (slash_selected + 1).min(slash_hits.len() - 1);
                                 }
                             }
-                            KeyCode::Up if input.is_empty() => {
-                                scroll = scroll.saturating_add(1);
+                            KeyCode::Up
+                                if project_picker.is_none()
+                                    && session_picker.is_none()
+                                    && mode_menu.is_none()
+                                    && theme_dialog.is_none()
+                                    && add_provider_dialog.is_none()
+                                    && provider_dialog.is_none()
+                                    && context_dialog.is_none()
+                                    && tool_dialog.is_none()
+                                    && tool_detail_dialog.is_none()
+                                    && passport_dialog.is_none() =>
+                            {
+                                if !input_history.is_empty() {
+                                    let next = history_index
+                                        .map_or(input_history.len().saturating_sub(1), |index| {
+                                            index.saturating_sub(1)
+                                        });
+                                    history_index = Some(next);
+                                    input = input_history[next].clone();
+                                    slash_selected = 0;
+                                } else if input.is_empty() {
+                                    scroll = scroll.saturating_add(1);
+                                }
                             }
-                            KeyCode::Down if input.is_empty() => {
-                                scroll = scroll.saturating_sub(1);
+                            KeyCode::Down
+                                if project_picker.is_none()
+                                    && session_picker.is_none()
+                                    && mode_menu.is_none()
+                                    && theme_dialog.is_none()
+                                    && add_provider_dialog.is_none()
+                                    && provider_dialog.is_none()
+                                    && context_dialog.is_none()
+                                    && tool_dialog.is_none()
+                                    && tool_detail_dialog.is_none()
+                                    && passport_dialog.is_none() =>
+                            {
+                                if let Some(index) = history_index {
+                                    if index + 1 < input_history.len() {
+                                        let next = index + 1;
+                                        history_index = Some(next);
+                                        input = input_history[next].clone();
+                                    } else {
+                                        history_index = None;
+                                        input.clear();
+                                    }
+                                    slash_selected = 0;
+                                } else if input.is_empty() {
+                                    scroll = scroll.saturating_sub(1);
+                                }
                             }
                             KeyCode::Tab if slash::is_open(&input) => {
                                 if let Some(cmd) = slash_hits.get(slash_selected) {
@@ -754,6 +800,10 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                         continue;
                                     }
                                     let prompt = input.clone();
+                                    if input_history.last() != Some(&prompt) {
+                                        input_history.push(prompt.clone());
+                                    }
+                                    history_index = None;
                                     input.clear();
                                     notice = None;
                                     status = "running…".to_owned();
@@ -771,8 +821,12 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             }
                             KeyCode::Backspace => {
                                 input.pop();
+                                history_index = None;
                             }
-                            KeyCode::Char(ch) => input.push(ch),
+                            KeyCode::Char(ch) => {
+                                input.push(ch);
+                                history_index = None;
+                            }
                             KeyCode::Esc if slash::is_open(&input) || input.starts_with('/') => {
                                 input.clear();
                                 slash_selected = 0;
