@@ -91,6 +91,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut context_dialog: Option<view::ContextDialog> = None;
     let mut tool_dialog: Option<view::ToolDialog> = None;
     let mut tool_detail_dialog: Option<view::ToolDetailDialog> = None;
+    let mut git_dialog: Option<view::GitDialog> = None;
     let mut mode_menu: Option<view::ModeMenu> = None;
     let mut project_picker: Option<view::ProjectPicker> = None;
     let mut session_picker: Option<view::SessionPicker> = None;
@@ -152,6 +153,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut last_slash_token = String::new();
     let mut model_override = String::new();
     let mut provider_override = String::new();
+    let mut git_status: Option<view::GitStatusInfo> = None;
     let mut notice: Option<String> = None;
     let mut tick = 0u64;
     let mut last_window_title = String::new();
@@ -242,6 +244,12 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
             tick = tick.wrapping_add(1);
             let env_model = std::env::var("BLORA_MODEL").unwrap_or_default();
             let env_provider = std::env::var("BLORA_PROVIDER").unwrap_or_default();
+            if tick % 20 == 0 || git_status.is_none() {
+                git_status = runtime
+                    .workspace_info(workspace)
+                    .ok()
+                    .map(|info| parse_git_status(&info));
+            }
             let logged_in = passport_user_token.is_some();
             let provider_option_list = provider_options(&provider_override, logged_in);
             let model = if model_override.is_empty() {
@@ -305,6 +313,8 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             context_dialog: context_dialog.as_ref(),
                             tool_dialog: tool_dialog.as_ref(),
                             tool_detail_dialog: tool_detail_dialog.as_ref(),
+                            git_dialog: git_dialog.as_ref(),
+                            git_status: git_status.as_ref(),
                             slash_hits: &slash_hits,
                             slash_selected,
                             search: search.as_deref(),
@@ -644,6 +654,28 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             KeyCode::Down if slash::is_open(&input) => {
                                 if !slash_hits.is_empty() {
                                     slash_selected = (slash_selected + 1).min(slash_hits.len() - 1);
+                                }
+                            }
+                            KeyCode::Left if git_dialog.is_some() => {
+                                if let Some(dialog) = git_dialog.as_mut() {
+                                    dialog.page = dialog.page.saturating_sub(1);
+                                }
+                            }
+                            KeyCode::Esc if git_dialog.is_some() => {
+                                git_dialog = None;
+                            }
+                            KeyCode::Right if git_dialog.is_some() => {
+                                if let Some(dialog) = git_dialog.as_mut() {
+                                    dialog.page = (dialog.page + 1).min(2);
+                                }
+                            }
+                            KeyCode::Enter if git_dialog.is_some() => {
+                                if let Some(dialog) = git_dialog.as_mut() {
+                                    if dialog.page == 0 {
+                                        dialog.info = git_status
+                                            .clone()
+                                            .unwrap_or_else(|| dialog.info.clone());
+                                    }
                                 }
                             }
                             KeyCode::Up
@@ -1009,6 +1041,12 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                         pointer = Some((mouse.column, mouse.row));
                         match mouse.kind {
                             MouseEventKind::ScrollUp => {
+                                if git_dialog.is_some() {
+                                    if let Some(dialog) = git_dialog.as_mut() {
+                                        dialog.selected = dialog.selected.saturating_sub(1);
+                                    }
+                                    continue;
+                                }
                                 if tool_detail_dialog.is_some() {
                                     if let Some(dialog) = tool_detail_dialog.as_mut() {
                                         dialog.scroll = dialog.scroll.saturating_sub(3);
@@ -1024,6 +1062,12 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 }
                             }
                             MouseEventKind::ScrollDown => {
+                                if git_dialog.is_some() {
+                                    if let Some(dialog) = git_dialog.as_mut() {
+                                        dialog.selected = dialog.selected.saturating_add(1);
+                                    }
+                                    continue;
+                                }
                                 if tool_detail_dialog.is_some() {
                                     if let Some(dialog) = tool_detail_dialog.as_mut() {
                                         dialog.scroll = dialog.scroll.saturating_add(3);
@@ -1168,6 +1212,30 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 if tool_dialog.is_some() {
                                     continue;
                                 }
+                                if matches!(hit, Some(view::Hit::GitStatus)) {
+                                    if let Some(info) = git_status.clone() {
+                                        git_dialog = Some(view::GitDialog {
+                                            info,
+                                            page: 0,
+                                            selected: 0,
+                                            fullscreen: false,
+                                            minimized: false,
+                                        });
+                                    }
+                                    continue;
+                                }
+                                if git_dialog.is_some() {
+                                    if let Some(dialog) = git_dialog.as_mut() {
+                                        match hit {
+                                            Some(view::Hit::GitRow(index))
+                                            | Some(view::Hit::GitAction(index)) => {
+                                                dialog.selected = index
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                    continue;
+                                }
                                 let modal_open = project_picker.is_some()
                                     || session_picker.is_some()
                                     || mode_menu.is_some()
@@ -1177,6 +1245,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     || context_dialog.is_some()
                                     || tool_dialog.is_some()
                                     || tool_detail_dialog.is_some()
+                                    || git_dialog.is_some()
                                     || passport_dialog.is_some();
                                 if matches!(
                                     hit,
@@ -1193,6 +1262,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                         &mut mode_menu,
                                         &mut tool_dialog,
                                         &mut tool_detail_dialog,
+                                        &mut git_dialog,
                                         &mut theme_dialog,
                                         &mut add_provider_dialog,
                                         &mut provider_dialog,
@@ -3282,6 +3352,38 @@ fn write_rules(workspace: &Path) -> String {
     }
 }
 
+fn parse_git_status(info: &blora_runtime::WorkspaceInfo) -> view::GitStatusInfo {
+    let mut branch = info.git_branch.trim().to_owned();
+    if branch.is_empty() {
+        branch = info
+            .git_status
+            .lines()
+            .next()
+            .unwrap_or("未检测到 Git")
+            .to_owned();
+    }
+    let mut added = 0usize;
+    let mut removed = 0usize;
+    for line in info.git_diff.lines() {
+        for token in line.split_whitespace() {
+            if let Some(value) = token.strip_prefix('+') {
+                added += value.parse::<usize>().unwrap_or(0);
+            }
+            if let Some(value) = token.strip_prefix('-') {
+                removed += value.parse::<usize>().unwrap_or(0);
+            }
+        }
+    }
+    view::GitStatusInfo {
+        branch,
+        added,
+        removed,
+        raw: info.git_status.clone(),
+        diff: info.git_diff.clone(),
+        log: info.git_log.clone(),
+    }
+}
+
 fn handle_traffic_light(
     hit: Option<view::Hit>,
     project_picker: &mut Option<view::ProjectPicker>,
@@ -3289,6 +3391,7 @@ fn handle_traffic_light(
     mode_menu: &mut Option<view::ModeMenu>,
     tool_dialog: &mut Option<view::ToolDialog>,
     tool_detail_dialog: &mut Option<view::ToolDetailDialog>,
+    git_dialog: &mut Option<view::GitDialog>,
     theme_dialog: &mut Option<view::ThemeDialog>,
     add_provider_dialog: &mut Option<view::AddProviderDialog>,
     provider_dialog: &mut Option<view::ProviderDialog>,
@@ -3307,6 +3410,8 @@ fn handle_traffic_light(
                 *status = "会话选择器已关闭".to_owned();
             } else if mode_menu.take().is_some() {
                 *status = "运行模式选择器已关闭".to_owned();
+            } else if git_dialog.take().is_some() {
+                *status = "Git 状态已关闭".to_owned();
             } else if tool_detail_dialog.take().is_some() {
                 *status = "工具详细信息已关闭".to_owned();
             } else if tool_dialog.take().is_some() {

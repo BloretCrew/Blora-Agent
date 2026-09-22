@@ -284,6 +284,25 @@ pub struct ToolDetailDialog {
 }
 
 #[derive(Clone, Debug)]
+pub struct GitStatusInfo {
+    pub branch: String,
+    pub added: usize,
+    pub removed: usize,
+    pub raw: String,
+    pub diff: String,
+    pub log: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct GitDialog {
+    pub info: GitStatusInfo,
+    pub page: usize,
+    pub selected: usize,
+    pub fullscreen: bool,
+    pub minimized: bool,
+}
+
+#[derive(Clone, Debug)]
 pub struct ContextDialog {
     pub scroll: usize,
     pub fullscreen: bool,
@@ -321,6 +340,8 @@ pub struct FrameModel<'a> {
     pub mode_menu: Option<&'a ModeMenu>,
     pub project_picker: Option<&'a ProjectPicker>,
     pub session_picker: Option<&'a SessionPicker>,
+    pub git_dialog: Option<&'a GitDialog>,
+    pub git_status: Option<&'a GitStatusInfo>,
     pub user_label: &'a str,
     pub running: bool,
     pub tick: u64,
@@ -334,6 +355,9 @@ pub enum Hit {
     Transcript,
     ToolSummary(Vec<usize>),
     ToolDetailRow(usize),
+    GitStatus,
+    GitRow(usize),
+    GitAction(usize),
     Composer,
     Slash(usize),
     Allow,
@@ -407,6 +431,9 @@ pub struct HitMap {
     pub toggle_approve: Option<Rect>,
     pub provider_target: Option<Rect>,
     pub context_usage: Option<Rect>,
+    pub git_status: Option<Rect>,
+    pub git_rows: Vec<(Rect, usize)>,
+    pub git_actions: Vec<(Rect, usize)>,
     pub hints: Vec<(Rect, HintAction)>,
     /// macOS-style traffic-light dots of the login dialog.
     pub traffic_lights: [Option<Rect>; 3],
@@ -446,6 +473,19 @@ impl HitMap {
                     _ => Hit::TrafficOpenBrowser,
                 });
             }
+        }
+        for (rect, idx) in &self.git_rows {
+            if contains(*rect, col, row) {
+                return Some(Hit::GitRow(*idx));
+            }
+        }
+        for (rect, idx) in &self.git_actions {
+            if contains(*rect, col, row) {
+                return Some(Hit::GitAction(*idx));
+            }
+        }
+        if self.git_status.is_some_and(|rect| contains(rect, col, row)) {
+            return Some(Hit::GitStatus);
         }
         for (rect, idx) in &self.tool_detail_rows {
             if contains(*rect, col, row) {
@@ -902,7 +942,12 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
             hint_row,
         );
     }
-    if let Some(dialog) = model.tool_detail_dialog {
+    if let Some(dialog) = model.git_dialog {
+        let dialog_hits = render_git_dialog(frame, area, dialog, model.pointer, &theme);
+        hits.traffic_lights = dialog_hits.traffic_lights;
+        hits.git_rows = dialog_hits.git_rows;
+        hits.git_actions = dialog_hits.git_actions;
+    } else if let Some(dialog) = model.tool_detail_dialog {
         let dialog_hits = render_tool_detail_dialog(frame, area, dialog, model.pointer, &theme);
         hits.traffic_lights = dialog_hits.traffic_lights;
     } else if let Some(dialog) = model.tool_dialog {
@@ -1090,6 +1135,9 @@ fn render_header(
     let mode_count = mode_session_indices.len().max(1);
     let counter = format!("{mode_position}/{mode_count}");
     let mode_title = mode_label(mode);
+    let git_text = model
+        .git_status
+        .map(|status| format!("+{}-{}", status.added, status.removed));
     let left = Line::from(vec![
         Span::styled("Blora", theme.rose_bold()),
         Span::styled("  ·  ", theme.mute()),
@@ -1103,6 +1151,27 @@ fn render_header(
         Span::styled("  ·  ", theme.mute()),
         Span::styled(ellipsize(display_title, 28), theme.fg(theme.text_dim)),
     ]);
+    if let Some(git_text) = git_text {
+        let git_x = inner
+            .right()
+            .saturating_sub(u16::try_from(git_text.width() + 1).unwrap_or(6));
+        hits.git_status = Some(Rect {
+            x: git_x,
+            y: inner.y,
+            width: u16::try_from(git_text.width()).unwrap_or(5),
+            height: 1,
+        });
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(git_text, theme.fg(theme.sage))))
+                .style(theme.base()),
+            Rect {
+                x: git_x,
+                y: inner.y,
+                width: inner.right().saturating_sub(git_x),
+                height: 1,
+            },
+        );
+    }
     let project_start = inner.x
         + u16::try_from(
             "Blora".width()
@@ -2564,6 +2633,127 @@ fn wrap_labeled_text(prefix: &str, text: &str, width: usize, style: Style) -> Ve
         lines.push(Line::from(Span::styled(prefix.to_owned(), style)));
     }
     lines
+}
+
+fn render_git_dialog(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    dialog: &GitDialog,
+    pointer: Option<(u16, u16)>,
+    theme: &Theme,
+) -> HitMap {
+    let mut hits = HitMap::default();
+    let Some(frame_area) = dialog_outer(area, 88, 20, dialog.fullscreen, dialog.minimized) else {
+        return hits;
+    };
+    let inner = paint_dialog_chrome(frame, frame_area, theme);
+    let [title_row, tabs, body, hint_row] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(4),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+    paint_traffic_title(frame, title_row, "Git 状态", pointer, theme, &mut hits);
+    if dialog.minimized {
+        return hits;
+    }
+    let labels = ["状态", "Git 图", "操作"];
+    for (index, label) in labels.iter().enumerate() {
+        let width = tabs.width / 3;
+        let rect = Rect::new(tabs.x + width * index as u16, tabs.y, width, 1);
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                *label,
+                if dialog.page == index {
+                    theme.fg(theme.text).add_modifier(Modifier::BOLD)
+                } else {
+                    theme.mute()
+                },
+            )))
+            .style(theme.base()),
+            rect,
+        );
+    }
+    match dialog.page {
+        0 => {
+            for (index, line) in dialog
+                .info
+                .raw
+                .lines()
+                .enumerate()
+                .take(body.height as usize)
+            {
+                let rect = Rect::new(body.x, body.y + index as u16, body.width, 1);
+                hits.git_rows.push((rect, index));
+                frame.render_widget(
+                    Paragraph::new(Line::from(Span::styled(
+                        line.to_owned(),
+                        theme.fg(theme.text),
+                    )))
+                    .style(theme.base()),
+                    rect,
+                );
+            }
+        }
+        1 => {
+            let lines = git_graph_lines(&dialog.info.log);
+            frame.render_widget(
+                Paragraph::new(
+                    lines
+                        .into_iter()
+                        .take(body.height as usize)
+                        .collect::<Vec<_>>(),
+                )
+                .style(theme.base()),
+                body,
+            );
+        }
+        _ => {
+            let actions = [
+                "刷新 Git 状态",
+                "暂存全部修改",
+                "取消暂存全部",
+                "提交（需要输入说明）",
+            ];
+            for (index, action) in actions.iter().enumerate() {
+                let rect = Rect::new(body.x, body.y + index as u16, body.width, 1);
+                hits.git_actions.push((rect, index));
+                frame.render_widget(
+                    Paragraph::new(Line::from(Span::styled(
+                        format!(
+                            "{}  {}",
+                            if dialog.selected == index { "❯" } else { " " },
+                            action
+                        ),
+                        theme.fg(theme.text),
+                    )))
+                    .style(theme.base()),
+                    rect,
+                );
+            }
+        }
+    }
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "←/→ 分页 · ↑/↓ 选择 · Enter 执行 · Esc 关闭",
+            theme.mute(),
+        )))
+        .style(theme.base()),
+        hint_row,
+    );
+    hits
+}
+
+fn git_graph_lines(log: &str) -> Vec<Line<'static>> {
+    log.lines()
+        .map(|line| {
+            Line::from(vec![
+                Span::styled("●─ ", Style::default()),
+                Span::styled(line.to_owned(), Style::default()),
+            ])
+        })
+        .collect()
 }
 
 fn render_tool_detail_dialog(
