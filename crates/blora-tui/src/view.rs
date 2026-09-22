@@ -2469,12 +2469,7 @@ fn tool_detail_lines(tool: &ToolCallDetail, width: usize, theme: &Theme) -> Vec<
             "调用参数",
             theme.fg(theme.rose).add_modifier(Modifier::BOLD),
         )));
-        lines.extend(wrap_labeled_text(
-            "  ",
-            &arguments.clone(),
-            content_width,
-            theme.mute(),
-        ));
+        lines.extend(render_arguments(arguments, content_width, theme));
         lines.push(Line::default());
     }
     if let Some(output) = &tool.output {
@@ -2490,6 +2485,67 @@ fn tool_detail_lines(tool: &ToolCallDetail, width: usize, theme: &Theme) -> Vec<
         ));
     }
     lines
+}
+
+fn render_arguments(arguments: &str, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(arguments) else {
+        return wrap_labeled_text("  ", arguments, width, theme.mute());
+    };
+    let Some(object) = value.as_object() else {
+        return wrap_labeled_text("  ", &pretty_json(&value), width, theme.mute());
+    };
+    let mut lines = Vec::new();
+    for (key, value) in object {
+        let label = argument_label(key);
+        if value.is_object() || value.is_array() {
+            lines.push(Line::from(vec![Span::styled(
+                format!("  {label}："),
+                theme.fg(theme.text_dim),
+            )]));
+            for line in pretty_json(value).lines() {
+                lines.push(Line::from(Span::styled(
+                    format!("    {line}"),
+                    theme.mute(),
+                )));
+            }
+        } else {
+            lines.extend(wrap_labeled_text(
+                &format!("  {label}："),
+                &pretty_json(value),
+                width,
+                theme.mute(),
+            ));
+        }
+    }
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled("  （无参数）", theme.mute())));
+    }
+    lines
+}
+
+fn argument_label(key: &str) -> String {
+    match key {
+        "path" => "路径".to_owned(),
+        "pattern" => "匹配模式".to_owned(),
+        "include" => "包含文件".to_owned(),
+        "max_results" => "最大结果数".to_owned(),
+        "offset" => "起始位置".to_owned(),
+        "limit" => "读取行数".to_owned(),
+        "query" => "搜索内容".to_owned(),
+        "command" => "命令".to_owned(),
+        "note" => "备注".to_owned(),
+        "steps" => "步骤".to_owned(),
+        "status" => "状态".to_owned(),
+        "title" => "标题".to_owned(),
+        _ => key.to_owned(),
+    }
+}
+
+fn pretty_json(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(value) => value.clone(),
+        _ => serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string()),
+    }
 }
 
 fn wrap_labeled_text(prefix: &str, text: &str, width: usize, style: Style) -> Vec<Line<'static>> {
