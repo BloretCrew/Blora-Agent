@@ -3632,7 +3632,15 @@ fn read_clipboard_image_preview() -> Option<(String, usize)> {
     std::fs::write(&temp, &bytes).ok()?;
     let preview = std::process::Command::new("convert")
         .arg(&temp)
-        .args(["-resize", "48x18", "txt:-"])
+        .args([
+            "-resize",
+            "48x18!",
+            "-colorspace",
+            "Gray",
+            "-contrast-stretch",
+            "2%x2%",
+            "txt:-",
+        ])
         .output()
         .ok()
         .and_then(|output| {
@@ -3648,7 +3656,7 @@ fn read_clipboard_image_preview() -> Option<(String, usize)> {
 }
 
 fn ascii_image_preview(text: &str) -> String {
-    let shades: Vec<char> = " .:-=+*#%@".chars().collect();
+    let shades: Vec<char> = "@%#*+=-:. ".chars().collect();
     let mut pixels = Vec::new();
     let mut width = 0usize;
     let mut height = 0usize;
@@ -3691,7 +3699,7 @@ fn ascii_image_preview(text: &str) -> String {
                 + u32::from(channels[1]) * 587
                 + u32::from(channels[2]) * 114)
                 / 1000;
-            let index = luminance as usize * (shades.len() - 1) / 255;
+            let index = (255usize.saturating_sub(luminance as usize)) * (shades.len() - 1) / 255;
             pixels.push((x, y, shades[index]));
         }
     }

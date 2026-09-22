@@ -1168,8 +1168,11 @@ fn render_header(
             height: 1,
         });
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(git_text, theme.fg(theme.sage))))
-                .style(theme.base()),
+            Paragraph::new(Line::from(vec![
+                Span::styled("● ", theme.fg(theme.sage)),
+                Span::styled(git_text, theme.fg(theme.sage)),
+            ]))
+            .style(theme.base()),
             Rect {
                 x: git_x,
                 y: inner.y,
