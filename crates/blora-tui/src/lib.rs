@@ -364,7 +364,11 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
             if event::poll(Duration::from_millis(wait_ms)).map_err(blora_types::BloraError::exec)? {
                 match event::read().map_err(blora_types::BloraError::exec)? {
                     Event::Paste(text) => {
-                        insert_pasted_text(&mut input, &mut paste_preview, &text);
+                        if text.is_empty() {
+                            paste_clipboard(&mut input, &mut paste_preview);
+                        } else {
+                            insert_pasted_text(&mut input, &mut paste_preview, &text);
+                        }
                         history_index = None;
                     }
                     Event::Key(key) if key.kind == KeyEventKind::Press => {
@@ -401,6 +405,10 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             continue;
                         }
                         match key.code {
+                            KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                paste_clipboard(&mut input, &mut paste_preview);
+                                history_index = None;
+                            }
                             KeyCode::Esc if text_selection.is_some() => {
                                 text_selection = None;
                                 selecting_text = false;
@@ -3544,6 +3552,21 @@ fn handle_traffic_light(
             }
         }
         _ => {}
+    }
+}
+
+fn paste_clipboard(input: &mut String, preview: &mut Option<String>) {
+    if let Some((image_preview, bytes)) = read_clipboard_image_preview() {
+        input.push_str(&format!("[图片 {}]", format_bytes(bytes)));
+        *preview = Some(format!(
+            "剪贴板图片（{}）：\n{}",
+            format_bytes(bytes),
+            image_preview
+        ));
+    } else if let Some(text) = read_clipboard_text() {
+        insert_pasted_text(input, preview, &text);
+    } else {
+        *preview = Some("无法读取剪贴板，请使用终端的 Ctrl+Shift+V 粘贴。".to_owned());
     }
 }
 
