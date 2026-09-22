@@ -3548,6 +3548,15 @@ fn handle_traffic_light(
 }
 
 fn insert_pasted_text(input: &mut String, preview: &mut Option<String>, text: &str) {
+    if let Some((image_preview, bytes)) = read_clipboard_image_preview() {
+        input.push_str(&format!("[图片 {}]", format_bytes(bytes)));
+        *preview = Some(format!(
+            "剪贴板图片（{}）：\n{}",
+            format_bytes(bytes),
+            image_preview
+        ));
+        return;
+    }
     const LARGE_PASTE_BYTES: usize = 512;
     if text.len() < LARGE_PASTE_BYTES {
         input.push_str(text);
@@ -3585,6 +3594,60 @@ fn truncate_preview(text: &str, max_bytes: usize) -> String {
         out.push_str("…");
     }
     out
+}
+
+fn read_clipboard_image_preview() -> Option<(String, usize)> {
+    let output = std::process::Command::new("xclip")
+        .args(["-selection", "clipboard", "-t", "image/png", "-o"])
+        .output()
+        .ok()?;
+    if !output.status.success() || output.stdout.is_empty() {
+        return None;
+    }
+    let bytes = output.stdout;
+    let temp = std::env::temp_dir().join(format!("blora-paste-{}.png", std::process::id()));
+    std::fs::write(&temp, &bytes).ok()?;
+    let preview = std::process::Command::new("convert")
+        .arg(&temp)
+        .args(["-resize", "48x18", "txt:-"])
+        .output()
+        .ok()
+        .and_then(|output| {
+            output
+                .status
+                .success()
+                .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+        })
+        .map(|text| ascii_image_preview(&text))
+        .unwrap_or_else(|| "[终端不支持图像预览，请使用外部查看器打开图片]".to_owned());
+    let _ = std::fs::remove_file(temp);
+    Some((preview, bytes.len()))
+}
+
+fn ascii_image_preview(text: &str) -> String {
+    let shades = " .:-=+*#%@";
+    let mut lines = Vec::new();
+    for line in text.lines().skip(1) {
+        let Some((_, rgb)) = line.split_once("srgb(") else {
+            continue;
+        };
+        let Some(rgb) = rgb.split(')').next() else {
+            continue;
+        };
+        let channels: Vec<u32> = rgb
+            .split(',')
+            .filter_map(|part| part.trim().parse().ok())
+            .collect();
+        if channels.len() == 3 {
+            let luminance = (channels[0] * 299 + channels[1] * 587 + channels[2] * 114) / 1000;
+            let index = luminance as usize * (shades.len() - 1) / 255;
+            lines.push(shades.chars().nth(index).unwrap_or(' '));
+        }
+    }
+    if lines.is_empty() {
+        return "[无法生成图像预览]".to_owned();
+    }
+    lines.into_iter().collect::<String>()
 }
 
 fn read_clipboard_text() -> Option<String> {
