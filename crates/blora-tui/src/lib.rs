@@ -3648,29 +3648,65 @@ fn read_clipboard_image_preview() -> Option<(String, usize)> {
 }
 
 fn ascii_image_preview(text: &str) -> String {
-    let shades = " .:-=+*#%@";
-    let mut lines = Vec::new();
+    let shades: Vec<char> = " .:-=+*#%@".chars().collect();
+    let mut pixels = Vec::new();
+    let mut width = 0usize;
+    let mut height = 0usize;
     for line in text.lines().skip(1) {
-        let Some((_, rgb)) = line.split_once("srgb(") else {
+        let Some((coordinate, rgba)) = line.split_once(": (") else {
             continue;
         };
-        let Some(rgb) = rgb.split(')').next() else {
+        let mut coordinates = coordinate.split(',');
+        let Some(x) = coordinates
+            .next()
+            .and_then(|value| value.parse::<usize>().ok())
+        else {
             continue;
         };
-        let channels: Vec<u32> = rgb
+        let Some(y) = coordinates
+            .next()
+            .and_then(|value| value.parse::<usize>().ok())
+        else {
+            continue;
+        };
+        let Some(rgb) = rgba.split(')').next() else {
+            continue;
+        };
+        let channels: Vec<u8> = rgb
             .split(',')
-            .filter_map(|part| part.trim().parse().ok())
+            .take(3)
+            .filter_map(|part| {
+                let value = part.trim().trim_end_matches('%').parse::<f32>().ok()?;
+                Some(if part.trim().ends_with('%') {
+                    (value * 2.55).round() as u8
+                } else {
+                    value.clamp(0.0, 255.0) as u8
+                })
+            })
             .collect();
         if channels.len() == 3 {
-            let luminance = (channels[0] * 299 + channels[1] * 587 + channels[2] * 114) / 1000;
+            width = width.max(x + 1);
+            height = height.max(y + 1);
+            let luminance = (u32::from(channels[0]) * 299
+                + u32::from(channels[1]) * 587
+                + u32::from(channels[2]) * 114)
+                / 1000;
             let index = luminance as usize * (shades.len() - 1) / 255;
-            lines.push(shades.chars().nth(index).unwrap_or(' '));
+            pixels.push((x, y, shades[index]));
         }
     }
-    if lines.is_empty() {
+    if pixels.is_empty() || width == 0 || height == 0 {
         return "[无法生成图像预览]".to_owned();
     }
-    lines.into_iter().collect::<String>()
+    let mut canvas = vec![vec![' '; width]; height];
+    for (x, y, glyph) in pixels {
+        canvas[y][x] = glyph;
+    }
+    canvas
+        .into_iter()
+        .map(|row| row.into_iter().collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn read_clipboard_text() -> Option<String> {
