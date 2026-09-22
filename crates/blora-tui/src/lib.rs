@@ -955,14 +955,30 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                         pointer = Some((mouse.column, mouse.row));
                         match mouse.kind {
                             MouseEventKind::ScrollUp => {
-                                if hits.over_slash(mouse.column, mouse.row) {
+                                if tool_detail_dialog.is_some() {
+                                    if let Some(dialog) = tool_detail_dialog.as_mut() {
+                                        dialog.scroll = dialog.scroll.saturating_sub(3);
+                                    }
+                                } else if tool_dialog.is_some() {
+                                    if let Some(dialog) = tool_dialog.as_mut() {
+                                        dialog.scroll = dialog.scroll.saturating_sub(3);
+                                    }
+                                } else if hits.over_slash(mouse.column, mouse.row) {
                                     slash_selected = slash_selected.saturating_sub(1);
                                 } else {
                                     scroll = scroll.saturating_add(3);
                                 }
                             }
                             MouseEventKind::ScrollDown => {
-                                if hits.over_slash(mouse.column, mouse.row) {
+                                if tool_detail_dialog.is_some() {
+                                    if let Some(dialog) = tool_detail_dialog.as_mut() {
+                                        dialog.scroll = dialog.scroll.saturating_add(3);
+                                    }
+                                } else if tool_dialog.is_some() {
+                                    if let Some(dialog) = tool_dialog.as_mut() {
+                                        dialog.scroll = dialog.scroll.saturating_add(3);
+                                    }
+                                } else if hits.over_slash(mouse.column, mouse.row) {
                                     if !slash_hits.is_empty() {
                                         slash_selected =
                                             (slash_selected + 1).min(slash_hits.len() - 1);
