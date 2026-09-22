@@ -3692,14 +3692,21 @@ fn ascii_image_preview(text: &str) -> String {
                 })
             })
             .collect();
-        if channels.len() == 3 {
+        if channels.len() >= 1 {
+            let gray = channels[0];
+            let pixel = if channels.len() >= 3 {
+                let luminance = (u32::from(channels[0]) * 299
+                    + u32::from(channels[1]) * 587
+                    + u32::from(channels[2]) * 114)
+                    / 1000;
+                luminance as u8
+            } else {
+                gray
+            };
             width = width.max(x + 1);
             height = height.max(y + 1);
-            let luminance = (u32::from(channels[0]) * 299
-                + u32::from(channels[1]) * 587
-                + u32::from(channels[2]) * 114)
-                / 1000;
-            let index = (255usize.saturating_sub(luminance as usize)) * (shades.len() - 1) / 255;
+            let index =
+                (255usize.saturating_sub(u32::from(pixel) as usize)) * (shades.len() - 1) / 255;
             pixels.push((x, y, shades[index]));
         }
     }
