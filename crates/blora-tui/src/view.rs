@@ -366,6 +366,7 @@ pub enum Hit {
     PrevSession,
     NextSession,
     ProjectPicker,
+    OpenNewProject,
     ProjectPickerRow(usize),
     SessionPicker,
     SessionPickerRow(usize),
@@ -423,6 +424,7 @@ pub struct HitMap {
     pub prev_session: Option<Rect>,
     pub next_session: Option<Rect>,
     pub project_picker: Option<Rect>,
+    pub open_new_project: Option<Rect>,
     pub project_picker_rows: Vec<(Rect, usize)>,
     pub session_picker: Option<Rect>,
     pub session_picker_rows: Vec<(Rect, usize)>,
@@ -522,6 +524,12 @@ impl HitMap {
             if contains(*rect, col, row) {
                 return Some(Hit::ModeRow(*idx));
             }
+        }
+        if self
+            .open_new_project
+            .is_some_and(|rect| contains(rect, col, row))
+        {
+            return Some(Hit::OpenNewProject);
         }
         for (rect, idx) in &self.project_picker_rows {
             if contains(*rect, col, row) {
@@ -717,7 +725,7 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
         projects.dedup();
         let visible = projects.len().clamp(1, 12) as u16;
         let menu_width = 72u16.min(area.width.saturating_sub(4));
-        let menu_height = (visible + 4).min(area.height.saturating_sub(4));
+        let menu_height = (visible + 5).min(area.height.saturating_sub(4));
         let Some(menu_area) = dialog_outer(
             area,
             menu_width,
@@ -735,7 +743,8 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
             .border_style(theme.fg(theme.hairline).bg(theme.bg));
         let inner = block.inner(menu_area);
         frame.render_widget(block, menu_area);
-        let [title_row, body, hint_row] = Layout::vertical([
+        let [title_row, open_row, body, hint_row] = Layout::vertical([
+            Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Min(2),
             Constraint::Length(1),
@@ -754,6 +763,15 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
         if picker.minimized {
             return hits;
         }
+        hits.open_new_project = Some(open_row);
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "+ 打开新项目",
+                theme.fg(theme.rose),
+            )))
+            .style(theme.base()),
+            open_row,
+        );
         let rows = split_n_rows(body, visible);
         for (row_index, project) in projects.iter().take(visible as usize).enumerate() {
             if let Some(rect) = rows.get(row_index).copied() {

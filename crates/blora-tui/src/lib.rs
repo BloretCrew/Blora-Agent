@@ -1324,6 +1324,17 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     selecting_text = true;
                                     continue;
                                 }
+                                if matches!(hit, Some(view::Hit::OpenNewProject)) {
+                                    open_project_folder(
+                                        runtime,
+                                        &mut sessions,
+                                        &mut index,
+                                        &mut cached,
+                                        &mut project_picker,
+                                        &mut status,
+                                    );
+                                    continue;
+                                }
                                 if let Some(view::Hit::ProjectPickerRow(project_index)) = hit {
                                     if let Some(path) = project_paths(&sessions).get(project_index)
                                     {
@@ -1772,6 +1783,61 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
         let _ = io::stdout().flush();
     }
     result
+}
+
+fn open_project_folder(
+    runtime: &Runtime,
+    sessions: &mut Vec<blora_storage::SessionSummary>,
+    index: &mut usize,
+    cached: &mut Option<(SessionId, blora_session::SessionProjection)>,
+    project_picker: &mut Option<view::ProjectPicker>,
+    status: &mut String,
+) {
+    *project_picker = None;
+    let chooser = if cfg!(target_os = "linux") {
+        std::process::Command::new("zenity")
+            .args(["--file-selection", "--directory", "--title=打开新项目"])
+            .output()
+    } else if cfg!(target_os = "macos") {
+        std::process::Command::new("osascript")
+            .args([
+                "-e",
+                "POSIX path of (choose folder with prompt \"打开新项目\")",
+            ])
+            .output()
+    } else {
+        std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", "Add-Type -AssemblyName System.Windows.Forms; $d=New-Object System.Windows.Forms.FolderBrowserDialog; if($d.ShowDialog() -eq 'OK'){$d.SelectedPath}"])
+            .output()
+    };
+    let Ok(output) = chooser else {
+        *status = "无法打开文件夹选择器（Linux 请安装 zenity）".to_owned();
+        return;
+    };
+    if !output.status.success() {
+        return;
+    }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if path.is_empty() {
+        return;
+    }
+    let path = Path::new(&path);
+    if !path.is_dir() {
+        *status = "所选路径不是文件夹".to_owned();
+        return;
+    }
+    match create_session(runtime, path, Mode::Code, None) {
+        Ok(id) => {
+            refresh_sessions(runtime, sessions, index);
+            if let Some(found) = sessions.iter().position(|session| session.id == id) {
+                *index = found;
+            }
+            *cached = None;
+            *project_picker = None;
+            *status = format!("已打开项目：{}", path.display());
+        }
+        Err(err) => *status = err.to_string(),
+    }
 }
 
 fn refresh_sessions(
