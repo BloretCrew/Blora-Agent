@@ -1566,6 +1566,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                         index = found;
                                         cached = None;
                                     }
+                                    project_picker = None;
                                     continue;
                                 }
                                 if matches!(hit, Some(view::Hit::ProjectPicker)) {

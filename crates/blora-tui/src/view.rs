@@ -1276,7 +1276,11 @@ fn render_header(
         .and_then(|projection| projection.session.as_ref());
     let mode = session.map(|item| item.mode.as_str()).unwrap_or("code");
     let project_name = model
-        .workspace
+        .sessions
+        .get(model.index)
+        .map(|session| session.workspace_path.as_str())
+        .unwrap_or_else(|| model.workspace.to_str().unwrap_or("项目"));
+    let project_name = Path::new(project_name)
         .file_name()
         .and_then(|name| name.to_str())
         .filter(|name| !name.is_empty())
