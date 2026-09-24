@@ -257,6 +257,8 @@ pub struct FolderPicker {
     pub path: std::path::PathBuf,
     pub entries: Vec<std::path::PathBuf>,
     pub selected: usize,
+    pub fullscreen: bool,
+    pub minimized: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -661,13 +663,20 @@ fn render_folder_picker(
     frame: &mut Frame<'_>,
     area: Rect,
     picker: &FolderPicker,
+    pointer: Option<(u16, u16)>,
     theme: &Theme,
     hits: &mut HitMap,
 ) {
     let visible = picker.entries.len().clamp(1, 10) as u16;
     let menu_width = 72u16.min(area.width.saturating_sub(4));
     let menu_height = (visible + 6).min(area.height.saturating_sub(4));
-    let Some(menu_area) = dialog_outer(area, menu_width, menu_height, false, false) else {
+    let Some(menu_area) = dialog_outer(
+        area,
+        menu_width,
+        menu_height,
+        picker.fullscreen,
+        picker.minimized,
+    ) else {
         return;
     };
     frame.render_widget(Clear, menu_area);
@@ -689,8 +698,11 @@ fn render_folder_picker(
     ])
     .areas(inner);
     let mut dialog_hits = HitMap::default();
-    paint_traffic_title(frame, title_row, title, None, theme, &mut dialog_hits);
+    paint_traffic_title(frame, title_row, title, pointer, theme, &mut dialog_hits);
     hits.traffic_lights = dialog_hits.traffic_lights;
+    if picker.minimized {
+        return;
+    }
     frame.render_widget(
         Paragraph::new(ellipsize(
             &picker.path.display().to_string(),
@@ -837,7 +849,7 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
     render_status(frame, status, model, &theme);
     render_hints(frame, hints, model, &theme, &mut hits);
     if let Some(picker) = model.folder_picker {
-        render_folder_picker(frame, area, picker, &theme, &mut hits);
+        render_folder_picker(frame, area, picker, model.pointer, &theme, &mut hits);
     }
     if let Some(picker) = model.folder_picker {
         let visible = picker.entries.len().clamp(1, 10) as u16;

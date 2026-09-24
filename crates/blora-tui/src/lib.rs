@@ -406,6 +406,34 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             slash_selected = 0;
                             continue;
                         }
+                        if folder_picker.is_some()
+                            && matches!(key.code, KeyCode::Left | KeyCode::Right)
+                        {
+                            handle_traffic_light(
+                                Some(if key.code == KeyCode::Left {
+                                    view::Hit::TrafficClose
+                                } else {
+                                    view::Hit::TrafficMinimize
+                                }),
+                                &mut folder_picker,
+                                &mut project_picker,
+                                &mut session_picker,
+                                &mut mode_menu,
+                                &mut tool_dialog,
+                                &mut tool_detail_dialog,
+                                &mut git_dialog,
+                                &mut theme_dialog,
+                                &mut add_provider_dialog,
+                                &mut provider_dialog,
+                                &mut context_dialog,
+                                &mut passport_dialog,
+                                &mut passport_browser_opened,
+                                passport_url.as_deref(),
+                                &mut cancel,
+                                &mut status,
+                            );
+                            continue;
+                        }
                         if folder_picker.is_some() {
                             match key.code {
                                 KeyCode::Up => {
@@ -1245,6 +1273,35 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             }
                             MouseEventKind::Down(MouseButton::Left) => {
                                 let hit = hits.hit(mouse.column, mouse.row);
+                                if matches!(
+                                    hit,
+                                    Some(
+                                        view::Hit::TrafficClose
+                                            | view::Hit::TrafficMinimize
+                                            | view::Hit::TrafficOpenBrowser
+                                    )
+                                ) {
+                                    handle_traffic_light(
+                                        hit,
+                                        &mut folder_picker,
+                                        &mut project_picker,
+                                        &mut session_picker,
+                                        &mut mode_menu,
+                                        &mut tool_dialog,
+                                        &mut tool_detail_dialog,
+                                        &mut git_dialog,
+                                        &mut theme_dialog,
+                                        &mut add_provider_dialog,
+                                        &mut provider_dialog,
+                                        &mut context_dialog,
+                                        &mut passport_dialog,
+                                        &mut passport_browser_opened,
+                                        passport_url.as_deref(),
+                                        &mut cancel,
+                                        &mut status,
+                                    );
+                                    continue;
+                                }
                                 if let Some(view::Hit::ToolSummary(indices)) = hit.clone() {
                                     selecting_text = false;
                                     text_selection = None;
@@ -1347,6 +1404,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 ) {
                                     handle_traffic_light(
                                         hit,
+                                        &mut folder_picker,
                                         &mut project_picker,
                                         &mut session_picker,
                                         &mut mode_menu,
@@ -1914,6 +1972,8 @@ fn open_folder_picker(workspace: &Path) -> view::FolderPicker {
         entries: folder_entries(&path),
         path,
         selected: 0,
+        fullscreen: false,
+        minimized: false,
     }
 }
 
@@ -3552,6 +3612,7 @@ fn parse_git_status(info: &blora_runtime::WorkspaceInfo) -> view::GitStatusInfo 
 
 fn handle_traffic_light(
     hit: Option<view::Hit>,
+    folder_picker: &mut Option<view::FolderPicker>,
     project_picker: &mut Option<view::ProjectPicker>,
     session_picker: &mut Option<view::SessionPicker>,
     mode_menu: &mut Option<view::ModeMenu>,
@@ -3570,7 +3631,9 @@ fn handle_traffic_light(
 ) {
     match hit {
         Some(view::Hit::TrafficClose) => {
-            if project_picker.take().is_some() {
+            if folder_picker.take().is_some() {
+                *status = "文件夹选择器已关闭".to_owned();
+            } else if project_picker.take().is_some() {
                 *status = "项目选择器已关闭".to_owned();
             } else if session_picker.take().is_some() {
                 *status = "会话选择器已关闭".to_owned();
@@ -3598,7 +3661,10 @@ fn handle_traffic_light(
             }
         }
         Some(view::Hit::TrafficMinimize) => {
-            if let Some(dialog) = project_picker.as_mut() {
+            if let Some(dialog) = folder_picker.as_mut() {
+                dialog.minimized = true;
+                dialog.fullscreen = false;
+            } else if let Some(dialog) = project_picker.as_mut() {
                 dialog.minimized = true;
                 dialog.fullscreen = false;
             } else if let Some(dialog) = session_picker.as_mut() {
@@ -3630,7 +3696,13 @@ fn handle_traffic_light(
             }
         }
         Some(view::Hit::TrafficOpenBrowser) => {
-            if let Some(dialog) = project_picker.as_mut() {
+            if let Some(dialog) = folder_picker.as_mut() {
+                if dialog.minimized {
+                    dialog.minimized = false;
+                } else {
+                    dialog.fullscreen = !dialog.fullscreen;
+                }
+            } else if let Some(dialog) = project_picker.as_mut() {
                 if dialog.minimized {
                     dialog.minimized = false;
                 } else {
