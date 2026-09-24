@@ -1168,8 +1168,9 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                         match mouse.kind {
                             MouseEventKind::ScrollUp => {
                                 if let Some(picker) = folder_picker.as_mut() {
-                                    picker.scroll = picker.scroll.saturating_sub(3);
-                                    picker.selected = picker.scroll;
+                                    picker.scroll = picker.scroll.saturating_sub(1);
+                                    picker.selected =
+                                        picker.selected.saturating_sub(1).max(picker.scroll);
                                     continue;
                                 }
                                 if git_dialog.is_some() {
@@ -1197,9 +1198,10 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     let visible = 8usize;
                                     picker.scroll = picker
                                         .scroll
-                                        .saturating_add(3)
+                                        .saturating_add(1)
                                         .min(picker.entries.len().saturating_sub(visible));
-                                    picker.selected = picker.scroll;
+                                    picker.selected =
+                                        picker.selected.saturating_add(1).max(picker.scroll);
                                     continue;
                                 }
                                 if git_dialog.is_some() {
