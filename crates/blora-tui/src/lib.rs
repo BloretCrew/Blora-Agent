@@ -488,11 +488,10 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                                     &mut sessions,
                                                     &mut index,
                                                 );
-                                                if let Some(found) =
-                                                    sessions.iter().position(|item| item.id == id)
-                                                {
-                                                    index = found;
-                                                }
+                                                index = sessions
+                                                    .iter()
+                                                    .position(|item| item.id == id)
+                                                    .unwrap_or(0);
                                                 cached = None;
                                                 status = format!(
                                                     "已打开项目：{}",
@@ -1510,11 +1509,10 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                                     &mut sessions,
                                                     &mut index,
                                                 );
-                                                if let Some(found) =
-                                                    sessions.iter().position(|item| item.id == id)
-                                                {
-                                                    index = found;
-                                                }
+                                                index = sessions
+                                                    .iter()
+                                                    .position(|item| item.id == id)
+                                                    .unwrap_or(0);
                                                 cached = None;
                                                 status = format!(
                                                     "已打开项目：{}",
@@ -1555,16 +1553,13 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 }
                                 if let Some(view::Hit::ProjectPickerRow(project_index)) = hit {
                                     if let Some(path) = project_paths(&sessions).get(project_index)
-                                    {
-                                        if let Some(found) = sessions
+                                        && let Some(found) = sessions
                                             .iter()
                                             .position(|session| &session.workspace_path == path)
-                                        {
-                                            index = found;
-                                            cached = None;
-                                        }
+                                    {
+                                        index = found;
+                                        cached = None;
                                     }
-                                    project_picker = None;
                                     continue;
                                 }
                                 if matches!(hit, Some(view::Hit::ProjectPicker)) {
@@ -2036,9 +2031,16 @@ fn refresh_sessions(
     sessions: &mut Vec<blora_storage::SessionSummary>,
     index: &mut usize,
 ) {
+    let selected_id = sessions.get(*index).map(|session| session.id.clone());
     if let Ok(list) = runtime.list_sessions() {
         *sessions = list;
-        if sessions.is_empty() {
+        if let Some(selected_id) = selected_id
+            && let Some(selected_index) = sessions
+                .iter()
+                .position(|session| session.id == selected_id)
+        {
+            *index = selected_index;
+        } else if sessions.is_empty() {
             *index = 0;
         } else if *index >= sessions.len() {
             *index = sessions.len() - 1;
