@@ -591,10 +591,7 @@ pub fn apply_event(projection: &mut SessionProjection, event: &EventEnvelope) ->
         }
         other => {
             apply_run_transition(projection, event, &other)?;
-            if matches!(
-                other,
-                KnownPayload::ContextCompactionCompleted(_) | KnownPayload::CheckpointCreated(_)
-            ) {
+            if matches!(other, KnownPayload::ContextCompactionCompleted(_)) {
                 projection.transcript.push(TranscriptItem::System {
                     summary: other.event_type().to_owned(),
                     event_id: event.event_id.clone(),
