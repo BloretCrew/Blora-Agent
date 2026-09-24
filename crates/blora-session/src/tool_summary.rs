@@ -73,8 +73,9 @@ pub fn summarize_tool_run(items: &[&TranscriptItem], _running: bool) -> String {
             Verb::Git => gits += 1,
             Verb::Commit => {
                 if let Some(hash) = commit_hash(arguments.as_deref(), output.as_deref()) {
-                    if !commits.iter().any(|item| item == &hash) {
-                        commits.push(hash);
+                    let short_hash: String = hash.chars().take(6).collect();
+                    if !commits.iter().any(|item| item == &short_hash) {
+                        commits.push(short_hash);
                     }
                 } else {
                     shells += 1;
@@ -250,7 +251,8 @@ mod tests {
         let text = summarize_tool_run(&items, false);
         assert!(text.contains("搜索了 2 次"), "{text}");
         assert!(text.contains("编辑了 2 个文件"), "{text}");
-        assert!(text.contains("提交了 79abcdef"), "{text}");
+        assert!(text.contains("提交了 79abcd"), "{text}");
+        assert!(!text.contains("79abcdef"), "{text}");
         assert!(text.contains("更新了任务清单"), "{text}");
     }
 
