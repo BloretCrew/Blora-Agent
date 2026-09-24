@@ -951,7 +951,7 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
         projects.dedup();
         let visible = projects.len().clamp(1, 12) as u16;
         let menu_width = 72u16.min(area.width.saturating_sub(4));
-        let menu_height = (visible + 5).min(area.height.saturating_sub(4));
+        let menu_height = (visible + 6).min(area.height.saturating_sub(4));
         let Some(menu_area) = dialog_outer(
             area,
             menu_width,
