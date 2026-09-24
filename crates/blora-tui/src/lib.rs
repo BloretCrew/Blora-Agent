@@ -1009,7 +1009,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 }
                             }
                             KeyCode::Enter if project_picker.is_some() => {
-                                if let Some(picker) = project_picker.take() {
+                                if let Some(picker) = project_picker.as_ref() {
                                     if let Some(path) =
                                         project_paths(&sessions).get(picker.selected)
                                     {
@@ -1019,6 +1019,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                         {
                                             index = found;
                                             cached = None;
+                                            project_picker = None;
                                         }
                                     }
                                 }
@@ -1552,6 +1553,11 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     continue;
                                 }
                                 if let Some(view::Hit::ProjectPickerRow(project_index)) = hit {
+                                    selecting_text = false;
+                                    text_selection = None;
+                                    if let Some(picker) = project_picker.as_mut() {
+                                        picker.selected = project_index;
+                                    }
                                     if let Some(path) = project_paths(&sessions).get(project_index)
                                         && let Some(found) = sessions
                                             .iter()
