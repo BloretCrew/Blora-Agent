@@ -180,8 +180,8 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                     user.email.as_deref(),
                     user.apptoken.as_deref(),
                     user.refresh_token.as_deref(),
-                    user.expires_in
-                        .map(|secs| chrono::Utc::now() + chrono::Duration::seconds(secs as i64)),
+                    Some(chrono::Utc::now()
+                        + chrono::Duration::seconds(user.expires_in.unwrap_or(3600) as i64)),
                 )?;
                 passport_user_token = user
                     .apptoken
@@ -2402,7 +2402,14 @@ fn usable_passport_token(
             )?;
             Ok(Some(refreshed.access_token))
         }
-        Err(_) => Ok(None),
+        Err(err) => {
+            eprintln!(
+                "PassPort 令牌刷新失败（{}）：{}；请执行 /login 重新登录",
+                user.passport_username.as_deref().unwrap_or_default(),
+                err
+            );
+            Ok(None)
+        }
     }
 }
 
