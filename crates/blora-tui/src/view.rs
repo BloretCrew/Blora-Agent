@@ -1406,7 +1406,7 @@ fn render_header(
     }
     let right = if model.running {
         Line::from(Span::styled(
-            format!("{}  running", spinner(model.tick)),
+            format!("{}  running", thinking_spinner(model.tick)),
             theme.fg(theme.sage),
         ))
     } else {
@@ -2004,7 +2004,7 @@ fn transcript_lines(
             if running {
                 out.push(Line::from(vec![
                     Span::styled("  ", theme.mute()),
-                    Span::styled(spinner(tick).to_string(), theme.fg(theme.sage)),
+                    Span::styled(thinking_spinner(tick).to_string(), theme.fg(theme.sage)),
                 ]));
             }
         }
@@ -3812,18 +3812,22 @@ fn short_id(id: &str) -> String {
     rest.chars().take(8).collect()
 }
 
+/// Braille spinner frames copied from the Grok pager's thinking indicator.
+const BRAILLE_SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧'];
+/// The running TUI refreshes every 50ms; three ticks give a ~150ms frame cadence.
+const SPINNER_DIVISOR: u64 = 3;
+
 pub(crate) fn spinner(tick: u64) -> char {
     let n = SPINNER.len();
-    if n == 0 {
-        return '✦';
-    }
-    if n == 1 {
-        return SPINNER[0];
-    }
     let period = 2 * (n - 1);
     let t = (tick as usize) % period;
     let index = if t < n { t } else { period - t };
     SPINNER[index]
+}
+
+fn thinking_spinner(tick: u64) -> char {
+    let index = (tick / SPINNER_DIVISOR) as usize % BRAILLE_SPINNER.len();
+    BRAILLE_SPINNER[index]
 }
 
 fn sanitize_title(text: &str) -> String {
@@ -3987,6 +3991,16 @@ mod tests {
         assert_eq!(spinner(20), '✼');
         assert_eq!(spinner(38), '✦');
         assert_eq!(spinner(39), '✧');
+    }
+
+    #[test]
+    fn thinking_spinner_cycles_braille_frames_every_three_ticks() {
+        let frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧'];
+        for (index, frame) in frames.into_iter().enumerate() {
+            assert_eq!(thinking_spinner(index as u64 * 3), frame);
+            assert_eq!(thinking_spinner(index as u64 * 3 + 2), frame);
+        }
+        assert_eq!(thinking_spinner(24), '⠋');
     }
 
     /// Double-width CJK cells leave a placeholder space in the buffer, so
