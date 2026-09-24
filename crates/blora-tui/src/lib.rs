@@ -11,7 +11,7 @@ mod theme;
 mod view;
 
 use std::io::{self, Write, stdout};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
@@ -94,6 +94,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut git_dialog: Option<view::GitDialog> = None;
     let mut mode_menu: Option<view::ModeMenu> = None;
     let mut project_picker: Option<view::ProjectPicker> = None;
+    let mut folder_picker: Option<view::FolderPicker> = None;
     let mut session_picker: Option<view::SessionPicker> = None;
     // PassPort user token of the logged-in user; drives the default provider.
     let mut passport_user_token: Option<String> = None;
@@ -327,6 +328,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             provider,
                             mode_menu: mode_menu.as_ref(),
                             project_picker: project_picker.as_ref(),
+                            folder_picker: folder_picker.as_ref(),
                             session_picker: session_picker.as_ref(),
                             user_label: &passport_username,
                             running: job.is_some(),
@@ -402,6 +404,70 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                         {
                             input.push('/');
                             slash_selected = 0;
+                            continue;
+                        }
+                        if folder_picker.is_some() {
+                            match key.code {
+                                KeyCode::Up => {
+                                    if let Some(picker) = folder_picker.as_mut() {
+                                        picker.selected = picker.selected.saturating_sub(1);
+                                    }
+                                }
+                                KeyCode::Down => {
+                                    if let Some(picker) = folder_picker.as_mut() {
+                                        picker.selected = (picker.selected + 1)
+                                            .min(picker.entries.len().saturating_sub(1));
+                                    }
+                                }
+                                KeyCode::Esc => folder_picker = None,
+                                KeyCode::Enter => {
+                                    if let Some(picker) = folder_picker.as_mut() {
+                                        if picker.selected == 0 {
+                                            if let Some(parent) = picker.path.parent() {
+                                                picker.path = parent.to_path_buf();
+                                                picker.entries = folder_entries(&picker.path);
+                                                picker.selected = 0;
+                                            }
+                                        } else if let Some(path) =
+                                            picker.entries.get(picker.selected).cloned()
+                                        {
+                                            picker.path = path;
+                                            picker.entries = folder_entries(&picker.path);
+                                            picker.selected = 0;
+                                        }
+                                    }
+                                }
+                                KeyCode::Char('o' | 'O') => {
+                                    if let Some(picker) = folder_picker.take() {
+                                        match create_session(
+                                            runtime,
+                                            &picker.path,
+                                            Mode::Code,
+                                            None,
+                                        ) {
+                                            Ok(id) => {
+                                                refresh_sessions(
+                                                    runtime,
+                                                    &mut sessions,
+                                                    &mut index,
+                                                );
+                                                if let Some(found) =
+                                                    sessions.iter().position(|item| item.id == id)
+                                                {
+                                                    index = found;
+                                                }
+                                                cached = None;
+                                                status = format!(
+                                                    "已打开项目：{}",
+                                                    picker.path.display()
+                                                );
+                                            }
+                                            Err(err) => status = err.to_string(),
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
                             continue;
                         }
                         match key.code {
@@ -1259,7 +1325,8 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     }
                                     continue;
                                 }
-                                let modal_open = project_picker.is_some()
+                                let modal_open = folder_picker.is_some()
+                                    || project_picker.is_some()
                                     || session_picker.is_some()
                                     || mode_menu.is_some()
                                     || theme_dialog.is_some()
@@ -1324,15 +1391,55 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     selecting_text = true;
                                     continue;
                                 }
+                                if matches!(hit, Some(view::Hit::FolderPickerParent)) {
+                                    if let Some(picker) = folder_picker.as_mut()
+                                        && let Some(parent) = picker.path.parent()
+                                    {
+                                        picker.path = parent.to_path_buf();
+                                        picker.entries = folder_entries(&picker.path);
+                                        picker.selected = 0;
+                                    }
+                                    continue;
+                                }
+                                if matches!(hit, Some(view::Hit::FolderPickerOpen)) {
+                                    if let Some(picker) = folder_picker.take() {
+                                        match create_session(
+                                            runtime,
+                                            &picker.path,
+                                            Mode::Code,
+                                            None,
+                                        ) {
+                                            Ok(id) => {
+                                                refresh_sessions(
+                                                    runtime,
+                                                    &mut sessions,
+                                                    &mut index,
+                                                );
+                                                if let Some(found) =
+                                                    sessions.iter().position(|item| item.id == id)
+                                                {
+                                                    index = found;
+                                                }
+                                                cached = None;
+                                                status = format!(
+                                                    "已打开项目：{}",
+                                                    picker.path.display()
+                                                );
+                                            }
+                                            Err(err) => status = err.to_string(),
+                                        }
+                                    }
+                                    continue;
+                                }
+                                if let Some(view::Hit::FolderPickerRow(selected)) = hit {
+                                    if let Some(picker) = folder_picker.as_mut() {
+                                        picker.selected = selected;
+                                    }
+                                    continue;
+                                }
                                 if matches!(hit, Some(view::Hit::OpenNewProject)) {
-                                    open_project_folder(
-                                        runtime,
-                                        &mut sessions,
-                                        &mut index,
-                                        &mut cached,
-                                        &mut project_picker,
-                                        &mut status,
-                                    );
+                                    folder_picker = Some(open_folder_picker(workspace));
+                                    project_picker = None;
                                     continue;
                                 }
                                 if let Some(view::Hit::ProjectPickerRow(project_index)) = hit {
@@ -1785,58 +1892,28 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     result
 }
 
-fn open_project_folder(
-    runtime: &Runtime,
-    sessions: &mut Vec<blora_storage::SessionSummary>,
-    index: &mut usize,
-    cached: &mut Option<(SessionId, blora_session::SessionProjection)>,
-    project_picker: &mut Option<view::ProjectPicker>,
-    status: &mut String,
-) {
-    *project_picker = None;
-    let chooser = if cfg!(target_os = "linux") {
-        std::process::Command::new("zenity")
-            .args(["--file-selection", "--directory", "--title=打开新项目"])
-            .output()
-    } else if cfg!(target_os = "macos") {
-        std::process::Command::new("osascript")
-            .args([
-                "-e",
-                "POSIX path of (choose folder with prompt \"打开新项目\")",
-            ])
-            .output()
-    } else {
-        std::process::Command::new("powershell")
-            .args(["-NoProfile", "-Command", "Add-Type -AssemblyName System.Windows.Forms; $d=New-Object System.Windows.Forms.FolderBrowserDialog; if($d.ShowDialog() -eq 'OK'){$d.SelectedPath}"])
-            .output()
-    };
-    let Ok(output) = chooser else {
-        *status = "无法打开文件夹选择器（Linux 请安装 zenity）".to_owned();
-        return;
-    };
-    if !output.status.success() {
-        return;
+fn folder_entries(path: &Path) -> Vec<PathBuf> {
+    let mut entries = vec![PathBuf::from("..")];
+    if let Ok(read_dir) = std::fs::read_dir(path) {
+        let mut children: Vec<PathBuf> = read_dir
+            .filter_map(std::result::Result::ok)
+            .filter_map(|entry| {
+                let path = entry.path();
+                path.is_dir().then_some(path)
+            })
+            .collect();
+        children.sort_by_key(|path| path.file_name().map(|name| name.to_os_string()));
+        entries.extend(children);
     }
-    let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    if path.is_empty() {
-        return;
-    }
-    let path = Path::new(&path);
-    if !path.is_dir() {
-        *status = "所选路径不是文件夹".to_owned();
-        return;
-    }
-    match create_session(runtime, path, Mode::Code, None) {
-        Ok(id) => {
-            refresh_sessions(runtime, sessions, index);
-            if let Some(found) = sessions.iter().position(|session| session.id == id) {
-                *index = found;
-            }
-            *cached = None;
-            *project_picker = None;
-            *status = format!("已打开项目：{}", path.display());
-        }
-        Err(err) => *status = err.to_string(),
+    entries
+}
+
+fn open_folder_picker(workspace: &Path) -> view::FolderPicker {
+    let path = std::env::current_dir().unwrap_or_else(|_| workspace.to_path_buf());
+    view::FolderPicker {
+        entries: folder_entries(&path),
+        path,
+        selected: 0,
     }
 }
 

@@ -253,6 +253,13 @@ pub struct ProjectPicker {
 }
 
 #[derive(Clone, Debug)]
+pub struct FolderPicker {
+    pub path: std::path::PathBuf,
+    pub entries: Vec<std::path::PathBuf>,
+    pub selected: usize,
+}
+
+#[derive(Clone, Debug)]
 pub struct SessionPicker {
     pub selected: usize,
     pub fullscreen: bool,
@@ -340,6 +347,7 @@ pub struct FrameModel<'a> {
     pub provider: &'a str,
     pub mode_menu: Option<&'a ModeMenu>,
     pub project_picker: Option<&'a ProjectPicker>,
+    pub folder_picker: Option<&'a FolderPicker>,
     pub session_picker: Option<&'a SessionPicker>,
     pub git_dialog: Option<&'a GitDialog>,
     pub git_status: Option<&'a GitStatusInfo>,
@@ -367,6 +375,9 @@ pub enum Hit {
     NextSession,
     ProjectPicker,
     OpenNewProject,
+    FolderPickerRow(usize),
+    FolderPickerParent,
+    FolderPickerOpen,
     ProjectPickerRow(usize),
     SessionPicker,
     SessionPickerRow(usize),
@@ -425,6 +436,9 @@ pub struct HitMap {
     pub next_session: Option<Rect>,
     pub project_picker: Option<Rect>,
     pub open_new_project: Option<Rect>,
+    pub folder_picker_rows: Vec<(Rect, usize)>,
+    pub folder_picker_parent: Option<Rect>,
+    pub folder_picker_open: Option<Rect>,
     pub project_picker_rows: Vec<(Rect, usize)>,
     pub session_picker: Option<Rect>,
     pub session_picker_rows: Vec<(Rect, usize)>,
@@ -531,6 +545,23 @@ impl HitMap {
         {
             return Some(Hit::OpenNewProject);
         }
+        if self
+            .folder_picker_parent
+            .is_some_and(|rect| contains(rect, col, row))
+        {
+            return Some(Hit::FolderPickerParent);
+        }
+        if self
+            .folder_picker_open
+            .is_some_and(|rect| contains(rect, col, row))
+        {
+            return Some(Hit::FolderPickerOpen);
+        }
+        for (rect, idx) in &self.folder_picker_rows {
+            if contains(*rect, col, row) {
+                return Some(Hit::FolderPickerRow(*idx));
+            }
+        }
         for (rect, idx) in &self.project_picker_rows {
             if contains(*rect, col, row) {
                 return Some(Hit::ProjectPickerRow(*idx));
@@ -626,6 +657,97 @@ fn contains(rect: Rect, col: u16, row: u16) -> bool {
         && row < rect.y.saturating_add(rect.height)
 }
 
+fn render_folder_picker(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    picker: &FolderPicker,
+    theme: &Theme,
+    hits: &mut HitMap,
+) {
+    let visible = picker.entries.len().clamp(1, 10) as u16;
+    let menu_width = 72u16.min(area.width.saturating_sub(4));
+    let menu_height = (visible + 6).min(area.height.saturating_sub(4));
+    let Some(menu_area) = dialog_outer(area, menu_width, menu_height, false, false) else {
+        return;
+    };
+    frame.render_widget(Clear, menu_area);
+    let title = "打开新项目 · 选择文件夹";
+    let block = Block::bordered()
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .title(title)
+        .style(theme.base())
+        .border_style(theme.fg(theme.hairline).bg(theme.bg));
+    let inner = block.inner(menu_area);
+    frame.render_widget(block, menu_area);
+    let [title_row, path_row, parent_row, body, open_row, hint_row] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+    let mut dialog_hits = HitMap::default();
+    paint_traffic_title(frame, title_row, title, None, theme, &mut dialog_hits);
+    hits.traffic_lights = dialog_hits.traffic_lights;
+    frame.render_widget(
+        Paragraph::new(ellipsize(
+            &picker.path.display().to_string(),
+            inner.width as usize,
+        ))
+        .style(theme.mute()),
+        path_row,
+    );
+    hits.folder_picker_parent = Some(parent_row);
+    frame.render_widget(
+        Paragraph::new("↑ 返回上级目录").style(theme.fg(theme.rose).bg(theme.bg)),
+        parent_row,
+    );
+    let rows = split_n_rows(body, visible);
+    for (idx, entry) in picker.entries.iter().take(visible as usize).enumerate() {
+        let Some(rect) = rows.get(idx).copied() else {
+            continue;
+        };
+        hits.folder_picker_rows.push((rect, idx));
+        if idx == picker.selected {
+            frame.render_widget(
+                Block::default().style(Style::default().bg(theme.bg_select)),
+                rect,
+            );
+        }
+        let label = if idx == 0 {
+            "..".to_owned()
+        } else {
+            entry
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("?")
+                .to_owned()
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    if idx == picker.selected { "❯ " } else { "  " },
+                    theme.fg(theme.rose),
+                ),
+                Span::styled(label, theme.fg(theme.text)),
+            ]))
+            .style(theme.base()),
+            rect,
+        );
+    }
+    hits.folder_picker_open = Some(open_row);
+    frame.render_widget(
+        Paragraph::new("打开当前文件夹").style(theme.fg(theme.sage).bg(theme.bg)),
+        open_row,
+    );
+    frame.render_widget(
+        Paragraph::new("↑/↓ 选择 · Enter 进入 · O 打开 · Esc 返回").style(theme.mute()),
+        hint_row,
+    );
+}
+
 pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
     let theme = Theme::current();
     let area = frame.area();
@@ -714,6 +836,110 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
     render_composer(frame, composer, model, &theme, &mut hits);
     render_status(frame, status, model, &theme);
     render_hints(frame, hints, model, &theme, &mut hits);
+    if let Some(picker) = model.folder_picker {
+        render_folder_picker(frame, area, picker, &theme, &mut hits);
+    }
+    if let Some(picker) = model.folder_picker {
+        let visible = picker.entries.len().clamp(1, 10) as u16;
+        let menu_width = 72u16.min(area.width.saturating_sub(4));
+        let menu_height = (visible + 6).min(area.height.saturating_sub(4));
+        let Some(menu_area) = dialog_outer(area, menu_width, menu_height, false, false) else {
+            return hits;
+        };
+        frame.render_widget(Clear, menu_area);
+        let title = "打开新项目 · 选择文件夹";
+        let block = Block::bordered()
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .title(title)
+            .style(theme.base())
+            .border_style(theme.fg(theme.hairline).bg(theme.bg));
+        let inner = block.inner(menu_area);
+        frame.render_widget(block, menu_area);
+        let [title_row, path_row, parent_row, body, open_row, hint_row] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .areas(inner);
+        let mut dialog_hits = HitMap::default();
+        paint_traffic_title(
+            frame,
+            title_row,
+            title,
+            model.pointer,
+            &theme,
+            &mut dialog_hits,
+        );
+        hits.traffic_lights = dialog_hits.traffic_lights;
+        frame.render_widget(
+            Paragraph::new(ellipsize(
+                &picker.path.display().to_string(),
+                inner.width as usize,
+            ))
+            .style(theme.mute()),
+            path_row,
+        );
+        hits.folder_picker_parent = Some(parent_row);
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "↑ 返回上级目录",
+                theme.fg(theme.rose),
+            )))
+            .style(theme.base()),
+            parent_row,
+        );
+        for (idx, entry) in picker.entries.iter().take(visible as usize).enumerate() {
+            if let Some(rect) = split_n_rows(body, visible).get(idx).copied() {
+                hits.folder_picker_rows.push((rect, idx));
+                if idx == picker.selected {
+                    frame.render_widget(
+                        Block::default().style(Style::default().bg(theme.bg_select)),
+                        rect,
+                    );
+                }
+                let label = if idx == 0 {
+                    "..".to_owned()
+                } else {
+                    entry
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("?")
+                        .to_owned()
+                };
+                frame.render_widget(
+                    Paragraph::new(Line::from(vec![
+                        Span::styled(
+                            if idx == picker.selected { "❯ " } else { "  " },
+                            theme.fg(theme.rose),
+                        ),
+                        Span::styled(label, theme.fg(theme.text)),
+                    ]))
+                    .style(theme.base()),
+                    rect,
+                );
+            }
+        }
+        hits.folder_picker_open = Some(open_row);
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "打开当前文件夹",
+                theme.fg(theme.sage),
+            )))
+            .style(theme.base()),
+            open_row,
+        );
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "↑/↓ 选择 · Enter 进入 · O 打开 · Esc 返回",
+                theme.mute(),
+            )))
+            .style(theme.base()),
+            hint_row,
+        );
+    }
     if let Some(picker) = model.project_picker {
         let mut projects: Vec<String> = model
             .sessions
