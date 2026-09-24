@@ -572,6 +572,7 @@ fn print_projection(
         match item {
             TranscriptItem::User { text, .. } => println!("  user: {text}"),
             TranscriptItem::Assistant { text, .. } => println!("  assistant: {text}"),
+            TranscriptItem::Reasoning { text, .. } => println!("  reasoning: {text}"),
             TranscriptItem::Tool {
                 name,
                 status,

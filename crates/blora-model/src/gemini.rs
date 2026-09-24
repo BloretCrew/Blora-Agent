@@ -199,8 +199,12 @@ pub fn parse_gemini_sse(
         };
         for part in parts {
             if let Some(text) = part.get("text").and_then(Value::as_str) {
-                completion.text.push_str(text);
-                on_event(StreamEvent::TextDelta(text.to_owned()))?;
+                if part.get("thought").and_then(Value::as_bool) == Some(true) {
+                    on_event(StreamEvent::ReasoningDelta(text.to_owned()))?;
+                } else {
+                    completion.text.push_str(text);
+                    on_event(StreamEvent::TextDelta(text.to_owned()))?;
+                }
             }
             if let Some(call) = part.get("functionCall") {
                 let name = call

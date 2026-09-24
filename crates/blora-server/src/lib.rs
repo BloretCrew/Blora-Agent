@@ -1181,6 +1181,10 @@ fn to_json(state: &AppState, id: &SessionId) -> Result<SessionJson, ApiError> {
                         kind: "assistant".to_owned(),
                         text: text.clone(),
                     },
+                    TranscriptItem::Reasoning { text, .. } => TranscriptJson {
+                        kind: "reasoning".to_owned(),
+                        text: text.clone(),
+                    },
                     TranscriptItem::Tool { .. } => unreachable!(),
                     TranscriptItem::System { summary, .. } => TranscriptJson {
                         kind: "system".to_owned(),

@@ -226,6 +226,21 @@ pub fn parse_sse(
                 on_event(StreamEvent::TextDelta(text.to_owned()))?;
             }
         }
+        if let Some(reasoning) = delta
+            .get("reasoning_content")
+            .or_else(|| delta.get("reasoning"))
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+        {
+            on_event(StreamEvent::ReasoningDelta(reasoning.to_owned()))?;
+        }
+        if delta
+            .get("reasoning_content")
+            .or_else(|| delta.get("reasoning"))
+            .is_some_and(Value::is_null)
+        {
+            on_event(StreamEvent::ReasoningComplete)?;
+        }
         if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
             for call in calls {
                 let index = call.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;

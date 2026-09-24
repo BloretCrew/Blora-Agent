@@ -79,6 +79,7 @@ fn transcript_lines(projection: &SessionProjection, hide_tools: bool) -> Vec<Str
         .flat_map(|item| match item {
             TranscriptItem::User { text, .. }
             | TranscriptItem::Assistant { text, .. }
+            | TranscriptItem::Reasoning { text, .. }
             | TranscriptItem::System { summary: text, .. } => {
                 text.lines().map(str::to_owned).collect::<Vec<_>>()
             }
@@ -88,7 +89,10 @@ fn transcript_lines(projection: &SessionProjection, hide_tools: bool) -> Vec<Str
                 to_model,
                 ..
             } => {
-                vec![format!("{} {to_provider} / {to_model}", crate::i18n::tr("routing.switch_to", "切换到"))]
+                vec![format!(
+                    "{} {to_provider} / {to_model}",
+                    crate::i18n::tr("routing.switch_to", "切换到")
+                )]
             }
         })
         .collect()

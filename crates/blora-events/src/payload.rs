@@ -101,6 +101,8 @@ pub struct AssistantMessageCompleted {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AssistantReasoning {
     pub text: String,
+    #[serde(default)]
+    pub completed: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

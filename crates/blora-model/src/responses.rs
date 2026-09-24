@@ -169,6 +169,25 @@ pub fn parse_responses_sse(
                     on_event(StreamEvent::TextDelta(text.to_owned()))?;
                 }
             }
+            "response.reasoning_summary_text.delta"
+            | "response.reasoning_text.delta"
+            | "response.reasoning_summary.delta"
+            | "response.reasoning.delta"
+            | "response.reasoning_summary_part.added"
+            | "response.reasoning_text_part.added" => {
+                saw_event = true;
+                if let Some(text) = value
+                    .get("delta")
+                    .or_else(|| value.pointer("/part/text"))
+                    .and_then(Value::as_str)
+                {
+                    on_event(StreamEvent::ReasoningDelta(text.to_owned()))?;
+                }
+            }
+            "response.reasoning_summary_text.done" | "response.reasoning_text.done" => {
+                saw_event = true;
+                on_event(StreamEvent::ReasoningComplete)?;
+            }
             "response.output_item.added" => {
                 saw_event = true;
                 if let Some(item) = value.get("item") {
@@ -298,6 +317,8 @@ mod tests {
     #[test]
     fn parses_text_and_function_call() {
         let body = "\
+data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"Let me think\"}\n\
+data: {\"type\":\"response.reasoning_summary_text.done\"}\n\
 data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hi\"}\n\
 data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"function_call\",\"call_id\":\"c1\",\"name\":\"list_dir\"}}\n\
 data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":1,\"delta\":\"{\\\"path\\\":\\\".\\\"}\"}\n\
@@ -305,15 +326,22 @@ data: {\"type\":\"response.output_item.added\",\"output_index\":2,\"item\":{\"ty
 data: {\"type\":\"response.output_item.done\",\"output_index\":2,\"item\":{\"type\":\"function_call\",\"call_id\":\"c2\",\"name\":\"git_status\",\"arguments\":\"{}\"}}\n\
 data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":3,\"output_tokens\":1,\"input_tokens_details\":{\"cached_tokens\":2}}}}\n";
         let mut deltas = Vec::new();
+        let mut reasoning = Vec::new();
+        let mut reasoning_completed = false;
         let completion =
             parse_responses_sse(Cursor::new(body), &CancelToken::new(), &mut |event| {
-                if let StreamEvent::TextDelta(text) = event {
-                    deltas.push(text);
+                match event {
+                    StreamEvent::TextDelta(text) => deltas.push(text),
+                    StreamEvent::ReasoningDelta(text) => reasoning.push(text),
+                    StreamEvent::ReasoningComplete => reasoning_completed = true,
+                    StreamEvent::ToolCall(_) => {}
                 }
                 Ok(())
             })
             .unwrap();
         assert_eq!(deltas, vec!["Hi".to_owned()]);
+        assert_eq!(reasoning, vec!["Let me think".to_owned()]);
+        assert!(reasoning_completed);
         assert_eq!(completion.tool_calls.len(), 2);
         assert_eq!(completion.tool_calls[0].name, "list_dir");
         assert_eq!(completion.tool_calls[1].id, "c2");

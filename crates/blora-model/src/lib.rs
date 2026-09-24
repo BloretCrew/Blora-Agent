@@ -127,6 +127,8 @@ pub struct Completion {
 #[derive(Clone, Debug)]
 pub enum StreamEvent {
     TextDelta(String),
+    ReasoningDelta(String),
+    ReasoningComplete,
     ToolCall(ToolCall),
 }
 

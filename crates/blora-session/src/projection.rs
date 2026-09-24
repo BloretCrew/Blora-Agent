@@ -46,6 +46,11 @@ pub enum TranscriptItem {
         text: String,
         event_id: EventId,
     },
+    Reasoning {
+        text: String,
+        running: bool,
+        event_id: EventId,
+    },
     Tool {
         name: String,
         status: String,
@@ -119,6 +124,8 @@ pub struct SessionProjection {
     pub permission_mode: Option<String>,
     #[serde(skip)]
     open_assistant: String,
+    #[serde(skip)]
+    open_reasoning: Option<usize>,
 }
 
 /// One row of the agent's working checklist.
@@ -268,7 +275,9 @@ pub fn apply_event(projection: &mut SessionProjection, event: &EventEnvelope) ->
                 .clone()
                 .ok_or_else(|| BloraError::event("run.created requires run_id"))?;
             if created.permission_mode.is_some() {
-                projection.permission_mode.clone_from(&created.permission_mode);
+                projection
+                    .permission_mode
+                    .clone_from(&created.permission_mode);
             }
             projection.runs.push(RunRecord {
                 id: run_id,
@@ -298,7 +307,45 @@ pub fn apply_event(projection: &mut SessionProjection, event: &EventEnvelope) ->
             projection.open_assistant.push_str(&delta.text);
             touch_run(projection, event)?;
         }
+        KnownPayload::AssistantReasoning(reasoning) => {
+            if reasoning.completed && reasoning.text.is_empty() {
+                if let Some(index) = projection.open_reasoning.take()
+                    && let Some(TranscriptItem::Reasoning { running, .. }) =
+                        projection.transcript.get_mut(index)
+                {
+                    *running = false;
+                }
+                touch_run(projection, event)?;
+            } else if let Some(index) = projection.open_reasoning {
+                if let Some(TranscriptItem::Reasoning {
+                    text,
+                    running,
+                    event_id,
+                }) = projection.transcript.get_mut(index)
+                {
+                    text.push_str(&reasoning.text);
+                    *running = !reasoning.completed;
+                    *event_id = event.event_id.clone();
+                }
+            } else if !reasoning.text.is_empty() {
+                projection.transcript.push(TranscriptItem::Reasoning {
+                    text: reasoning.text,
+                    running: !reasoning.completed,
+                    event_id: event.event_id.clone(),
+                });
+                if !reasoning.completed {
+                    projection.open_reasoning = Some(projection.transcript.len() - 1);
+                }
+            }
+            touch_run(projection, event)?;
+        }
         KnownPayload::AssistantMessageCompleted(completed) => {
+            if let Some(index) = projection.open_reasoning.take()
+                && let Some(TranscriptItem::Reasoning { running, .. }) =
+                    projection.transcript.get_mut(index)
+            {
+                *running = false;
+            }
             let text = if completed.text.is_empty() {
                 std::mem::take(&mut projection.open_assistant)
             } else {
@@ -312,6 +359,12 @@ pub fn apply_event(projection: &mut SessionProjection, event: &EventEnvelope) ->
             touch_run(projection, event)?;
         }
         KnownPayload::ToolRequested(tool) => {
+            if let Some(index) = projection.open_reasoning.take()
+                && let Some(TranscriptItem::Reasoning { running, .. }) =
+                    projection.transcript.get_mut(index)
+            {
+                *running = false;
+            }
             let arguments = compact_tool_args(&tool.arguments);
             if let Some(TranscriptItem::Tool {
                 status,
@@ -591,7 +644,10 @@ pub fn apply_event(projection: &mut SessionProjection, event: &EventEnvelope) ->
         }
         other => {
             apply_run_transition(projection, event, &other)?;
-            if matches!(other, KnownPayload::ContextCompactionCompleted(_)) {
+            if matches!(
+                other,
+                KnownPayload::ContextCompactionCompleted(_) | KnownPayload::CheckpointCreated(_)
+            ) {
                 projection.transcript.push(TranscriptItem::System {
                     summary: other.event_type().to_owned(),
                     event_id: event.event_id.clone(),
@@ -724,7 +780,7 @@ fn run_mut<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blora_events::{NewEvent, RunCreated, SessionCreated, UserInput};
+    use blora_events::{AssistantReasoning, NewEvent, RunCreated, SessionCreated, UserInput};
     use blora_types::Mode;
 
     fn envelope(session: &SessionId, sequence: u64, payload: KnownPayload) -> EventEnvelope {
@@ -839,6 +895,50 @@ mod tests {
         let projection = rebuild(&[created, run_event, delta, delta2]).unwrap();
         assert_eq!(projection.live_assistant(), Some("Hello"));
         assert!(projection.transcript.is_empty());
+    }
+
+    #[test]
+    fn reasoning_events_stream_into_one_running_transcript_item() {
+        let session_id = SessionId::generate();
+        let created = envelope(
+            &session_id,
+            1,
+            KnownPayload::SessionCreated(SessionCreated {
+                title: None,
+                workspace_path: "/tmp/ws".to_owned(),
+                mode: Mode::Code,
+                parent_session_id: None,
+            }),
+        );
+        let first = envelope(
+            &session_id,
+            2,
+            KnownPayload::AssistantReasoning(AssistantReasoning {
+                text: "Let me ".to_owned(),
+                completed: false,
+            }),
+        );
+        let second = envelope(
+            &session_id,
+            3,
+            KnownPayload::AssistantReasoning(AssistantReasoning {
+                text: "think".to_owned(),
+                completed: false,
+            }),
+        );
+        let done = envelope(
+            &session_id,
+            4,
+            KnownPayload::AssistantReasoning(AssistantReasoning {
+                text: String::new(),
+                completed: true,
+            }),
+        );
+        let projection = rebuild(&[created, first, second, done]).unwrap();
+        assert!(matches!(
+            projection.transcript.as_slice(),
+            [TranscriptItem::Reasoning { text, running: false, .. }] if text == "Let me think"
+        ));
     }
 
     #[test]

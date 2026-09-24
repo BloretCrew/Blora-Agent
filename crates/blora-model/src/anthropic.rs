@@ -310,6 +310,14 @@ pub fn parse_anthropic_sse(
                                 on_event(StreamEvent::TextDelta(text.to_owned()))?;
                             }
                         }
+                        Some("thinking_delta") => {
+                            if let Some(text) = delta.get("thinking").and_then(Value::as_str) {
+                                on_event(StreamEvent::ReasoningDelta(text.to_owned()))?;
+                            }
+                        }
+                        Some("signature_delta") => {
+                            on_event(StreamEvent::ReasoningComplete)?;
+                        }
                         Some("input_json_delta") => {
                             if let Some(partial) = delta.get("partial_json").and_then(Value::as_str)
                             {

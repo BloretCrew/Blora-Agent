@@ -1910,6 +1910,7 @@ fn transcript_lines(
                     theme,
                 );
             }
+            TranscriptItem::Reasoning { .. } => {}
             TranscriptItem::Tool {
                 name,
                 status,
@@ -1982,6 +1983,32 @@ fn transcript_lines(
                 }
             }
         }
+    }
+    if let Some(reasoning) = projection
+        .transcript
+        .iter()
+        .rev()
+        .find_map(|item| match item {
+            TranscriptItem::Reasoning {
+                text,
+                running: true,
+                ..
+            } => Some(text.as_str()),
+            _ => None,
+        })
+    {
+        if !out.is_empty() {
+            out.push(Line::default());
+        }
+        push_reasoning_block(
+            &mut out,
+            reasoning,
+            true,
+            width,
+            needle.as_deref(),
+            theme,
+            tick,
+        );
     }
     if running && let Some(live) = projection.live_assistant() {
         let show = match needle.as_deref() {
@@ -2106,14 +2133,48 @@ fn is_approval_system(item: &TranscriptItem) -> bool {
     matches!(item, TranscriptItem::System { summary, .. } if summary.starts_with("approval required:"))
 }
 
+/// Render streamed provider reasoning with the Grok-style breathing accent.
+fn push_reasoning_block(
+    out: &mut Vec<Line<'static>>,
+    text: &str,
+    running: bool,
+    width: usize,
+    needle: Option<&str>,
+    theme: &Theme,
+    tick: u64,
+) {
+    let title = if running { "Thinking…" } else { "Thought" };
+    let title_color = if running {
+        blend_color(theme.bg, theme.sage, pulse_brightness(tick, 0.15)).unwrap_or(theme.sage)
+    } else {
+        theme.text_mute
+    };
+    out.push(Line::from(vec![
+        Span::styled("  ┃ ", theme.fg(title_color)),
+        Span::styled(title, theme.fg(title_color).add_modifier(Modifier::BOLD)),
+    ]));
+    let body_width = width.saturating_sub(4).max(8);
+    let body = crate::markdown::render(text, body_width.saturating_sub(2).max(1), needle, theme);
+    for (row, mut line) in body.into_iter().enumerate() {
+        let color = if running {
+            let brightness = pulse_brightness_for_row(tick, 0.15, row as u16, 32);
+            blend_color(theme.bg, theme.sage, brightness).unwrap_or(theme.sage)
+        } else {
+            theme.text_dim
+        };
+        line.spans.insert(0, Span::styled("  ┃ ", theme.fg(color)));
+        out.push(line);
+    }
+}
+
 fn item_matches(item: &TranscriptItem, needle: Option<&str>) -> bool {
     let Some(needle) = needle else {
         return true;
     };
     match item {
-        TranscriptItem::User { text, .. } | TranscriptItem::Assistant { text, .. } => {
-            text.to_ascii_lowercase().contains(needle)
-        }
+        TranscriptItem::User { text, .. }
+        | TranscriptItem::Assistant { text, .. }
+        | TranscriptItem::Reasoning { text, .. } => text.to_ascii_lowercase().contains(needle),
         TranscriptItem::Tool {
             name,
             arguments,
