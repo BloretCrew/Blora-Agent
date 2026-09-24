@@ -1474,6 +1474,18 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     selecting_text = true;
                                     continue;
                                 }
+                                if matches!(hit, Some(view::Hit::FolderPickerRow(_)))
+                                    || matches!(
+                                        hit,
+                                        Some(
+                                            view::Hit::FolderPickerParent
+                                                | view::Hit::FolderPickerOpen
+                                        )
+                                    )
+                                {
+                                    selecting_text = false;
+                                    text_selection = None;
+                                }
                                 if matches!(hit, Some(view::Hit::FolderPickerParent)) {
                                     if let Some(picker) = folder_picker.as_mut()
                                         && let Some(parent) = picker.path.parent()
@@ -1515,13 +1527,23 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     continue;
                                 }
                                 if let Some(view::Hit::FolderPickerRow(selected)) = hit {
+                                    selecting_text = false;
+                                    text_selection = None;
                                     if let Some(picker) = folder_picker.as_mut() {
-                                        picker.selected = selected;
-                                        let visible = 8usize;
-                                        if selected < picker.scroll {
-                                            picker.scroll = selected;
-                                        } else if selected >= picker.scroll + visible {
-                                            picker.scroll = selected + 1 - visible;
+                                        if selected == 0 {
+                                            if let Some(parent) = picker.path.parent() {
+                                                picker.path = parent.to_path_buf();
+                                                picker.entries = folder_entries(&picker.path);
+                                                picker.selected = 0;
+                                                picker.scroll = 0;
+                                            }
+                                        } else if let Some(path) =
+                                            picker.entries.get(selected).cloned()
+                                        {
+                                            picker.path = path;
+                                            picker.entries = folder_entries(&picker.path);
+                                            picker.selected = 0;
+                                            picker.scroll = 0;
                                         }
                                     }
                                     continue;
