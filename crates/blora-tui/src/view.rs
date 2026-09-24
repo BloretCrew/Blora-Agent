@@ -1983,7 +1983,27 @@ fn transcript_lines(
             }
         }
     }
-    if let Some(live) = projection.live_assistant() {
+    if running && let Some(live) = projection.live_assistant() {
+        let show = match needle.as_deref() {
+            None => true,
+            Some(needle) => live.to_ascii_lowercase().contains(needle),
+        };
+        if show {
+            if !out.is_empty() {
+                out.push(Line::default());
+            }
+            push_live_block(
+                &mut out,
+                "blora",
+                theme.sage,
+                live,
+                width,
+                needle.as_deref(),
+                theme,
+                tick,
+            );
+        }
+    } else if let Some(live) = projection.live_assistant() {
         let show = match needle.as_deref() {
             None => true,
             Some(needle) => live.to_ascii_lowercase().contains(needle),
@@ -2001,12 +2021,6 @@ fn transcript_lines(
                 needle.as_deref(),
                 theme,
             );
-            if running {
-                out.push(Line::from(vec![
-                    Span::styled("  ", theme.mute()),
-                    Span::styled(spinner(tick).to_string(), theme.fg(theme.sage)),
-                ]));
-            }
         }
     }
     out
@@ -2170,6 +2184,130 @@ fn push_block(
     ]));
     let body_width = width.saturating_sub(2).max(8);
     out.extend(crate::markdown::render(text, body_width, needle, theme));
+}
+
+/// Render a live assistant block with the same breathing accent treatment as Grok's thinking block.
+fn push_live_block(
+    out: &mut Vec<Line<'static>>,
+    role: &str,
+    accent: Color,
+    text: &str,
+    width: usize,
+    needle: Option<&str>,
+    theme: &Theme,
+    tick: u64,
+) {
+    let bullet_opacity = pulse_brightness(tick, 0.15);
+    let bullet_color = blend_color(theme.bg, accent, bullet_opacity).unwrap_or(accent);
+    out.push(Line::from(vec![
+        Span::styled("┃ ", theme.fg(bullet_color)),
+        Span::styled(
+            role.to_owned(),
+            theme.fg(bullet_color).add_modifier(Modifier::BOLD),
+        ),
+    ]));
+
+    let body_width = width.saturating_sub(2).max(8);
+    let body = crate::markdown::render(text, body_width.saturating_sub(2).max(1), needle, theme);
+    for (row, mut line) in body.into_iter().enumerate() {
+        let opacity = pulse_brightness_for_row(tick, 0.15, row as u16, 32);
+        let color = blend_color(theme.bg, accent, opacity).unwrap_or(accent);
+        line.spans.insert(0, Span::styled("┃ ", theme.fg(color)));
+        out.push(line);
+    }
+}
+
+fn pulse_brightness(tick: u64, speed: f32) -> f32 {
+    pulse_brightness_for_row(tick, speed, 0, 1)
+}
+
+fn pulse_brightness_for_row(tick: u64, speed: f32, row: u16, wave_rows: u16) -> f32 {
+    let phase = (row as f32 / wave_rows.max(1) as f32) * std::f32::consts::TAU;
+    let t = tick as f32 * speed + phase;
+    let wave = t.sin();
+    wave * wave
+}
+
+fn blend_color(base: Color, accent: Color, opacity: f32) -> Option<Color> {
+    use ratatui::style::Color::*;
+    let (br, bg, bb) = color_rgb(base)?;
+    let (ar, ag, ab) = color_rgb(accent)?;
+    let blend = |b: u8, a: u8| (b as f32 * (1.0 - opacity) + a as f32 * opacity).round() as u8;
+    let rgb = (blend(br, ar), blend(bg, ag), blend(bb, ab));
+    Some(match (base, accent) {
+        (Indexed(_), _) | (_, Indexed(_)) => Indexed(nearest_indexed(rgb)),
+        _ => Rgb(rgb.0, rgb.1, rgb.2),
+    })
+}
+
+fn color_rgb(color: Color) -> Option<(u8, u8, u8)> {
+    use ratatui::style::Color::*;
+    match color {
+        Rgb(r, g, b) => Some((r, g, b)),
+        Black => Some((0, 0, 0)),
+        Red => Some((128, 0, 0)),
+        Green => Some((0, 128, 0)),
+        Yellow => Some((128, 128, 0)),
+        Blue => Some((0, 0, 128)),
+        Magenta => Some((128, 0, 128)),
+        Cyan => Some((0, 128, 128)),
+        Gray => Some((192, 192, 192)),
+        DarkGray => Some((128, 128, 128)),
+        LightRed => Some((255, 0, 0)),
+        LightGreen => Some((0, 255, 0)),
+        LightYellow => Some((255, 255, 0)),
+        LightBlue => Some((0, 0, 255)),
+        LightMagenta => Some((255, 0, 255)),
+        LightCyan => Some((0, 255, 255)),
+        White => Some((255, 255, 255)),
+        Indexed(index) => Some(indexed_rgb(index)),
+        Reset => None,
+    }
+}
+
+fn indexed_rgb(index: u8) -> (u8, u8, u8) {
+    const BASIC: [(u8, u8, u8); 16] = [
+        (0, 0, 0),
+        (128, 0, 0),
+        (0, 128, 0),
+        (128, 128, 0),
+        (0, 0, 128),
+        (128, 0, 128),
+        (0, 128, 128),
+        (192, 192, 192),
+        (128, 128, 128),
+        (255, 0, 0),
+        (0, 255, 0),
+        (255, 255, 0),
+        (0, 0, 255),
+        (255, 0, 255),
+        (0, 255, 255),
+        (255, 255, 255),
+    ];
+    if index < 16 {
+        return BASIC[index as usize];
+    }
+    if index >= 232 {
+        let v = 8 + (index - 232) * 10;
+        return (v, v, v);
+    }
+    let n = index - 16;
+    let component = |value: u8| if value == 0 { 0 } else { 55 + value * 40 };
+    (component(n / 36), component((n / 6) % 6), component(n % 6))
+}
+
+fn nearest_indexed((r, g, b): (u8, u8, u8)) -> u8 {
+    let mut best = (u32::MAX, 0u8);
+    for index in 0..=255 {
+        let (cr, cg, cb) = indexed_rgb(index);
+        let distance = (r as i32 - cr as i32).pow(2) as u32
+            + (g as i32 - cg as i32).pow(2) as u32
+            + (b as i32 - cb as i32).pow(2) as u32;
+        if distance < best.0 {
+            best = (distance, index);
+        }
+    }
+    best.1
 }
 
 fn highlight_spans(text: &str, needle: Option<&str>, theme: &Theme) -> Vec<Span<'static>> {
@@ -3971,6 +4109,21 @@ mod tests {
             "✼ Blora Code · 问候"
         );
         assert_eq!(window_title(false, 0, "code", "问候"), "Blora Code · 问候");
+    }
+
+    #[test]
+    fn pulse_brightness_matches_grok_sin_squared_wave() {
+        assert_eq!(pulse_brightness(0, 0.15), 0.0);
+        assert!(pulse_brightness(10, 0.15) > 0.99);
+        assert!(pulse_brightness(20, 0.15) < 0.02);
+    }
+
+    #[test]
+    fn blend_color_moves_between_background_and_accent() {
+        let bg = Color::Rgb(10, 20, 30);
+        let accent = Color::Rgb(110, 120, 130);
+        assert_eq!(blend_color(bg, accent, 0.0), Some(bg));
+        assert_eq!(blend_color(bg, accent, 1.0), Some(accent));
     }
 
     #[test]
