@@ -1796,7 +1796,10 @@ fn tool_summary_hit_rows(
         if matches!(visible[index].1, TranscriptItem::Tool { .. }) {
             let start = index;
             index += 1;
-            while index < visible.len() && matches!(visible[index].1, TranscriptItem::Tool { .. }) {
+            while index < visible.len()
+                && (matches!(visible[index].1, TranscriptItem::Tool { .. })
+                    || is_approval_system(visible[index].1))
+            {
                 index += 1;
             }
             let items = visible[start..index]
@@ -1806,7 +1809,7 @@ fn tool_summary_hit_rows(
             let summary = blora_session::summarize_tool_run(&items, running);
             let indices = visible[start..index]
                 .iter()
-                .map(|(i, _)| *i)
+                .filter_map(|(i, item)| matches!(item, TranscriptItem::Tool { .. }).then_some(*i))
                 .collect::<Vec<_>>();
             groups.push((summary, indices));
         } else {
@@ -1892,24 +1895,46 @@ fn transcript_lines(
         if matches!(visible[index], TranscriptItem::Tool { .. }) {
             let start = index;
             index += 1;
-            while index < visible.len() && matches!(visible[index], TranscriptItem::Tool { .. }) {
+            while index < visible.len()
+                && (matches!(visible[index], TranscriptItem::Tool { .. })
+                    || is_approval_system(visible[index]))
+            {
                 index += 1;
             }
             let group = &visible[start..index];
-            let summary = blora_session::summarize_tool_run(group, running);
-            let failed = group.iter().any(|item| matches!(item, TranscriptItem::Tool { status, .. } if status == "failed" || status == "error"));
+            let tools: Vec<&TranscriptItem> = group
+                .iter()
+                .copied()
+                .filter(|item| matches!(item, TranscriptItem::Tool { .. }))
+                .collect();
+            let summary = blora_session::summarize_tool_run(&tools, running);
+            let failed = tools.iter().any(|item| matches!(item, TranscriptItem::Tool { status, .. } if status == "failed" || status == "error"));
             let color = if failed {
                 theme.rust
-            } else if group.iter().any(|item| {
+            } else if tools.iter().any(|item| {
                 matches!(item, TranscriptItem::Tool { status, .. } if status == "running" || status == "requested")
             }) {
                 theme.amber
             } else {
                 theme.text_dim
             };
+            let approval_messages: Vec<&str> = group
+                .iter()
+                .filter_map(|item| match item {
+                    TranscriptItem::System { summary, .. } if is_approval_system(item) => {
+                        Some(summary.trim_start_matches("approval required: "))
+                    }
+                    _ => None,
+                })
+                .collect();
+            let approval_suffix = if approval_messages.is_empty() {
+                String::new()
+            } else {
+                format!(" · {}", approval_messages.join(" · "))
+            };
             out.push(Line::from(vec![
                 Span::styled("  ", theme.mute()),
-                Span::styled(summary, theme.fg(color)),
+                Span::styled(format!("{summary}{approval_suffix}"), theme.fg(color)),
             ]));
             continue;
         }
@@ -2119,6 +2144,10 @@ fn highlight_selection(
             Line::from(spans)
         })
         .collect()
+}
+
+fn is_approval_system(item: &TranscriptItem) -> bool {
+    matches!(item, TranscriptItem::System { summary, .. } if summary.starts_with("approval required:"))
 }
 
 fn item_matches(item: &TranscriptItem, needle: Option<&str>) -> bool {
