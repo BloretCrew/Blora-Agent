@@ -12,7 +12,10 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{
+    Block, Clear, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation,
+    ScrollbarState,
+};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::i18n;
@@ -1676,6 +1679,26 @@ fn render_transcript(
     let visible = transcript_window(lines.clone(), inner.height as usize, model.scroll);
     let visible = highlight_selection(visible, inner, model.text_selection, theme);
     frame.render_widget(Paragraph::new(visible).style(theme.base()), inner);
+    let max_scroll = lines.len().saturating_sub(inner.height as usize);
+    if max_scroll > 0 {
+        let scrollbar_area = Rect {
+            x: inner.x + inner.width.saturating_sub(1),
+            y: inner.y,
+            width: 1,
+            height: inner.height,
+        };
+        let mut state =
+            ScrollbarState::new(max_scroll + 1).position(max_scroll.saturating_sub(model.scroll));
+        frame.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .thumb_style(theme.fg(theme.text_dim))
+                .track_style(theme.fg(theme.hairline))
+                .begin_symbol(None)
+                .end_symbol(None),
+            scrollbar_area,
+            &mut state,
+        );
+    }
     hits.tool_summary_rows = tool_summary_hit_rows(
         model.projection,
         model.search,
