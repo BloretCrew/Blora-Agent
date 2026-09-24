@@ -439,12 +439,19 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 KeyCode::Up => {
                                     if let Some(picker) = folder_picker.as_mut() {
                                         picker.selected = picker.selected.saturating_sub(1);
+                                        if picker.selected < picker.scroll {
+                                            picker.scroll = picker.selected;
+                                        }
                                     }
                                 }
                                 KeyCode::Down => {
                                     if let Some(picker) = folder_picker.as_mut() {
                                         picker.selected = (picker.selected + 1)
                                             .min(picker.entries.len().saturating_sub(1));
+                                        let page = 9usize;
+                                        if picker.selected >= picker.scroll + page {
+                                            picker.scroll = picker.selected + 1 - page;
+                                        }
                                     }
                                 }
                                 KeyCode::Esc => folder_picker = None,
@@ -455,6 +462,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                                 picker.path = parent.to_path_buf();
                                                 picker.entries = folder_entries(&picker.path);
                                                 picker.selected = 0;
+                                                picker.scroll = 0;
                                             }
                                         } else if let Some(path) =
                                             picker.entries.get(picker.selected).cloned()
@@ -462,6 +470,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                             picker.path = path;
                                             picker.entries = folder_entries(&picker.path);
                                             picker.selected = 0;
+                                            picker.scroll = 0;
                                         }
                                     }
                                 }
@@ -1158,6 +1167,11 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                         pointer = Some((mouse.column, mouse.row));
                         match mouse.kind {
                             MouseEventKind::ScrollUp => {
+                                if let Some(picker) = folder_picker.as_mut() {
+                                    picker.scroll = picker.scroll.saturating_sub(3);
+                                    picker.selected = picker.scroll;
+                                    continue;
+                                }
                                 if git_dialog.is_some() {
                                     if let Some(dialog) = git_dialog.as_mut() {
                                         dialog.selected = dialog.selected.saturating_sub(1);
@@ -1179,6 +1193,15 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 }
                             }
                             MouseEventKind::ScrollDown => {
+                                if let Some(picker) = folder_picker.as_mut() {
+                                    let visible = 8usize;
+                                    picker.scroll = picker
+                                        .scroll
+                                        .saturating_add(3)
+                                        .min(picker.entries.len().saturating_sub(visible));
+                                    picker.selected = picker.scroll;
+                                    continue;
+                                }
                                 if git_dialog.is_some() {
                                     if let Some(dialog) = git_dialog.as_mut() {
                                         dialog.selected = dialog.selected.saturating_add(1);
@@ -1492,6 +1515,12 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 if let Some(view::Hit::FolderPickerRow(selected)) = hit {
                                     if let Some(picker) = folder_picker.as_mut() {
                                         picker.selected = selected;
+                                        let visible = 8usize;
+                                        if selected < picker.scroll {
+                                            picker.scroll = selected;
+                                        } else if selected >= picker.scroll + visible {
+                                            picker.scroll = selected + 1 - visible;
+                                        }
                                     }
                                     continue;
                                 }
@@ -1972,6 +2001,7 @@ fn open_folder_picker(workspace: &Path) -> view::FolderPicker {
         entries: folder_entries(&path),
         path,
         selected: 0,
+        scroll: 0,
         fullscreen: false,
         minimized: false,
     }

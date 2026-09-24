@@ -257,6 +257,7 @@ pub struct FolderPicker {
     pub path: std::path::PathBuf,
     pub entries: Vec<std::path::PathBuf>,
     pub selected: usize,
+    pub scroll: usize,
     pub fullscreen: bool,
     pub minimized: bool,
 }
@@ -667,9 +668,8 @@ fn render_folder_picker(
     theme: &Theme,
     hits: &mut HitMap,
 ) {
-    let visible = picker.entries.len().clamp(1, 10) as u16;
     let menu_width = 72u16.min(area.width.saturating_sub(4));
-    let menu_height = (visible + 6).min(area.height.saturating_sub(4));
+    let menu_height = 16u16.min(area.height.saturating_sub(4));
     let Some(menu_area) = dialog_outer(
         area,
         menu_width,
@@ -716,9 +716,13 @@ fn render_folder_picker(
         Paragraph::new("↑ 返回上级目录").style(theme.fg(theme.rose).bg(theme.bg)),
         parent_row,
     );
-    let rows = split_n_rows(body, visible);
-    for (idx, entry) in picker.entries.iter().take(visible as usize).enumerate() {
-        let Some(rect) = rows.get(idx).copied() else {
+    let row_count = body.height.max(1) as usize;
+    let max_scroll = picker.entries.len().saturating_sub(row_count);
+    let scroll = picker.scroll.min(max_scroll);
+    let rows = split_n_rows(body, row_count as u16);
+    for (row_offset, idx) in (scroll..picker.entries.len()).take(row_count).enumerate() {
+        let entry = &picker.entries[idx];
+        let Some(rect) = rows.get(row_offset).copied() else {
             continue;
         };
         hits.folder_picker_rows.push((rect, idx));
