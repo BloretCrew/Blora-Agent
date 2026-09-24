@@ -53,7 +53,7 @@ pub fn summarize_tool_run(items: &[&TranscriptItem], _running: bool) -> String {
         if status == "failed" || status == "error" {
             failed += 1;
         }
-        if status == "running" || status == "requested" {
+        if status == "running" {
             inflight = true;
         }
         let verb = classify(name, arguments.as_deref(), output.as_deref());
@@ -63,10 +63,14 @@ pub fn summarize_tool_run(items: &[&TranscriptItem], _running: bool) -> String {
         match verb {
             Verb::Search => search += 1,
             Verb::Read => {
-                reads.insert(arg_field(arguments.as_deref(), "path").unwrap_or_else(|| name.clone()));
+                reads.insert(
+                    arg_field(arguments.as_deref(), "path").unwrap_or_else(|| name.clone()),
+                );
             }
             Verb::Edit => {
-                edits.insert(arg_field(arguments.as_deref(), "path").unwrap_or_else(|| name.clone()));
+                edits.insert(
+                    arg_field(arguments.as_deref(), "path").unwrap_or_else(|| name.clone()),
+                );
             }
             Verb::List => lists += 1,
             Verb::Shell => shells += 1,
@@ -103,7 +107,7 @@ pub fn summarize_tool_run(items: &[&TranscriptItem], _running: bool) -> String {
             }
             Verb::List if lists > 0 => Some(count_phrase(past, "列出", lists, "个目录")),
             Verb::Shell if shells > 0 => Some(count_phrase(past, "运行", shells, "条命令")),
-            Verb::Git if gits > 0 => Some(count_phrase(past, "查看 git", gits, "次")),
+            Verb::Git if gits > 0 => Some(count_phrase(past, "查看 Git 状态", gits, "次")),
             Verb::Commit => {
                 if commits.is_empty() {
                     None
@@ -136,10 +140,10 @@ pub fn summarize_tool_run(items: &[&TranscriptItem], _running: bool) -> String {
         });
     }
     let mut text = parts.join("，");
-    text.push('。');
     if failed > 0 {
         text.push_str(&format!(" · {failed} 次失败"));
     }
+    text.push('。');
     text
 }
 
@@ -254,6 +258,17 @@ mod tests {
         assert!(text.contains("提交了 79abcd"), "{text}");
         assert!(!text.contains("79abcdef"), "{text}");
         assert!(text.contains("更新了任务清单"), "{text}");
+        assert!(text.ends_with("任务清单。"), "{text}");
+    }
+
+    #[test]
+    fn requested_tools_are_not_reported_as_running() {
+        let mut read = tool("git_status", "{}", None);
+        if let TranscriptItem::Tool { status, .. } = &mut read {
+            *status = "requested".to_owned();
+        }
+        let text = summarize_tool_run(&[&read], false);
+        assert_eq!(text, "查看 Git 状态了 1 次。");
     }
 
     #[test]
