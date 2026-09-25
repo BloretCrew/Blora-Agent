@@ -1396,7 +1396,33 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     continue;
                                 }
                                 if git_dialog.is_some() {
-                                    if let Some(dialog) = git_dialog.as_mut() {
+                                    if matches!(
+                                        hit,
+                                        Some(
+                                            view::Hit::TrafficClose
+                                                | view::Hit::TrafficMinimize
+                                                | view::Hit::TrafficOpenBrowser
+                                        )
+                                    ) {
+                                        handle_traffic_light(
+                                            hit,
+                                            &mut project_picker,
+                                            &mut session_picker,
+                                            &mut mode_menu,
+                                            &mut tool_dialog,
+                                            &mut tool_detail_dialog,
+                                            &mut git_dialog,
+                                            &mut theme_dialog,
+                                            &mut add_provider_dialog,
+                                            &mut provider_dialog,
+                                            &mut context_dialog,
+                                            &mut passport_dialog,
+                                            &mut passport_browser_opened,
+                                            passport_url.as_deref(),
+                                            &mut cancel,
+                                            &mut status,
+                                        );
+                                    } else if let Some(dialog) = git_dialog.as_mut() {
                                         match hit {
                                             Some(view::Hit::GitRow(index))
                                             | Some(view::Hit::GitAction(index)) => {
