@@ -11,7 +11,7 @@ mod theme;
 mod view;
 
 use std::io::{self, Write, stdout};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
@@ -99,6 +99,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut git_sync_id = 0u64;
     let mut mode_menu: Option<view::ModeMenu> = None;
     let mut project_picker: Option<view::ProjectPicker> = None;
+    let mut folder_picker: Option<view::FolderPicker> = None;
     let mut session_picker: Option<view::SessionPicker> = None;
     // PassPort user token of the logged-in user; drives the default provider.
     let mut passport_user_token: Option<String> = None;
@@ -160,6 +161,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut model_override = String::new();
     let mut provider_override = String::new();
     let mut git_status: Option<view::GitStatusInfo> = None;
+    let mut git_status_workspace: Option<PathBuf> = None;
     let mut notice: Option<String> = None;
     let mut tick = 0u64;
     let mut last_window_title = String::new();
@@ -214,6 +216,11 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                     ));
                 }
             }
+            let active_workspace = sessions
+                .get(index)
+                .map(|session| PathBuf::from(&session.workspace_path))
+                .filter(|path| path.is_dir())
+                .unwrap_or_else(|| workspace.to_path_buf());
             let session_id = sessions.get(index).map(|item| item.id.clone());
             // Keep one projection per selected session and apply only new events.
             if let Some(id) = session_id.as_ref() {
@@ -254,9 +261,13 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
             tick = tick.wrapping_add(1);
             let env_model = std::env::var("BLORA_MODEL").unwrap_or_default();
             let env_provider = std::env::var("BLORA_PROVIDER").unwrap_or_default();
+            if git_status_workspace.as_ref() != Some(&active_workspace) {
+                git_status_workspace = Some(active_workspace.clone());
+                git_status = None;
+            }
             if tick % 20 == 0 || git_status.is_none() {
                 git_status = runtime
-                    .workspace_info(workspace)
+                    .workspace_info(&active_workspace)
                     .ok()
                     .map(|info| parse_git_status(&info));
             }
@@ -302,7 +313,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                     hits = view::draw(
                         frame,
                         &view::FrameModel {
-                            workspace,
+                            workspace: &active_workspace,
                             sessions: &sessions,
                             index,
                             projection,
@@ -336,6 +347,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             provider,
                             mode_menu: mode_menu.as_ref(),
                             project_picker: project_picker.as_ref(),
+                            folder_picker: folder_picker.as_ref(),
                             session_picker: session_picker.as_ref(),
                             user_label: &passport_username,
                             running: job.is_some(),
@@ -406,7 +418,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                     dialog.syncing = false;
                     dialog.feedback = Some(match result {
                         Ok(_) => {
-                            if let Ok(info) = runtime.workspace_info(workspace) {
+                            if let Ok(info) = runtime.workspace_info(&active_workspace) {
                                 dialog.info = parse_git_status(&info);
                                 git_status = Some(dialog.info.clone());
                             }
@@ -473,6 +485,49 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                         {
                             input.push('/');
                             slash_selected = 0;
+                            continue;
+                        }
+                        if folder_picker.is_some() {
+                            match key.code {
+                                KeyCode::Esc => folder_picker = None,
+                                KeyCode::Up => {
+                                    if let Some(picker) = folder_picker.as_mut() {
+                                        picker.selected = picker.selected.saturating_sub(1);
+                                        picker.scroll = picker.scroll.min(picker.selected);
+                                    }
+                                }
+                                KeyCode::Down => {
+                                    if let Some(picker) = folder_picker.as_mut() {
+                                        picker.selected = (picker.selected + 1)
+                                            .min(picker.entries.len().saturating_sub(1));
+                                        picker.scroll =
+                                            picker.scroll.max(picker.selected.saturating_sub(9));
+                                    }
+                                }
+                                KeyCode::Enter => {
+                                    if let Some(picker) = folder_picker.as_mut() {
+                                        enter_folder(picker, picker.selected);
+                                    }
+                                }
+                                KeyCode::Char('o' | 'O') => {
+                                    if let Some(picker) = folder_picker.take() {
+                                        open_project(
+                                            runtime,
+                                            &picker.path,
+                                            &mut sessions,
+                                            &mut index,
+                                            &mut cached,
+                                            &mut status,
+                                        );
+                                    }
+                                }
+                                KeyCode::Left => {
+                                    if let Some(picker) = folder_picker.as_mut() {
+                                        enter_folder(picker, 0);
+                                    }
+                                }
+                                _ => {}
+                            }
                             continue;
                         }
                         match key.code {
@@ -847,9 +902,9 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                             .clone()
                                             .unwrap_or_else(|| dialog.info.clone());
                                     } else if dialog.page == 2 {
-                                        commit_git_dialog(runtime, workspace, dialog);
+                                        commit_git_dialog(runtime, &active_workspace, dialog);
                                         git_status = runtime
-                                            .workspace_info(workspace)
+                                            .workspace_info(&active_workspace)
                                             .ok()
                                             .map(|info| parse_git_status(&info));
                                     }
@@ -1071,9 +1126,10 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             }
                             KeyCode::Enter if project_picker.is_some() => {
                                 if let Some(picker) = project_picker.take() {
-                                    if let Some(path) =
-                                        project_paths(&sessions).get(picker.selected)
-                                    {
+                                    let projects = project_paths(&sessions);
+                                    if picker.selected == projects.len() {
+                                        folder_picker = Some(open_folder_picker(&active_workspace));
+                                    } else if let Some(path) = projects.get(picker.selected) {
                                         if let Some(found) = sessions
                                             .iter()
                                             .position(|session| &session.workspace_path == path)
@@ -1091,8 +1147,8 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             }
                             KeyCode::Down if project_picker.is_some() => {
                                 if let Some(picker) = project_picker.as_mut() {
-                                    picker.selected = (picker.selected + 1)
-                                        .min(project_count(&sessions).saturating_sub(1));
+                                    picker.selected =
+                                        (picker.selected + 1).min(project_count(&sessions).min(11));
                                 }
                             }
                             KeyCode::Esc if project_picker.is_some() => {
@@ -1227,6 +1283,10 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                         pointer = Some((mouse.column, mouse.row));
                         match mouse.kind {
                             MouseEventKind::ScrollUp => {
+                                if let Some(picker) = folder_picker.as_mut() {
+                                    picker.scroll = picker.scroll.saturating_sub(1);
+                                    continue;
+                                }
                                 if git_dialog.is_some() {
                                     if let Some(dialog) = git_dialog.as_mut() {
                                         dialog.scroll = dialog.scroll.saturating_sub(3);
@@ -1248,6 +1308,11 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 }
                             }
                             MouseEventKind::ScrollDown => {
+                                if let Some(picker) = folder_picker.as_mut() {
+                                    picker.scroll = (picker.scroll + 1)
+                                        .min(picker.entries.len().saturating_sub(1));
+                                    continue;
+                                }
                                 if git_dialog.is_some() {
                                     if let Some(dialog) = git_dialog.as_mut() {
                                         dialog.scroll = dialog.scroll.saturating_add(3);
@@ -1342,6 +1407,45 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             }
                             MouseEventKind::Down(MouseButton::Left) => {
                                 let hit = hits.hit(mouse.column, mouse.row);
+                                if folder_picker.is_some() {
+                                    match hit {
+                                        Some(view::Hit::TrafficClose) => folder_picker = None,
+                                        Some(view::Hit::TrafficMinimize) => {
+                                            if let Some(picker) = folder_picker.as_mut() {
+                                                picker.minimized = true;
+                                                picker.fullscreen = false;
+                                            }
+                                        }
+                                        Some(view::Hit::TrafficOpenBrowser) => {
+                                            if let Some(picker) = folder_picker.as_mut() {
+                                                if picker.minimized {
+                                                    picker.minimized = false;
+                                                } else {
+                                                    picker.fullscreen = !picker.fullscreen;
+                                                }
+                                            }
+                                        }
+                                        Some(view::Hit::FolderPickerOpen) => {
+                                            if let Some(picker) = folder_picker.take() {
+                                                open_project(
+                                                    runtime,
+                                                    &picker.path,
+                                                    &mut sessions,
+                                                    &mut index,
+                                                    &mut cached,
+                                                    &mut status,
+                                                );
+                                            }
+                                        }
+                                        Some(view::Hit::FolderPickerRow(row)) => {
+                                            if let Some(picker) = folder_picker.as_mut() {
+                                                enter_folder(picker, row);
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                    continue;
+                                }
                                 if let Some(view::Hit::ToolSummary(indices)) = hit.clone() {
                                     selecting_text = false;
                                     text_selection = None;
@@ -1493,10 +1597,13 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                                     let sender = git_generation_tx.clone();
                                                     let generation = git_generation_id;
                                                     let original_message = dialog.message.clone();
+                                                    let generation_workspace =
+                                                        active_workspace.clone();
                                                     git_generation = Some(scope.spawn(move || {
                                                         let result = runtime
                                                             .generate_git_commit_message(
-                                                                workspace, &options,
+                                                                &generation_workspace,
+                                                                &options,
                                                             );
                                                         let _ = sender.send((
                                                             generation,
@@ -1513,10 +1620,12 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                                 ) {
                                                     view::GitPrimaryAction::Commit(_) => {
                                                         commit_git_dialog(
-                                                            runtime, workspace, dialog,
+                                                            runtime,
+                                                            &active_workspace,
+                                                            dialog,
                                                         );
                                                         git_status = runtime
-                                                            .workspace_info(workspace)
+                                                            .workspace_info(&active_workspace)
                                                             .ok()
                                                             .map(|info| parse_git_status(&info));
                                                     }
@@ -1537,9 +1646,11 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                                         git_sync_id = git_sync_id.wrapping_add(1);
                                                         let id = git_sync_id;
                                                         let sender = git_sync_tx.clone();
+                                                        let sync_workspace =
+                                                            active_workspace.clone();
                                                         git_sync = Some(scope.spawn(move || {
-                                                            let result =
-                                                                runtime.git_sync(workspace, pull);
+                                                            let result = runtime
+                                                                .git_sync(&sync_workspace, pull);
                                                             let _ = sender.send((id, result));
                                                         }));
                                                     }
@@ -1625,8 +1736,10 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     continue;
                                 }
                                 if let Some(view::Hit::ProjectPickerRow(project_index)) = hit {
-                                    if let Some(path) = project_paths(&sessions).get(project_index)
-                                    {
+                                    let projects = project_paths(&sessions);
+                                    if project_index == projects.len() {
+                                        folder_picker = Some(open_folder_picker(&active_workspace));
+                                    } else if let Some(path) = projects.get(project_index) {
                                         if let Some(found) = sessions
                                             .iter()
                                             .position(|session| &session.workspace_path == path)
@@ -2447,6 +2560,99 @@ fn usable_passport_token(
     }
 }
 
+#[cfg(test)]
+mod project_picker_tests {
+    use super::*;
+
+    #[test]
+    fn directory_browser_enters_children_and_returns_to_parent() {
+        let base =
+            std::env::temp_dir().join(format!("blora-project-picker-{}", std::process::id()));
+        let child = base.join("new-project");
+        std::fs::create_dir_all(&child).unwrap();
+        let mut picker = view::FolderPicker {
+            path: base.clone(),
+            entries: folder_entries(&base),
+            selected: 0,
+            scroll: 0,
+            fullscreen: false,
+            minimized: false,
+        };
+        let row = picker
+            .entries
+            .iter()
+            .position(|path| path == &child)
+            .unwrap();
+        enter_folder(&mut picker, row);
+        assert_eq!(picker.path, child);
+        enter_folder(&mut picker, 0);
+        assert_eq!(picker.path, base);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+}
+
+fn folder_entries(path: &Path) -> Vec<PathBuf> {
+    let mut entries = vec![PathBuf::from("..")];
+    if let Ok(read_dir) = std::fs::read_dir(path) {
+        let mut children: Vec<_> = read_dir
+            .filter_map(std::result::Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.is_dir())
+            .collect();
+        children.sort_by_key(|path| path.file_name().map(|name| name.to_os_string()));
+        entries.extend(children);
+    }
+    entries
+}
+
+fn open_folder_picker(workspace: &Path) -> view::FolderPicker {
+    let path = workspace.to_path_buf();
+    view::FolderPicker {
+        entries: folder_entries(&path),
+        path,
+        selected: 0,
+        scroll: 0,
+        fullscreen: false,
+        minimized: false,
+    }
+}
+
+fn enter_folder(picker: &mut view::FolderPicker, row: usize) {
+    let next = if row == 0 {
+        picker.path.parent().map(Path::to_path_buf)
+    } else {
+        picker.entries.get(row).cloned()
+    };
+    if let Some(next) = next {
+        picker.path = next;
+        picker.entries = folder_entries(&picker.path);
+        picker.selected = 0;
+        picker.scroll = 0;
+    }
+}
+
+fn open_project(
+    runtime: &Runtime,
+    path: &Path,
+    sessions: &mut Vec<blora_storage::SessionSummary>,
+    index: &mut usize,
+    cached: &mut Option<(SessionId, blora_session::SessionProjection)>,
+    status: &mut String,
+) {
+    match create_session(runtime, path, Mode::Code, None) {
+        Ok(id) => {
+            refresh_sessions(runtime, sessions, index);
+            *index = sessions
+                .iter()
+                .position(|session| session.id == id)
+                .unwrap_or(0);
+            *cached = None;
+            *status = format!("已打开项目：{}", path.display());
+        }
+        Err(err) => *status = err.to_string(),
+    }
+}
+
 fn project_paths(sessions: &[blora_storage::SessionSummary]) -> Vec<String> {
     let mut paths: Vec<String> = sessions
         .iter()
@@ -2458,7 +2664,7 @@ fn project_paths(sessions: &[blora_storage::SessionSummary]) -> Vec<String> {
 }
 
 fn project_count(sessions: &[blora_storage::SessionSummary]) -> usize {
-    project_paths(sessions).len().max(1)
+    project_paths(sessions).len()
 }
 
 fn select_mode_session(

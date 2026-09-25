@@ -253,6 +253,16 @@ pub struct ProjectPicker {
 }
 
 #[derive(Clone, Debug)]
+pub struct FolderPicker {
+    pub path: std::path::PathBuf,
+    pub entries: Vec<std::path::PathBuf>,
+    pub selected: usize,
+    pub scroll: usize,
+    pub fullscreen: bool,
+    pub minimized: bool,
+}
+
+#[derive(Clone, Debug)]
 pub struct SessionPicker {
     pub selected: usize,
     pub fullscreen: bool,
@@ -351,6 +361,7 @@ pub struct FrameModel<'a> {
     pub provider: &'a str,
     pub mode_menu: Option<&'a ModeMenu>,
     pub project_picker: Option<&'a ProjectPicker>,
+    pub folder_picker: Option<&'a FolderPicker>,
     pub session_picker: Option<&'a SessionPicker>,
     pub git_dialog: Option<&'a GitDialog>,
     pub git_status: Option<&'a GitStatusInfo>,
@@ -383,6 +394,8 @@ pub enum Hit {
     NextSession,
     ProjectPicker,
     ProjectPickerRow(usize),
+    FolderPickerRow(usize),
+    FolderPickerOpen,
     SessionPicker,
     SessionPickerRow(usize),
     Mode,
@@ -440,6 +453,8 @@ pub struct HitMap {
     pub next_session: Option<Rect>,
     pub project_picker: Option<Rect>,
     pub project_picker_rows: Vec<(Rect, usize)>,
+    pub folder_picker_rows: Vec<(Rect, usize)>,
+    pub folder_picker_open: Option<Rect>,
     pub session_picker: Option<Rect>,
     pub session_picker_rows: Vec<(Rect, usize)>,
     pub mode: Option<Rect>,
@@ -571,6 +586,17 @@ impl HitMap {
             if contains(*rect, col, row) {
                 return Some(Hit::ModeRow(*idx));
             }
+        }
+        for (rect, idx) in &self.folder_picker_rows {
+            if contains(*rect, col, row) {
+                return Some(Hit::FolderPickerRow(*idx));
+            }
+        }
+        if self
+            .folder_picker_open
+            .is_some_and(|rect| contains(rect, col, row))
+        {
+            return Some(Hit::FolderPickerOpen);
         }
         for (rect, idx) in &self.project_picker_rows {
             if contains(*rect, col, row) {
@@ -764,9 +790,9 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
             .collect();
         projects.sort();
         projects.dedup();
-        let visible = projects.len().clamp(1, 12) as u16;
+        let visible = projects.len().min(11) as u16 + 1;
         let menu_width = 72u16.min(area.width.saturating_sub(4));
-        let menu_height = (visible + 4).min(area.height.saturating_sub(4));
+        let menu_height = (visible + 4).min(area.height.saturating_sub(2));
         let Some(menu_area) = dialog_outer(
             area,
             menu_width,
@@ -804,9 +830,16 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
             return hits;
         }
         let rows = split_n_rows(body, visible);
-        for (row_index, project) in projects.iter().take(visible as usize).enumerate() {
+        for row_index in 0..visible as usize {
             if let Some(rect) = rows.get(row_index).copied() {
-                hits.project_picker_rows.push((rect, row_index));
+                hits.project_picker_rows.push((
+                    rect,
+                    if row_index == visible as usize - 1 {
+                        projects.len()
+                    } else {
+                        row_index
+                    },
+                ));
                 if row_index == picker.selected {
                     frame.render_widget(
                         Block::default().style(Style::default().bg(theme.bg_select)),
@@ -821,7 +854,18 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
                 frame.render_widget(
                     Paragraph::new(Line::from(vec![
                         Span::styled(marker, theme.fg(theme.rose)),
-                        Span::styled(ellipsize(project, 60), theme.fg(theme.text)),
+                        Span::styled(
+                            if row_index == visible as usize - 1 {
+                                "+ 打开新项目".to_owned()
+                            } else {
+                                ellipsize(&projects[row_index], 60)
+                            },
+                            theme.fg(if row_index == visible as usize - 1 {
+                                theme.sage
+                            } else {
+                                theme.text
+                            }),
+                        ),
                     ]))
                     .style(theme.base()),
                     rect,
@@ -838,6 +882,81 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
             )))
             .style(theme.base()),
             hint_row,
+        );
+    }
+    if let Some(picker) = model.folder_picker {
+        let Some(modal) = dialog_outer(area, 76, 18, picker.fullscreen, picker.minimized) else {
+            return hits;
+        };
+        hits.project_picker_rows.clear();
+        let inner = paint_dialog_chrome(frame, modal, &theme);
+        let [title, path_row, body, action, hint] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .areas(inner);
+        let mut dialog_hits = HitMap::default();
+        paint_traffic_title(
+            frame,
+            title,
+            "打开新项目",
+            model.pointer,
+            &theme,
+            &mut dialog_hits,
+        );
+        hits.traffic_lights = dialog_hits.traffic_lights;
+        if picker.minimized {
+            return hits;
+        }
+        frame.render_widget(
+            Paragraph::new(format!("路径：{}", picker.path.display())).style(theme.dim()),
+            path_row,
+        );
+        let visible = usize::from(body.height);
+        let scroll = picker
+            .scroll
+            .min(picker.entries.len().saturating_sub(visible));
+        for (offset, entry) in picker.entries.iter().enumerate().skip(scroll).take(visible) {
+            let rect = Rect::new(body.x, body.y + (offset - scroll) as u16, body.width, 1);
+            hits.folder_picker_rows.push((rect, offset));
+            if offset == picker.selected {
+                frame.render_widget(
+                    Block::default().style(Style::default().bg(theme.bg_select)),
+                    rect,
+                );
+            }
+            let name = if offset == 0 {
+                "..".to_owned()
+            } else {
+                entry
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            };
+            frame.render_widget(
+                Paragraph::new(format!(
+                    "{} {name}/",
+                    if offset == picker.selected {
+                        "❯"
+                    } else {
+                        " "
+                    }
+                ))
+                .style(theme.fg(theme.text)),
+                rect,
+            );
+        }
+        hits.folder_picker_open = Some(action);
+        frame.render_widget(
+            Paragraph::new(" + 打开此目录").style(theme.fg(theme.sage)),
+            action,
+        );
+        frame.render_widget(
+            Paragraph::new("↑/↓ 选择 · Enter 进入目录 · O 打开项目 · Esc 返回").style(theme.mute()),
+            hint,
         );
     }
     if let Some(picker) = model.session_picker {
@@ -1190,7 +1309,10 @@ fn render_header(
         .and_then(|projection| projection.session.as_ref());
     let mode = session.map(|item| item.mode.as_str()).unwrap_or("code");
     let project_name = model
-        .workspace
+        .sessions
+        .get(model.index)
+        .map(|session| Path::new(&session.workspace_path))
+        .unwrap_or(model.workspace)
         .file_name()
         .and_then(|name| name.to_str())
         .filter(|name| !name.is_empty())
@@ -4103,6 +4225,115 @@ mod tests {
     use crate::theme::Palette;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+
+    #[test]
+    fn project_picker_shows_add_row_and_folder_open_target() {
+        let area = Rect::new(0, 0, 100, 30);
+        let sessions = vec![SessionSummary {
+            id: blora_types::SessionId::generate(),
+            title: None,
+            workspace_path: "/tmp/example-project".into(),
+            mode: Mode::Code,
+            status: blora_types::SessionStatus::Active,
+            updated_at: chrono::Utc::now(),
+            last_sequence: 0,
+        }];
+        let project = ProjectPicker {
+            selected: 1,
+            fullscreen: false,
+            minimized: false,
+        };
+        let mut folder = FolderPicker {
+            path: "/tmp".into(),
+            entries: vec!["..".into(), "/tmp/example-project".into()],
+            selected: 0,
+            scroll: 0,
+            fullscreen: false,
+            minimized: false,
+        };
+        let draw_picker = |folder: Option<&FolderPicker>| {
+            let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+            let mut hits = HitMap::default();
+            terminal
+                .draw(|frame| {
+                    hits = draw(
+                        frame,
+                        &FrameModel {
+                            workspace: Path::new("/tmp/example-project"),
+                            sessions: &sessions,
+                            index: 0,
+                            projection: None,
+                            pending: &[],
+                            input: "",
+                            status: "",
+                            notice: None,
+                            paste_preview: None,
+                            passport_dialog: None,
+                            provider_dialog: None,
+                            add_provider_dialog: None,
+                            theme_dialog: None,
+                            context_dialog: None,
+                            tool_dialog: None,
+                            tool_detail_dialog: None,
+                            slash_hits: &[],
+                            slash_selected: 0,
+                            search: None,
+                            hide_tools: false,
+                            scroll: 0,
+                            auto_approve: false,
+                            model: "",
+                            provider: "",
+                            mode_menu: None,
+                            project_picker: Some(&project),
+                            folder_picker: folder,
+                            session_picker: None,
+                            git_dialog: None,
+                            git_status: None,
+                            user_label: "you",
+                            running: false,
+                            tick: 0,
+                            pointer: None,
+                            text_selection: None,
+                        },
+                    );
+                })
+                .unwrap();
+            let lines: Vec<String> = (0..area.height)
+                .map(|row| {
+                    (0..area.width)
+                        .map(|col| {
+                            terminal
+                                .backend()
+                                .buffer()
+                                .cell((col, row))
+                                .unwrap()
+                                .symbol()
+                                .to_owned()
+                        })
+                        .collect()
+                })
+                .collect();
+            (lines, hits)
+        };
+        let (lines, hits) = draw_picker(None);
+        assert!(
+            lines
+                .iter()
+                .any(|line| flatten(line).contains("打开新项目"))
+        );
+        let add = hits.project_picker_rows.last().unwrap().0;
+        assert_eq!(hits.hit(add.x, add.y), Some(Hit::ProjectPickerRow(1)));
+        folder.selected = 1;
+        let (lines, hits) = draw_picker(Some(&folder));
+        assert!(
+            lines
+                .iter()
+                .any(|line| flatten(line).contains("打开此目录"))
+        );
+        let open = hits.folder_picker_open.unwrap();
+        assert_eq!(hits.hit(open.x, open.y), Some(Hit::FolderPickerOpen));
+        assert_eq!(hits.folder_picker_rows.len(), 2);
+    }
 
     #[test]
     fn idle_context_bar_fills_by_usage() {
