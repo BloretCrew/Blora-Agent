@@ -304,6 +304,7 @@ pub struct GitDialog {
     pub selected: usize,
     pub message: String,
     pub editing_message: bool,
+    pub generating_message: bool,
     pub scroll: usize,
     pub feedback: Option<String>,
     pub fullscreen: bool,
@@ -367,6 +368,7 @@ pub enum Hit {
     GitStatus,
     GitTab(usize),
     GitMessage,
+    GitGenerate,
     GitCommit,
     GitFile(usize),
     GitRow(usize),
@@ -447,6 +449,7 @@ pub struct HitMap {
     pub git_status: Option<Rect>,
     pub git_tabs: Vec<(Rect, usize)>,
     pub git_message: Option<Rect>,
+    pub git_generate: Option<Rect>,
     pub git_commit: Option<Rect>,
     pub git_files: Vec<(Rect, usize)>,
     pub git_rows: Vec<(Rect, usize)>,
@@ -501,6 +504,12 @@ impl HitMap {
             .is_some_and(|rect| contains(rect, col, row))
         {
             return Some(Hit::GitMessage);
+        }
+        if self
+            .git_generate
+            .is_some_and(|rect| contains(rect, col, row))
+        {
+            return Some(Hit::GitGenerate);
         }
         if self.git_commit.is_some_and(|rect| contains(rect, col, row)) {
             return Some(Hit::GitCommit);
@@ -984,10 +993,11 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
         );
     }
     if let Some(dialog) = model.git_dialog {
-        let dialog_hits = render_git_dialog(frame, area, dialog, model.pointer, &theme);
+        let dialog_hits = render_git_dialog(frame, area, dialog, model.pointer, &theme, model.tick);
         hits.traffic_lights = dialog_hits.traffic_lights;
         hits.git_tabs = dialog_hits.git_tabs;
         hits.git_message = dialog_hits.git_message;
+        hits.git_generate = dialog_hits.git_generate;
         hits.git_commit = dialog_hits.git_commit;
         hits.git_files = dialog_hits.git_files;
         hits.git_rows = dialog_hits.git_rows;
@@ -2845,6 +2855,7 @@ fn render_git_dialog(
     dialog: &GitDialog,
     pointer: Option<(u16, u16)>,
     theme: &Theme,
+    tick: u64,
 ) -> HitMap {
     let mut hits = HitMap::default();
     let Some(frame_area) = dialog_outer(area, 88, 20, dialog.fullscreen, dialog.minimized) else {
@@ -2917,7 +2928,7 @@ fn render_git_dialog(
                 body,
             );
         }
-        _ => render_git_commit_page(frame, body, dialog, theme, &mut hits),
+        _ => render_git_commit_page(frame, body, dialog, theme, &mut hits, tick),
     }
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
@@ -2965,13 +2976,16 @@ fn render_git_commit_page(
     dialog: &GitDialog,
     theme: &Theme,
     hits: &mut HitMap,
+    tick: u64,
 ) {
     if body.height < 5 || body.width < 20 {
         return;
     }
     let message = Rect::new(body.x + 1, body.y + 1, body.width.saturating_sub(2), 1);
-    let commit = Rect::new(message.x, body.y + 3, message.width, 1);
+    let generate = Rect::new(message.x, body.y + 2, message.width, 1);
+    let commit = Rect::new(message.x, body.y + 4, message.width, 1);
     hits.git_message = Some(message);
+    hits.git_generate = Some(generate);
     hits.git_commit = Some(commit);
     let message_text = if dialog.message.is_empty() {
         format!(
@@ -3004,6 +3018,15 @@ fn render_git_commit_page(
         ),
         message,
     );
+    let generate_label = if dialog.generating_message {
+        format!(" {} 正在生成提交信息…", spinner(tick))
+    } else {
+        " ✦ 生成提交信息".to_owned()
+    };
+    frame.render_widget(
+        Paragraph::new(generate_label).style(theme.fg(theme.sage).bg(theme.bg_raised)),
+        generate,
+    );
     let files = git_changed_files(&dialog.info.raw);
     let staged = files.iter().filter(|file| file.staged).count();
     let commit_style = if staged > 0 && !dialog.message.trim().is_empty() {
@@ -3018,7 +3041,7 @@ fn render_git_commit_page(
         Paragraph::new(format!(" ✓ 提交已暂存的更改 ({staged})")).style(commit_style),
         commit,
     );
-    let summary = Rect::new(message.x, body.y + 5, message.width, 1);
+    let summary = Rect::new(message.x, body.y + 6, message.width, 1);
     if summary.y >= body.bottom() {
         return;
     }
@@ -4074,6 +4097,7 @@ mod tests {
             selected: 0,
             message: "修复界面".into(),
             editing_message: false,
+            generating_message: false,
             scroll: 0,
             feedback: None,
             fullscreen: false,
@@ -4082,12 +4106,15 @@ mod tests {
         let mut hits = HitMap::default();
         terminal
             .draw(|frame| {
-                hits = render_git_dialog(frame, area, &dialog, None, &Theme::current());
+                hits = render_git_dialog(frame, area, &dialog, None, &Theme::current(), 0);
             })
             .unwrap();
         let message = hits.git_message.unwrap();
+        let generate = hits.git_generate.unwrap();
         let commit = hits.git_commit.unwrap();
         assert_eq!(hits.hit(message.x, message.y), Some(Hit::GitMessage));
+        assert_eq!(hits.hit(generate.x, generate.y), Some(Hit::GitGenerate));
+        assert_eq!(generate.y, message.y + 1);
         assert_eq!(hits.hit(commit.x, commit.y), Some(Hit::GitCommit));
         assert_eq!(hits.git_files.len(), 3);
         for (row, index) in &hits.git_files {
@@ -4097,6 +4124,66 @@ mod tests {
         assert!(files[0].staged);
         assert!(!files[1].staged);
         assert!(!files[2].staged);
+    }
+
+    #[test]
+    fn git_generate_button_uses_running_spinner() {
+        let area = Rect::new(0, 0, 110, 30);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        let mut dialog = GitDialog {
+            info: GitStatusInfo {
+                branch: "main".into(),
+                added: 0,
+                removed: 0,
+                ahead: 0,
+                behind: 0,
+                stashes: 0,
+                clean: false,
+                raw: "## main\n M test.rs".into(),
+                diff: String::new(),
+                log: String::new(),
+            },
+            page: 2,
+            selected: 0,
+            message: String::new(),
+            editing_message: false,
+            generating_message: true,
+            scroll: 0,
+            feedback: None,
+            fullscreen: false,
+            minimized: false,
+        };
+        let mut hits = HitMap::default();
+        terminal
+            .draw(|frame| {
+                hits = render_git_dialog(frame, area, &dialog, None, &Theme::current(), 1);
+            })
+            .unwrap();
+        let rect = hits.git_generate.unwrap();
+        assert_eq!(
+            terminal
+                .backend()
+                .buffer()
+                .cell((rect.x + 1, rect.y))
+                .unwrap()
+                .symbol(),
+            spinner(1).to_string()
+        );
+        dialog.generating_message = false;
+        terminal
+            .draw(|frame| {
+                render_git_dialog(frame, area, &dialog, None, &Theme::current(), 1);
+            })
+            .unwrap();
+        assert_eq!(
+            terminal
+                .backend()
+                .buffer()
+                .cell((rect.x + 1, rect.y))
+                .unwrap()
+                .symbol(),
+            "✦"
+        );
     }
 
     #[test]
@@ -4121,6 +4208,7 @@ mod tests {
             selected: 0,
             message: String::new(),
             editing_message: false,
+            generating_message: false,
             scroll: 0,
             feedback: None,
             fullscreen: false,
@@ -4133,7 +4221,7 @@ mod tests {
                     Paragraph::new("background text").style(Theme::current().base()),
                     area,
                 );
-                hits = render_git_dialog(frame, area, &dialog, None, &Theme::current());
+                hits = render_git_dialog(frame, area, &dialog, None, &Theme::current(), 0);
             })
             .unwrap();
         assert_eq!(

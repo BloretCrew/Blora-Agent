@@ -311,6 +311,22 @@ impl LocalBackend {
         self.git(&["diff", "--stat", "HEAD"])
     }
 
+    pub fn git_commit_context(&self) -> Result<String> {
+        self.policy
+            .require(self.policy.file_read(), "git_commit_context")?;
+        let diff = self.git_mutate(&["diff", "--no-ext-diff", "HEAD", "--"])?;
+        let untracked = self.git_mutate(&["ls-files", "--others", "--exclude-standard"])?;
+        let mut context = String::new();
+        context.push_str("Tracked changes:\n");
+        context.push_str(&diff.chars().take(16000).collect::<String>());
+        context.push_str("\nUntracked file names:\n");
+        context.push_str(&untracked.chars().take(2000).collect::<String>());
+        if diff.trim().is_empty() && untracked.trim().is_empty() {
+            return Err(BloraError::Exec("没有可用于生成提交信息的变更".to_owned()));
+        }
+        Ok(context)
+    }
+
     pub fn git_numstat(&self) -> Result<String> {
         self.policy
             .require(self.policy.file_read(), "git_numstat")?;
@@ -609,6 +625,44 @@ impl ExecutionBackend for LocalBackend {
 mod tests {
     use super::*;
     use blora_policy::Policy;
+
+    #[test]
+    fn git_commit_context_includes_tracked_changes_and_untracked_names() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(dir.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        std::fs::write(dir.path().join("tracked.txt"), "before\n").unwrap();
+        let backend = LocalBackend::new(Policy::new(dir.path(), true).unwrap());
+        backend.git_stage("tracked.txt", true).unwrap();
+        assert!(
+            Command::new("git")
+                .args([
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                    "commit",
+                    "-qm",
+                    "init"
+                ])
+                .current_dir(dir.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        std::fs::write(dir.path().join("tracked.txt"), "after\n").unwrap();
+        std::fs::write(dir.path().join("untracked.txt"), "private contents").unwrap();
+        let context = backend.git_commit_context().unwrap();
+        assert!(context.contains("+after"));
+        assert!(context.contains("untracked.txt"));
+        assert!(!context.contains("private contents"));
+    }
 
     #[test]
     fn git_stage_targets_one_file_and_rejects_empty_commit_message() {

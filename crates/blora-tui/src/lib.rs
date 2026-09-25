@@ -92,6 +92,9 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut tool_dialog: Option<view::ToolDialog> = None;
     let mut tool_detail_dialog: Option<view::ToolDetailDialog> = None;
     let mut git_dialog: Option<view::GitDialog> = None;
+    let (git_generation_tx, git_generation_rx) =
+        std::sync::mpsc::channel::<(u64, String, Result<String>)>();
+    let mut git_generation_id = 0u64;
     let mut mode_menu: Option<view::ModeMenu> = None;
     let mut project_picker: Option<view::ProjectPicker> = None;
     let mut folder_picker: Option<view::FolderPicker> = None;
@@ -168,6 +171,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut cached: Option<(SessionId, blora_session::SessionProjection)> = None;
     let result = thread::scope(|scope| -> Result<()> {
         let mut job: Option<thread::ScopedJoinHandle<'_, Result<blora_types::RunId>>> = None;
+        let mut git_generation: Option<thread::ScopedJoinHandle<'_, ()>> = None;
         loop {
             refresh_sessions(runtime, &mut sessions, &mut index);
             if let Some(receiver) = passport_receiver.as_ref()
@@ -362,7 +366,40 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                 cancel = CancelToken::new();
             }
 
-            let wait_ms = if job.is_some() { 50 } else { 200 };
+            while let Ok((generation, original_message, result)) = git_generation_rx.try_recv() {
+                if generation != git_generation_id {
+                    continue;
+                }
+                if let Some(dialog) = git_dialog.as_mut()
+                    && dialog.generating_message
+                {
+                    dialog.generating_message = false;
+                    match result {
+                        Ok(message) => {
+                            if dialog.message == original_message {
+                                dialog.message = message;
+                                dialog.feedback = None;
+                            } else {
+                                dialog.feedback = Some("已保留手动编辑的提交消息".to_owned());
+                            }
+                        }
+                        Err(error) => dialog.feedback = Some(error.to_string()),
+                    }
+                }
+            }
+            if git_generation
+                .as_ref()
+                .is_some_and(|handle| handle.is_finished())
+            {
+                if let Some(handle) = git_generation.take() {
+                    let _ = handle.join();
+                }
+            }
+            let wait_ms = if job.is_some() || git_generation.is_some() {
+                50
+            } else {
+                200
+            };
             if event::poll(Duration::from_millis(wait_ms)).map_err(blora_types::BloraError::exec)? {
                 match event::read().map_err(blora_types::BloraError::exec)? {
                     Event::Paste(text) => {
@@ -1487,6 +1524,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 }
                                 if matches!(hit, Some(view::Hit::GitStatus)) {
                                     if let Some(info) = git_status.clone() {
+                                        git_generation_id = git_generation_id.wrapping_add(1);
                                         git_dialog = Some(view::GitDialog {
                                             info,
                                             page: 0,
@@ -1537,6 +1575,56 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                             }
                                             Some(view::Hit::GitMessage) => {
                                                 dialog.editing_message = true;
+                                            }
+                                            Some(view::Hit::GitGenerate) => {
+                                                if !dialog.generating_message
+                                                    && git_generation.is_none()
+                                                {
+                                                    git_generation_id =
+                                                        git_generation_id.wrapping_add(1);
+                                                    dialog.generating_message = true;
+                                                    dialog.editing_message = false;
+                                                    dialog.feedback = None;
+                                                    let selected_model = if model_override
+                                                        .is_empty()
+                                                    {
+                                                        projection
+                                                            .and_then(|item| item.model.as_deref())
+                                                            .unwrap_or("")
+                                                    } else {
+                                                        &model_override
+                                                    };
+                                                    let selected_provider =
+                                                        if provider_override.is_empty() {
+                                                            projection
+                                                                .and_then(|item| {
+                                                                    item.provider.as_deref()
+                                                                })
+                                                                .unwrap_or("")
+                                                        } else {
+                                                            &provider_override
+                                                        };
+                                                    let options = tui_run_options(
+                                                        auto_approve,
+                                                        selected_model,
+                                                        selected_provider,
+                                                        passport_user_token.clone(),
+                                                    );
+                                                    let sender = git_generation_tx.clone();
+                                                    let generation = git_generation_id;
+                                                    let original_message = dialog.message.clone();
+                                                    git_generation = Some(scope.spawn(move || {
+                                                        let result = runtime
+                                                            .generate_git_commit_message(
+                                                                workspace, &options,
+                                                            );
+                                                        let _ = sender.send((
+                                                            generation,
+                                                            original_message,
+                                                            result,
+                                                        ));
+                                                    }));
+                                                }
                                             }
                                             Some(view::Hit::GitCommit) => {
                                                 commit_git_dialog(runtime, workspace, dialog);

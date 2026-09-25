@@ -354,6 +354,68 @@ impl Runtime {
         backend.git_stage(file, stage)
     }
 
+    pub fn generate_git_commit_message(
+        &self,
+        path: &std::path::Path,
+        options: &RunOptions,
+    ) -> Result<String> {
+        let backend = LocalBackend::new(Policy::new(path, true)?);
+        let context = backend.git_commit_context()?;
+        let providers = resolve_provider_chain(
+            options.mock,
+            &options.provider,
+            options.passport_user_token.as_deref(),
+        );
+        let provider = &providers[0];
+        if provider.name() == "mock" {
+            return Err(BloraError::Provider(
+                "请先配置可用的模型以生成提交信息".to_owned(),
+            ));
+        }
+        let model = if !options.model.trim().is_empty() {
+            options.model.clone()
+        } else if provider.name() == "blora" {
+            blora_model::PASSPORT_MODEL_NAME.to_owned()
+        } else {
+            std::env::var("BLORA_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_owned())
+        };
+        let request = CompletionRequest {
+            model,
+            messages: vec![
+                ChatMessage::text(
+                    "system",
+                    "根据 Git 变更生成简洁准确的中文提交信息，仅输出一行提交主题，不要解释或使用 Markdown；不要猜测未展示的文件内容。",
+                ),
+                ChatMessage::text("user", context),
+            ],
+            max_output_tokens: Some(100),
+            ..CompletionRequest::default()
+        };
+        let mut streamed = String::new();
+        let completion = provider.complete(&request, &CancelToken::new(), &mut |event| {
+            if let StreamEvent::TextDelta(delta) = event {
+                streamed.push_str(&delta);
+            }
+            Ok(())
+        })?;
+        let text = if completion.text.trim().is_empty() {
+            streamed.as_str()
+        } else {
+            completion.text.as_str()
+        };
+        let message = text
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .unwrap_or("")
+            .trim()
+            .trim_matches(['\"', '`'])
+            .to_owned();
+        if message.is_empty() {
+            return Err(BloraError::Provider("模型未生成提交信息".to_owned()));
+        }
+        Ok(message)
+    }
+
     pub fn git_commit(&self, path: &std::path::Path, message: &str) -> Result<String> {
         let backend = LocalBackend::new(Policy::new(path, true)?);
         backend.git_commit(message)
