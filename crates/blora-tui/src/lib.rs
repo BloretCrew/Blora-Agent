@@ -3748,8 +3748,7 @@ fn parse_git_status(info: &blora_runtime::WorkspaceInfo) -> view::GitStatusInfo 
         removed += deletions.parse::<usize>().unwrap_or(0);
     }
     let status_line = info.git_status.lines().next().unwrap_or("");
-    let ahead = git_tracking_count(status_line, "ahead ");
-    let behind = git_tracking_count(status_line, "behind ");
+    let (ahead, behind) = git_branch_counts(&info.git_branch_counts);
     let stashes = info
         .git_stashes
         .lines()
@@ -3778,7 +3777,8 @@ mod git_status_tests {
     #[test]
     fn parses_clean_tracking_and_stash_counts() {
         let info = blora_runtime::WorkspaceInfo {
-            git_status: "## main...origin/main [ahead 5, behind 2]".into(),
+            git_status: "## main...origin/main [领先 5，落后 2]".into(),
+            git_branch_counts: "# branch.oid abc123\n# branch.head main\n# branch.upstream origin/main\n# branch.ab +5 -2".into(),
             git_stashes: "stash@{0}\nstash@{1}".into(),
             ..Default::default()
         };
@@ -3790,6 +3790,11 @@ mod git_status_tests {
             ..Default::default()
         };
         assert!(!parse_git_status(&dirty).clean);
+        assert_eq!(
+            git_branch_counts("# branch.head main\n# branch.ab +154 -0"),
+            (154, 0)
+        );
+        assert_eq!(git_branch_counts("# branch.head main"), (0, 0));
     }
 
     #[test]
@@ -3805,12 +3810,17 @@ mod git_status_tests {
     }
 }
 
-fn git_tracking_count(status: &str, label: &str) -> usize {
+fn git_branch_counts(status: &str) -> (usize, usize) {
     status
-        .split_once(label)
-        .and_then(|(_, rest)| rest.split(|ch: char| !ch.is_ascii_digit()).next())
-        .and_then(|number| number.parse().ok())
-        .unwrap_or(0)
+        .lines()
+        .find_map(|line| {
+            let counts = line.strip_prefix("# branch.ab ")?;
+            let mut parts = counts.split_whitespace();
+            let ahead = parts.next()?.strip_prefix('+')?.parse().ok()?;
+            let behind = parts.next()?.strip_prefix('-')?.parse().ok()?;
+            Some((ahead, behind))
+        })
+        .unwrap_or((0, 0))
 }
 
 fn handle_traffic_light(

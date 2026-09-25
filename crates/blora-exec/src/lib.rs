@@ -308,6 +308,17 @@ impl LocalBackend {
         self.git(&["status", "--short", "--branch"])
     }
 
+    pub fn git_branch_counts(&self) -> Result<String> {
+        self.policy
+            .require(self.policy.file_read(), "git_branch_counts")?;
+        self.git(&[
+            "status",
+            "--porcelain=v2",
+            "--branch",
+            "--untracked-files=no",
+        ])
+    }
+
     pub fn git_diff(&self) -> Result<String> {
         self.policy.require(self.policy.file_read(), "git_diff")?;
         self.git(&["diff", "--stat", "HEAD"])
