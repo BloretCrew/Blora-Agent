@@ -132,7 +132,11 @@ fn flush_table(
     theme: &Theme,
 ) -> Vec<Line<'static>> {
     let raw = std::mem::take(rows);
-    if raw.len() < 2 || !raw.iter().any(|line| is_table_sep_row(&split_table_row(line))) {
+    if raw.len() < 2
+        || !raw
+            .iter()
+            .any(|line| is_table_sep_row(&split_table_row(line)))
+    {
         return raw
             .into_iter()
             .flat_map(|line| render_block(&line, width, needle, theme))
@@ -240,10 +244,7 @@ fn pad_spans(
             }
             out.append(&mut spans);
             if total - left > 0 {
-                out.push(Span::styled(
-                    " ".repeat(total - left),
-                    theme.fg(theme.text),
-                ));
+                out.push(Span::styled(" ".repeat(total - left), theme.fg(theme.text)));
             }
             out
         }
@@ -312,10 +313,7 @@ fn render_table(
                 if index > 0 {
                     spans.push(Span::styled(" │ ".to_owned(), theme.mute()));
                 }
-                let piece = wrapped[index]
-                    .get(line_idx)
-                    .cloned()
-                    .unwrap_or_default();
+                let piece = wrapped[index].get(line_idx).cloned().unwrap_or_default();
                 let align = aligns.get(index).copied().unwrap_or(Align::Left);
                 spans.extend(pad_spans(piece, col_w[index].max(1), align, theme));
             }
@@ -329,10 +327,7 @@ fn render_table(
                 }
                 rule.push_str(&"─".repeat(col_w[index].max(1)));
             }
-            out.push(indent_line(
-                vec![Span::styled(rule, theme.mute())],
-                theme,
-            ));
+            out.push(indent_line(vec![Span::styled(rule, theme.mute())], theme));
         }
     }
     out
@@ -361,7 +356,12 @@ fn list_prefix(line: &str) -> Option<(&str, &str)> {
     None
 }
 
-fn render_block(text: &str, width: usize, needle: Option<&str>, theme: &Theme) -> Vec<Line<'static>> {
+fn render_block(
+    text: &str,
+    width: usize,
+    needle: Option<&str>,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
     if let Some((level, title)) = heading_level(text) {
         let style = match level {
             1 => theme.fg(theme.rose).add_modifier(Modifier::BOLD),
@@ -375,10 +375,7 @@ fn render_block(text: &str, width: usize, needle: Option<&str>, theme: &Theme) -
     }
     if is_hr(text) {
         let rule = "─".repeat(width.saturating_sub(2).max(3));
-        return vec![indent_line(
-            vec![Span::styled(rule, theme.mute())],
-            theme,
-        )];
+        return vec![indent_line(vec![Span::styled(rule, theme.mute())], theme)];
     }
     if let Some(rest) = text.trim_start().strip_prefix('>') {
         let body = rest.strip_prefix(' ').unwrap_or(rest);
@@ -482,18 +479,17 @@ fn render_inlines(
         if chars[i] == '`' {
             if let Some(end) = find_closing(&chars, i + 1, '`') {
                 let inner: String = chars[i + 1..end].iter().collect();
-                out.extend(highlight(
-                    inner,
-                    theme.fg(theme.amber),
-                    needle,
-                    theme,
-                ));
+                out.extend(highlight(inner, theme.fg(theme.amber), needle, theme));
                 i = end + 1;
                 continue;
             }
         }
         if take_delim(&chars, i, "**") || take_delim(&chars, i, "__") {
-            let delim = if take_delim(&chars, i, "**") { "**" } else { "__" };
+            let delim = if take_delim(&chars, i, "**") {
+                "**"
+            } else {
+                "__"
+            };
             if let Some(end) = find_delim(&chars, i + 2, delim) {
                 let inner: String = chars[i + 2..end].iter().collect();
                 out.extend(highlight(
@@ -588,7 +584,10 @@ fn find_delim(chars: &[char], start: usize, delim: &str) -> Option<usize> {
 }
 
 fn find_closing(chars: &[char], start: usize, mark: char) -> Option<usize> {
-    chars[start..].iter().position(|ch| *ch == mark).map(|p| start + p)
+    chars[start..]
+        .iter()
+        .position(|ch| *ch == mark)
+        .map(|p| start + p)
 }
 
 fn find_char(chars: &[char], start: usize, mark: char) -> Option<usize> {
@@ -703,16 +702,14 @@ mod tests {
         assert!(text.contains("• "), "{text}");
         let hello = lines
             .iter()
-            .find(|line| {
-                line.spans
-                    .iter()
-                    .any(|span| span.content.contains("Hello"))
-            })
+            .find(|line| line.spans.iter().any(|span| span.content.contains("Hello")))
             .expect("heading line");
-        assert!(hello
-            .spans
-            .iter()
-            .any(|span| span.style.add_modifier.contains(Modifier::BOLD)));
+        assert!(
+            hello
+                .spans
+                .iter()
+                .any(|span| span.style.add_modifier.contains(Modifier::BOLD))
+        );
     }
 
     #[test]
@@ -745,7 +742,10 @@ mod tests {
         let lines = render(md, 16, None, &theme());
         let text = flat(&lines);
         assert!(text.contains("this-is-a"), "{text}");
-        assert!(text.contains("cell-value") || text.contains("value"), "{text}");
+        assert!(
+            text.contains("cell-value") || text.contains("value"),
+            "{text}"
+        );
         assert!(!text.contains('…'), "must wrap, not truncate: {text}");
     }
 

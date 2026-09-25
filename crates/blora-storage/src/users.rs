@@ -250,7 +250,9 @@ impl SqliteStore {
     pub fn list_users(&self) -> Result<Vec<UserRecord>> {
         let conn = self.lock();
         let mut stmt = conn
-            .prepare(&format!("SELECT {USER_COLUMNS} FROM users ORDER BY created_at ASC"))
+            .prepare(&format!(
+                "SELECT {USER_COLUMNS} FROM users ORDER BY created_at ASC"
+            ))
             .map_err(BloraError::storage)?;
         let rows = stmt
             .query_map([], map_user_row)

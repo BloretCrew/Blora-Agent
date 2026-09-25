@@ -188,7 +188,9 @@ impl LocalBackend {
         let root = self.policy.resolve(path.unwrap_or("."))?;
         let pattern = pattern.trim();
         if pattern.is_empty() {
-            return Err(BloraError::Exec("glob pattern must not be empty".to_owned()));
+            return Err(BloraError::Exec(
+                "glob pattern must not be empty".to_owned(),
+            ));
         }
         let mut found: Vec<(std::time::SystemTime, String)> = Vec::new();
         for entry in WalkDir::new(&root)
@@ -856,9 +858,13 @@ mod tests {
         let policy = Policy::new(dir.path(), true).unwrap();
         let backend = LocalBackend::new(policy);
         backend.write_file("src/lib.rs", "fn hit() {}\n").unwrap();
-        backend.write_file("src/deep/more.rs", "fn hit() {}\n").unwrap();
+        backend
+            .write_file("src/deep/more.rs", "fn hit() {}\n")
+            .unwrap();
         backend.write_file("notes/hit.md", "hit\n").unwrap();
-        backend.write_file("target/skip.rs", "fn hit() {}\n").unwrap();
+        backend
+            .write_file("target/skip.rs", "fn hit() {}\n")
+            .unwrap();
 
         let rs = backend.glob("**/*.rs", None).unwrap();
         assert!(rs.contains("src/lib.rs"));
@@ -870,9 +876,7 @@ mod tests {
         assert!(!top.contains("more.rs"));
         assert_eq!(backend.glob("*.py", None).unwrap(), "no matches");
 
-        let only_md = backend
-            .search_with("hit", None, Some("*.md"), 10)
-            .unwrap();
+        let only_md = backend.search_with("hit", None, Some("*.md"), 10).unwrap();
         assert!(only_md.contains("notes/hit.md"));
         assert!(!only_md.contains("lib.rs"));
         let capped = backend.search_with("hit", None, None, 1).unwrap();

@@ -11,7 +11,7 @@ mod theme;
 mod view;
 
 use std::io::{self, Write, stdout};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::thread;
 use std::time::Duration;
 
@@ -99,7 +99,6 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut git_sync_id = 0u64;
     let mut mode_menu: Option<view::ModeMenu> = None;
     let mut project_picker: Option<view::ProjectPicker> = None;
-    let mut folder_picker: Option<view::FolderPicker> = None;
     let mut session_picker: Option<view::SessionPicker> = None;
     // PassPort user token of the logged-in user; drives the default provider.
     let mut passport_user_token: Option<String> = None;
@@ -187,8 +186,10 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                     user.email.as_deref(),
                     user.apptoken.as_deref(),
                     user.refresh_token.as_deref(),
-                    Some(chrono::Utc::now()
-                        + chrono::Duration::seconds(user.expires_in.unwrap_or(3600) as i64)),
+                    Some(
+                        chrono::Utc::now()
+                            + chrono::Duration::seconds(user.expires_in.unwrap_or(3600) as i64),
+                    ),
                 )?;
                 passport_user_token = user
                     .apptoken
@@ -335,7 +336,6 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             provider,
                             mode_menu: mode_menu.as_ref(),
                             project_picker: project_picker.as_ref(),
-                            folder_picker: folder_picker.as_ref(),
                             session_picker: session_picker.as_ref(),
                             user_label: &passport_username,
                             running: job.is_some(),
@@ -473,106 +473,6 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                         {
                             input.push('/');
                             slash_selected = 0;
-                            continue;
-                        }
-                        if folder_picker.is_some()
-                            && matches!(key.code, KeyCode::Left | KeyCode::Right)
-                        {
-                            handle_traffic_light(
-                                Some(if key.code == KeyCode::Left {
-                                    view::Hit::TrafficClose
-                                } else {
-                                    view::Hit::TrafficMinimize
-                                }),
-                                &mut folder_picker,
-                                &mut project_picker,
-                                &mut session_picker,
-                                &mut mode_menu,
-                                &mut tool_dialog,
-                                &mut tool_detail_dialog,
-                                &mut git_dialog,
-                                &mut theme_dialog,
-                                &mut add_provider_dialog,
-                                &mut provider_dialog,
-                                &mut context_dialog,
-                                &mut passport_dialog,
-                                &mut passport_browser_opened,
-                                passport_url.as_deref(),
-                                &mut cancel,
-                                &mut status,
-                            );
-                            continue;
-                        }
-                        if folder_picker.is_some() {
-                            match key.code {
-                                KeyCode::Up => {
-                                    if let Some(picker) = folder_picker.as_mut() {
-                                        picker.selected = picker.selected.saturating_sub(1);
-                                        if picker.selected < picker.scroll {
-                                            picker.scroll = picker.selected;
-                                        }
-                                    }
-                                }
-                                KeyCode::Down => {
-                                    if let Some(picker) = folder_picker.as_mut() {
-                                        picker.selected = (picker.selected + 1)
-                                            .min(picker.entries.len().saturating_sub(1));
-                                        let page = 9usize;
-                                        if picker.selected >= picker.scroll + page {
-                                            picker.scroll = picker.selected + 1 - page;
-                                        }
-                                    }
-                                }
-                                KeyCode::Esc => folder_picker = None,
-                                KeyCode::Enter => {
-                                    if let Some(picker) = folder_picker.as_mut() {
-                                        if picker.selected == 0 {
-                                            if let Some(parent) = picker.path.parent() {
-                                                picker.path = parent.to_path_buf();
-                                                picker.entries = folder_entries(&picker.path);
-                                                picker.selected = 0;
-                                                picker.scroll = 0;
-                                            }
-                                        } else if let Some(path) =
-                                            picker.entries.get(picker.selected).cloned()
-                                        {
-                                            picker.path = path;
-                                            picker.entries = folder_entries(&picker.path);
-                                            picker.selected = 0;
-                                            picker.scroll = 0;
-                                        }
-                                    }
-                                }
-                                KeyCode::Char('o' | 'O') => {
-                                    if let Some(picker) = folder_picker.take() {
-                                        match create_session(
-                                            runtime,
-                                            &picker.path,
-                                            Mode::Code,
-                                            None,
-                                        ) {
-                                            Ok(id) => {
-                                                refresh_sessions(
-                                                    runtime,
-                                                    &mut sessions,
-                                                    &mut index,
-                                                );
-                                                index = sessions
-                                                    .iter()
-                                                    .position(|item| item.id == id)
-                                                    .unwrap_or(0);
-                                                cached = None;
-                                                status = format!(
-                                                    "已打开项目：{}",
-                                                    picker.path.display()
-                                                );
-                                            }
-                                            Err(err) => status = err.to_string(),
-                                        }
-                                    }
-                                }
-                                _ => {}
-                            }
                             continue;
                         }
                         match key.code {
@@ -1170,7 +1070,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 }
                             }
                             KeyCode::Enter if project_picker.is_some() => {
-                                if let Some(picker) = project_picker.as_ref() {
+                                if let Some(picker) = project_picker.take() {
                                     if let Some(path) =
                                         project_paths(&sessions).get(picker.selected)
                                     {
@@ -1180,7 +1080,6 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                         {
                                             index = found;
                                             cached = None;
-                                            project_picker = None;
                                         }
                                     }
                                 }
@@ -1328,12 +1227,6 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                         pointer = Some((mouse.column, mouse.row));
                         match mouse.kind {
                             MouseEventKind::ScrollUp => {
-                                if let Some(picker) = folder_picker.as_mut() {
-                                    picker.scroll = picker.scroll.saturating_sub(1);
-                                    picker.selected =
-                                        picker.selected.saturating_sub(1).max(picker.scroll);
-                                    continue;
-                                }
                                 if git_dialog.is_some() {
                                     if let Some(dialog) = git_dialog.as_mut() {
                                         dialog.scroll = dialog.scroll.saturating_sub(3);
@@ -1355,16 +1248,6 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 }
                             }
                             MouseEventKind::ScrollDown => {
-                                if let Some(picker) = folder_picker.as_mut() {
-                                    let visible = 8usize;
-                                    picker.scroll = picker
-                                        .scroll
-                                        .saturating_add(1)
-                                        .min(picker.entries.len().saturating_sub(visible));
-                                    picker.selected =
-                                        picker.selected.saturating_add(1).max(picker.scroll);
-                                    continue;
-                                }
                                 if git_dialog.is_some() {
                                     if let Some(dialog) = git_dialog.as_mut() {
                                         dialog.scroll = dialog.scroll.saturating_add(3);
@@ -1459,35 +1342,6 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             }
                             MouseEventKind::Down(MouseButton::Left) => {
                                 let hit = hits.hit(mouse.column, mouse.row);
-                                if matches!(
-                                    hit,
-                                    Some(
-                                        view::Hit::TrafficClose
-                                            | view::Hit::TrafficMinimize
-                                            | view::Hit::TrafficOpenBrowser
-                                    )
-                                ) {
-                                    handle_traffic_light(
-                                        hit,
-                                        &mut folder_picker,
-                                        &mut project_picker,
-                                        &mut session_picker,
-                                        &mut mode_menu,
-                                        &mut tool_dialog,
-                                        &mut tool_detail_dialog,
-                                        &mut git_dialog,
-                                        &mut theme_dialog,
-                                        &mut add_provider_dialog,
-                                        &mut provider_dialog,
-                                        &mut context_dialog,
-                                        &mut passport_dialog,
-                                        &mut passport_browser_opened,
-                                        passport_url.as_deref(),
-                                        &mut cancel,
-                                        &mut status,
-                                    );
-                                    continue;
-                                }
                                 if let Some(view::Hit::ToolSummary(indices)) = hit.clone() {
                                     selecting_text = false;
                                     text_selection = None;
@@ -1554,6 +1408,8 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                             selected: 0,
                                             message: String::new(),
                                             editing_message: false,
+                                            generating_message: false,
+                                            syncing: false,
                                             excluded_files: Default::default(),
                                             scroll: 0,
                                             feedback: None,
@@ -1703,8 +1559,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     }
                                     continue;
                                 }
-                                let modal_open = folder_picker.is_some()
-                                    || project_picker.is_some()
+                                let modal_open = project_picker.is_some()
                                     || session_picker.is_some()
                                     || mode_menu.is_some()
                                     || theme_dialog.is_some()
@@ -1725,7 +1580,6 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 ) {
                                     handle_traffic_light(
                                         hit,
-                                        &mut folder_picker,
                                         &mut project_picker,
                                         &mut session_picker,
                                         &mut mode_menu,
@@ -1770,97 +1624,16 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     selecting_text = true;
                                     continue;
                                 }
-                                if matches!(hit, Some(view::Hit::FolderPickerRow(_)))
-                                    || matches!(
-                                        hit,
-                                        Some(
-                                            view::Hit::FolderPickerParent
-                                                | view::Hit::FolderPickerOpen
-                                        )
-                                    )
-                                {
-                                    selecting_text = false;
-                                    text_selection = None;
-                                }
-                                if matches!(hit, Some(view::Hit::FolderPickerParent)) {
-                                    if let Some(picker) = folder_picker.as_mut()
-                                        && let Some(parent) = picker.path.parent()
-                                    {
-                                        picker.path = parent.to_path_buf();
-                                        picker.entries = folder_entries(&picker.path);
-                                        picker.selected = 0;
-                                    }
-                                    continue;
-                                }
-                                if matches!(hit, Some(view::Hit::FolderPickerOpen)) {
-                                    if let Some(picker) = folder_picker.take() {
-                                        match create_session(
-                                            runtime,
-                                            &picker.path,
-                                            Mode::Code,
-                                            None,
-                                        ) {
-                                            Ok(id) => {
-                                                refresh_sessions(
-                                                    runtime,
-                                                    &mut sessions,
-                                                    &mut index,
-                                                );
-                                                index = sessions
-                                                    .iter()
-                                                    .position(|item| item.id == id)
-                                                    .unwrap_or(0);
-                                                cached = None;
-                                                status = format!(
-                                                    "已打开项目：{}",
-                                                    picker.path.display()
-                                                );
-                                            }
-                                            Err(err) => status = err.to_string(),
-                                        }
-                                    }
-                                    continue;
-                                }
-                                if let Some(view::Hit::FolderPickerRow(selected)) = hit {
-                                    selecting_text = false;
-                                    text_selection = None;
-                                    if let Some(picker) = folder_picker.as_mut() {
-                                        if selected == 0 {
-                                            if let Some(parent) = picker.path.parent() {
-                                                picker.path = parent.to_path_buf();
-                                                picker.entries = folder_entries(&picker.path);
-                                                picker.selected = 0;
-                                                picker.scroll = 0;
-                                            }
-                                        } else if let Some(path) =
-                                            picker.entries.get(selected).cloned()
-                                        {
-                                            picker.path = path;
-                                            picker.entries = folder_entries(&picker.path);
-                                            picker.selected = 0;
-                                            picker.scroll = 0;
-                                        }
-                                    }
-                                    continue;
-                                }
-                                if matches!(hit, Some(view::Hit::OpenNewProject)) {
-                                    folder_picker = Some(open_folder_picker(workspace));
-                                    project_picker = None;
-                                    continue;
-                                }
                                 if let Some(view::Hit::ProjectPickerRow(project_index)) = hit {
-                                    selecting_text = false;
-                                    text_selection = None;
-                                    if let Some(picker) = project_picker.as_mut() {
-                                        picker.selected = project_index;
-                                    }
                                     if let Some(path) = project_paths(&sessions).get(project_index)
-                                        && let Some(found) = sessions
+                                    {
+                                        if let Some(found) = sessions
                                             .iter()
                                             .position(|session| &session.workspace_path == path)
-                                    {
-                                        index = found;
-                                        cached = None;
+                                        {
+                                            index = found;
+                                            cached = None;
+                                        }
                                     }
                                     project_picker = None;
                                     continue;
@@ -2301,49 +2074,14 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     result
 }
 
-fn folder_entries(path: &Path) -> Vec<PathBuf> {
-    let mut entries = vec![PathBuf::from("..")];
-    if let Ok(read_dir) = std::fs::read_dir(path) {
-        let mut children: Vec<PathBuf> = read_dir
-            .filter_map(std::result::Result::ok)
-            .filter_map(|entry| {
-                let path = entry.path();
-                path.is_dir().then_some(path)
-            })
-            .collect();
-        children.sort_by_key(|path| path.file_name().map(|name| name.to_os_string()));
-        entries.extend(children);
-    }
-    entries
-}
-
-fn open_folder_picker(workspace: &Path) -> view::FolderPicker {
-    let path = std::env::current_dir().unwrap_or_else(|_| workspace.to_path_buf());
-    view::FolderPicker {
-        entries: folder_entries(&path),
-        path,
-        selected: 0,
-        scroll: 0,
-        fullscreen: false,
-        minimized: false,
-    }
-}
-
 fn refresh_sessions(
     runtime: &Runtime,
     sessions: &mut Vec<blora_storage::SessionSummary>,
     index: &mut usize,
 ) {
-    let selected_id = sessions.get(*index).map(|session| session.id.clone());
     if let Ok(list) = runtime.list_sessions() {
         *sessions = list;
-        if let Some(selected_id) = selected_id
-            && let Some(selected_index) = sessions
-                .iter()
-                .position(|session| session.id == selected_id)
-        {
-            *index = selected_index;
-        } else if sessions.is_empty() {
+        if sessions.is_empty() {
             *index = 0;
         } else if *index >= sessions.len() {
             *index = sessions.len() - 1;
@@ -4077,7 +3815,6 @@ fn git_tracking_count(status: &str, label: &str) -> usize {
 
 fn handle_traffic_light(
     hit: Option<view::Hit>,
-    folder_picker: &mut Option<view::FolderPicker>,
     project_picker: &mut Option<view::ProjectPicker>,
     session_picker: &mut Option<view::SessionPicker>,
     mode_menu: &mut Option<view::ModeMenu>,
@@ -4096,9 +3833,7 @@ fn handle_traffic_light(
 ) {
     match hit {
         Some(view::Hit::TrafficClose) => {
-            if folder_picker.take().is_some() {
-                *status = "文件夹选择器已关闭".to_owned();
-            } else if project_picker.take().is_some() {
+            if project_picker.take().is_some() {
                 *status = "项目选择器已关闭".to_owned();
             } else if session_picker.take().is_some() {
                 *status = "会话选择器已关闭".to_owned();
@@ -4126,10 +3861,7 @@ fn handle_traffic_light(
             }
         }
         Some(view::Hit::TrafficMinimize) => {
-            if let Some(dialog) = folder_picker.as_mut() {
-                dialog.minimized = true;
-                dialog.fullscreen = false;
-            } else if let Some(dialog) = project_picker.as_mut() {
+            if let Some(dialog) = project_picker.as_mut() {
                 dialog.minimized = true;
                 dialog.fullscreen = false;
             } else if let Some(dialog) = session_picker.as_mut() {
@@ -4161,13 +3893,7 @@ fn handle_traffic_light(
             }
         }
         Some(view::Hit::TrafficOpenBrowser) => {
-            if let Some(dialog) = folder_picker.as_mut() {
-                if dialog.minimized {
-                    dialog.minimized = false;
-                } else {
-                    dialog.fullscreen = !dialog.fullscreen;
-                }
-            } else if let Some(dialog) = project_picker.as_mut() {
+            if let Some(dialog) = project_picker.as_mut() {
                 if dialog.minimized {
                     dialog.minimized = false;
                 } else {
@@ -4312,15 +4038,7 @@ fn read_clipboard_image_preview() -> Option<(String, usize)> {
     std::fs::write(&temp, &bytes).ok()?;
     let preview = std::process::Command::new("convert")
         .arg(&temp)
-        .args([
-            "-resize",
-            "48x18!",
-            "-colorspace",
-            "Gray",
-            "-contrast-stretch",
-            "2%x2%",
-            "txt:-",
-        ])
+        .args(["-resize", "48x18", "txt:-"])
         .output()
         .ok()
         .and_then(|output| {
@@ -4336,7 +4054,7 @@ fn read_clipboard_image_preview() -> Option<(String, usize)> {
 }
 
 fn ascii_image_preview(text: &str) -> String {
-    let shades: Vec<char> = "@%#*+=-:. ".chars().collect();
+    let shades: Vec<char> = " .:-=+*#%@".chars().collect();
     let mut pixels = Vec::new();
     let mut width = 0usize;
     let mut height = 0usize;
@@ -4372,21 +4090,14 @@ fn ascii_image_preview(text: &str) -> String {
                 })
             })
             .collect();
-        if channels.len() >= 1 {
-            let gray = channels[0];
-            let pixel = if channels.len() >= 3 {
-                let luminance = (u32::from(channels[0]) * 299
-                    + u32::from(channels[1]) * 587
-                    + u32::from(channels[2]) * 114)
-                    / 1000;
-                luminance as u8
-            } else {
-                gray
-            };
+        if channels.len() == 3 {
             width = width.max(x + 1);
             height = height.max(y + 1);
-            let index =
-                (255usize.saturating_sub(u32::from(pixel) as usize)) * (shades.len() - 1) / 255;
+            let luminance = (u32::from(channels[0]) * 299
+                + u32::from(channels[1]) * 587
+                + u32::from(channels[2]) * 114)
+                / 1000;
+            let index = luminance as usize * (shades.len() - 1) / 255;
             pixels.push((x, y, shades[index]));
         }
     }

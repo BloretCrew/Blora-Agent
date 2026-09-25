@@ -50,9 +50,14 @@ fn is_passport_alias(name: &str) -> bool {
 }
 
 fn env_has_provider_key() -> bool {
-    ["BLORA_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY"]
-        .iter()
-        .any(|key| std::env::var(key).is_ok_and(|value| !value.trim().is_empty()))
+    [
+        "BLORA_API_KEY",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "GEMINI_API_KEY",
+    ]
+    .iter()
+    .any(|key| std::env::var(key).is_ok_and(|value| !value.trim().is_empty()))
 }
 
 /// Resolve the provider chain for an optional logged-in PassPort user.

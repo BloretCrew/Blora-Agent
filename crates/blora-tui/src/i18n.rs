@@ -32,10 +32,12 @@ pub fn init() -> String {
             );
         }
     }
-    let catalog = CATALOG.get_or_init(|| RwLock::new(Catalog {
-        locale: "zh-CN".to_owned(),
-        values: embedded_source(),
-    }));
+    let catalog = CATALOG.get_or_init(|| {
+        RwLock::new(Catalog {
+            locale: "zh-CN".to_owned(),
+            values: embedded_source(),
+        })
+    });
     if let Ok(mut current) = catalog.write() {
         current.locale = locale.clone();
         current.values = values;
@@ -55,7 +57,12 @@ pub fn locale() -> String {
 pub fn tr(key: &str, fallback: &str) -> String {
     CATALOG
         .get()
-        .and_then(|catalog| catalog.read().ok().and_then(|value| value.values.get(key).cloned()))
+        .and_then(|catalog| {
+            catalog
+                .read()
+                .ok()
+                .and_then(|value| value.values.get(key).cloned())
+        })
         .unwrap_or_else(|| fallback.to_owned())
 }
 
@@ -113,8 +120,14 @@ mod tests {
     #[test]
     fn source_catalog_contains_stable_ui_keys() {
         let values = embedded_source();
-        assert_eq!(values.get("dialog.context_usage").map(String::as_str), Some("上下文用量"));
+        assert_eq!(
+            values.get("dialog.context_usage").map(String::as_str),
+            Some("上下文用量")
+        );
         assert_eq!(values.get("action.close").map(String::as_str), Some("关闭"));
-        assert_eq!(values.get("dialog.mode").map(String::as_str), Some("运行模式"));
+        assert_eq!(
+            values.get("dialog.mode").map(String::as_str),
+            Some("运行模式")
+        );
     }
 }

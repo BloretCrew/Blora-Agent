@@ -131,13 +131,12 @@ impl PassportConfig {
     }
 
     /// Exchange a refresh token for a new OAuth access token.
-    pub fn refresh_access_token(
-        &self,
-        refresh_token: &str,
-    ) -> Result<RefreshedToken, AuthError> {
+    pub fn refresh_access_token(&self, refresh_token: &str) -> Result<RefreshedToken, AuthError> {
         let refresh_token = refresh_token.trim();
         if refresh_token.is_empty() {
-            return Err(AuthError::Protocol("Passport refresh token is empty".to_owned()));
+            return Err(AuthError::Protocol(
+                "Passport refresh token is empty".to_owned(),
+            ));
         }
         let body = format!(
             "client_id={}&client_secret={}&grant_type={}&refresh_token={}",
@@ -164,7 +163,9 @@ impl PassportConfig {
             .get("access_token")
             .and_then(Value::as_str)
             .filter(|token| !token.is_empty())
-            .ok_or_else(|| AuthError::Protocol("Passport refresh response has no access_token".to_owned()))?;
+            .ok_or_else(|| {
+                AuthError::Protocol("Passport refresh response has no access_token".to_owned())
+            })?;
         Ok(RefreshedToken {
             access_token: access_token.to_owned(),
             refresh_token: value
@@ -361,7 +362,10 @@ fn parse_user(value: Value) -> Result<PassportUser, AuthError> {
         nickname: string_field(&value, "nickname"),
         avatar: string_field(&value, "avatar"),
         email: string_field(&value, "email"),
-        apptoken: first_string_field(&value, &["apptoken", "app_token", "usertoken", "user_token"]),
+        apptoken: first_string_field(
+            &value,
+            &["apptoken", "app_token", "usertoken", "user_token"],
+        ),
         refresh_token: None,
         expires_in: None,
     })
