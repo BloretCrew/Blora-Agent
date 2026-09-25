@@ -302,6 +302,10 @@ pub struct GitDialog {
     pub info: GitStatusInfo,
     pub page: usize,
     pub selected: usize,
+    pub message: String,
+    pub editing_message: bool,
+    pub scroll: usize,
+    pub feedback: Option<String>,
     pub fullscreen: bool,
     pub minimized: bool,
 }
@@ -362,6 +366,9 @@ pub enum Hit {
     ToolDetailRow(usize),
     GitStatus,
     GitTab(usize),
+    GitMessage,
+    GitCommit,
+    GitFile(usize),
     GitRow(usize),
     GitAction(usize),
     Composer,
@@ -439,6 +446,9 @@ pub struct HitMap {
     pub context_usage: Option<Rect>,
     pub git_status: Option<Rect>,
     pub git_tabs: Vec<(Rect, usize)>,
+    pub git_message: Option<Rect>,
+    pub git_commit: Option<Rect>,
+    pub git_files: Vec<(Rect, usize)>,
     pub git_rows: Vec<(Rect, usize)>,
     pub git_actions: Vec<(Rect, usize)>,
     pub hints: Vec<(Rect, HintAction)>,
@@ -484,6 +494,20 @@ impl HitMap {
         for (rect, idx) in &self.git_tabs {
             if contains(*rect, col, row) {
                 return Some(Hit::GitTab(*idx));
+            }
+        }
+        if self
+            .git_message
+            .is_some_and(|rect| contains(rect, col, row))
+        {
+            return Some(Hit::GitMessage);
+        }
+        if self.git_commit.is_some_and(|rect| contains(rect, col, row)) {
+            return Some(Hit::GitCommit);
+        }
+        for (rect, idx) in &self.git_files {
+            if contains(*rect, col, row) {
+                return Some(Hit::GitFile(*idx));
             }
         }
         for (rect, idx) in &self.git_rows {
@@ -963,6 +987,9 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
         let dialog_hits = render_git_dialog(frame, area, dialog, model.pointer, &theme);
         hits.traffic_lights = dialog_hits.traffic_lights;
         hits.git_tabs = dialog_hits.git_tabs;
+        hits.git_message = dialog_hits.git_message;
+        hits.git_commit = dialog_hits.git_commit;
+        hits.git_files = dialog_hits.git_files;
         hits.git_rows = dialog_hits.git_rows;
         hits.git_actions = dialog_hits.git_actions;
     } else if let Some(dialog) = model.tool_detail_dialog {
@@ -2890,40 +2917,151 @@ fn render_git_dialog(
                 body,
             );
         }
-        _ => {
-            let actions = [
-                "刷新 Git 状态",
-                "暂存全部修改",
-                "取消暂存全部",
-                "提交（需要输入说明）",
-            ];
-            for (index, action) in actions.iter().enumerate() {
-                let rect = Rect::new(body.x, body.y + index as u16, body.width, 1);
-                hits.git_actions.push((rect, index));
-                frame.render_widget(
-                    Paragraph::new(Line::from(Span::styled(
-                        format!(
-                            "{}  {}",
-                            if dialog.selected == index { "❯" } else { " " },
-                            action
-                        ),
-                        theme.fg(theme.text),
-                    )))
-                    .style(theme.base()),
-                    rect,
-                );
-            }
-        }
+        _ => render_git_commit_page(frame, body, dialog, theme, &mut hits),
     }
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            "←/→ 分页 · ↑/↓ 选择 · Enter 执行 · Esc 关闭",
+            if dialog.page == 2 {
+                "点击消息输入 · 点击文件暂存 · ↑/↓ 选择 · 空格切换 · Enter 提交 · Esc 关闭"
+            } else {
+                "←/→ 分页 · Esc 关闭"
+            },
             theme.mute(),
         )))
         .style(theme.base()),
         hint_row,
     );
     hits
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GitChangedFile {
+    pub path: String,
+    pub status: String,
+    pub staged: bool,
+}
+
+pub fn git_changed_files(raw: &str) -> Vec<GitChangedFile> {
+    raw.lines()
+        .skip(1)
+        .filter_map(|line| {
+            let status = line.get(..2)?.to_owned();
+            let path = line.get(3..)?.to_owned();
+            if path.is_empty() || status == "!!" {
+                return None;
+            }
+            Some(GitChangedFile {
+                staged: status.as_bytes()[0] != b' ' && status.as_bytes()[0] != b'?',
+                path,
+                status,
+            })
+        })
+        .collect()
+}
+
+fn render_git_commit_page(
+    frame: &mut Frame<'_>,
+    body: Rect,
+    dialog: &GitDialog,
+    theme: &Theme,
+    hits: &mut HitMap,
+) {
+    if body.height < 5 || body.width < 20 {
+        return;
+    }
+    let message = Rect::new(body.x + 1, body.y + 1, body.width.saturating_sub(2), 1);
+    let commit = Rect::new(message.x, body.y + 3, message.width, 1);
+    hits.git_message = Some(message);
+    hits.git_commit = Some(commit);
+    let message_text = if dialog.message.is_empty() {
+        format!(
+            "提交消息（在 {} 上提交）",
+            dialog
+                .info
+                .raw
+                .lines()
+                .next()
+                .unwrap_or("当前分支")
+                .trim_start_matches("## ")
+        )
+    } else {
+        dialog.message.clone()
+    };
+    frame.render_widget(
+        Paragraph::new(format!(
+            " {}{}",
+            message_text,
+            if dialog.editing_message { "▏" } else { "" }
+        ))
+        .style(
+            theme
+                .fg(if dialog.message.is_empty() {
+                    theme.text_dim
+                } else {
+                    theme.text
+                })
+                .bg(theme.bg_raised),
+        ),
+        message,
+    );
+    let files = git_changed_files(&dialog.info.raw);
+    let staged = files.iter().filter(|file| file.staged).count();
+    let commit_style = if staged > 0 && !dialog.message.trim().is_empty() {
+        theme
+            .fg(theme.bg)
+            .bg(theme.sage)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        theme.fg(theme.text_dim).bg(theme.bg_raised)
+    };
+    frame.render_widget(
+        Paragraph::new(format!(" ✓ 提交已暂存的更改 ({staged})")).style(commit_style),
+        commit,
+    );
+    let summary = Rect::new(message.x, body.y + 5, message.width, 1);
+    if summary.y >= body.bottom() {
+        return;
+    }
+    frame.render_widget(
+        Paragraph::new(format!(
+            "更改 {}  ·  已暂存 {}  ·  空格切换暂存",
+            files.len(),
+            staged
+        ))
+        .style(theme.fg(theme.text_dim).add_modifier(Modifier::BOLD)),
+        summary,
+    );
+    if files.is_empty() {
+        let row = Rect::new(message.x, summary.y + 1, message.width, 1);
+        frame.render_widget(
+            Paragraph::new("  工作区没有待提交的更改").style(theme.mute()),
+            row,
+        );
+    }
+    let visible = body
+        .bottom()
+        .saturating_sub(summary.y + if dialog.feedback.is_some() { 2 } else { 1 })
+        as usize;
+    let scroll = dialog.scroll.min(files.len().saturating_sub(visible));
+    for (offset, file) in files.iter().enumerate().skip(scroll).take(visible) {
+        let y = summary.y + 1 + (offset - scroll) as u16;
+        let row = Rect::new(message.x, y, message.width, 1);
+        hits.git_files.push((row, offset));
+        let status = if file.staged { "●" } else { "○" };
+        let text = format!(" {}  {}  {}", status, file.status, file.path);
+        let style = if dialog.selected == offset && !dialog.editing_message {
+            theme.fg(theme.text).bg(theme.bg_select)
+        } else {
+            theme.fg(theme.text)
+        };
+        frame.render_widget(Paragraph::new(text).style(style), row);
+    }
+    if let Some(feedback) = &dialog.feedback {
+        frame.render_widget(
+            Paragraph::new(feedback.as_str()).style(theme.fg(theme.amber)),
+            Rect::new(message.x, body.bottom() - 1, message.width, 1),
+        );
+    }
 }
 
 fn git_graph_lines(log: &str) -> Vec<Line<'static>> {
@@ -3916,6 +4054,52 @@ mod tests {
     }
 
     #[test]
+    fn git_commit_page_renders_files_and_click_targets() {
+        let area = Rect::new(0, 0, 110, 30);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        let dialog = GitDialog {
+            info: GitStatusInfo {
+                branch: "main".into(),
+                added: 2,
+                removed: 0,
+                ahead: 0,
+                behind: 0,
+                stashes: 0,
+                clean: false,
+                raw: "## main\nM  src/main.rs\n M src/view.rs\n?? notes.txt".into(),
+                diff: String::new(),
+                log: String::new(),
+            },
+            page: 2,
+            selected: 0,
+            message: "修复界面".into(),
+            editing_message: false,
+            scroll: 0,
+            feedback: None,
+            fullscreen: false,
+            minimized: false,
+        };
+        let mut hits = HitMap::default();
+        terminal
+            .draw(|frame| {
+                hits = render_git_dialog(frame, area, &dialog, None, &Theme::current());
+            })
+            .unwrap();
+        let message = hits.git_message.unwrap();
+        let commit = hits.git_commit.unwrap();
+        assert_eq!(hits.hit(message.x, message.y), Some(Hit::GitMessage));
+        assert_eq!(hits.hit(commit.x, commit.y), Some(Hit::GitCommit));
+        assert_eq!(hits.git_files.len(), 3);
+        for (row, index) in &hits.git_files {
+            assert_eq!(hits.hit(row.x, row.y), Some(Hit::GitFile(*index)));
+        }
+        let files = git_changed_files(&dialog.info.raw);
+        assert!(files[0].staged);
+        assert!(!files[1].staged);
+        assert!(!files[2].staged);
+    }
+
+    #[test]
     fn git_dialog_preserves_background_and_exposes_traffic_lights() {
         let area = Rect::new(0, 0, 110, 30);
         let backend = TestBackend::new(area.width, area.height);
@@ -3935,6 +4119,10 @@ mod tests {
             },
             page: 0,
             selected: 0,
+            message: String::new(),
+            editing_message: false,
+            scroll: 0,
+            feedback: None,
             fullscreen: false,
             minimized: false,
         };

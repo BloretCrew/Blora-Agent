@@ -349,6 +349,16 @@ impl Runtime {
         })
     }
 
+    pub fn git_stage(&self, path: &std::path::Path, file: &str, stage: bool) -> Result<()> {
+        let backend = LocalBackend::new(Policy::new(path, true)?);
+        backend.git_stage(file, stage)
+    }
+
+    pub fn git_commit(&self, path: &std::path::Path, message: &str) -> Result<String> {
+        let backend = LocalBackend::new(Policy::new(path, true)?);
+        backend.git_commit(message)
+    }
+
     pub fn list_sessions(&self) -> Result<Vec<SessionSummary>> {
         self.store.list_sessions()
     }
