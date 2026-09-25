@@ -305,6 +305,7 @@ pub struct GitDialog {
     pub message: String,
     pub editing_message: bool,
     pub generating_message: bool,
+    pub syncing: bool,
     pub scroll: usize,
     pub feedback: Option<String>,
     pub fullscreen: bool,
@@ -369,6 +370,7 @@ pub enum Hit {
     GitTab(usize),
     GitMessage,
     GitGenerate,
+    GitPrimary,
     GitCommit,
     GitFile(usize),
     GitRow(usize),
@@ -450,6 +452,7 @@ pub struct HitMap {
     pub git_tabs: Vec<(Rect, usize)>,
     pub git_message: Option<Rect>,
     pub git_generate: Option<Rect>,
+    pub git_primary: Option<Rect>,
     pub git_commit: Option<Rect>,
     pub git_files: Vec<(Rect, usize)>,
     pub git_rows: Vec<(Rect, usize)>,
@@ -510,6 +513,12 @@ impl HitMap {
             .is_some_and(|rect| contains(rect, col, row))
         {
             return Some(Hit::GitGenerate);
+        }
+        if self
+            .git_primary
+            .is_some_and(|rect| contains(rect, col, row))
+        {
+            return Some(Hit::GitPrimary);
         }
         if self.git_commit.is_some_and(|rect| contains(rect, col, row)) {
             return Some(Hit::GitCommit);
@@ -998,6 +1007,7 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
         hits.git_tabs = dialog_hits.git_tabs;
         hits.git_message = dialog_hits.git_message;
         hits.git_generate = dialog_hits.git_generate;
+        hits.git_primary = dialog_hits.git_primary;
         hits.git_commit = dialog_hits.git_commit;
         hits.git_files = dialog_hits.git_files;
         hits.git_rows = dialog_hits.git_rows;
@@ -2970,6 +2980,49 @@ pub fn git_changed_files(raw: &str) -> Vec<GitChangedFile> {
         .collect()
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GitPrimaryAction {
+    Commit(usize),
+    Pull,
+    Push,
+    None,
+}
+
+pub fn git_primary_action(info: &GitStatusInfo) -> GitPrimaryAction {
+    let count = git_changed_files(&info.raw).len();
+    if count > 0 {
+        GitPrimaryAction::Commit(count)
+    } else if info.behind > 0 {
+        GitPrimaryAction::Pull
+    } else if info.ahead > 0 {
+        GitPrimaryAction::Push
+    } else {
+        GitPrimaryAction::None
+    }
+}
+
+fn git_primary_label(info: &GitStatusInfo) -> String {
+    let counts = format!(
+        "{}{}",
+        if info.ahead > 0 {
+            format!(" ↑{}", info.ahead)
+        } else {
+            String::new()
+        },
+        if info.behind > 0 {
+            format!(" ↓{}", info.behind)
+        } else {
+            String::new()
+        },
+    );
+    match git_primary_action(info) {
+        GitPrimaryAction::Commit(count) => format!("提交 {count} 个更改"),
+        GitPrimaryAction::Pull => format!("拉取{counts}"),
+        GitPrimaryAction::Push => format!("推送{counts}"),
+        GitPrimaryAction::None => "已同步".to_owned(),
+    }
+}
+
 fn render_git_commit_page(
     frame: &mut Frame<'_>,
     body: Rect,
@@ -2982,10 +3035,18 @@ fn render_git_commit_page(
         return;
     }
     let message = Rect::new(body.x + 1, body.y + 1, body.width.saturating_sub(2), 1);
-    let generate = Rect::new(message.x, body.y + 2, message.width, 1);
+    let left_width = message.width / 2;
+    let generate = Rect::new(message.x, body.y + 2, left_width.saturating_sub(1), 1);
+    let primary = Rect::new(
+        message.x + left_width,
+        body.y + 2,
+        message.width - left_width,
+        1,
+    );
     let commit = Rect::new(message.x, body.y + 4, message.width, 1);
     hits.git_message = Some(message);
     hits.git_generate = Some(generate);
+    hits.git_primary = Some(primary);
     hits.git_commit = Some(commit);
     let message_text = if dialog.message.is_empty() {
         format!(
@@ -3027,6 +3088,20 @@ fn render_git_commit_page(
         Paragraph::new(generate_label).style(theme.fg(theme.sage).bg(theme.bg_raised)),
         generate,
     );
+    let primary_label = if dialog.syncing {
+        format!(" {} 正在同步…", spinner(tick))
+    } else {
+        format!(" {}", git_primary_label(&dialog.info))
+    };
+    let primary_style = if matches!(git_primary_action(&dialog.info), GitPrimaryAction::None) {
+        theme.fg(theme.text_dim).bg(theme.bg_raised)
+    } else {
+        theme
+            .fg(theme.text)
+            .bg(theme.bg_select)
+            .add_modifier(Modifier::BOLD)
+    };
+    frame.render_widget(Paragraph::new(primary_label).style(primary_style), primary);
     let files = git_changed_files(&dialog.info.raw);
     let staged = files.iter().filter(|file| file.staged).count();
     let commit_style = if staged > 0 && !dialog.message.trim().is_empty() {
@@ -4077,6 +4152,40 @@ mod tests {
     }
 
     #[test]
+    fn git_primary_button_matches_changes_and_tracking_status() {
+        let mut info = GitStatusInfo {
+            branch: "main".into(),
+            added: 0,
+            removed: 0,
+            ahead: 5,
+            behind: 6,
+            stashes: 0,
+            clean: true,
+            raw: "## main...origin/main [ahead 5, behind 6]".into(),
+            diff: String::new(),
+            log: String::new(),
+        };
+        assert_eq!(git_primary_action(&info), GitPrimaryAction::Pull);
+        assert_eq!(git_primary_label(&info), "拉取 ↑5 ↓6");
+        info.ahead = 0;
+        info.behind = 7;
+        assert_eq!(git_primary_label(&info), "拉取 ↓7");
+        info.ahead = 5;
+        info.behind = 0;
+        assert_eq!(git_primary_action(&info), GitPrimaryAction::Push);
+        assert_eq!(git_primary_label(&info), "推送 ↑5");
+        info.behind = 6;
+        info.raw.push_str("\n M file.rs\n?? notes.txt");
+        assert_eq!(git_primary_action(&info), GitPrimaryAction::Commit(2));
+        assert_eq!(git_primary_label(&info), "提交 2 个更改");
+        info.raw = "## main".into();
+        info.ahead = 0;
+        info.behind = 0;
+        assert_eq!(git_primary_action(&info), GitPrimaryAction::None);
+        assert_eq!(git_primary_label(&info), "已同步");
+    }
+
+    #[test]
     fn git_commit_page_renders_files_and_click_targets() {
         let area = Rect::new(0, 0, 110, 30);
         let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
@@ -4098,6 +4207,7 @@ mod tests {
             message: "修复界面".into(),
             editing_message: false,
             generating_message: false,
+            syncing: false,
             scroll: 0,
             feedback: None,
             fullscreen: false,
@@ -4111,9 +4221,12 @@ mod tests {
             .unwrap();
         let message = hits.git_message.unwrap();
         let generate = hits.git_generate.unwrap();
+        let primary = hits.git_primary.unwrap();
         let commit = hits.git_commit.unwrap();
         assert_eq!(hits.hit(message.x, message.y), Some(Hit::GitMessage));
         assert_eq!(hits.hit(generate.x, generate.y), Some(Hit::GitGenerate));
+        assert_eq!(hits.hit(primary.x, primary.y), Some(Hit::GitPrimary));
+        assert_eq!(primary.x, generate.right() + 1);
         assert_eq!(generate.y, message.y + 1);
         assert_eq!(hits.hit(commit.x, commit.y), Some(Hit::GitCommit));
         assert_eq!(hits.git_files.len(), 3);
@@ -4148,6 +4261,7 @@ mod tests {
             message: String::new(),
             editing_message: false,
             generating_message: true,
+            syncing: false,
             scroll: 0,
             feedback: None,
             fullscreen: false,
@@ -4209,6 +4323,7 @@ mod tests {
             message: String::new(),
             editing_message: false,
             generating_message: false,
+            syncing: false,
             scroll: 0,
             feedback: None,
             fullscreen: false,

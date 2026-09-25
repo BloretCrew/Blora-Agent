@@ -95,6 +95,8 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let (git_generation_tx, git_generation_rx) =
         std::sync::mpsc::channel::<(u64, String, Result<String>)>();
     let mut git_generation_id = 0u64;
+    let (git_sync_tx, git_sync_rx) = std::sync::mpsc::channel::<(u64, Result<String>)>();
+    let mut git_sync_id = 0u64;
     let mut mode_menu: Option<view::ModeMenu> = None;
     let mut project_picker: Option<view::ProjectPicker> = None;
     let mut folder_picker: Option<view::FolderPicker> = None;
@@ -172,6 +174,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let result = thread::scope(|scope| -> Result<()> {
         let mut job: Option<thread::ScopedJoinHandle<'_, Result<blora_types::RunId>>> = None;
         let mut git_generation: Option<thread::ScopedJoinHandle<'_, ()>> = None;
+        let mut git_sync: Option<thread::ScopedJoinHandle<'_, ()>> = None;
         loop {
             refresh_sessions(runtime, &mut sessions, &mut index);
             if let Some(receiver) = passport_receiver.as_ref()
@@ -395,7 +398,30 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                     let _ = handle.join();
                 }
             }
-            let wait_ms = if job.is_some() || git_generation.is_some() {
+            while let Ok((operation, result)) = git_sync_rx.try_recv() {
+                if operation != git_sync_id {
+                    continue;
+                }
+                if let Some(dialog) = git_dialog.as_mut() {
+                    dialog.syncing = false;
+                    dialog.feedback = Some(match result {
+                        Ok(_) => {
+                            if let Ok(info) = runtime.workspace_info(workspace) {
+                                dialog.info = parse_git_status(&info);
+                                git_status = Some(dialog.info.clone());
+                            }
+                            "同步完成".to_owned()
+                        }
+                        Err(error) => error.to_string(),
+                    });
+                }
+            }
+            if git_sync.as_ref().is_some_and(|handle| handle.is_finished()) {
+                if let Some(handle) = git_sync.take() {
+                    let _ = handle.join();
+                }
+            }
+            let wait_ms = if job.is_some() || git_generation.is_some() || git_sync.is_some() {
                 50
             } else {
                 200
@@ -1525,6 +1551,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 if matches!(hit, Some(view::Hit::GitStatus)) {
                                     if let Some(info) = git_status.clone() {
                                         git_generation_id = git_generation_id.wrapping_add(1);
+                                        git_sync_id = git_sync_id.wrapping_add(1);
                                         git_dialog = Some(view::GitDialog {
                                             info,
                                             page: 0,
@@ -1624,6 +1651,40 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                                             result,
                                                         ));
                                                     }));
+                                                }
+                                            }
+                                            Some(view::Hit::GitPrimary) => {
+                                                match view::git_primary_action(&dialog.info) {
+                                                    view::GitPrimaryAction::Commit(_) => {
+                                                        commit_git_dialog(
+                                                            runtime, workspace, dialog,
+                                                        );
+                                                        git_status = runtime
+                                                            .workspace_info(workspace)
+                                                            .ok()
+                                                            .map(|info| parse_git_status(&info));
+                                                    }
+                                                    view::GitPrimaryAction::Pull
+                                                    | view::GitPrimaryAction::Push
+                                                        if !dialog.syncing
+                                                            && git_sync.is_none() =>
+                                                    {
+                                                        let pull = matches!(
+                                                            view::git_primary_action(&dialog.info),
+                                                            view::GitPrimaryAction::Pull
+                                                        );
+                                                        dialog.syncing = true;
+                                                        dialog.feedback = None;
+                                                        git_sync_id = git_sync_id.wrapping_add(1);
+                                                        let id = git_sync_id;
+                                                        let sender = git_sync_tx.clone();
+                                                        git_sync = Some(scope.spawn(move || {
+                                                            let result =
+                                                                runtime.git_sync(workspace, pull);
+                                                            let _ = sender.send((id, result));
+                                                        }));
+                                                    }
+                                                    _ => {}
                                                 }
                                             }
                                             Some(view::Hit::GitCommit) => {

@@ -416,6 +416,11 @@ impl Runtime {
         Ok(message)
     }
 
+    pub fn git_sync(&self, path: &std::path::Path, pull: bool) -> Result<String> {
+        let backend = LocalBackend::new(Policy::new(path, true)?);
+        backend.git_sync(pull)
+    }
+
     pub fn git_commit(&self, path: &std::path::Path, message: &str) -> Result<String> {
         let backend = LocalBackend::new(Policy::new(path, true)?);
         backend.git_commit(message)

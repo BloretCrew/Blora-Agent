@@ -359,6 +359,31 @@ impl LocalBackend {
         self.git_mutate(&args).map(|_| ())
     }
 
+    pub fn git_sync(&self, pull: bool) -> Result<String> {
+        self.policy.require(self.policy.file_write(), "git_sync")?;
+        let upstream = self.git_mutate(&[
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ])?;
+        let upstream = upstream.trim();
+        let (remote, branch) = upstream
+            .split_once('/')
+            .ok_or_else(|| BloraError::Exec("无法识别当前分支的上游分支".to_owned()))?;
+        if pull {
+            let status = self.git_mutate(&["status", "--porcelain"])?;
+            if !status.trim().is_empty() {
+                return Err(BloraError::Exec(
+                    "工作区存在未提交更改，请先提交或暂存后拉取".to_owned(),
+                ));
+            }
+            self.git_mutate(&["pull", "--ff-only", "--", remote, branch])
+        } else {
+            self.git_mutate(&["push", "--", remote, &format!("HEAD:{branch}")])
+        }
+    }
+
     pub fn git_commit(&self, message: &str) -> Result<String> {
         self.policy
             .require(self.policy.file_write(), "git_commit")?;
@@ -625,6 +650,22 @@ impl ExecutionBackend for LocalBackend {
 mod tests {
     use super::*;
     use blora_policy::Policy;
+
+    #[test]
+    fn git_sync_requires_an_upstream() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(dir.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let backend = LocalBackend::new(Policy::new(dir.path(), true).unwrap());
+        assert!(backend.git_sync(true).is_err());
+        assert!(backend.git_sync(false).is_err());
+    }
 
     #[test]
     fn git_commit_context_includes_tracked_changes_and_untracked_names() {
