@@ -321,6 +321,12 @@ impl LocalBackend {
         self.git(&["branch", "-vv"])
     }
 
+    pub fn git_stashes(&self) -> Result<String> {
+        self.policy
+            .require(self.policy.file_read(), "git_stashes")?;
+        self.git(&["stash", "list", "--format=%gd"])
+    }
+
     pub fn git_worktree(&self, action: &str, path: Option<&str>) -> Result<String> {
         match action {
             "list" | "" => {

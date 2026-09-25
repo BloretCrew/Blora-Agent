@@ -56,6 +56,7 @@ pub struct WorkspaceInfo {
     pub git_diff: String,
     pub git_log: String,
     pub git_branch: String,
+    pub git_stashes: String,
 }
 
 #[derive(Clone, Debug)]
@@ -342,6 +343,7 @@ impl Runtime {
             git_diff: backend.git_diff().unwrap_or_else(|err| err.to_string()),
             git_log: backend.git_log().unwrap_or_else(|err| err.to_string()),
             git_branch: backend.git_branch().unwrap_or_else(|err| err.to_string()),
+            git_stashes: backend.git_stashes().unwrap_or_else(|err| err.to_string()),
         })
     }
 

@@ -3670,14 +3670,58 @@ fn parse_git_status(info: &blora_runtime::WorkspaceInfo) -> view::GitStatusInfo 
             }
         }
     }
+    let status_line = info.git_status.lines().next().unwrap_or("");
+    let ahead = git_tracking_count(status_line, "ahead ");
+    let behind = git_tracking_count(status_line, "behind ");
+    let stashes = info
+        .git_stashes
+        .lines()
+        .filter(|line| line.starts_with("stash@{"))
+        .count();
+    let clean =
+        status_line.starts_with("## ") && info.git_status.lines().skip(1).all(str::is_empty);
     view::GitStatusInfo {
         branch,
         added,
         removed,
+        ahead,
+        behind,
+        stashes,
+        clean,
         raw: info.git_status.clone(),
         diff: info.git_diff.clone(),
         log: info.git_log.clone(),
     }
+}
+
+#[cfg(test)]
+mod git_status_tests {
+    use super::*;
+
+    #[test]
+    fn parses_clean_tracking_and_stash_counts() {
+        let info = blora_runtime::WorkspaceInfo {
+            git_status: "## main...origin/main [ahead 5, behind 2]".into(),
+            git_stashes: "stash@{0}\nstash@{1}".into(),
+            ..Default::default()
+        };
+        let status = parse_git_status(&info);
+        assert!(status.clean);
+        assert_eq!((status.ahead, status.behind, status.stashes), (5, 2, 2));
+        let dirty = blora_runtime::WorkspaceInfo {
+            git_status: "## main...origin/main [ahead 5]\n M src/lib.rs".into(),
+            ..Default::default()
+        };
+        assert!(!parse_git_status(&dirty).clean);
+    }
+}
+
+fn git_tracking_count(status: &str, label: &str) -> usize {
+    status
+        .split_once(label)
+        .and_then(|(_, rest)| rest.split(|ch: char| !ch.is_ascii_digit()).next())
+        .and_then(|number| number.parse().ok())
+        .unwrap_or(0)
 }
 
 fn handle_traffic_light(

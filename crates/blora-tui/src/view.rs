@@ -288,6 +288,10 @@ pub struct GitStatusInfo {
     pub branch: String,
     pub added: usize,
     pub removed: usize,
+    pub ahead: usize,
+    pub behind: usize,
+    pub stashes: usize,
+    pub clean: bool,
     pub raw: String,
     pub diff: String,
     pub log: String,
@@ -1104,6 +1108,25 @@ fn paint_traffic_title(
     );
 }
 
+fn git_indicator_text(status: &GitStatusInfo) -> String {
+    if status.clean {
+        format!("↑{} ↓{} ⍟{}", status.ahead, status.behind, status.stashes)
+    } else {
+        format!("+{}-{}", status.added, status.removed)
+    }
+}
+
+fn git_header_rect(inner: Rect, context: Rect, text_width: usize) -> Option<Rect> {
+    let width = u16::try_from(text_width).ok()?;
+    let x = context.x.checked_sub(width.checked_add(2)?)?;
+    (x >= inner.x && width > 0).then_some(Rect {
+        x,
+        y: inner.y,
+        width,
+        height: 1,
+    })
+}
+
 fn render_header(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -1141,9 +1164,7 @@ fn render_header(
     let mode_count = mode_session_indices.len().max(1);
     let counter = format!("{mode_position}/{mode_count}");
     let mode_title = mode_label(mode);
-    let git_text = model
-        .git_status
-        .map(|status| format!("+{}-{}", status.added, status.removed));
+    let git_text = model.git_status.map(git_indicator_text);
     let left = Line::from(vec![
         Span::styled("Blora", theme.rose_bold()),
         Span::styled("  ·  ", theme.mute()),
@@ -1157,27 +1178,6 @@ fn render_header(
         Span::styled("  ·  ", theme.mute()),
         Span::styled(ellipsize(display_title, 28), theme.fg(theme.text_dim)),
     ]);
-    if let Some(git_text) = git_text {
-        let git_x = inner
-            .right()
-            .saturating_sub(u16::try_from(git_text.width() + 1).unwrap_or(6));
-        hits.git_status = Some(Rect {
-            x: git_x,
-            y: inner.y,
-            width: u16::try_from(git_text.width()).unwrap_or(5),
-            height: 1,
-        });
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(git_text, theme.fg(theme.sage))))
-                .style(theme.base()),
-            Rect {
-                x: git_x,
-                y: inner.y,
-                width: inner.right().saturating_sub(git_x),
-                height: 1,
-            },
-        );
-    }
     let project_start = inner.x
         + u16::try_from(
             "Blora".width()
@@ -1255,17 +1255,8 @@ fn render_header(
     if width == 0 {
         return;
     }
-    let right_edge = model
-        .git_status
-        .map(|status| {
-            let git_width = format!("+{}-{}", status.added, status.removed).width() as u16;
-            inner.right().saturating_sub(git_width.saturating_add(1))
-        })
-        .unwrap_or(inner.right());
-    let available_width = right_edge.saturating_sub(inner.x);
-    let width = width.min(available_width);
     let rect = Rect {
-        x: right_edge.saturating_sub(width),
+        x: inner.right().saturating_sub(width),
         y: inner.y,
         width,
         height: 1,
@@ -1276,6 +1267,16 @@ fn render_header(
         hits.context_usage = Some(rect);
     }
     frame.render_widget(Paragraph::new(right).style(theme.base()), rect);
+    if let Some(git_text) = git_text {
+        if let Some(git_rect) = git_header_rect(inner, rect, git_text.width()) {
+            hits.git_status = Some(git_rect);
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(git_text, theme.fg(theme.sage))))
+                    .style(theme.base()),
+                git_rect,
+            );
+        }
+    }
 }
 
 fn render_context_dialog(
@@ -3900,6 +3901,36 @@ mod tests {
             older.iter().map(ToString::to_string).collect::<Vec<_>>(),
             vec!["3", "4", "5", "6"]
         );
+    }
+
+    #[test]
+    fn git_indicator_shows_tracking_counts_for_clean_workspace() {
+        let mut status = GitStatusInfo {
+            branch: String::new(),
+            added: 0,
+            removed: 0,
+            ahead: 5,
+            behind: 2,
+            stashes: 2,
+            clean: true,
+            raw: String::new(),
+            diff: String::new(),
+            log: String::new(),
+        };
+        assert_eq!(git_indicator_text(&status), "↑5 ↓2 ⍟2");
+        status.clean = false;
+        status.added = 3;
+        status.removed = 1;
+        assert_eq!(git_indicator_text(&status), "+3-1");
+    }
+
+    #[test]
+    fn git_indicator_stays_left_of_context_with_gap() {
+        let inner = Rect::new(2, 0, 76, 1);
+        let context = Rect::new(65, 0, 13, 1);
+        let git = git_header_rect(inner, context, "↑5 ↓2 ⍟2".width()).unwrap();
+        assert_eq!(context.x - git.right(), 2);
+        assert!(git_header_rect(Rect::new(2, 0, 15, 1), Rect::new(4, 0, 13, 1), 8).is_none());
     }
 
     #[test]
