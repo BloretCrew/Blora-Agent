@@ -12,10 +12,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Flex, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{
-    Block, Clear, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation,
-    ScrollbarState,
-};
+use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::i18n;
@@ -256,16 +253,6 @@ pub struct ProjectPicker {
 }
 
 #[derive(Clone, Debug)]
-pub struct FolderPicker {
-    pub path: std::path::PathBuf,
-    pub entries: Vec<std::path::PathBuf>,
-    pub selected: usize,
-    pub scroll: usize,
-    pub fullscreen: bool,
-    pub minimized: bool,
-}
-
-#[derive(Clone, Debug)]
 pub struct SessionPicker {
     pub selected: usize,
     pub fullscreen: bool,
@@ -353,7 +340,6 @@ pub struct FrameModel<'a> {
     pub provider: &'a str,
     pub mode_menu: Option<&'a ModeMenu>,
     pub project_picker: Option<&'a ProjectPicker>,
-    pub folder_picker: Option<&'a FolderPicker>,
     pub session_picker: Option<&'a SessionPicker>,
     pub git_dialog: Option<&'a GitDialog>,
     pub git_status: Option<&'a GitStatusInfo>,
@@ -380,10 +366,6 @@ pub enum Hit {
     PrevSession,
     NextSession,
     ProjectPicker,
-    OpenNewProject,
-    FolderPickerRow(usize),
-    FolderPickerParent,
-    FolderPickerOpen,
     ProjectPickerRow(usize),
     SessionPicker,
     SessionPickerRow(usize),
@@ -441,10 +423,6 @@ pub struct HitMap {
     pub prev_session: Option<Rect>,
     pub next_session: Option<Rect>,
     pub project_picker: Option<Rect>,
-    pub open_new_project: Option<Rect>,
-    pub folder_picker_rows: Vec<(Rect, usize)>,
-    pub folder_picker_parent: Option<Rect>,
-    pub folder_picker_open: Option<Rect>,
     pub project_picker_rows: Vec<(Rect, usize)>,
     pub session_picker: Option<Rect>,
     pub session_picker_rows: Vec<(Rect, usize)>,
@@ -545,29 +523,6 @@ impl HitMap {
                 return Some(Hit::ModeRow(*idx));
             }
         }
-        if self
-            .open_new_project
-            .is_some_and(|rect| contains(rect, col, row))
-        {
-            return Some(Hit::OpenNewProject);
-        }
-        if self
-            .folder_picker_parent
-            .is_some_and(|rect| contains(rect, col, row))
-        {
-            return Some(Hit::FolderPickerParent);
-        }
-        if self
-            .folder_picker_open
-            .is_some_and(|rect| contains(rect, col, row))
-        {
-            return Some(Hit::FolderPickerOpen);
-        }
-        for (rect, idx) in &self.folder_picker_rows {
-            if contains(*rect, col, row) {
-                return Some(Hit::FolderPickerRow(*idx));
-            }
-        }
         for (rect, idx) in &self.project_picker_rows {
             if contains(*rect, col, row) {
                 return Some(Hit::ProjectPickerRow(*idx));
@@ -663,110 +618,6 @@ fn contains(rect: Rect, col: u16, row: u16) -> bool {
         && row < rect.y.saturating_add(rect.height)
 }
 
-fn render_folder_picker(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    picker: &FolderPicker,
-    pointer: Option<(u16, u16)>,
-    theme: &Theme,
-    hits: &mut HitMap,
-) {
-    let menu_width = 72u16.min(area.width.saturating_sub(4));
-    let menu_height = 16u16.min(area.height.saturating_sub(4));
-    let Some(menu_area) = dialog_outer(
-        area,
-        menu_width,
-        menu_height,
-        picker.fullscreen,
-        picker.minimized,
-    ) else {
-        return;
-    };
-    frame.render_widget(Clear, menu_area);
-    let title = "打开新项目 · 选择文件夹";
-    let block = Block::bordered()
-        .border_type(ratatui::widgets::BorderType::Rounded)
-        .title(title)
-        .style(theme.base())
-        .border_style(theme.fg(theme.hairline).bg(theme.bg));
-    let inner = block.inner(menu_area);
-    frame.render_widget(block, menu_area);
-    let [title_row, path_row, parent_row, body, open_row, hint_row] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Min(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-    ])
-    .areas(inner);
-    let mut dialog_hits = HitMap::default();
-    paint_traffic_title(frame, title_row, title, pointer, theme, &mut dialog_hits);
-    hits.traffic_lights = dialog_hits.traffic_lights;
-    if picker.minimized {
-        return;
-    }
-    frame.render_widget(
-        Paragraph::new(ellipsize(
-            &picker.path.display().to_string(),
-            inner.width as usize,
-        ))
-        .style(theme.mute()),
-        path_row,
-    );
-    hits.folder_picker_parent = Some(parent_row);
-    frame.render_widget(
-        Paragraph::new("↑ 返回上级目录").style(theme.fg(theme.rose).bg(theme.bg)),
-        parent_row,
-    );
-    let row_count = body.height.max(1) as usize;
-    let max_scroll = picker.entries.len().saturating_sub(row_count);
-    let scroll = picker.scroll.min(max_scroll);
-    let rows = split_n_rows(body, row_count as u16);
-    for (row_offset, idx) in (scroll..picker.entries.len()).take(row_count).enumerate() {
-        let entry = &picker.entries[idx];
-        let Some(rect) = rows.get(row_offset).copied() else {
-            continue;
-        };
-        hits.folder_picker_rows.push((rect, idx));
-        if idx == picker.selected {
-            frame.render_widget(
-                Block::default().style(Style::default().bg(theme.bg_select)),
-                rect,
-            );
-        }
-        let label = if idx == 0 {
-            "..".to_owned()
-        } else {
-            entry
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("?")
-                .to_owned()
-        };
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(
-                    if idx == picker.selected { "❯ " } else { "  " },
-                    theme.fg(theme.rose),
-                ),
-                Span::styled(label, theme.fg(theme.text)),
-            ]))
-            .style(theme.base()),
-            rect,
-        );
-    }
-    hits.folder_picker_open = Some(open_row);
-    frame.render_widget(
-        Paragraph::new("打开当前文件夹").style(theme.fg(theme.sage).bg(theme.bg)),
-        open_row,
-    );
-    frame.render_widget(
-        Paragraph::new("↑/↓ 选择 · Enter 进入 · O 打开 · Esc 返回").style(theme.mute()),
-        hint_row,
-    );
-}
-
 pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
     let theme = Theme::current();
     let area = frame.area();
@@ -855,9 +706,6 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
     render_composer(frame, composer, model, &theme, &mut hits);
     render_status(frame, status, model, &theme);
     render_hints(frame, hints, model, &theme, &mut hits);
-    if let Some(picker) = model.folder_picker {
-        render_folder_picker(frame, area, picker, model.pointer, &theme, &mut hits);
-    }
     if let Some(picker) = model.project_picker {
         let mut projects: Vec<String> = model
             .sessions
@@ -869,7 +717,7 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
         projects.dedup();
         let visible = projects.len().clamp(1, 12) as u16;
         let menu_width = 72u16.min(area.width.saturating_sub(4));
-        let menu_height = (visible + 6).min(area.height.saturating_sub(4));
+        let menu_height = (visible + 4).min(area.height.saturating_sub(4));
         let Some(menu_area) = dialog_outer(
             area,
             menu_width,
@@ -887,8 +735,7 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
             .border_style(theme.fg(theme.hairline).bg(theme.bg));
         let inner = block.inner(menu_area);
         frame.render_widget(block, menu_area);
-        let [title_row, open_row, body, hint_row] = Layout::vertical([
-            Constraint::Length(1),
+        let [title_row, body, hint_row] = Layout::vertical([
             Constraint::Length(1),
             Constraint::Min(2),
             Constraint::Length(1),
@@ -907,15 +754,6 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
         if picker.minimized {
             return hits;
         }
-        hits.open_new_project = Some(open_row);
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                "+ 打开新项目",
-                theme.fg(theme.rose),
-            )))
-            .style(theme.base()),
-            open_row,
-        );
         let rows = split_n_rows(body, visible);
         for (row_index, project) in projects.iter().take(visible as usize).enumerate() {
             if let Some(rect) = rows.get(row_index).copied() {
@@ -1279,11 +1117,7 @@ fn render_header(
         .and_then(|projection| projection.session.as_ref());
     let mode = session.map(|item| item.mode.as_str()).unwrap_or("code");
     let project_name = model
-        .sessions
-        .get(model.index)
-        .map(|session| session.workspace_path.as_str())
-        .unwrap_or_else(|| model.workspace.to_str().unwrap_or("项目"));
-    let project_name = Path::new(project_name)
+        .workspace
         .file_name()
         .and_then(|name| name.to_str())
         .filter(|name| !name.is_empty())
@@ -1334,11 +1168,8 @@ fn render_header(
             height: 1,
         });
         frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled("● ", theme.fg(theme.sage)),
-                Span::styled(git_text, theme.fg(theme.sage)),
-            ]))
-            .style(theme.base()),
+            Paragraph::new(Line::from(Span::styled(git_text, theme.fg(theme.sage))))
+                .style(theme.base()),
             Rect {
                 x: git_x,
                 y: inner.y,
@@ -1424,8 +1255,17 @@ fn render_header(
     if width == 0 {
         return;
     }
+    let right_edge = model
+        .git_status
+        .map(|status| {
+            let git_width = format!("+{}-{}", status.added, status.removed).width() as u16;
+            inner.right().saturating_sub(git_width.saturating_add(1))
+        })
+        .unwrap_or(inner.right());
+    let available_width = right_edge.saturating_sub(inner.x);
+    let width = width.min(available_width);
     let rect = Rect {
-        x: inner.x + inner.width.saturating_sub(width),
+        x: right_edge.saturating_sub(width),
         y: inner.y,
         width,
         height: 1,
@@ -1679,26 +1519,6 @@ fn render_transcript(
     let visible = transcript_window(lines.clone(), inner.height as usize, model.scroll);
     let visible = highlight_selection(visible, inner, model.text_selection, theme);
     frame.render_widget(Paragraph::new(visible).style(theme.base()), inner);
-    let max_scroll = lines.len().saturating_sub(inner.height as usize);
-    if max_scroll > 0 {
-        let scrollbar_area = Rect {
-            x: inner.x + inner.width.saturating_sub(1),
-            y: inner.y,
-            width: 1,
-            height: inner.height,
-        };
-        let mut state =
-            ScrollbarState::new(max_scroll + 1).position(max_scroll.saturating_sub(model.scroll));
-        frame.render_stateful_widget(
-            Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                .thumb_style(theme.fg(theme.text_dim))
-                .track_style(theme.fg(theme.hairline))
-                .begin_symbol(None)
-                .end_symbol(None),
-            scrollbar_area,
-            &mut state,
-        );
-    }
     hits.tool_summary_rows = tool_summary_hit_rows(
         model.projection,
         model.search,
@@ -1738,10 +1558,7 @@ fn tool_summary_hit_rows(
         if matches!(visible[index].1, TranscriptItem::Tool { .. }) {
             let start = index;
             index += 1;
-            while index < visible.len()
-                && (matches!(visible[index].1, TranscriptItem::Tool { .. })
-                    || is_approval_system(visible[index].1))
-            {
+            while index < visible.len() && matches!(visible[index].1, TranscriptItem::Tool { .. }) {
                 index += 1;
             }
             let items = visible[start..index]
@@ -1751,7 +1568,7 @@ fn tool_summary_hit_rows(
             let summary = blora_session::summarize_tool_run(&items, running);
             let indices = visible[start..index]
                 .iter()
-                .filter_map(|(i, item)| matches!(item, TranscriptItem::Tool { .. }).then_some(*i))
+                .map(|(i, _)| *i)
                 .collect::<Vec<_>>();
             groups.push((summary, indices));
         } else {
@@ -1837,46 +1654,24 @@ fn transcript_lines(
         if matches!(visible[index], TranscriptItem::Tool { .. }) {
             let start = index;
             index += 1;
-            while index < visible.len()
-                && (matches!(visible[index], TranscriptItem::Tool { .. })
-                    || is_approval_system(visible[index]))
-            {
+            while index < visible.len() && matches!(visible[index], TranscriptItem::Tool { .. }) {
                 index += 1;
             }
             let group = &visible[start..index];
-            let tools: Vec<&TranscriptItem> = group
-                .iter()
-                .copied()
-                .filter(|item| matches!(item, TranscriptItem::Tool { .. }))
-                .collect();
-            let summary = blora_session::summarize_tool_run(&tools, running);
-            let failed = tools.iter().any(|item| matches!(item, TranscriptItem::Tool { status, .. } if status == "failed" || status == "error"));
+            let summary = blora_session::summarize_tool_run(group, running);
+            let failed = group.iter().any(|item| matches!(item, TranscriptItem::Tool { status, .. } if status == "failed" || status == "error"));
             let color = if failed {
                 theme.rust
-            } else if tools.iter().any(|item| {
+            } else if group.iter().any(|item| {
                 matches!(item, TranscriptItem::Tool { status, .. } if status == "running" || status == "requested")
             }) {
                 theme.amber
             } else {
                 theme.text_dim
             };
-            let approval_messages: Vec<&str> = group
-                .iter()
-                .filter_map(|item| match item {
-                    TranscriptItem::System { summary, .. } if is_approval_system(item) => {
-                        Some(summary.trim_start_matches("approval required: "))
-                    }
-                    _ => None,
-                })
-                .collect();
-            let approval_suffix = if approval_messages.is_empty() {
-                String::new()
-            } else {
-                format!(" · {}", approval_messages.join(" · "))
-            };
             out.push(Line::from(vec![
                 Span::styled("  ", theme.mute()),
-                Span::styled(format!("{summary}{approval_suffix}"), theme.fg(color)),
+                Span::styled(summary, theme.fg(color)),
             ]));
             continue;
         }
@@ -2010,27 +1805,7 @@ fn transcript_lines(
             tick,
         );
     }
-    if running && let Some(live) = projection.live_assistant() {
-        let show = match needle.as_deref() {
-            None => true,
-            Some(needle) => live.to_ascii_lowercase().contains(needle),
-        };
-        if show {
-            if !out.is_empty() {
-                out.push(Line::default());
-            }
-            push_live_block(
-                &mut out,
-                "blora",
-                theme.sage,
-                live,
-                width,
-                needle.as_deref(),
-                theme,
-                tick,
-            );
-        }
-    } else if let Some(live) = projection.live_assistant() {
+    if let Some(live) = projection.live_assistant() {
         let show = match needle.as_deref() {
             None => true,
             Some(needle) => live.to_ascii_lowercase().contains(needle),
@@ -2041,13 +1816,19 @@ fn transcript_lines(
             }
             push_block(
                 &mut out,
-                "blora",
+                "Blora",
                 theme.sage,
                 live,
                 width,
                 needle.as_deref(),
                 theme,
             );
+            if running {
+                out.push(Line::from(vec![
+                    Span::styled("  ", theme.mute()),
+                    Span::styled(spinner(tick).to_string(), theme.fg(theme.sage)),
+                ]));
+            }
         }
     }
     out
@@ -2129,11 +1910,99 @@ fn highlight_selection(
         .collect()
 }
 
-fn is_approval_system(item: &TranscriptItem) -> bool {
-    matches!(item, TranscriptItem::System { summary, .. } if summary.starts_with("approval required:"))
+fn pulse_brightness(tick: u64, speed: f32) -> f32 {
+    pulse_brightness_for_row(tick, speed, 0, 1)
 }
 
-/// Render streamed provider reasoning with the Grok-style breathing accent.
+fn pulse_brightness_for_row(tick: u64, speed: f32, row: u16, wave_rows: u16) -> f32 {
+    let phase = (row as f32 / wave_rows.max(1) as f32) * std::f32::consts::TAU;
+    let wave = (tick as f32 * speed + phase).sin();
+    wave * wave
+}
+
+fn blend_color(base: Color, accent: Color, opacity: f32) -> Option<Color> {
+    use ratatui::style::Color::*;
+    let (br, bg, bb) = color_rgb(base)?;
+    let (ar, ag, ab) = color_rgb(accent)?;
+    let blend = |b: u8, a: u8| (b as f32 * (1.0 - opacity) + a as f32 * opacity).round() as u8;
+    let rgb = (blend(br, ar), blend(bg, ag), blend(bb, ab));
+    Some(match (base, accent) {
+        (Indexed(_), _) | (_, Indexed(_)) => Indexed(nearest_indexed(rgb)),
+        _ => Rgb(rgb.0, rgb.1, rgb.2),
+    })
+}
+
+fn color_rgb(color: Color) -> Option<(u8, u8, u8)> {
+    use ratatui::style::Color::*;
+    match color {
+        Rgb(r, g, b) => Some((r, g, b)),
+        Black => Some((0, 0, 0)),
+        Red => Some((128, 0, 0)),
+        Green => Some((0, 128, 0)),
+        Yellow => Some((128, 128, 0)),
+        Blue => Some((0, 0, 128)),
+        Magenta => Some((128, 0, 128)),
+        Cyan => Some((0, 128, 128)),
+        Gray => Some((192, 192, 192)),
+        DarkGray => Some((128, 128, 128)),
+        LightRed => Some((255, 0, 0)),
+        LightGreen => Some((0, 255, 0)),
+        LightYellow => Some((255, 255, 0)),
+        LightBlue => Some((0, 0, 255)),
+        LightMagenta => Some((255, 0, 255)),
+        LightCyan => Some((0, 255, 255)),
+        White => Some((255, 255, 255)),
+        Indexed(index) => Some(indexed_rgb(index)),
+        Reset => None,
+    }
+}
+
+fn indexed_rgb(index: u8) -> (u8, u8, u8) {
+    const BASIC: [(u8, u8, u8); 16] = [
+        (0, 0, 0),
+        (128, 0, 0),
+        (0, 128, 0),
+        (128, 128, 0),
+        (0, 0, 128),
+        (128, 0, 128),
+        (0, 128, 128),
+        (192, 192, 192),
+        (128, 128, 128),
+        (255, 0, 0),
+        (0, 255, 0),
+        (255, 255, 0),
+        (0, 0, 255),
+        (255, 0, 255),
+        (0, 255, 255),
+        (255, 255, 255),
+    ];
+    if index < 16 {
+        return BASIC[index as usize];
+    }
+    if index >= 232 {
+        let v = 8 + (index - 232) * 10;
+        return (v, v, v);
+    }
+    let n = index - 16;
+    let c = |v: u8| if v == 0 { 0 } else { 55 + v * 40 };
+    (c(n / 36), c((n / 6) % 6), c(n % 6))
+}
+
+fn nearest_indexed((r, g, b): (u8, u8, u8)) -> u8 {
+    let mut best = (u32::MAX, 0);
+    for i in 0..=255u8 {
+        let (cr, cg, cb) = indexed_rgb(i);
+        let d = (r as i32 - cr as i32).pow(2) as u32
+            + (g as i32 - cg as i32).pow(2) as u32
+            + (b as i32 - cb as i32).pow(2) as u32;
+        if d < best.0 {
+            best = (d, i);
+        }
+    }
+    best.1
+}
+
+/// Render the provider's streamed reasoning with the running-state breathing accent.
 fn push_reasoning_block(
     out: &mut Vec<Line<'static>>,
     text: &str,
@@ -2245,130 +2114,6 @@ fn push_block(
     ]));
     let body_width = width.saturating_sub(2).max(8);
     out.extend(crate::markdown::render(text, body_width, needle, theme));
-}
-
-/// Render a live assistant block with the same breathing accent treatment as Grok's thinking block.
-fn push_live_block(
-    out: &mut Vec<Line<'static>>,
-    role: &str,
-    accent: Color,
-    text: &str,
-    width: usize,
-    needle: Option<&str>,
-    theme: &Theme,
-    tick: u64,
-) {
-    let bullet_opacity = pulse_brightness(tick, 0.15);
-    let bullet_color = blend_color(theme.bg, accent, bullet_opacity).unwrap_or(accent);
-    out.push(Line::from(vec![
-        Span::styled("┃ ", theme.fg(bullet_color)),
-        Span::styled(
-            role.to_owned(),
-            theme.fg(bullet_color).add_modifier(Modifier::BOLD),
-        ),
-    ]));
-
-    let body_width = width.saturating_sub(2).max(8);
-    let body = crate::markdown::render(text, body_width.saturating_sub(2).max(1), needle, theme);
-    for (row, mut line) in body.into_iter().enumerate() {
-        let opacity = pulse_brightness_for_row(tick, 0.15, row as u16, 32);
-        let color = blend_color(theme.bg, accent, opacity).unwrap_or(accent);
-        line.spans.insert(0, Span::styled("┃ ", theme.fg(color)));
-        out.push(line);
-    }
-}
-
-fn pulse_brightness(tick: u64, speed: f32) -> f32 {
-    pulse_brightness_for_row(tick, speed, 0, 1)
-}
-
-fn pulse_brightness_for_row(tick: u64, speed: f32, row: u16, wave_rows: u16) -> f32 {
-    let phase = (row as f32 / wave_rows.max(1) as f32) * std::f32::consts::TAU;
-    let t = tick as f32 * speed + phase;
-    let wave = t.sin();
-    wave * wave
-}
-
-fn blend_color(base: Color, accent: Color, opacity: f32) -> Option<Color> {
-    use ratatui::style::Color::*;
-    let (br, bg, bb) = color_rgb(base)?;
-    let (ar, ag, ab) = color_rgb(accent)?;
-    let blend = |b: u8, a: u8| (b as f32 * (1.0 - opacity) + a as f32 * opacity).round() as u8;
-    let rgb = (blend(br, ar), blend(bg, ag), blend(bb, ab));
-    Some(match (base, accent) {
-        (Indexed(_), _) | (_, Indexed(_)) => Indexed(nearest_indexed(rgb)),
-        _ => Rgb(rgb.0, rgb.1, rgb.2),
-    })
-}
-
-fn color_rgb(color: Color) -> Option<(u8, u8, u8)> {
-    use ratatui::style::Color::*;
-    match color {
-        Rgb(r, g, b) => Some((r, g, b)),
-        Black => Some((0, 0, 0)),
-        Red => Some((128, 0, 0)),
-        Green => Some((0, 128, 0)),
-        Yellow => Some((128, 128, 0)),
-        Blue => Some((0, 0, 128)),
-        Magenta => Some((128, 0, 128)),
-        Cyan => Some((0, 128, 128)),
-        Gray => Some((192, 192, 192)),
-        DarkGray => Some((128, 128, 128)),
-        LightRed => Some((255, 0, 0)),
-        LightGreen => Some((0, 255, 0)),
-        LightYellow => Some((255, 255, 0)),
-        LightBlue => Some((0, 0, 255)),
-        LightMagenta => Some((255, 0, 255)),
-        LightCyan => Some((0, 255, 255)),
-        White => Some((255, 255, 255)),
-        Indexed(index) => Some(indexed_rgb(index)),
-        Reset => None,
-    }
-}
-
-fn indexed_rgb(index: u8) -> (u8, u8, u8) {
-    const BASIC: [(u8, u8, u8); 16] = [
-        (0, 0, 0),
-        (128, 0, 0),
-        (0, 128, 0),
-        (128, 128, 0),
-        (0, 0, 128),
-        (128, 0, 128),
-        (0, 128, 128),
-        (192, 192, 192),
-        (128, 128, 128),
-        (255, 0, 0),
-        (0, 255, 0),
-        (255, 255, 0),
-        (0, 0, 255),
-        (255, 0, 255),
-        (0, 255, 255),
-        (255, 255, 255),
-    ];
-    if index < 16 {
-        return BASIC[index as usize];
-    }
-    if index >= 232 {
-        let v = 8 + (index - 232) * 10;
-        return (v, v, v);
-    }
-    let n = index - 16;
-    let component = |value: u8| if value == 0 { 0 } else { 55 + value * 40 };
-    (component(n / 36), component((n / 6) % 6), component(n % 6))
-}
-
-fn nearest_indexed((r, g, b): (u8, u8, u8)) -> u8 {
-    let mut best = (u32::MAX, 0u8);
-    for index in 0..=255 {
-        let (cr, cg, cb) = indexed_rgb(index);
-        let distance = (r as i32 - cr as i32).pow(2) as u32
-            + (g as i32 - cg as i32).pow(2) as u32
-            + (b as i32 - cb as i32).pow(2) as u32;
-        if distance < best.0 {
-            best = (distance, index);
-        }
-    }
-    best.1
 }
 
 fn highlight_spans(text: &str, needle: Option<&str>, theme: &Theme) -> Vec<Span<'static>> {
@@ -4013,6 +3758,12 @@ fn short_id(id: &str) -> String {
 
 pub(crate) fn spinner(tick: u64) -> char {
     let n = SPINNER.len();
+    if n == 0 {
+        return '✦';
+    }
+    if n == 1 {
+        return SPINNER[0];
+    }
     let period = 2 * (n - 1);
     let t = (tick as usize) % period;
     let index = if t < n { t } else { period - t };
@@ -4170,21 +3921,6 @@ mod tests {
             "✼ Blora Code · 问候"
         );
         assert_eq!(window_title(false, 0, "code", "问候"), "Blora Code · 问候");
-    }
-
-    #[test]
-    fn pulse_brightness_matches_grok_sin_squared_wave() {
-        assert_eq!(pulse_brightness(0, 0.15), 0.0);
-        assert!(pulse_brightness(10, 0.15) > 0.99);
-        assert!(pulse_brightness(20, 0.15) < 0.02);
-    }
-
-    #[test]
-    fn blend_color_moves_between_background_and_accent() {
-        let bg = Color::Rgb(10, 20, 30);
-        let accent = Color::Rgb(110, 120, 130);
-        assert_eq!(blend_color(bg, accent, 0.0), Some(bg));
-        assert_eq!(blend_color(bg, accent, 1.0), Some(accent));
     }
 
     #[test]
