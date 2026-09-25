@@ -53,12 +53,9 @@ pub struct WorkspaceInfo {
     pub files: String,
     pub entries: Vec<String>,
     pub git_status: String,
-    pub git_branch_counts: String,
     pub git_diff: String,
-    pub git_numstat: String,
     pub git_log: String,
     pub git_branch: String,
-    pub git_stashes: String,
 }
 
 #[derive(Clone, Debug)]

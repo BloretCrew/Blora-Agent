@@ -79,7 +79,6 @@ fn transcript_lines(projection: &SessionProjection, hide_tools: bool) -> Vec<Str
         .flat_map(|item| match item {
             TranscriptItem::User { text, .. }
             | TranscriptItem::Assistant { text, .. }
-            | TranscriptItem::Reasoning { text, .. }
             | TranscriptItem::System { summary: text, .. } => {
                 text.lines().map(str::to_owned).collect::<Vec<_>>()
             }
