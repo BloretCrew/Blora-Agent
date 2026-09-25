@@ -311,6 +311,12 @@ impl LocalBackend {
         self.git(&["diff", "--stat", "HEAD"])
     }
 
+    pub fn git_numstat(&self) -> Result<String> {
+        self.policy
+            .require(self.policy.file_read(), "git_numstat")?;
+        self.git(&["diff", "--numstat", "HEAD"])
+    }
+
     pub fn git_log(&self) -> Result<String> {
         self.policy.require(self.policy.file_read(), "git_log")?;
         self.git(&["log", "-8", "--oneline"])

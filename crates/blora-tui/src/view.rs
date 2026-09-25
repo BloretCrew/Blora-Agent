@@ -2815,6 +2815,8 @@ fn render_git_dialog(
     let Some(frame_area) = dialog_outer(area, 88, 20, dialog.fullscreen, dialog.minimized) else {
         return hits;
     };
+    frame.render_widget(Clear, area);
+    frame.render_widget(Block::default().style(theme.base()), area);
     let inner = paint_dialog_chrome(frame, frame_area, theme);
     let [title_row, tabs, body, hint_row] = Layout::vertical([
         Constraint::Length(1),
@@ -3900,6 +3902,44 @@ mod tests {
         assert_eq!(
             older.iter().map(ToString::to_string).collect::<Vec<_>>(),
             vec!["3", "4", "5", "6"]
+        );
+    }
+
+    #[test]
+    fn git_dialog_clears_content_outside_its_frame() {
+        let area = Rect::new(0, 0, 110, 30);
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let dialog = GitDialog {
+            info: GitStatusInfo {
+                branch: String::new(),
+                added: 0,
+                removed: 0,
+                ahead: 0,
+                behind: 0,
+                stashes: 0,
+                clean: true,
+                raw: "## main".into(),
+                diff: String::new(),
+                log: String::new(),
+            },
+            page: 0,
+            selected: 0,
+            fullscreen: false,
+            minimized: false,
+        };
+        terminal
+            .draw(|frame| {
+                frame.render_widget(
+                    Paragraph::new("background text").style(Theme::current().base()),
+                    area,
+                );
+                render_git_dialog(frame, area, &dialog, None, &Theme::current());
+            })
+            .unwrap();
+        assert_eq!(
+            terminal.backend().buffer().cell((0, 0)).unwrap().symbol(),
+            " "
         );
     }
 

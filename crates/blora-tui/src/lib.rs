@@ -3660,15 +3660,15 @@ fn parse_git_status(info: &blora_runtime::WorkspaceInfo) -> view::GitStatusInfo 
     }
     let mut added = 0usize;
     let mut removed = 0usize;
-    for line in info.git_diff.lines() {
-        for token in line.split_whitespace() {
-            if let Some(value) = token.strip_prefix('+') {
-                added += value.parse::<usize>().unwrap_or(0);
-            }
-            if let Some(value) = token.strip_prefix('-') {
-                removed += value.parse::<usize>().unwrap_or(0);
-            }
-        }
+    for line in info.git_numstat.lines() {
+        let mut columns = line.split('\t');
+        let (Some(additions), Some(deletions), Some(_path)) =
+            (columns.next(), columns.next(), columns.next())
+        else {
+            continue;
+        };
+        added += additions.parse::<usize>().unwrap_or(0);
+        removed += deletions.parse::<usize>().unwrap_or(0);
     }
     let status_line = info.git_status.lines().next().unwrap_or("");
     let ahead = git_tracking_count(status_line, "ahead ");
@@ -3713,6 +3713,18 @@ mod git_status_tests {
             ..Default::default()
         };
         assert!(!parse_git_status(&dirty).clean);
+    }
+
+    #[test]
+    fn parses_numstat_with_binary_files_and_skips_summary() {
+        let info = blora_runtime::WorkspaceInfo {
+            git_status: "## main\n M src/lib.rs".into(),
+            git_numstat: "12\t3\tsrc/lib.rs\n-\t-\timage.png\n4\t0\tnew file.rs\n 2 files changed, 16 insertions(+)".into(),
+            ..Default::default()
+        };
+        let status = parse_git_status(&info);
+        assert!(!status.clean);
+        assert_eq!((status.added, status.removed), (16, 3));
     }
 }
 
