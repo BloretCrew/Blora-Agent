@@ -934,11 +934,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 if let Some(dialog) = git_dialog.as_mut()
                                     && dialog.page == 2
                                 {
-                                    toggle_git_file(runtime, workspace, dialog);
-                                    git_status = runtime
-                                        .workspace_info(workspace)
-                                        .ok()
-                                        .map(|info| parse_git_status(&info));
+                                    toggle_git_file(dialog);
                                 }
                             }
                             KeyCode::Char(_) | KeyCode::Backspace if git_dialog.is_some() => {}
@@ -1558,6 +1554,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                             selected: 0,
                                             message: String::new(),
                                             editing_message: false,
+                                            excluded_files: Default::default(),
                                             scroll: 0,
                                             feedback: None,
                                             fullscreen: false,
@@ -1654,7 +1651,10 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                                 }
                                             }
                                             Some(view::Hit::GitPrimary) => {
-                                                match view::git_primary_action(&dialog.info) {
+                                                match view::git_primary_action(
+                                                    &dialog.info,
+                                                    &dialog.excluded_files,
+                                                ) {
                                                     view::GitPrimaryAction::Commit(_) => {
                                                         commit_git_dialog(
                                                             runtime, workspace, dialog,
@@ -1670,7 +1670,10 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                                             && git_sync.is_none() =>
                                                     {
                                                         let pull = matches!(
-                                                            view::git_primary_action(&dialog.info),
+                                                            view::git_primary_action(
+                                                                &dialog.info,
+                                                                &dialog.excluded_files
+                                                            ),
                                                             view::GitPrimaryAction::Pull
                                                         );
                                                         dialog.syncing = true;
@@ -1687,20 +1690,9 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                                     _ => {}
                                                 }
                                             }
-                                            Some(view::Hit::GitCommit) => {
-                                                commit_git_dialog(runtime, workspace, dialog);
-                                                git_status = runtime
-                                                    .workspace_info(workspace)
-                                                    .ok()
-                                                    .map(|info| parse_git_status(&info));
-                                            }
                                             Some(view::Hit::GitFile(index)) => {
                                                 dialog.selected = index;
-                                                toggle_git_file(runtime, workspace, dialog);
-                                                git_status = runtime
-                                                    .workspace_info(workspace)
-                                                    .ok()
-                                                    .map(|info| parse_git_status(&info));
+                                                toggle_git_file(dialog);
                                             }
                                             Some(view::Hit::GitRow(index))
                                             | Some(view::Hit::GitAction(index)) => {
@@ -3952,22 +3944,13 @@ fn write_rules(workspace: &Path) -> String {
     }
 }
 
-fn toggle_git_file(runtime: &Runtime, workspace: &Path, dialog: &mut view::GitDialog) {
+fn toggle_git_file(dialog: &mut view::GitDialog) {
     let files = view::git_changed_files(&dialog.info.raw);
     if let Some(file) = files.get(dialog.selected) {
-        let path = file
-            .path
-            .rsplit_once(" -> ")
-            .map_or(file.path.as_str(), |(_, new)| new);
-        match runtime.git_stage(workspace, path, !file.staged) {
-            Ok(()) => {
-                dialog.feedback = None;
-                if let Ok(info) = runtime.workspace_info(workspace) {
-                    dialog.info = parse_git_status(&info);
-                }
-            }
-            Err(error) => dialog.feedback = Some(error.to_string()),
+        if !dialog.excluded_files.remove(&file.path) {
+            dialog.excluded_files.insert(file.path.clone());
         }
+        dialog.feedback = None;
     }
 }
 
@@ -3977,16 +3960,24 @@ fn commit_git_dialog(runtime: &Runtime, workspace: &Path, dialog: &mut view::Git
         dialog.editing_message = true;
         return;
     }
-    if !view::git_changed_files(&dialog.info.raw)
+    let selected: Vec<String> = view::git_changed_files(&dialog.info.raw)
         .iter()
-        .any(|file| file.staged)
-    {
-        dialog.feedback = Some("请先暂存要提交的文件".to_owned());
+        .filter(|file| !dialog.excluded_files.contains(&file.path))
+        .map(|file| {
+            file.path
+                .rsplit_once(" -> ")
+                .map_or(file.path.as_str(), |(_, new)| new)
+                .to_owned()
+        })
+        .collect();
+    if selected.is_empty() {
+        dialog.feedback = Some("请勾选要提交的文件".to_owned());
         return;
     }
-    match runtime.git_commit(workspace, &dialog.message) {
+    match runtime.git_commit_selected(workspace, &dialog.message, &selected) {
         Ok(_) => {
             dialog.message.clear();
+            dialog.excluded_files.clear();
             dialog.feedback = Some("提交成功".to_owned());
             if let Ok(info) = runtime.workspace_info(workspace) {
                 dialog.info = parse_git_status(&info);

@@ -384,6 +384,23 @@ impl LocalBackend {
         }
     }
 
+    pub fn git_commit_selected(&self, message: &str, selected: &[String]) -> Result<String> {
+        self.policy
+            .require(self.policy.file_write(), "git_commit_selected")?;
+        if message.trim().is_empty() {
+            return Err(BloraError::Exec("commit message is empty".to_owned()));
+        }
+        if selected.is_empty() {
+            return Err(BloraError::Exec("没有勾选要提交的文件".to_owned()));
+        }
+        let mut args = vec!["add", "--"];
+        args.extend(selected.iter().map(String::as_str));
+        self.git_mutate(&args)?;
+        let mut args = vec!["commit", "-m", message.trim(), "--only", "--"];
+        args.extend(selected.iter().map(String::as_str));
+        self.git_mutate(&args)
+    }
+
     pub fn git_commit(&self, message: &str) -> Result<String> {
         self.policy
             .require(self.policy.file_write(), "git_commit")?;
@@ -650,6 +667,64 @@ impl ExecutionBackend for LocalBackend {
 mod tests {
     use super::*;
     use blora_policy::Policy;
+
+    #[test]
+    fn git_commit_selected_commits_checked_files_without_other_staged_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(dir.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let backend = LocalBackend::new(Policy::new(dir.path(), true).unwrap());
+        std::fs::write(dir.path().join("selected.txt"), "selected").unwrap();
+        std::fs::write(dir.path().join("other.txt"), "other").unwrap();
+        backend.git_stage("other.txt", true).unwrap();
+        assert!(
+            backend
+                .git_commit_selected(" ", &["selected.txt".to_owned()])
+                .is_err()
+        );
+        assert!(backend.git_commit_selected("subject", &[]).is_err());
+        let result = Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(result.success());
+        assert!(
+            Command::new("git")
+                .args(["config", "user.email", "test@example.invalid"])
+                .current_dir(dir.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        backend
+            .git_commit_selected("selected commit", &["selected.txt".to_owned()])
+            .unwrap();
+        let committed = Command::new("git")
+            .args(["show", "--pretty=format:", "--name-only", "HEAD"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        let committed = String::from_utf8(committed.stdout).unwrap();
+        assert!(committed.contains("selected.txt"));
+        assert!(!committed.contains("other.txt"));
+        let status = Command::new("git")
+            .args(["status", "--short"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8(status.stdout)
+                .unwrap()
+                .contains("A  other.txt")
+        );
+    }
 
     #[test]
     fn git_sync_requires_an_upstream() {

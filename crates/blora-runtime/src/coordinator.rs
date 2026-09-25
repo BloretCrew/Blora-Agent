@@ -421,6 +421,16 @@ impl Runtime {
         backend.git_sync(pull)
     }
 
+    pub fn git_commit_selected(
+        &self,
+        path: &std::path::Path,
+        message: &str,
+        selected: &[String],
+    ) -> Result<String> {
+        let backend = LocalBackend::new(Policy::new(path, true)?);
+        backend.git_commit_selected(message, selected)
+    }
+
     pub fn git_commit(&self, path: &std::path::Path, message: &str) -> Result<String> {
         let backend = LocalBackend::new(Policy::new(path, true)?);
         backend.git_commit(message)

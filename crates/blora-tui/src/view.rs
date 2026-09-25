@@ -306,6 +306,7 @@ pub struct GitDialog {
     pub editing_message: bool,
     pub generating_message: bool,
     pub syncing: bool,
+    pub excluded_files: std::collections::HashSet<String>,
     pub scroll: usize,
     pub feedback: Option<String>,
     pub fullscreen: bool,
@@ -371,7 +372,6 @@ pub enum Hit {
     GitMessage,
     GitGenerate,
     GitPrimary,
-    GitCommit,
     GitFile(usize),
     GitRow(usize),
     GitAction(usize),
@@ -453,7 +453,6 @@ pub struct HitMap {
     pub git_message: Option<Rect>,
     pub git_generate: Option<Rect>,
     pub git_primary: Option<Rect>,
-    pub git_commit: Option<Rect>,
     pub git_files: Vec<(Rect, usize)>,
     pub git_rows: Vec<(Rect, usize)>,
     pub git_actions: Vec<(Rect, usize)>,
@@ -519,9 +518,6 @@ impl HitMap {
             .is_some_and(|rect| contains(rect, col, row))
         {
             return Some(Hit::GitPrimary);
-        }
-        if self.git_commit.is_some_and(|rect| contains(rect, col, row)) {
-            return Some(Hit::GitCommit);
         }
         for (rect, idx) in &self.git_files {
             if contains(*rect, col, row) {
@@ -1008,7 +1004,6 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
         hits.git_message = dialog_hits.git_message;
         hits.git_generate = dialog_hits.git_generate;
         hits.git_primary = dialog_hits.git_primary;
-        hits.git_commit = dialog_hits.git_commit;
         hits.git_files = dialog_hits.git_files;
         hits.git_rows = dialog_hits.git_rows;
         hits.git_actions = dialog_hits.git_actions;
@@ -2943,7 +2938,7 @@ fn render_git_dialog(
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             if dialog.page == 2 {
-                "点击消息输入 · 点击文件暂存 · ↑/↓ 选择 · 空格切换 · Enter 提交 · Esc 关闭"
+                "点击消息输入 · 点击文件切换勾选 · ↑/↓ 选择 · 空格切换 · Enter 提交 · Esc 关闭"
             } else {
                 "←/→ 分页 · Esc 关闭"
             },
@@ -2988,9 +2983,16 @@ pub enum GitPrimaryAction {
     None,
 }
 
-pub fn git_primary_action(info: &GitStatusInfo) -> GitPrimaryAction {
-    let count = git_changed_files(&info.raw).len();
-    if count > 0 {
+pub fn git_primary_action(
+    info: &GitStatusInfo,
+    excluded: &std::collections::HashSet<String>,
+) -> GitPrimaryAction {
+    let files = git_changed_files(&info.raw);
+    let count = files
+        .iter()
+        .filter(|file| !excluded.contains(&file.path))
+        .count();
+    if !files.is_empty() {
         GitPrimaryAction::Commit(count)
     } else if info.behind > 0 {
         GitPrimaryAction::Pull
@@ -3001,7 +3003,7 @@ pub fn git_primary_action(info: &GitStatusInfo) -> GitPrimaryAction {
     }
 }
 
-fn git_primary_label(info: &GitStatusInfo) -> String {
+fn git_primary_label(info: &GitStatusInfo, excluded: &std::collections::HashSet<String>) -> String {
     let counts = format!(
         "{}{}",
         if info.ahead > 0 {
@@ -3015,7 +3017,7 @@ fn git_primary_label(info: &GitStatusInfo) -> String {
             String::new()
         },
     );
-    match git_primary_action(info) {
+    match git_primary_action(info, excluded) {
         GitPrimaryAction::Commit(count) => format!("提交 {count} 个更改"),
         GitPrimaryAction::Pull => format!("拉取{counts}"),
         GitPrimaryAction::Push => format!("推送{counts}"),
@@ -3043,11 +3045,9 @@ fn render_git_commit_page(
         message.width - left_width,
         1,
     );
-    let commit = Rect::new(message.x, body.y + 4, message.width, 1);
     hits.git_message = Some(message);
     hits.git_generate = Some(generate);
     hits.git_primary = Some(primary);
-    hits.git_commit = Some(commit);
     let message_text = if dialog.message.is_empty() {
         format!(
             "提交消息（在 {} 上提交）",
@@ -3091,9 +3091,15 @@ fn render_git_commit_page(
     let primary_label = if dialog.syncing {
         format!(" {} 正在同步…", spinner(tick))
     } else {
-        format!(" {}", git_primary_label(&dialog.info))
+        format!(
+            " {}",
+            git_primary_label(&dialog.info, &dialog.excluded_files)
+        )
     };
-    let primary_style = if matches!(git_primary_action(&dialog.info), GitPrimaryAction::None) {
+    let primary_style = if matches!(
+        git_primary_action(&dialog.info, &dialog.excluded_files),
+        GitPrimaryAction::None | GitPrimaryAction::Commit(0)
+    ) {
         theme.fg(theme.text_dim).bg(theme.bg_raised)
     } else {
         theme
@@ -3103,28 +3109,19 @@ fn render_git_commit_page(
     };
     frame.render_widget(Paragraph::new(primary_label).style(primary_style), primary);
     let files = git_changed_files(&dialog.info.raw);
-    let staged = files.iter().filter(|file| file.staged).count();
-    let commit_style = if staged > 0 && !dialog.message.trim().is_empty() {
-        theme
-            .fg(theme.bg)
-            .bg(theme.sage)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        theme.fg(theme.text_dim).bg(theme.bg_raised)
-    };
-    frame.render_widget(
-        Paragraph::new(format!(" ✓ 提交已暂存的更改 ({staged})")).style(commit_style),
-        commit,
-    );
-    let summary = Rect::new(message.x, body.y + 6, message.width, 1);
+    let selected = files
+        .iter()
+        .filter(|file| !dialog.excluded_files.contains(&file.path))
+        .count();
+    let summary = Rect::new(message.x, body.y + 3, message.width, 1);
     if summary.y >= body.bottom() {
         return;
     }
     frame.render_widget(
         Paragraph::new(format!(
-            "更改 {}  ·  已暂存 {}  ·  空格切换暂存",
+            "更改 {}  ·  已勾选 {}  ·  空格切换勾选",
             files.len(),
-            staged
+            selected
         ))
         .style(theme.fg(theme.text_dim).add_modifier(Modifier::BOLD)),
         summary,
@@ -3145,7 +3142,11 @@ fn render_git_commit_page(
         let y = summary.y + 1 + (offset - scroll) as u16;
         let row = Rect::new(message.x, y, message.width, 1);
         hits.git_files.push((row, offset));
-        let status = if file.staged { "●" } else { "○" };
+        let status = if dialog.excluded_files.contains(&file.path) {
+            "○"
+        } else {
+            "●"
+        };
         let text = format!(" {}  {}  {}", status, file.status, file.path);
         let style = if dialog.selected == offset && !dialog.editing_message {
             theme.fg(theme.text).bg(theme.bg_select)
@@ -4153,6 +4154,7 @@ mod tests {
 
     #[test]
     fn git_primary_button_matches_changes_and_tracking_status() {
+        let mut excluded = std::collections::HashSet::new();
         let mut info = GitStatusInfo {
             branch: "main".into(),
             added: 0,
@@ -4165,24 +4167,34 @@ mod tests {
             diff: String::new(),
             log: String::new(),
         };
-        assert_eq!(git_primary_action(&info), GitPrimaryAction::Pull);
-        assert_eq!(git_primary_label(&info), "拉取 ↑5 ↓6");
+        assert_eq!(git_primary_action(&info, &excluded), GitPrimaryAction::Pull);
+        assert_eq!(git_primary_label(&info, &excluded), "拉取 ↑5 ↓6");
         info.ahead = 0;
         info.behind = 7;
-        assert_eq!(git_primary_label(&info), "拉取 ↓7");
+        assert_eq!(git_primary_label(&info, &excluded), "拉取 ↓7");
         info.ahead = 5;
         info.behind = 0;
-        assert_eq!(git_primary_action(&info), GitPrimaryAction::Push);
-        assert_eq!(git_primary_label(&info), "推送 ↑5");
+        assert_eq!(git_primary_action(&info, &excluded), GitPrimaryAction::Push);
+        assert_eq!(git_primary_label(&info, &excluded), "推送 ↑5");
         info.behind = 6;
         info.raw.push_str("\n M file.rs\n?? notes.txt");
-        assert_eq!(git_primary_action(&info), GitPrimaryAction::Commit(2));
-        assert_eq!(git_primary_label(&info), "提交 2 个更改");
+        assert_eq!(
+            git_primary_action(&info, &excluded),
+            GitPrimaryAction::Commit(2)
+        );
+        assert_eq!(git_primary_label(&info, &excluded), "提交 2 个更改");
+        excluded.insert("file.rs".to_owned());
+        assert_eq!(git_primary_label(&info, &excluded), "提交 1 个更改");
+        excluded.insert("notes.txt".to_owned());
+        assert_eq!(
+            git_primary_action(&info, &excluded),
+            GitPrimaryAction::Commit(0)
+        );
         info.raw = "## main".into();
         info.ahead = 0;
         info.behind = 0;
-        assert_eq!(git_primary_action(&info), GitPrimaryAction::None);
-        assert_eq!(git_primary_label(&info), "已同步");
+        assert_eq!(git_primary_action(&info, &excluded), GitPrimaryAction::None);
+        assert_eq!(git_primary_label(&info, &excluded), "已同步");
     }
 
     #[test]
@@ -4208,6 +4220,7 @@ mod tests {
             editing_message: false,
             generating_message: false,
             syncing: false,
+            excluded_files: Default::default(),
             scroll: 0,
             feedback: None,
             fullscreen: false,
@@ -4222,13 +4235,11 @@ mod tests {
         let message = hits.git_message.unwrap();
         let generate = hits.git_generate.unwrap();
         let primary = hits.git_primary.unwrap();
-        let commit = hits.git_commit.unwrap();
         assert_eq!(hits.hit(message.x, message.y), Some(Hit::GitMessage));
         assert_eq!(hits.hit(generate.x, generate.y), Some(Hit::GitGenerate));
         assert_eq!(hits.hit(primary.x, primary.y), Some(Hit::GitPrimary));
         assert_eq!(primary.x, generate.right() + 1);
         assert_eq!(generate.y, message.y + 1);
-        assert_eq!(hits.hit(commit.x, commit.y), Some(Hit::GitCommit));
         assert_eq!(hits.git_files.len(), 3);
         for (row, index) in &hits.git_files {
             assert_eq!(hits.hit(row.x, row.y), Some(Hit::GitFile(*index)));
@@ -4237,6 +4248,12 @@ mod tests {
         assert!(files[0].staged);
         assert!(!files[1].staged);
         assert!(!files[2].staged);
+        assert!(dialog.excluded_files.is_empty());
+        assert!(
+            hits.git_files
+                .iter()
+                .all(|(_, index)| !dialog.excluded_files.contains(&files[*index].path))
+        );
     }
 
     #[test]
@@ -4262,6 +4279,7 @@ mod tests {
             editing_message: false,
             generating_message: true,
             syncing: false,
+            excluded_files: Default::default(),
             scroll: 0,
             feedback: None,
             fullscreen: false,
@@ -4324,6 +4342,7 @@ mod tests {
             editing_message: false,
             generating_message: false,
             syncing: false,
+            excluded_files: Default::default(),
             scroll: 0,
             feedback: None,
             fullscreen: false,
