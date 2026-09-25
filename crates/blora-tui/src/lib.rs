@@ -1424,6 +1424,10 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                         );
                                     } else if let Some(dialog) = git_dialog.as_mut() {
                                         match hit {
+                                            Some(view::Hit::GitTab(page)) => {
+                                                dialog.page = page;
+                                                dialog.selected = 0;
+                                            }
                                             Some(view::Hit::GitRow(index))
                                             | Some(view::Hit::GitAction(index)) => {
                                                 dialog.selected = index

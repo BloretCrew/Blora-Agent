@@ -361,6 +361,7 @@ pub enum Hit {
     ToolSummary(Vec<usize>),
     ToolDetailRow(usize),
     GitStatus,
+    GitTab(usize),
     GitRow(usize),
     GitAction(usize),
     Composer,
@@ -437,6 +438,7 @@ pub struct HitMap {
     pub provider_target: Option<Rect>,
     pub context_usage: Option<Rect>,
     pub git_status: Option<Rect>,
+    pub git_tabs: Vec<(Rect, usize)>,
     pub git_rows: Vec<(Rect, usize)>,
     pub git_actions: Vec<(Rect, usize)>,
     pub hints: Vec<(Rect, HintAction)>,
@@ -477,6 +479,11 @@ impl HitMap {
                     1 => Hit::TrafficMinimize,
                     _ => Hit::TrafficOpenBrowser,
                 });
+            }
+        }
+        for (rect, idx) in &self.git_tabs {
+            if contains(*rect, col, row) {
+                return Some(Hit::GitTab(*idx));
             }
         }
         for (rect, idx) in &self.git_rows {
@@ -955,6 +962,7 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
     if let Some(dialog) = model.git_dialog {
         let dialog_hits = render_git_dialog(frame, area, dialog, model.pointer, &theme);
         hits.traffic_lights = dialog_hits.traffic_lights;
+        hits.git_tabs = dialog_hits.git_tabs;
         hits.git_rows = dialog_hits.git_rows;
         hits.git_actions = dialog_hits.git_actions;
     } else if let Some(dialog) = model.tool_detail_dialog {
@@ -2829,18 +2837,22 @@ fn render_git_dialog(
     }
     let labels = ["状态", "Git 图", "操作"];
     for (index, label) in labels.iter().enumerate() {
-        let width = tabs.width / 3;
-        let rect = Rect::new(tabs.x + width * index as u16, tabs.y, width, 1);
+        let start = tabs.x + tabs.width * index as u16 / 3;
+        let end = tabs.x + tabs.width * (index as u16 + 1) / 3;
+        let rect = Rect::new(start, tabs.y, end - start, 1);
+        hits.git_tabs.push((rect, index));
+        let selected = dialog.page == index;
+        let style = if selected {
+            theme
+                .fg(theme.text)
+                .bg(theme.bg_select)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            theme.mute()
+        };
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                *label,
-                if dialog.page == index {
-                    theme.fg(theme.text).add_modifier(Modifier::BOLD)
-                } else {
-                    theme.mute()
-                },
-            )))
-            .style(theme.base()),
+            Paragraph::new(format!(" {} {} ", if selected { "▸" } else { " " }, label))
+                .style(style),
             rect,
         );
     }
@@ -3939,6 +3951,20 @@ mod tests {
         assert_eq!(
             terminal.backend().buffer().cell((0, 0)).unwrap().symbol(),
             "b"
+        );
+        for (rect, page) in &hits.git_tabs {
+            assert_eq!(hits.hit(rect.x + 1, rect.y), Some(Hit::GitTab(*page)));
+        }
+        assert_eq!(hits.git_tabs.len(), 3);
+        let selected = hits.git_tabs[0].0;
+        assert_eq!(
+            terminal
+                .backend()
+                .buffer()
+                .cell((selected.x + 1, selected.y))
+                .unwrap()
+                .symbol(),
+            "▸"
         );
         let close = hits.traffic_lights[0].unwrap();
         let minimize = hits.traffic_lights[1].unwrap();
