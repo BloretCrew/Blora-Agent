@@ -3604,23 +3604,73 @@ fn parse_git_status(info: &blora_runtime::WorkspaceInfo) -> view::GitStatusInfo 
     }
     let mut added = 0usize;
     let mut removed = 0usize;
-    for line in info.git_diff.lines() {
-        for token in line.split_whitespace() {
-            if let Some(value) = token.strip_prefix('+') {
-                added += value.parse::<usize>().unwrap_or(0);
-            }
-            if let Some(value) = token.strip_prefix('-') {
-                removed += value.parse::<usize>().unwrap_or(0);
-            }
-        }
+    for line in info.git_numstat.lines() {
+        let mut columns = line.split('\t');
+        let (Some(additions), Some(deletions), Some(_path)) =
+            (columns.next(), columns.next(), columns.next())
+        else {
+            continue;
+        };
+        added += additions.parse::<usize>().unwrap_or(0);
+        removed += deletions.parse::<usize>().unwrap_or(0);
     }
+    let (ahead, behind) = git_branch_counts(&info.git_branch_counts);
+    let stashes = info.git_stashes.lines().filter(|line| line.starts_with("stash@{")).count();
+    let clean = info.git_status.lines().next().is_some_and(|line| line.starts_with("## "))
+        && info.git_status.lines().skip(1).all(str::is_empty);
     view::GitStatusInfo {
         branch,
         added,
         removed,
+        ahead,
+        behind,
+        stashes,
+        clean,
         raw: info.git_status.clone(),
         diff: info.git_diff.clone(),
         log: info.git_log.clone(),
+    }
+}
+
+fn git_branch_counts(status: &str) -> (usize, usize) {
+    status.lines().find_map(|line| {
+        let counts = line.strip_prefix("# branch.ab ")?;
+        let mut parts = counts.split_whitespace();
+        let ahead = parts.next()?.strip_prefix('+')?.parse().ok()?;
+        let behind = parts.next()?.strip_prefix('-')?.parse().ok()?;
+        Some((ahead, behind))
+    }).unwrap_or((0, 0))
+}
+
+#[cfg(test)]
+mod git_status_tests {
+    use super::*;
+
+    #[test]
+    fn parses_clean_tracking_and_stash_counts() {
+        let info = blora_runtime::WorkspaceInfo {
+            git_status: "## main...origin/main [领先 5，落后 2]".into(),
+            git_branch_counts: "# branch.head main\n# branch.ab +5 -2".into(),
+            git_stashes: "stash@{0}\nstash@{1}".into(),
+            ..Default::default()
+        };
+        let status = parse_git_status(&info);
+        assert!(status.clean);
+        assert_eq!((status.ahead, status.behind, status.stashes), (5, 2, 2));
+        assert_eq!(git_branch_counts("# branch.ab +154 -0"), (154, 0));
+        assert_eq!(git_branch_counts("# branch.head main"), (0, 0));
+    }
+
+    #[test]
+    fn parses_numstat_with_binary_files_and_skips_summary() {
+        let info = blora_runtime::WorkspaceInfo {
+            git_status: "## main\n M src/lib.rs".into(),
+            git_numstat: "12\t3\tsrc/lib.rs\n-\t-\timage.png\n4\t0\tnew file.rs\n 2 files changed, 16 insertions(+)".into(),
+            ..Default::default()
+        };
+        let status = parse_git_status(&info);
+        assert!(!status.clean);
+        assert_eq!((status.added, status.removed), (16, 3));
     }
 }
 
