@@ -13,7 +13,7 @@ mod view;
 use std::io::{self, Write, stdout};
 use std::path::{Path, PathBuf};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use blora_runtime::{CancelToken, RunOptions, Runtime};
 use blora_session::TranscriptItem;
@@ -30,6 +30,30 @@ use crossterm::terminal::{
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+
+const TOOL_SUMMARY_DOUBLE_CLICK: Duration = Duration::from_millis(500);
+
+#[derive(Default)]
+struct ToolSummaryClick {
+    pending: Option<(Vec<usize>, Instant)>,
+}
+
+impl ToolSummaryClick {
+    fn register(&mut self, hit: Option<&view::Hit>, now: Instant) -> bool {
+        let Some(view::Hit::ToolSummary(indices)) = hit else {
+            self.pending = None;
+            return false;
+        };
+        if self.pending.as_ref().is_some_and(|(previous, time)| {
+            previous == indices && now.saturating_duration_since(*time) <= TOOL_SUMMARY_DOUBLE_CLICK
+        }) {
+            self.pending = None;
+            return true;
+        }
+        self.pending = Some((indices.clone(), now));
+        false
+    }
+}
 
 fn begin_passport_login(
     passport_url: &mut Option<String>,
@@ -169,6 +193,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut pointer: Option<(u16, u16)> = None;
     let mut text_selection: Option<selection::Selection> = None;
     let mut selecting_text = false;
+    let mut tool_summary_click = ToolSummaryClick::default();
     let mut hits = view::HitMap::default();
     let mut cancel = CancelToken::new();
     let mut cached: Option<(SessionId, blora_session::SessionProjection)> = None;
@@ -1406,6 +1431,14 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             }
                             MouseEventKind::Down(MouseButton::Left) => {
                                 let hit = hits.hit(mouse.column, mouse.row);
+                                let open_tool_summary = if tool_dialog.is_none()
+                                    && tool_detail_dialog.is_none()
+                                {
+                                    tool_summary_click.register(hit.as_ref(), Instant::now())
+                                } else {
+                                    tool_summary_click.register(None, Instant::now());
+                                    false
+                                };
                                 if folder_picker.is_some() {
                                     match hit {
                                         Some(view::Hit::TrafficClose) => folder_picker = None,
@@ -1492,6 +1525,9 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     continue;
                                 }
                                 if let Some(view::Hit::ToolSummary(indices)) = hit.clone() {
+                                    if !open_tool_summary {
+                                        continue;
+                                    }
                                     selecting_text = false;
                                     text_selection = None;
                                     let tools = projection
@@ -3949,6 +3985,48 @@ fn git_branch_counts(status: &str) -> (usize, usize) {
             Some((ahead, behind))
         })
         .unwrap_or((0, 0))
+}
+
+#[cfg(test)]
+mod tool_summary_click_tests {
+    use super::*;
+
+    #[test]
+    fn opens_only_after_two_clicks_on_the_same_summary() {
+        let mut click = ToolSummaryClick::default();
+        let now = Instant::now();
+        let first = view::Hit::ToolSummary(vec![2, 3]);
+        let other = view::Hit::ToolSummary(vec![4]);
+        assert!(!click.register(Some(&first), now));
+        assert!(!click.register(Some(&other), now + Duration::from_millis(100)));
+        assert!(!click.register(Some(&first), now + Duration::from_millis(200)));
+        assert!(click.register(Some(&first), now + Duration::from_millis(300)));
+        assert!(!click.register(Some(&first), now + Duration::from_millis(350)));
+    }
+
+    #[test]
+    fn ignores_expired_or_interrupted_clicks() {
+        let mut click = ToolSummaryClick::default();
+        let now = Instant::now();
+        let summary = view::Hit::ToolSummary(vec![1]);
+        assert!(!click.register(Some(&summary), now));
+        assert!(!click.register(
+            Some(&summary),
+            now + TOOL_SUMMARY_DOUBLE_CLICK + Duration::from_millis(1)
+        ));
+        assert!(!click.register(
+            None,
+            now + TOOL_SUMMARY_DOUBLE_CLICK + Duration::from_millis(2)
+        ));
+        assert!(!click.register(
+            Some(&summary),
+            now + TOOL_SUMMARY_DOUBLE_CLICK + Duration::from_millis(3)
+        ));
+        assert!(click.register(
+            Some(&summary),
+            now + TOOL_SUMMARY_DOUBLE_CLICK + Duration::from_millis(4)
+        ));
+    }
 }
 
 #[cfg(test)]

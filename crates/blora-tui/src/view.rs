@@ -1755,11 +1755,17 @@ fn tool_summary_hit_rows(
         };
         cursor = row.saturating_add(1);
         let visible_row = row.saturating_sub(window_start);
-        if visible_row < rect.height as usize {
-            rows.push((
-                Rect::new(rect.x, rect.y + visible_row as u16, rect.width, 1),
-                indices,
-            ));
+        if row >= window_start && visible_row < rect.height as usize {
+            let offset = 2u16.min(rect.width);
+            let width = u16::try_from(summary.width())
+                .unwrap_or(u16::MAX)
+                .min(rect.width.saturating_sub(offset));
+            if width > 0 {
+                rows.push((
+                    Rect::new(rect.x + offset, rect.y + visible_row as u16, width, 1),
+                    indices,
+                ));
+            }
         }
     }
     rows
@@ -4513,6 +4519,66 @@ mod tests {
         let (lines, _) = render_passport_with_hits(area, &dialog, Some((green.x, green.y)));
         let chars = row_chars(&lines[green.y as usize]);
         assert_eq!(chars[green.x as usize], '+', "green shows + on hover");
+    }
+
+    #[test]
+    fn tool_summary_click_target_covers_only_the_visible_text() {
+        let mut projection = SessionProjection::new();
+        for name in ["search", "read_file"] {
+            projection.transcript.push(TranscriptItem::Tool {
+                name: name.to_owned(),
+                status: "completed".to_owned(),
+                event_id: blora_types::EventId::generate(),
+                arguments: None,
+                output: None,
+                call_id: None,
+            });
+        }
+        let area = Rect::new(4, 5, 80, 8);
+        let lines = transcript_lines(
+            &projection,
+            None,
+            false,
+            78,
+            false,
+            0,
+            "you",
+            None,
+            &Theme::current(),
+        );
+        let rows = tool_summary_hit_rows(Some(&projection), None, false, false, &lines, area, 0);
+        assert_eq!(rows.len(), 1);
+        let (target, indices) = &rows[0];
+        assert_eq!(indices, &vec![0, 1]);
+        assert_eq!(target.x, area.x + 2);
+        assert_eq!(
+            target.width as usize,
+            blora_session::summarize_tool_run(
+                &projection.transcript.iter().collect::<Vec<_>>(),
+                false
+            )
+            .width()
+        );
+        assert!(target.width < area.width - 2);
+        let mut hits = HitMap::default();
+        hits.tool_summary_rows = rows.clone();
+        assert_eq!(
+            hits.hit(target.x, target.y),
+            Some(Hit::ToolSummary(vec![0, 1]))
+        );
+        assert_ne!(
+            hits.hit(area.x, target.y),
+            Some(Hit::ToolSummary(vec![0, 1]))
+        );
+        assert_ne!(
+            hits.hit(target.right(), target.y),
+            Some(Hit::ToolSummary(vec![0, 1]))
+        );
+        let mut scrolled_lines = lines.clone();
+        scrolled_lines.extend((0..12).map(|_| Line::default()));
+        assert!(tool_summary_hit_rows(
+            Some(&projection), None, false, false, &scrolled_lines, area, 0
+        ).is_empty());
     }
 
     #[test]
