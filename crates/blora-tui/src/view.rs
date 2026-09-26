@@ -4583,6 +4583,50 @@ mod tests {
     }
 
     #[test]
+    fn git_dialog_controls_take_priority_over_transcript() {
+        let area = Rect::new(0, 0, 110, 30);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        let dialog = GitDialog {
+            info: GitStatusInfo {
+                branch: "main".into(),
+                added: 1,
+                removed: 0,
+                ahead: 0,
+                behind: 0,
+                stashes: 0,
+                clean: false,
+                raw: "## main\n M src/lib.rs".into(),
+                diff: String::new(),
+                log: String::new(),
+            },
+            page: 2,
+            selected: 0,
+            message: String::new(),
+            editing_message: false,
+            generating_message: false,
+            syncing: false,
+            excluded_files: Default::default(),
+            scroll: 0,
+            feedback: None,
+            fullscreen: false,
+            minimized: false,
+        };
+        let mut hits = HitMap::default();
+        terminal
+            .draw(|frame| {
+                hits = render_git_dialog(frame, area, &dialog, None, &Theme::current(), 0);
+            })
+            .unwrap();
+        for (rect, page) in &hits.git_tabs {
+            hits.tool_summary_rows.push((*rect, vec![0]));
+            assert_eq!(hits.hit(rect.x + 1, rect.y), Some(Hit::GitTab(*page)));
+        }
+        let primary = hits.git_primary.expect("commit button");
+        hits.tool_summary_rows.push((primary, vec![0]));
+        assert_eq!(hits.hit(primary.x + 1, primary.y), Some(Hit::GitPrimary));
+    }
+
+    #[test]
     fn git_indicator_shows_tracking_counts_for_clean_workspace() {
         let mut status = GitStatusInfo {
             branch: String::new(),

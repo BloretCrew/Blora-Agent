@@ -716,28 +716,94 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     slash_selected = (slash_selected + 1).min(slash_hits.len() - 1);
                                 }
                             }
+                            KeyCode::Char('v')
+                                if key.modifiers.contains(KeyModifiers::CONTROL)
+                                    && git_dialog
+                                        .as_ref()
+                                        .is_some_and(|dialog| dialog.editing_message) =>
+                            {
+                                if let Some(text) = read_clipboard_text()
+                                    && let Some(dialog) = git_dialog.as_mut()
+                                {
+                                    dialog.message.push_str(text.trim_end_matches(['\r', '\n']));
+                                }
+                            }
+                            KeyCode::Char(ch)
+                                if git_dialog
+                                    .as_ref()
+                                    .is_some_and(|dialog| dialog.editing_message)
+                                    && !key.modifiers.contains(KeyModifiers::CONTROL) =>
+                            {
+                                if let Some(dialog) = git_dialog.as_mut() {
+                                    dialog.message.push(ch);
+                                }
+                            }
+                            KeyCode::Backspace
+                                if git_dialog
+                                    .as_ref()
+                                    .is_some_and(|dialog| dialog.editing_message) =>
+                            {
+                                if let Some(dialog) = git_dialog.as_mut() {
+                                    dialog.message.pop();
+                                }
+                            }
+                            KeyCode::Enter
+                                if git_dialog
+                                    .as_ref()
+                                    .is_some_and(|dialog| dialog.editing_message) =>
+                            {
+                                if let Some(dialog) = git_dialog.as_mut() {
+                                    dialog.editing_message = false;
+                                }
+                            }
                             KeyCode::Left if git_dialog.is_some() => {
                                 if let Some(dialog) = git_dialog.as_mut() {
                                     dialog.page = dialog.page.saturating_sub(1);
                                 }
                             }
                             KeyCode::Esc if git_dialog.is_some() => {
-                                git_dialog = None;
+                                if let Some(dialog) = git_dialog.as_mut() {
+                                    if dialog.editing_message {
+                                        dialog.editing_message = false;
+                                    } else {
+                                        git_dialog = None;
+                                    }
+                                }
                             }
                             KeyCode::Right if git_dialog.is_some() => {
                                 if let Some(dialog) = git_dialog.as_mut() {
                                     dialog.page = (dialog.page + 1).min(2);
                                 }
                             }
+                            KeyCode::Up if git_dialog.is_some() => {
+                                if let Some(dialog) = git_dialog.as_mut() {
+                                    dialog.selected = dialog.selected.saturating_sub(1);
+                                }
+                            }
+                            KeyCode::Down if git_dialog.is_some() => {
+                                if let Some(dialog) = git_dialog.as_mut() {
+                                    dialog.selected = dialog.selected.saturating_add(1);
+                                }
+                            }
                             KeyCode::Enter if git_dialog.is_some() => {
                                 if let Some(dialog) = git_dialog.as_mut() {
-                                    if dialog.page == 0 {
-                                        dialog.info = git_status
-                                            .clone()
-                                            .unwrap_or_else(|| dialog.info.clone());
+                                    if dialog.minimized {
+                                        dialog.minimized = false;
+                                    } else if dialog.page == 2 {
+                                        commit_git_dialog(runtime, &active_workspace, dialog);
+                                        git_status = runtime
+                                            .workspace_info(&active_workspace)
+                                            .ok()
+                                            .map(|info| parse_git_status(&info));
+                                    } else if let Ok(info) =
+                                        runtime.workspace_info(&active_workspace)
+                                    {
+                                        dialog.info = parse_git_status(&info);
+                                        git_status = Some(dialog.info.clone());
                                     }
                                 }
                             }
+                            KeyCode::Char(_) if git_dialog.is_some() => {}
                             KeyCode::Up
                                 if project_picker.is_none()
                                     && session_picker.is_none()
@@ -1375,21 +1441,38 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                             info,
                                             page: 0,
                                             selected: 0,
+                                            message: String::new(),
+                                            editing_message: false,
+                                            generating_message: false,
+                                            syncing: false,
+                                            excluded_files: Default::default(),
+                                            scroll: 0,
+                                            feedback: None,
                                             fullscreen: false,
                                             minimized: false,
                                         });
                                     }
                                     continue;
                                 }
-                                if git_dialog.is_some() {
-                                    if let Some(dialog) = git_dialog.as_mut() {
-                                        match hit {
-                                            Some(view::Hit::GitRow(index))
-                                            | Some(view::Hit::GitAction(index)) => {
-                                                dialog.selected = index
-                                            }
-                                            _ => {}
+                                if let Some(dialog) = git_dialog.as_mut() {
+                                    match hit {
+                                        Some(view::Hit::GitTab(page)) => {
+                                            dialog.page = page;
+                                            dialog.selected = 0;
+                                            dialog.editing_message = false;
                                         }
+                                        Some(view::Hit::GitMessage) => {
+                                            dialog.editing_message = true;
+                                        }
+                                        Some(view::Hit::GitPrimary) => {
+                                            commit_git_dialog(runtime, &active_workspace, dialog);
+                                            git_status = runtime
+                                                .workspace_info(&active_workspace)
+                                                .ok()
+                                                .map(|info| parse_git_status(&info));
+                                        }
+                                        Some(view::Hit::GitRow(index)) => dialog.selected = index,
+                                        _ => {}
                                     }
                                     continue;
                                 }
@@ -3589,6 +3672,46 @@ fn write_rules(workspace: &Path) -> String {
     ) {
         Ok(()) => format!("wrote {}", path.display()),
         Err(err) => err.to_string(),
+    }
+}
+
+fn commit_git_dialog(runtime: &Runtime, workspace: &Path, dialog: &mut view::GitDialog) {
+    if dialog.message.trim().is_empty() {
+        dialog.editing_message = true;
+        dialog.feedback = Some("请先输入提交说明".to_owned());
+        return;
+    }
+    let files: Vec<String> = dialog
+        .info
+        .raw
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let status = line.get(..2)?;
+            let path = line.get(3..)?.trim();
+            if path.is_empty() || status == "!!" {
+                return None;
+            }
+            Some(
+                path.rsplit_once(" -> ")
+                    .map_or(path, |(_, new)| new)
+                    .to_owned(),
+            )
+        })
+        .collect();
+    if files.is_empty() {
+        dialog.feedback = Some("没有待提交的更改".to_owned());
+        return;
+    }
+    match runtime.git_commit_selected(workspace, &dialog.message, &files) {
+        Ok(_) => {
+            dialog.message.clear();
+            dialog.feedback = Some("提交成功".to_owned());
+            if let Ok(info) = runtime.workspace_info(workspace) {
+                dialog.info = parse_git_status(&info);
+            }
+        }
+        Err(err) => dialog.feedback = Some(err.to_string()),
     }
 }
 
