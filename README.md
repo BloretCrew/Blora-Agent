@@ -51,6 +51,19 @@ cargo run -p blora-cli -- run --session ses_… --yes "fix the failing test"
 
 数据目录：`$BLORA_HOME`，默认 `~/.blora/state.sqlite`。网络命令默认拒绝，设置 `BLORA_NETWORK=1` 后才可审批执行。
 
+### Windows
+
+在 Windows 上用同样的 `cargo run -p blora-cli` 启动 TUI 或 Web。需要已安装 Git，因为工具命令走 POSIX shell：
+
+- 若 `bash` 或 `sh` 在 `PATH` 上（Git for Windows 会提供），命令用 `sh -c` 执行，`cd`、管道和引号与 Linux 一致。
+- 否则使用 `cmd.exe /D /C`。这时 `ls` 这类命令不可用，除非它们自己也在 `PATH` 上。
+- `BLORA_SHELL` 可指定解释器：`bash` 的路径、`cmd`，或 `powershell`。
+- 浏览器用 `cmd /C start` 打开。复制文本优先用 `clip`，粘贴用 PowerShell 的 `Get-Clipboard`。这些子进程不弹出控制台窗口。
+- 结束超时进程用 `taskkill /T /F`。`BLORA_EXEC=pty` 在 Windows 上退回普通 shell，因为没有 Unix 的 `script`。
+- `BLORA_EXEC=bwrap` 只在 Linux 上可用。Docker 隔离仍然调用本机 `docker`。
+- Hook 可以是 `.exe`、`.cmd`、`.bat`、`.ps1`。没有扩展名的脚本只在 POSIX shell 下按 shebang 运行。
+- 数据目录默认是 `%USERPROFILE%\.blora`。Unix 上该目录权限为 `0700`；Windows 沿用用户配置目录自己的访问控制。
+
 ## 仓库结构
 
 ```text

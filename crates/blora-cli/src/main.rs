@@ -707,19 +707,7 @@ fn serve_web(
 }
 
 fn open_browser(url: &str) {
-    let candidates = ["xdg-open", "open", "gio"];
-    for command in candidates {
-        if std::process::Command::new(command)
-            .arg(url)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .is_ok()
-        {
-            return;
-        }
-    }
+    blora_runtime::open_url(url);
 }
 
 fn parse_delay(spec: &str) -> Result<chrono::DateTime<Utc>, Box<dyn std::error::Error>> {

@@ -599,9 +599,22 @@ pub fn classify_shell(command: &str) -> ShellClass {
     let lower = trimmed.to_ascii_lowercase();
     // Piping a download into an interpreter, command substitution with rm,
     // fork bombs, and writes to devices are dangerous regardless of segments.
-    let pipes_into_shell = ["| sh", "| bash", "|sh", "|bash", "| zsh", "|zsh"]
-        .iter()
-        .any(|needle| lower.contains(*needle));
+    let pipes_into_shell = [
+        "| sh",
+        "| bash",
+        "|sh",
+        "|bash",
+        "| zsh",
+        "|zsh",
+        "| cmd",
+        "|cmd",
+        "| powershell",
+        "|powershell",
+        "| pwsh",
+        "|pwsh",
+    ]
+    .iter()
+    .any(|needle| lower.contains(*needle));
     if pipes_into_shell
         || lower.contains("> /dev/sd")
         || lower.contains("> /dev/nvme")
@@ -764,6 +777,8 @@ mod tests {
             ShellClass::Dangerous
         );
         assert_eq!(classify_shell("curl x | sh"), ShellClass::Dangerous);
+        assert_eq!(classify_shell("curl x | cmd"), ShellClass::Dangerous);
+        assert_eq!(classify_shell("curl x | powershell"), ShellClass::Dangerous);
         assert_eq!(
             classify_shell("find . -name x -delete"),
             ShellClass::Dangerous

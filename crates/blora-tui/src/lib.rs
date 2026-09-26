@@ -402,8 +402,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                 && passport_receiver.is_some()
                 && let Some(url) = passport_url.as_deref()
             {
-                let _ = std::process::Command::new("xdg-open").arg(url).spawn();
-                let _ = std::process::Command::new("open").arg(url).spawn();
+                blora_runtime::open_url(url);
                 passport_browser_opened = true;
                 if let Some(dialog) = passport_dialog.as_mut() {
                     dialog.opened_browser = true;
@@ -2091,9 +2090,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                             dialog.fullscreen = !dialog.fullscreen;
                                         }
                                     } else if let Some(url) = passport_url.as_deref() {
-                                        let _ =
-                                            std::process::Command::new("xdg-open").arg(url).spawn();
-                                        let _ = std::process::Command::new("open").arg(url).spawn();
+                                        blora_runtime::open_url(url);
                                         if let Some(dialog) = passport_dialog.as_mut() {
                                             dialog.opened_browser = true;
                                         }
@@ -4326,8 +4323,7 @@ fn handle_traffic_light(
                     dialog.fullscreen = !dialog.fullscreen;
                 }
             } else if let Some(url) = passport_url {
-                let _ = std::process::Command::new("xdg-open").arg(url).spawn();
-                let _ = std::process::Command::new("open").arg(url).spawn();
+                blora_runtime::open_url(url);
                 *passport_browser_opened = true;
                 if let Some(dialog) = passport_dialog.as_mut() {
                     dialog.opened_browser = true;
@@ -4494,42 +4490,29 @@ fn ascii_image_preview(text: &str) -> String {
 }
 
 fn read_clipboard_text() -> Option<String> {
+    #[cfg(windows)]
+    if let Some(text) = clipboard_output(
+        "powershell.exe",
+        &["-NoProfile", "-Command", "Get-Clipboard -Raw"],
+    ) {
+        return Some(text);
+    }
     for (program, args) in [
         ("wl-paste", vec!["--no-newline"]),
         ("xclip", vec!["-selection", "clipboard", "-o"]),
         ("xsel", vec!["--clipboard", "--output"]),
         ("pbpaste", Vec::new()),
     ] {
-        let Ok(output) = std::process::Command::new(program).args(args).output() else {
-            continue;
-        };
-        if output.status.success() {
-            return Some(String::from_utf8_lossy(&output.stdout).into_owned());
+        if let Some(text) = clipboard_output(program, &args) {
+            return Some(text);
         }
     }
     None
 }
 
 fn copy_text_to_clipboard(text: &str) -> String {
-    for (program, args) in [
-        ("wl-copy", &[] as &[&str]),
-        ("xclip", &["-selection", "clipboard"] as &[&str]),
-        ("xsel", &["--clipboard", "--input"] as &[&str]),
-        ("pbcopy", &[] as &[&str]),
-    ] {
-        if let Ok(mut child) = std::process::Command::new(program)
-            .args(args)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        {
-            if let Some(mut stdin) = child.stdin.take() {
-                let _ = stdin.write_all(text.as_bytes());
-            }
-            let _ = child.wait();
-            return format!("copied {} chars", text.chars().count());
-        }
+    if write_clipboard(text) {
+        return format!("copied {} chars", text.chars().count());
     }
     format!("no clipboard tool; selected {} chars", text.chars().count())
 }
@@ -4551,13 +4534,35 @@ fn copy_last_assistant(runtime: &Runtime, session_id: &SessionId) -> String {
     if text.is_empty() {
         return "nothing to copy".to_owned();
     }
-    for (program, args) in [
-        ("wl-copy", &[] as &[&str]),
-        ("xclip", &["-selection", "clipboard"] as &[&str]),
-        ("xsel", &["--clipboard", "--input"] as &[&str]),
-        ("pbcopy", &[] as &[&str]),
-    ] {
-        if let Ok(mut child) = std::process::Command::new(program)
+    if write_clipboard(&text) {
+        return format!("copied {} chars", text.chars().count());
+    }
+    format!(
+        "no clipboard tool; last reply is {} chars",
+        text.chars().count()
+    )
+}
+
+fn clipboard_output(program: &str, args: &[&str]) -> Option<String> {
+    let output = blora_runtime::command(program).args(args).output().ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn write_clipboard(text: &str) -> bool {
+    let mut commands: Vec<(&str, &[&str])> = Vec::new();
+    #[cfg(windows)]
+    commands.push(("clip", &[] as &[&str]));
+    commands.extend([
+        ("wl-copy", &[][..]),
+        ("xclip", &["-selection", "clipboard"][..]),
+        ("xsel", &["--clipboard", "--input"][..]),
+        ("pbcopy", &[][..]),
+    ]);
+    for (program, args) in commands {
+        if let Ok(mut child) = blora_runtime::command(program)
             .args(args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
@@ -4567,12 +4572,10 @@ fn copy_last_assistant(runtime: &Runtime, session_id: &SessionId) -> String {
             if let Some(mut stdin) = child.stdin.take() {
                 let _ = stdin.write_all(text.as_bytes());
             }
-            let _ = child.wait();
-            return format!("copied {} chars", text.chars().count());
+            if child.wait().map(|status| status.success()).unwrap_or(false) {
+                return true;
+            }
         }
     }
-    format!(
-        "no clipboard tool; last reply is {} chars",
-        text.chars().count()
-    )
+    false
 }

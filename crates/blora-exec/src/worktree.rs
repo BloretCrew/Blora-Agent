@@ -2,9 +2,10 @@
 // Copyright (C) 2026 Blora Agent contributors
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use blora_types::{BloraError, Result};
+
+use crate::host::command;
 
 /// Isolated Git worktree under `{workspace}/.blora/worktrees/{name}`.
 #[derive(Clone, Debug)]
@@ -23,7 +24,7 @@ impl WorktreeHandle {
         if safe.is_empty() {
             return Err(BloraError::Exec("worktree name is empty".to_owned()));
         }
-        let inside = Command::new("git")
+        let inside = command("git")
             .args(["rev-parse", "--is-inside-work-tree"])
             .current_dir(source)
             .output()
@@ -43,7 +44,7 @@ impl WorktreeHandle {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(BloraError::exec)?;
         }
-        let output = Command::new("git")
+        let output = command("git")
             .args([
                 "worktree",
                 "add",
@@ -72,7 +73,7 @@ impl WorktreeHandle {
     }
 
     pub fn remove(self) -> Result<()> {
-        let output = Command::new("git")
+        let output = command("git")
             .args([
                 "worktree",
                 "remove",
@@ -102,7 +103,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("README"), "hi").unwrap();
         let git = |args: &[&str]| {
-            Command::new("git")
+            command("git")
                 .args(args)
                 .current_dir(dir.path())
                 .status()
@@ -110,11 +111,11 @@ mod tests {
                 .success()
         };
         assert!(git(&["init"]));
-        let _ = Command::new("git")
+        let _ = command("git")
             .args(["config", "user.email", "blora@example.test"])
             .current_dir(dir.path())
             .status();
-        let _ = Command::new("git")
+        let _ = command("git")
             .args(["config", "user.name", "Blora"])
             .current_dir(dir.path())
             .status();

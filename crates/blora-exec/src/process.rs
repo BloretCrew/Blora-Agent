@@ -2,13 +2,14 @@
 // Copyright (C) 2026 Blora Agent contributors
 
 use std::collections::BTreeMap;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 
 use blora_types::{BloraError, Result};
 
 use crate::LocalBackend;
+use crate::host::terminate_pid;
 
 #[derive(Clone, Debug)]
 pub struct ProcessInfo {
@@ -95,10 +96,7 @@ impl LocalBackend {
                 "pid {pid} is not a Blora-tracked process"
             )));
         }
-        let status = Command::new("kill")
-            .arg(pid.to_string())
-            .status()
-            .map_err(BloraError::exec)?;
+        let status = terminate_pid(pid).map_err(BloraError::exec)?;
         if let Some(info) = lock_registry().get_mut(&pid) {
             info.status = "killed".to_owned();
         }

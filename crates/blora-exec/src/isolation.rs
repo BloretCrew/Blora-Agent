@@ -6,6 +6,8 @@ use std::process::Command;
 
 use blora_types::{BloraError, Result};
 
+use crate::host;
+
 /// How shell commands are isolated from the host.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Isolation {
@@ -42,11 +44,7 @@ impl Isolation {
 
     pub fn shell_command(self, workspace: &Path, command: &str) -> Result<Command> {
         match self {
-            Self::Local => {
-                let mut cmd = Command::new("sh");
-                cmd.arg("-c").arg(command).current_dir(workspace);
-                Ok(cmd)
-            }
+            Self::Local => Ok(host::shell_command(workspace, command)),
             Self::Sandbox => sandbox_command(workspace, command),
             Self::Bwrap => bwrap_command(workspace, command),
             Self::Container => container_command(workspace, command),
@@ -57,7 +55,7 @@ impl Isolation {
 }
 
 fn sandbox_command(workspace: &Path, command: &str) -> Result<Command> {
-    let unshare_ok = Command::new("unshare")
+    let unshare_ok = host::command("unshare")
         .args(["-n", "true"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -65,19 +63,22 @@ fn sandbox_command(workspace: &Path, command: &str) -> Result<Command> {
         .map(|status| status.success())
         .unwrap_or(false);
     let mut cmd = if unshare_ok {
-        let mut cmd = Command::new("unshare");
+        let mut cmd = host::command("unshare");
         cmd.args(["-n", "--", "sh", "-c", command]);
         cmd
     } else {
-        let mut cmd = Command::new("sh");
-        cmd.arg("-c").arg(command);
-        cmd
+        host::shell_command(workspace, command)
     };
+    let workspace_home = workspace.display().to_string();
     cmd.current_dir(workspace)
         .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .env("HOME", workspace)
+        .env("PATH", host::sandbox_path())
+        .env("HOME", &workspace_home)
         .env("LANG", "C");
+    #[cfg(windows)]
+    {
+        cmd.env("USERPROFILE", &workspace_home);
+    }
     Ok(cmd)
 }
 
@@ -85,7 +86,7 @@ fn sandbox_command(workspace: &Path, command: &str) -> Result<Command> {
 /// workspace and a private /tmp are writable, and the network namespace is
 /// unshared. Extra writable paths come from `BLORA_BWRAP_RW` (colon separated).
 fn bwrap_command(workspace: &Path, command: &str) -> Result<Command> {
-    let available = Command::new("bwrap")
+    let available = host::command("bwrap")
         .arg("--version")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -98,7 +99,7 @@ fn bwrap_command(workspace: &Path, command: &str) -> Result<Command> {
         ));
     }
     let workspace_str = workspace.display().to_string();
-    let mut cmd = Command::new("bwrap");
+    let mut cmd = host::command("bwrap");
     cmd.args(["--ro-bind", "/", "/"])
         .args(["--bind", &workspace_str, &workspace_str])
         .args(["--tmpfs", "/tmp"])
@@ -125,7 +126,7 @@ fn bwrap_command(workspace: &Path, command: &str) -> Result<Command> {
 fn container_command(workspace: &Path, command: &str) -> Result<Command> {
     let image = std::env::var("BLORA_CONTAINER_IMAGE").unwrap_or_else(|_| "alpine:3.20".to_owned());
     let mount = format!("{}:/work", workspace.display());
-    let docker = Command::new("docker")
+    let docker = host::command("docker")
         .arg("version")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -135,7 +136,7 @@ fn container_command(workspace: &Path, command: &str) -> Result<Command> {
             "BLORA_EXEC=container requires a working docker CLI".to_owned(),
         ));
     }
-    let mut cmd = Command::new("docker");
+    let mut cmd = host::command("docker");
     cmd.args([
         "run",
         "--rm",
@@ -153,10 +154,19 @@ fn container_command(workspace: &Path, command: &str) -> Result<Command> {
 }
 
 fn pty_command(workspace: &Path, command: &str) -> Result<Command> {
-    let mut cmd = Command::new("script");
-    cmd.args(["-qefc", command, "/dev/null"])
-        .current_dir(workspace);
-    Ok(cmd)
+    // `script` allocates a PTY on Unix. Windows has no equivalent on PATH,
+    // so interactive commands run in the host shell without a console window.
+    #[cfg(windows)]
+    {
+        return Ok(host::shell_command(workspace, command));
+    }
+    #[cfg(not(windows))]
+    {
+        let mut cmd = host::command("script");
+        cmd.args(["-qefc", command, "/dev/null"])
+            .current_dir(workspace);
+        Ok(cmd)
+    }
 }
 
 pub fn remote_host() -> Result<String> {
@@ -172,7 +182,7 @@ pub fn remote_command(workspace: &Path, command: &str) -> Result<Command> {
     let host = remote_host()?;
     let root = remote_root(workspace);
     let script = format!("cd {root} && {command}");
-    let mut cmd = Command::new("ssh");
+    let mut cmd = host::command("ssh");
     cmd.args([
         "-o",
         "BatchMode=yes",
@@ -201,14 +211,42 @@ mod tests {
         let cmd = Isolation::Sandbox
             .shell_command(dir.path(), "true")
             .unwrap();
-        assert!(cmd.get_program() == "unshare" || cmd.get_program() == "sh");
+        let program = cmd.get_program().to_string_lossy().to_ascii_lowercase();
+        assert!(
+            program == "unshare"
+                || program == "sh"
+                || program.ends_with("sh.exe")
+                || program.ends_with("bash")
+                || program.ends_with("bash.exe")
+                || program.contains("cmd")
+                || program.contains("powershell")
+                || program.contains("pwsh"),
+            "{program}"
+        );
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn pty_uses_script() {
         let dir = tempfile::tempdir().unwrap();
         let cmd = Isolation::Pty.shell_command(dir.path(), "echo hi").unwrap();
         assert_eq!(cmd.get_program(), "script");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn pty_falls_back_to_the_host_shell() {
+        let dir = tempfile::tempdir().unwrap();
+        let cmd = Isolation::Pty.shell_command(dir.path(), "echo hi").unwrap();
+        let program = cmd.get_program().to_string_lossy().to_ascii_lowercase();
+        assert!(
+            program.contains("bash")
+                || program.contains("sh")
+                || program.contains("cmd")
+                || program.contains("powershell")
+                || program.contains("pwsh"),
+            "{program}"
+        );
     }
 
     #[test]

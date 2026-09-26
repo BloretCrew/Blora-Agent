@@ -5,7 +5,7 @@
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -13,6 +13,7 @@ use std::time::Duration;
 use blora_policy::Policy;
 use blora_types::{BloraError, Result};
 mod glob;
+mod host;
 mod isolation;
 mod media;
 mod process;
@@ -22,6 +23,9 @@ use regex::Regex;
 use walkdir::WalkDir;
 
 pub use glob::glob_match;
+pub use host::{
+    HostShell, command, host_shell, open_url, path_is_absolute, quote, shell_command, terminate_pid,
+};
 pub use isolation::{Isolation, remote_command, remote_host, remote_root};
 pub use process::ProcessInfo;
 pub use worktree::WorktreeHandle;
@@ -282,7 +286,7 @@ impl LocalBackend {
                 CdTarget::Path(path) => join_cwd(&effective, &path),
             };
             let dest = self.normalize_cwd(&raw)?;
-            (format!("cd {}", sh_quote(&dest)), ".".to_owned())
+            (host::cd_into(&dest), ".".to_owned())
         } else {
             (command.to_owned(), effective)
         };
@@ -355,7 +359,7 @@ impl LocalBackend {
         let status = match rx.recv_timeout(timeout) {
             Ok(status) => status.map_err(BloraError::exec)?,
             Err(_) => {
-                let _ = Command::new("kill").arg(pid.to_string()).status();
+                let _ = terminate_pid(pid);
                 return Err(BloraError::Exec(format!(
                     "command timed out after {}s",
                     timeout.as_secs()
@@ -473,7 +477,7 @@ impl LocalBackend {
 
     /// Like [`Self::git`], but a non-zero exit is an error and empty output stays empty.
     fn git_strict(&self, args: &[&str]) -> Result<String> {
-        let output = Command::new("git")
+        let output = command("git")
             .args(args)
             .current_dir(self.policy.workspace())
             .env("LC_ALL", "C")
@@ -652,7 +656,7 @@ impl LocalBackend {
     }
 
     fn git_mutate(&self, args: &[&str]) -> Result<String> {
-        let output = Command::new("git")
+        let output = command("git")
             .args(args)
             .current_dir(self.policy.workspace())
             .output()
@@ -669,7 +673,7 @@ impl LocalBackend {
     }
 
     fn git(&self, args: &[&str]) -> Result<String> {
-        let output = Command::new("git")
+        let output = command("git")
             .args(args)
             .current_dir(self.policy.workspace())
             .output()
@@ -751,10 +755,13 @@ pub fn shell_cwd_after(effective: &str, command: &str, success: bool) -> String 
 #[must_use]
 pub fn join_cwd(current: &str, target: &str) -> String {
     let target = target.trim();
-    if let Some(rest) = target.strip_prefix("~/") {
-        return rest.trim_start_matches('/').to_owned();
+    if let Some(rest) = target
+        .strip_prefix("~/")
+        .or_else(|| target.strip_prefix("~\\"))
+    {
+        return rest.trim_start_matches(['/', '\\']).to_owned();
     }
-    if target.starts_with('/') {
+    if path_is_absolute(target) {
         return target.to_owned();
     }
     let base = current.trim().trim_end_matches('/');
@@ -797,22 +804,19 @@ pub fn plain_cd_target(command: &str) -> Option<CdTarget> {
     if !quoted && target.split_whitespace().nth(1).is_some() {
         return None;
     }
-    if let Some(rest) = target.strip_prefix("~/") {
-        return Some(CdTarget::Path(rest.trim_start_matches('/').to_owned()));
+    if let Some(rest) = target
+        .strip_prefix("~/")
+        .or_else(|| target.strip_prefix("~\\"))
+    {
+        return Some(CdTarget::Path(
+            rest.trim_start_matches(['/', '\\']).to_owned(),
+        ));
     }
     Some(CdTarget::Path(target.to_owned()))
 }
 
 fn wrap_cwd(cwd: &str, command: &str) -> String {
-    if cwd == "." {
-        command.to_owned()
-    } else {
-        format!("cd {} && {command}", sh_quote(cwd))
-    }
-}
-
-fn sh_quote(text: &str) -> String {
-    format!("'{}'", text.replace('\'', "'\\''"))
+    host::chain(cwd, command)
 }
 
 fn should_skip(path: &Path) -> bool {
@@ -961,6 +965,7 @@ impl ExecutionBackend for LocalBackend {
 mod tests {
     use super::*;
     use blora_policy::Policy;
+    use std::process::Command;
 
     #[test]
     fn reads_and_writes_inside_workspace() {
@@ -1049,6 +1054,9 @@ mod tests {
         assert_eq!(shell_cwd_after("sub", "pwd", true), "sub");
         assert_eq!(shell_cwd_after("sub", "cd ..", false), "sub");
         assert!(plain_cd_target("cd sub && ls").is_none());
+        assert_eq!(join_cwd("src", r"C:\Windows"), r"C:\Windows");
+        assert_eq!(join_cwd("src", r"\\server\share"), r"\\server\share");
+        assert_eq!(join_cwd("src", "lib.rs"), "src/lib.rs");
         let escaped = backend.shell_prepared("cd ..", ".", ShellKind::Foreground(None));
         assert!(escaped.is_err());
     }

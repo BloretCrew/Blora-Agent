@@ -14,7 +14,8 @@
 //! audit trail can tell "allowed" from "not checked".
 
 use std::io::{Read, Write};
-use std::process::{Command, Stdio};
+use std::path::Path;
+use std::process::Stdio;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -97,7 +98,7 @@ pub fn run_in(dir: Option<&std::path::Path>, event: &str, payload: &Value) -> Ho
     if !path.is_file() {
         return HookOutcome::absent();
     }
-    let mut child = match Command::new(&path)
+    let mut child = match hook_command(&path)
         .env("BLORA_HOOK", event)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -132,7 +133,7 @@ pub fn run_in(dir: Option<&std::path::Path>, event: &str, payload: &Value) -> Ho
             HookOutcome::degraded(format!("wait failed: {err}"))
         }
         Err(_) => {
-            let _ = Command::new("kill").arg(pid.to_string()).status();
+            let _ = blora_exec::terminate_pid(pid);
             tracing::warn!("hook {event} timed out");
             HookOutcome::degraded("timed out".to_owned())
         }
@@ -142,6 +143,37 @@ pub fn run_in(dir: Option<&std::path::Path>, event: &str, payload: &Value) -> Ho
 /// Fire-and-forget variant for informational events.
 pub fn fire(event: &str, payload: &str) {
     let _ = run(event, &json!({"text": payload}));
+}
+
+fn hook_command(path: &Path) -> std::process::Command {
+    #[cfg(windows)]
+    {
+        let extension = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if extension == "ps1" {
+            let mut cmd = blora_exec::command("powershell.exe");
+            cmd.args(["-NoProfile", "-NonInteractive", "-File"])
+                .arg(path);
+            return cmd;
+        }
+        if matches!(extension.as_str(), "exe" | "cmd" | "bat") {
+            return blora_exec::command(path);
+        }
+        // Shebang scripts run when Git Bash or another POSIX shell is the host shell.
+        if blora_exec::host_shell() == blora_exec::HostShell::Posix {
+            let parent = path.parent().unwrap_or_else(|| Path::new("."));
+            let script = format!("exec {}", blora_exec::quote(&path.display().to_string()));
+            return blora_exec::shell_command(parent, &script);
+        }
+        return blora_exec::command(path);
+    }
+    #[cfg(not(windows))]
+    {
+        blora_exec::command(path)
+    }
 }
 
 fn interpret(event: &str, code: Option<i32>, output: &str) -> HookOutcome {
