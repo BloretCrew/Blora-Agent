@@ -92,11 +92,6 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut tool_dialog: Option<view::ToolDialog> = None;
     let mut tool_detail_dialog: Option<view::ToolDetailDialog> = None;
     let mut git_dialog: Option<view::GitDialog> = None;
-    let (git_generation_tx, git_generation_rx) =
-        std::sync::mpsc::channel::<(u64, String, Result<String>)>();
-    let mut git_generation_id = 0u64;
-    let (git_sync_tx, git_sync_rx) = std::sync::mpsc::channel::<(u64, Result<String>)>();
-    let mut git_sync_id = 0u64;
     let mut mode_menu: Option<view::ModeMenu> = None;
     let mut project_picker: Option<view::ProjectPicker> = None;
     let mut folder_picker: Option<view::FolderPicker> = None;
@@ -174,8 +169,6 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut cached: Option<(SessionId, blora_session::SessionProjection)> = None;
     let result = thread::scope(|scope| -> Result<()> {
         let mut job: Option<thread::ScopedJoinHandle<'_, Result<blora_types::RunId>>> = None;
-        let mut git_generation: Option<thread::ScopedJoinHandle<'_, ()>> = None;
-        let mut git_sync: Option<thread::ScopedJoinHandle<'_, ()>> = None;
         loop {
             refresh_sessions(runtime, &mut sessions, &mut index);
             if let Some(receiver) = passport_receiver.as_ref()
@@ -188,10 +181,8 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                     user.email.as_deref(),
                     user.apptoken.as_deref(),
                     user.refresh_token.as_deref(),
-                    Some(
-                        chrono::Utc::now()
-                            + chrono::Duration::seconds(user.expires_in.unwrap_or(3600) as i64),
-                    ),
+                    user.expires_in
+                        .map(|secs| chrono::Utc::now() + chrono::Duration::seconds(secs as i64)),
                 )?;
                 passport_user_token = user
                     .apptoken
@@ -219,7 +210,6 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
             let active_workspace = sessions
                 .get(index)
                 .map(|session| PathBuf::from(&session.workspace_path))
-                .filter(|path| path.is_dir())
                 .unwrap_or_else(|| workspace.to_path_buf());
             let session_id = sessions.get(index).map(|item| item.id.clone());
             // Keep one projection per selected session and apply only new events.
@@ -381,72 +371,10 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                 cancel = CancelToken::new();
             }
 
-            while let Ok((generation, original_message, result)) = git_generation_rx.try_recv() {
-                if generation != git_generation_id {
-                    continue;
-                }
-                if let Some(dialog) = git_dialog.as_mut()
-                    && dialog.generating_message
-                {
-                    dialog.generating_message = false;
-                    match result {
-                        Ok(message) => {
-                            if dialog.message == original_message {
-                                dialog.message = message;
-                                dialog.feedback = None;
-                            } else {
-                                dialog.feedback = Some("已保留手动编辑的提交消息".to_owned());
-                            }
-                        }
-                        Err(error) => dialog.feedback = Some(error.to_string()),
-                    }
-                }
-            }
-            if git_generation
-                .as_ref()
-                .is_some_and(|handle| handle.is_finished())
-            {
-                if let Some(handle) = git_generation.take() {
-                    let _ = handle.join();
-                }
-            }
-            while let Ok((operation, result)) = git_sync_rx.try_recv() {
-                if operation != git_sync_id {
-                    continue;
-                }
-                if let Some(dialog) = git_dialog.as_mut() {
-                    dialog.syncing = false;
-                    dialog.feedback = Some(match result {
-                        Ok(_) => {
-                            if let Ok(info) = runtime.workspace_info(&active_workspace) {
-                                dialog.info = parse_git_status(&info);
-                                git_status = Some(dialog.info.clone());
-                            }
-                            "同步完成".to_owned()
-                        }
-                        Err(error) => error.to_string(),
-                    });
-                }
-            }
-            if git_sync.as_ref().is_some_and(|handle| handle.is_finished()) {
-                if let Some(handle) = git_sync.take() {
-                    let _ = handle.join();
-                }
-            }
-            let wait_ms = if job.is_some() || git_generation.is_some() || git_sync.is_some() {
-                50
-            } else {
-                200
-            };
+            let wait_ms = if job.is_some() { 50 } else { 200 };
             if event::poll(Duration::from_millis(wait_ms)).map_err(blora_types::BloraError::exec)? {
                 match event::read().map_err(blora_types::BloraError::exec)? {
                     Event::Paste(text) => {
-                        if let Some(dialog) = git_dialog.as_mut() {
-                            if dialog.editing_message {
-                                dialog.message.push_str(text.trim_end_matches(['\r', '\n']));
-                            }
-                            continue;
-                        }
                         if text.is_empty() {
                             paste_clipboard(&mut input, &mut paste_preview);
                         } else {
@@ -464,8 +392,12 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                         if key.modifiers.contains(KeyModifiers::CONTROL)
                             && key.code == KeyCode::Char('n')
                         {
-                            match create_session(runtime, workspace, blora_types::Mode::Code, None)
-                            {
+                            match create_session(
+                                runtime,
+                                &active_workspace,
+                                blora_types::Mode::Code,
+                                None,
+                            ) {
                                 Ok(id) => {
                                     refresh_sessions(runtime, &mut sessions, &mut index);
                                     if let Some(found) =
@@ -487,28 +419,21 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             slash_selected = 0;
                             continue;
                         }
-                        if folder_picker.is_some() {
+                        if let Some(picker) = folder_picker.as_mut() {
                             match key.code {
                                 KeyCode::Esc => folder_picker = None,
                                 KeyCode::Up => {
-                                    if let Some(picker) = folder_picker.as_mut() {
-                                        picker.selected = picker.selected.saturating_sub(1);
-                                        picker.scroll = picker.scroll.min(picker.selected);
-                                    }
+                                    picker.selected = picker.selected.saturating_sub(1);
+                                    picker.scroll = picker.scroll.min(picker.selected);
                                 }
                                 KeyCode::Down => {
-                                    if let Some(picker) = folder_picker.as_mut() {
-                                        picker.selected = (picker.selected + 1)
-                                            .min(picker.entries.len().saturating_sub(1));
-                                        picker.scroll =
-                                            picker.scroll.max(picker.selected.saturating_sub(9));
-                                    }
+                                    picker.selected = (picker.selected + 1)
+                                        .min(picker.entries.len().saturating_sub(1));
+                                    picker.scroll =
+                                        picker.scroll.max(picker.selected.saturating_sub(9));
                                 }
-                                KeyCode::Enter => {
-                                    if let Some(picker) = folder_picker.as_mut() {
-                                        enter_folder(picker, picker.selected);
-                                    }
-                                }
+                                KeyCode::Enter => enter_folder(picker, picker.selected),
+                                KeyCode::Left => enter_folder(picker, 0),
                                 KeyCode::Char('o' | 'O') => {
                                     if let Some(picker) = folder_picker.take() {
                                         open_project(
@@ -521,42 +446,14 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                         );
                                     }
                                 }
-                                KeyCode::Left => {
-                                    if let Some(picker) = folder_picker.as_mut() {
-                                        enter_folder(picker, 0);
-                                    }
-                                }
                                 _ => {}
                             }
                             continue;
                         }
                         match key.code {
-                            KeyCode::Char('v')
-                                if key.modifiers.contains(KeyModifiers::CONTROL)
-                                    && git_dialog.is_some() =>
-                            {
-                                if let Some(dialog) = git_dialog.as_mut()
-                                    && dialog.editing_message
-                                {
-                                    if let Some(text) = read_clipboard_text() {
-                                        dialog
-                                            .message
-                                            .push_str(text.trim_end_matches(['\r', '\n']));
-                                    }
-                                }
-                            }
                             KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                 paste_clipboard(&mut input, &mut paste_preview);
                                 history_index = None;
-                            }
-                            KeyCode::Esc if git_dialog.is_some() => {
-                                if let Some(dialog) = git_dialog.as_mut() {
-                                    if dialog.editing_message {
-                                        dialog.editing_message = false;
-                                    } else {
-                                        git_dialog = None;
-                                    }
-                                }
                             }
                             KeyCode::Esc if text_selection.is_some() => {
                                 text_selection = None;
@@ -819,94 +716,25 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     slash_selected = (slash_selected + 1).min(slash_hits.len() - 1);
                                 }
                             }
-                            KeyCode::Char(ch)
-                                if git_dialog
-                                    .as_ref()
-                                    .is_some_and(|dialog| dialog.editing_message)
-                                    && !key.modifiers.contains(KeyModifiers::CONTROL) =>
-                            {
-                                if let Some(dialog) = git_dialog.as_mut() {
-                                    dialog.message.push(ch);
-                                }
-                            }
-                            KeyCode::Backspace
-                                if git_dialog
-                                    .as_ref()
-                                    .is_some_and(|dialog| dialog.editing_message) =>
-                            {
-                                if let Some(dialog) = git_dialog.as_mut() {
-                                    dialog.message.pop();
-                                }
-                            }
-                            KeyCode::Enter
-                                if git_dialog
-                                    .as_ref()
-                                    .is_some_and(|dialog| dialog.editing_message) =>
-                            {
-                                if let Some(dialog) = git_dialog.as_mut() {
-                                    dialog.editing_message = false;
-                                }
-                            }
                             KeyCode::Left if git_dialog.is_some() => {
                                 if let Some(dialog) = git_dialog.as_mut() {
                                     dialog.page = dialog.page.saturating_sub(1);
-                                    dialog.editing_message = false;
                                 }
+                            }
+                            KeyCode::Esc if git_dialog.is_some() => {
+                                git_dialog = None;
                             }
                             KeyCode::Right if git_dialog.is_some() => {
                                 if let Some(dialog) = git_dialog.as_mut() {
                                     dialog.page = (dialog.page + 1).min(2);
-                                    dialog.editing_message = false;
                                 }
                             }
-                            KeyCode::Up if git_dialog.is_some() => {
-                                if let Some(dialog) = git_dialog.as_mut() {
-                                    dialog.selected = dialog.selected.saturating_sub(1);
-                                    dialog.scroll = dialog.scroll.min(dialog.selected);
-                                }
-                            }
-                            KeyCode::Down if git_dialog.is_some() => {
-                                if let Some(dialog) = git_dialog.as_mut() {
-                                    let count = view::git_changed_files(&dialog.info.raw).len();
-                                    dialog.selected =
-                                        (dialog.selected + 1).min(count.saturating_sub(1));
-                                    dialog.scroll = dialog.selected.saturating_sub(6);
-                                }
-                            }
-                            KeyCode::Insert if git_dialog.is_some() => {
-                                if let Some(dialog) = git_dialog.as_mut()
-                                    && dialog.page == 2
-                                {
-                                    if let Some(text) = read_clipboard_text() {
-                                        dialog
-                                            .message
-                                            .push_str(text.trim_end_matches(['\r', '\n']));
-                                        dialog.editing_message = true;
-                                    }
-                                }
-                            }
-                            KeyCode::Char(' ') if git_dialog.is_some() => {
-                                if let Some(dialog) = git_dialog.as_mut()
-                                    && dialog.page == 2
-                                {
-                                    toggle_git_file(dialog);
-                                }
-                            }
-                            KeyCode::Char(_) | KeyCode::Backspace if git_dialog.is_some() => {}
                             KeyCode::Enter if git_dialog.is_some() => {
                                 if let Some(dialog) = git_dialog.as_mut() {
-                                    if dialog.minimized {
-                                        dialog.minimized = false;
-                                    } else if dialog.page == 0 {
+                                    if dialog.page == 0 {
                                         dialog.info = git_status
                                             .clone()
                                             .unwrap_or_else(|| dialog.info.clone());
-                                    } else if dialog.page == 2 {
-                                        commit_git_dialog(runtime, &active_workspace, dialog);
-                                        git_status = runtime
-                                            .workspace_info(&active_workspace)
-                                            .ok()
-                                            .map(|info| parse_git_status(&info));
                                     }
                                 }
                             }
@@ -993,7 +821,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                             &mut auto_approve,
                                             &mut sessions,
                                             &mut index,
-                                            workspace,
+                                            &active_workspace,
                                             &cancel,
                                             &mut search,
                                             &mut hide_tools,
@@ -1063,6 +891,13 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                         };
                                         continue;
                                     }
+                                    if passport_login_required(
+                                        &provider_override,
+                                        passport_user_token.as_deref(),
+                                    ) {
+                                        status = "PassPort 未登录或令牌已过期，请执行 /login".to_owned();
+                                        continue;
+                                    }
                                     let prompt = input.clone();
                                     if input_history.last() != Some(&prompt) {
                                         input_history.push(prompt.clone());
@@ -1128,7 +963,11 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 if let Some(picker) = project_picker.take() {
                                     let projects = project_paths(&sessions);
                                     if picker.selected == projects.len() {
-                                        folder_picker = Some(open_folder_picker(&active_workspace));
+                                        let path = sessions
+                                            .get(index)
+                                            .map(|session| PathBuf::from(&session.workspace_path))
+                                            .unwrap_or_else(|| workspace.to_path_buf());
+                                        folder_picker = Some(open_folder_picker(&path));
                                     } else if let Some(path) = projects.get(picker.selected) {
                                         if let Some(found) = sessions
                                             .iter()
@@ -1289,7 +1128,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 }
                                 if git_dialog.is_some() {
                                     if let Some(dialog) = git_dialog.as_mut() {
-                                        dialog.scroll = dialog.scroll.saturating_sub(3);
+                                        dialog.selected = dialog.selected.saturating_sub(1);
                                     }
                                     continue;
                                 }
@@ -1315,7 +1154,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 }
                                 if git_dialog.is_some() {
                                     if let Some(dialog) = git_dialog.as_mut() {
-                                        dialog.scroll = dialog.scroll.saturating_add(3);
+                                        dialog.selected = dialog.selected.saturating_add(1);
                                     }
                                     continue;
                                 }
@@ -1504,19 +1343,10 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 }
                                 if matches!(hit, Some(view::Hit::GitStatus)) {
                                     if let Some(info) = git_status.clone() {
-                                        git_generation_id = git_generation_id.wrapping_add(1);
-                                        git_sync_id = git_sync_id.wrapping_add(1);
                                         git_dialog = Some(view::GitDialog {
                                             info,
                                             page: 0,
                                             selected: 0,
-                                            message: String::new(),
-                                            editing_message: false,
-                                            generating_message: false,
-                                            syncing: false,
-                                            excluded_files: Default::default(),
-                                            scroll: 0,
-                                            feedback: None,
                                             fullscreen: false,
                                             minimized: false,
                                         });
@@ -1524,143 +1354,8 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     continue;
                                 }
                                 if git_dialog.is_some() {
-                                    if matches!(
-                                        hit,
-                                        Some(
-                                            view::Hit::TrafficClose
-                                                | view::Hit::TrafficMinimize
-                                                | view::Hit::TrafficOpenBrowser
-                                        )
-                                    ) {
-                                        handle_traffic_light(
-                                            hit,
-                                            &mut project_picker,
-                                            &mut session_picker,
-                                            &mut mode_menu,
-                                            &mut tool_dialog,
-                                            &mut tool_detail_dialog,
-                                            &mut git_dialog,
-                                            &mut theme_dialog,
-                                            &mut add_provider_dialog,
-                                            &mut provider_dialog,
-                                            &mut context_dialog,
-                                            &mut passport_dialog,
-                                            &mut passport_browser_opened,
-                                            passport_url.as_deref(),
-                                            &mut cancel,
-                                            &mut status,
-                                        );
-                                    } else if let Some(dialog) = git_dialog.as_mut() {
+                                    if let Some(dialog) = git_dialog.as_mut() {
                                         match hit {
-                                            Some(view::Hit::GitTab(page)) => {
-                                                dialog.page = page;
-                                                dialog.selected = 0;
-                                                dialog.editing_message = false;
-                                            }
-                                            Some(view::Hit::GitMessage) => {
-                                                dialog.editing_message = true;
-                                            }
-                                            Some(view::Hit::GitGenerate) => {
-                                                if !dialog.generating_message
-                                                    && git_generation.is_none()
-                                                {
-                                                    git_generation_id =
-                                                        git_generation_id.wrapping_add(1);
-                                                    dialog.generating_message = true;
-                                                    dialog.editing_message = false;
-                                                    dialog.feedback = None;
-                                                    let selected_model = if model_override
-                                                        .is_empty()
-                                                    {
-                                                        projection
-                                                            .and_then(|item| item.model.as_deref())
-                                                            .unwrap_or("")
-                                                    } else {
-                                                        &model_override
-                                                    };
-                                                    let selected_provider =
-                                                        if provider_override.is_empty() {
-                                                            projection
-                                                                .and_then(|item| {
-                                                                    item.provider.as_deref()
-                                                                })
-                                                                .unwrap_or("")
-                                                        } else {
-                                                            &provider_override
-                                                        };
-                                                    let options = tui_run_options(
-                                                        auto_approve,
-                                                        selected_model,
-                                                        selected_provider,
-                                                        passport_user_token.clone(),
-                                                    );
-                                                    let sender = git_generation_tx.clone();
-                                                    let generation = git_generation_id;
-                                                    let original_message = dialog.message.clone();
-                                                    let generation_workspace =
-                                                        active_workspace.clone();
-                                                    git_generation = Some(scope.spawn(move || {
-                                                        let result = runtime
-                                                            .generate_git_commit_message(
-                                                                &generation_workspace,
-                                                                &options,
-                                                            );
-                                                        let _ = sender.send((
-                                                            generation,
-                                                            original_message,
-                                                            result,
-                                                        ));
-                                                    }));
-                                                }
-                                            }
-                                            Some(view::Hit::GitPrimary) => {
-                                                match view::git_primary_action(
-                                                    &dialog.info,
-                                                    &dialog.excluded_files,
-                                                ) {
-                                                    view::GitPrimaryAction::Commit(_) => {
-                                                        commit_git_dialog(
-                                                            runtime,
-                                                            &active_workspace,
-                                                            dialog,
-                                                        );
-                                                        git_status = runtime
-                                                            .workspace_info(&active_workspace)
-                                                            .ok()
-                                                            .map(|info| parse_git_status(&info));
-                                                    }
-                                                    view::GitPrimaryAction::Pull
-                                                    | view::GitPrimaryAction::Push
-                                                        if !dialog.syncing
-                                                            && git_sync.is_none() =>
-                                                    {
-                                                        let pull = matches!(
-                                                            view::git_primary_action(
-                                                                &dialog.info,
-                                                                &dialog.excluded_files
-                                                            ),
-                                                            view::GitPrimaryAction::Pull
-                                                        );
-                                                        dialog.syncing = true;
-                                                        dialog.feedback = None;
-                                                        git_sync_id = git_sync_id.wrapping_add(1);
-                                                        let id = git_sync_id;
-                                                        let sender = git_sync_tx.clone();
-                                                        let sync_workspace =
-                                                            active_workspace.clone();
-                                                        git_sync = Some(scope.spawn(move || {
-                                                            let result = runtime
-                                                                .git_sync(&sync_workspace, pull);
-                                                            let _ = sender.send((id, result));
-                                                        }));
-                                                    }
-                                                    _ => {}
-                                                }
-                                            }
-                                            Some(view::Hit::GitFile(index)) => {
-                                                dialog.selected = index;
-                                                toggle_git_file(dialog);
-                                            }
                                             Some(view::Hit::GitRow(index))
                                             | Some(view::Hit::GitAction(index)) => {
                                                 dialog.selected = index
@@ -1725,6 +1420,27 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     ));
                                     continue;
                                 }
+                                if let Some(view::Hit::ProjectPickerRow(project_index)) = hit {
+                                    let projects = project_paths(&sessions);
+                                    if project_index < projects.len() {
+                                        if let Some(path) = projects.get(project_index)
+                                            && let Some(found) = sessions
+                                                .iter()
+                                                .position(|session| &session.workspace_path == path)
+                                        {
+                                            index = found;
+                                            cached = None;
+                                        }
+                                    } else if project_index == projects.len() {
+                                        let path = sessions
+                                            .get(index)
+                                            .map(|session| PathBuf::from(&session.workspace_path))
+                                            .unwrap_or_else(|| workspace.to_path_buf());
+                                        folder_picker = Some(open_folder_picker(&path));
+                                    }
+                                    project_picker = None;
+                                    continue;
+                                }
                                 if !modal_open
                                     && hits.transcript.contains((mouse.column, mouse.row).into())
                                 {
@@ -1733,22 +1449,6 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                         end: (mouse.column, mouse.row),
                                     });
                                     selecting_text = true;
-                                    continue;
-                                }
-                                if let Some(view::Hit::ProjectPickerRow(project_index)) = hit {
-                                    let projects = project_paths(&sessions);
-                                    if project_index == projects.len() {
-                                        folder_picker = Some(open_folder_picker(&active_workspace));
-                                    } else if let Some(path) = projects.get(project_index) {
-                                        if let Some(found) = sessions
-                                            .iter()
-                                            .position(|session| &session.workspace_path == path)
-                                        {
-                                            index = found;
-                                            cached = None;
-                                        }
-                                    }
-                                    project_picker = None;
                                     continue;
                                 }
                                 if matches!(hit, Some(view::Hit::ProjectPicker)) {
@@ -1910,7 +1610,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                                     &mut auto_approve,
                                                     &mut sessions,
                                                     &mut index,
-                                                    workspace,
+                                                    &active_workspace,
                                                     &cancel,
                                                     &mut search,
                                                     &mut hide_tools,
@@ -2050,7 +1750,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 } else if hit == Some(view::Hit::Hint(view::HintAction::New)) {
                                     match create_session(
                                         runtime,
-                                        workspace,
+                                        &active_workspace,
                                         blora_types::Mode::Code,
                                         None,
                                     ) {
@@ -2102,7 +1802,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                                     &mut auto_approve,
                                                     &mut sessions,
                                                     &mut index,
-                                                    workspace,
+                                                    &active_workspace,
                                                     &cancel,
                                                     &mut search,
                                                     &mut hide_tools,
@@ -2132,6 +1832,13 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                                 Ok(()) => "已排队插话，将在下一轮送达".to_owned(),
                                                 Err(err) => err.to_string(),
                                             };
+                                            continue;
+                                        }
+                                        if passport_login_required(
+                                            &provider_override,
+                                            passport_user_token.as_deref(),
+                                        ) {
+                                            status = "PassPort 未登录或令牌已过期，请执行 /login".to_owned();
                                             continue;
                                         }
                                         let prompt = input.clone();
@@ -2193,8 +1900,15 @@ fn refresh_sessions(
     index: &mut usize,
 ) {
     if let Ok(list) = runtime.list_sessions() {
+        let selected_id = sessions.get(*index).map(|session| session.id.clone());
         *sessions = list;
-        if sessions.is_empty() {
+        if let Some(selected_id) = selected_id
+            && let Some(selected_index) = sessions
+                .iter()
+                .position(|session| session.id == selected_id)
+        {
+            *index = selected_index;
+        } else if sessions.is_empty() {
             *index = 0;
         } else if *index >= sessions.len() {
             *index = sessions.len() - 1;
@@ -2549,45 +2263,7 @@ fn usable_passport_token(
             )?;
             Ok(Some(refreshed.access_token))
         }
-        Err(err) => {
-            eprintln!(
-                "PassPort 令牌刷新失败（{}）：{}；请执行 /login 重新登录",
-                user.passport_username.as_deref().unwrap_or_default(),
-                err
-            );
-            Ok(None)
-        }
-    }
-}
-
-#[cfg(test)]
-mod project_picker_tests {
-    use super::*;
-
-    #[test]
-    fn directory_browser_enters_children_and_returns_to_parent() {
-        let base =
-            std::env::temp_dir().join(format!("blora-project-picker-{}", std::process::id()));
-        let child = base.join("new-project");
-        std::fs::create_dir_all(&child).unwrap();
-        let mut picker = view::FolderPicker {
-            path: base.clone(),
-            entries: folder_entries(&base),
-            selected: 0,
-            scroll: 0,
-            fullscreen: false,
-            minimized: false,
-        };
-        let row = picker
-            .entries
-            .iter()
-            .position(|path| path == &child)
-            .unwrap();
-        enter_folder(&mut picker, row);
-        assert_eq!(picker.path, child);
-        enter_folder(&mut picker, 0);
-        assert_eq!(picker.path, base);
-        std::fs::remove_dir_all(&base).unwrap();
+        Err(_) => Ok(None),
     }
 }
 
@@ -2685,6 +2361,34 @@ fn passport_display_name(user: &blora_storage::UserRecord) -> Option<String> {
         .map(str::trim)
         .filter(|name| !name.is_empty())
         .map(ToOwned::to_owned)
+}
+
+fn passport_login_required(provider: &str, user_token: Option<&str>) -> bool {
+    let provider = provider.trim();
+    let uses_passport = provider.is_empty()
+        || matches!(
+            provider.to_ascii_lowercase().as_str(),
+            "blora" | "passport" | "bloret-passport" | "bloret passport"
+        );
+    uses_passport && !user_token.is_some_and(|token| !token.trim().is_empty())
+}
+
+#[cfg(test)]
+mod passport_login_tests {
+    use super::passport_login_required;
+
+    #[test]
+    fn requires_login_for_default_passport_without_token() {
+        assert!(passport_login_required("", None));
+        assert!(passport_login_required("Bloret PassPort", None));
+        assert!(!passport_login_required("", Some("token")));
+    }
+
+    #[test]
+    fn allows_explicit_provider_without_passport_token() {
+        assert!(!passport_login_required("crewrouter", None));
+        assert!(!passport_login_required("mock", None));
+    }
 }
 
 fn tui_run_options(
@@ -3888,49 +3592,6 @@ fn write_rules(workspace: &Path) -> String {
     }
 }
 
-fn toggle_git_file(dialog: &mut view::GitDialog) {
-    let files = view::git_changed_files(&dialog.info.raw);
-    if let Some(file) = files.get(dialog.selected) {
-        if !dialog.excluded_files.remove(&file.path) {
-            dialog.excluded_files.insert(file.path.clone());
-        }
-        dialog.feedback = None;
-    }
-}
-
-fn commit_git_dialog(runtime: &Runtime, workspace: &Path, dialog: &mut view::GitDialog) {
-    if dialog.message.trim().is_empty() {
-        dialog.feedback = Some("请先输入提交消息".to_owned());
-        dialog.editing_message = true;
-        return;
-    }
-    let selected: Vec<String> = view::git_changed_files(&dialog.info.raw)
-        .iter()
-        .filter(|file| !dialog.excluded_files.contains(&file.path))
-        .map(|file| {
-            file.path
-                .rsplit_once(" -> ")
-                .map_or(file.path.as_str(), |(_, new)| new)
-                .to_owned()
-        })
-        .collect();
-    if selected.is_empty() {
-        dialog.feedback = Some("请勾选要提交的文件".to_owned());
-        return;
-    }
-    match runtime.git_commit_selected(workspace, &dialog.message, &selected) {
-        Ok(_) => {
-            dialog.message.clear();
-            dialog.excluded_files.clear();
-            dialog.feedback = Some("提交成功".to_owned());
-            if let Ok(info) = runtime.workspace_info(workspace) {
-                dialog.info = parse_git_status(&info);
-            }
-        }
-        Err(error) => dialog.feedback = Some(error.to_string()),
-    }
-}
-
 fn parse_git_status(info: &blora_runtime::WorkspaceInfo) -> view::GitStatusInfo {
     let mut branch = info.git_branch.trim().to_owned();
     if branch.is_empty() {
@@ -3943,90 +3604,24 @@ fn parse_git_status(info: &blora_runtime::WorkspaceInfo) -> view::GitStatusInfo 
     }
     let mut added = 0usize;
     let mut removed = 0usize;
-    for line in info.git_numstat.lines() {
-        let mut columns = line.split('\t');
-        let (Some(additions), Some(deletions), Some(_path)) =
-            (columns.next(), columns.next(), columns.next())
-        else {
-            continue;
-        };
-        added += additions.parse::<usize>().unwrap_or(0);
-        removed += deletions.parse::<usize>().unwrap_or(0);
+    for line in info.git_diff.lines() {
+        for token in line.split_whitespace() {
+            if let Some(value) = token.strip_prefix('+') {
+                added += value.parse::<usize>().unwrap_or(0);
+            }
+            if let Some(value) = token.strip_prefix('-') {
+                removed += value.parse::<usize>().unwrap_or(0);
+            }
+        }
     }
-    let status_line = info.git_status.lines().next().unwrap_or("");
-    let (ahead, behind) = git_branch_counts(&info.git_branch_counts);
-    let stashes = info
-        .git_stashes
-        .lines()
-        .filter(|line| line.starts_with("stash@{"))
-        .count();
-    let clean =
-        status_line.starts_with("## ") && info.git_status.lines().skip(1).all(str::is_empty);
     view::GitStatusInfo {
         branch,
         added,
         removed,
-        ahead,
-        behind,
-        stashes,
-        clean,
         raw: info.git_status.clone(),
         diff: info.git_diff.clone(),
         log: info.git_log.clone(),
     }
-}
-
-#[cfg(test)]
-mod git_status_tests {
-    use super::*;
-
-    #[test]
-    fn parses_clean_tracking_and_stash_counts() {
-        let info = blora_runtime::WorkspaceInfo {
-            git_status: "## main...origin/main [领先 5，落后 2]".into(),
-            git_branch_counts: "# branch.oid abc123\n# branch.head main\n# branch.upstream origin/main\n# branch.ab +5 -2".into(),
-            git_stashes: "stash@{0}\nstash@{1}".into(),
-            ..Default::default()
-        };
-        let status = parse_git_status(&info);
-        assert!(status.clean);
-        assert_eq!((status.ahead, status.behind, status.stashes), (5, 2, 2));
-        let dirty = blora_runtime::WorkspaceInfo {
-            git_status: "## main...origin/main [ahead 5]\n M src/lib.rs".into(),
-            ..Default::default()
-        };
-        assert!(!parse_git_status(&dirty).clean);
-        assert_eq!(
-            git_branch_counts("# branch.head main\n# branch.ab +154 -0"),
-            (154, 0)
-        );
-        assert_eq!(git_branch_counts("# branch.head main"), (0, 0));
-    }
-
-    #[test]
-    fn parses_numstat_with_binary_files_and_skips_summary() {
-        let info = blora_runtime::WorkspaceInfo {
-            git_status: "## main\n M src/lib.rs".into(),
-            git_numstat: "12\t3\tsrc/lib.rs\n-\t-\timage.png\n4\t0\tnew file.rs\n 2 files changed, 16 insertions(+)".into(),
-            ..Default::default()
-        };
-        let status = parse_git_status(&info);
-        assert!(!status.clean);
-        assert_eq!((status.added, status.removed), (16, 3));
-    }
-}
-
-fn git_branch_counts(status: &str) -> (usize, usize) {
-    status
-        .lines()
-        .find_map(|line| {
-            let counts = line.strip_prefix("# branch.ab ")?;
-            let mut parts = counts.split_whitespace();
-            let ahead = parts.next()?.strip_prefix('+')?.parse().ok()?;
-            let behind = parts.next()?.strip_prefix('-')?.parse().ok()?;
-            Some((ahead, behind))
-        })
-        .unwrap_or((0, 0))
 }
 
 fn handle_traffic_light(
