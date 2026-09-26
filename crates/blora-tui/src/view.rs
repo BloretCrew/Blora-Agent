@@ -4455,6 +4455,32 @@ mod tests {
     }
 
     #[test]
+    fn git_primary_action_respects_selected_files_and_tracking() {
+        let mut info = GitStatusInfo {
+            branch: "main".into(),
+            added: 0,
+            removed: 0,
+            ahead: 2,
+            behind: 1,
+            stashes: 0,
+            clean: false,
+            raw: "## main\n M src/lib.rs\n?? notes.txt".into(),
+            diff: String::new(),
+            log: String::new(),
+        };
+        let mut excluded = std::collections::HashSet::new();
+        assert_eq!(git_primary_action(&info, &excluded), GitPrimaryAction::Commit(2));
+        excluded.insert("src/lib.rs".into());
+        assert_eq!(git_primary_action(&info, &excluded), GitPrimaryAction::Commit(1));
+        excluded.insert("notes.txt".into());
+        assert_eq!(git_primary_action(&info, &excluded), GitPrimaryAction::Commit(0));
+        info.raw = "## main".into();
+        assert_eq!(git_primary_action(&info, &excluded), GitPrimaryAction::Pull);
+        info.behind = 0;
+        assert_eq!(git_primary_action(&info, &excluded), GitPrimaryAction::Push);
+    }
+
+    #[test]
     fn git_generate_button_uses_running_spinner() {
         let area = Rect::new(0, 0, 110, 30);
         let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();

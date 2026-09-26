@@ -92,6 +92,11 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut tool_dialog: Option<view::ToolDialog> = None;
     let mut tool_detail_dialog: Option<view::ToolDetailDialog> = None;
     let mut git_dialog: Option<view::GitDialog> = None;
+    let (git_generation_tx, git_generation_rx) =
+        std::sync::mpsc::channel::<(u64, String, Result<String>)>();
+    let mut git_generation_id = 0u64;
+    let (git_sync_tx, git_sync_rx) = std::sync::mpsc::channel::<(u64, Result<String>)>();
+    let mut git_sync_id = 0u64;
     let mut mode_menu: Option<view::ModeMenu> = None;
     let mut project_picker: Option<view::ProjectPicker> = None;
     let mut folder_picker: Option<view::FolderPicker> = None;
@@ -169,6 +174,8 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut cached: Option<(SessionId, blora_session::SessionProjection)> = None;
     let result = thread::scope(|scope| -> Result<()> {
         let mut job: Option<thread::ScopedJoinHandle<'_, Result<blora_types::RunId>>> = None;
+        let mut git_generation: Option<thread::ScopedJoinHandle<'_, ()>> = None;
+        let mut git_sync: Option<thread::ScopedJoinHandle<'_, ()>> = None;
         loop {
             refresh_sessions(runtime, &mut sessions, &mut index);
             if let Some(receiver) = passport_receiver.as_ref()
@@ -371,9 +378,62 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                 cancel = CancelToken::new();
             }
 
-            let wait_ms = if job.is_some() { 50 } else { 200 };
+            while let Ok((generation, original_message, result)) = git_generation_rx.try_recv() {
+                if generation != git_generation_id {
+                    continue;
+                }
+                if let Some(dialog) = git_dialog.as_mut() && dialog.generating_message {
+                    dialog.generating_message = false;
+                    match result {
+                        Ok(message) if dialog.message == original_message => {
+                            dialog.message = message;
+                            dialog.feedback = None;
+                        }
+                        Ok(_) => dialog.feedback = Some("已保留手动编辑的提交消息".to_owned()),
+                        Err(error) => dialog.feedback = Some(error.to_string()),
+                    }
+                }
+            }
+            if git_generation.as_ref().is_some_and(|handle| handle.is_finished()) {
+                if let Some(handle) = git_generation.take() {
+                    let _ = handle.join();
+                }
+            }
+            while let Ok((operation, result)) = git_sync_rx.try_recv() {
+                if operation != git_sync_id {
+                    continue;
+                }
+                if let Some(dialog) = git_dialog.as_mut() {
+                    dialog.syncing = false;
+                    dialog.feedback = Some(match result {
+                        Ok(_) => {
+                            if let Ok(info) = runtime.workspace_info(&active_workspace) {
+                                dialog.info = parse_git_status(&info);
+                                git_status = Some(dialog.info.clone());
+                            }
+                            "同步完成".to_owned()
+                        }
+                        Err(error) => error.to_string(),
+                    });
+                }
+            }
+            if git_sync.as_ref().is_some_and(|handle| handle.is_finished()) {
+                if let Some(handle) = git_sync.take() {
+                    let _ = handle.join();
+                }
+            }
+            let wait_ms = if job.is_some() || git_generation.is_some() || git_sync.is_some() {
+                50
+            } else {
+                200
+            };
             if event::poll(Duration::from_millis(wait_ms)).map_err(blora_types::BloraError::exec)? {
                 match event::read().map_err(blora_types::BloraError::exec)? {
+                    Event::Paste(text) if git_dialog.as_ref().is_some_and(|dialog| dialog.editing_message) => {
+                        if let Some(dialog) = git_dialog.as_mut() {
+                            dialog.message.push_str(text.trim_end_matches(['\r', '\n']));
+                        }
+                    }
                     Event::Paste(text) => {
                         if text.is_empty() {
                             paste_clipboard(&mut input, &mut paste_preview);
@@ -759,6 +819,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             KeyCode::Left if git_dialog.is_some() => {
                                 if let Some(dialog) = git_dialog.as_mut() {
                                     dialog.page = dialog.page.saturating_sub(1);
+                                    dialog.editing_message = false;
                                 }
                             }
                             KeyCode::Esc if git_dialog.is_some() => {
@@ -773,16 +834,33 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             KeyCode::Right if git_dialog.is_some() => {
                                 if let Some(dialog) = git_dialog.as_mut() {
                                     dialog.page = (dialog.page + 1).min(2);
+                                    dialog.editing_message = false;
                                 }
                             }
                             KeyCode::Up if git_dialog.is_some() => {
                                 if let Some(dialog) = git_dialog.as_mut() {
                                     dialog.selected = dialog.selected.saturating_sub(1);
+                                    dialog.scroll = dialog.scroll.min(dialog.selected);
                                 }
                             }
                             KeyCode::Down if git_dialog.is_some() => {
                                 if let Some(dialog) = git_dialog.as_mut() {
-                                    dialog.selected = dialog.selected.saturating_add(1);
+                                    let count = view::git_changed_files(&dialog.info.raw).len();
+                                    dialog.selected = (dialog.selected + 1).min(count.saturating_sub(1));
+                                    dialog.scroll = dialog.selected.saturating_sub(6);
+                                }
+                            }
+                            KeyCode::Char(' ') if git_dialog.is_some() => {
+                                if let Some(dialog) = git_dialog.as_mut() && dialog.page == 2 {
+                                    toggle_git_file(dialog);
+                                }
+                            }
+                            KeyCode::Insert if git_dialog.is_some() => {
+                                if let Some(dialog) = git_dialog.as_mut() && dialog.page == 2 {
+                                    if let Some(text) = read_clipboard_text() {
+                                        dialog.message.push_str(text.trim_end_matches(['\r', '\n']));
+                                        dialog.editing_message = true;
+                                    }
                                 }
                             }
                             KeyCode::Enter if git_dialog.is_some() => {
@@ -790,11 +868,26 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     if dialog.minimized {
                                         dialog.minimized = false;
                                     } else if dialog.page == 2 {
-                                        commit_git_dialog(runtime, &active_workspace, dialog);
-                                        git_status = runtime
-                                            .workspace_info(&active_workspace)
-                                            .ok()
-                                            .map(|info| parse_git_status(&info));
+                                        match view::git_primary_action(&dialog.info, &dialog.excluded_files) {
+                                            view::GitPrimaryAction::Commit(_) => {
+                                                commit_git_dialog(runtime, &active_workspace, dialog);
+                                                git_status = runtime.workspace_info(&active_workspace).ok().map(|info| parse_git_status(&info));
+                                            }
+                                            action @ (view::GitPrimaryAction::Pull | view::GitPrimaryAction::Push)
+                                                if !dialog.syncing && git_sync.is_none() => {
+                                                dialog.syncing = true;
+                                                dialog.feedback = None;
+                                                git_sync_id = git_sync_id.wrapping_add(1);
+                                                let id = git_sync_id;
+                                                let sender = git_sync_tx.clone();
+                                                let workspace = active_workspace.clone();
+                                                git_sync = Some(scope.spawn(move || {
+                                                    let result = runtime.git_sync(&workspace, matches!(action, view::GitPrimaryAction::Pull));
+                                                    let _ = sender.send((id, result));
+                                                }));
+                                            }
+                                            _ => {}
+                                        }
                                     } else if let Ok(info) =
                                         runtime.workspace_info(&active_workspace)
                                     {
@@ -803,7 +896,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     }
                                 }
                             }
-                            KeyCode::Char(_) if git_dialog.is_some() => {}
+                            KeyCode::Char(_) | KeyCode::Backspace if git_dialog.is_some() => {}
                             KeyCode::Up
                                 if project_picker.is_none()
                                     && session_picker.is_none()
@@ -1194,7 +1287,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 }
                                 if git_dialog.is_some() {
                                     if let Some(dialog) = git_dialog.as_mut() {
-                                        dialog.selected = dialog.selected.saturating_sub(1);
+                                        dialog.scroll = dialog.scroll.saturating_sub(3);
                                     }
                                     continue;
                                 }
@@ -1220,7 +1313,8 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 }
                                 if git_dialog.is_some() {
                                     if let Some(dialog) = git_dialog.as_mut() {
-                                        dialog.selected = dialog.selected.saturating_add(1);
+                                        let count = view::git_changed_files(&dialog.info.raw).len();
+                                        dialog.scroll = dialog.scroll.saturating_add(3).min(count.saturating_sub(1));
                                     }
                                     continue;
                                 }
@@ -1437,6 +1531,8 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 }
                                 if matches!(hit, Some(view::Hit::GitStatus)) {
                                     if let Some(info) = git_status.clone() {
+                                        git_generation_id = git_generation_id.wrapping_add(1);
+                                        git_sync_id = git_sync_id.wrapping_add(1);
                                         git_dialog = Some(view::GitDialog {
                                             info,
                                             page: 0,
@@ -1464,14 +1560,56 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                         Some(view::Hit::GitMessage) => {
                                             dialog.editing_message = true;
                                         }
-                                        Some(view::Hit::GitPrimary) => {
-                                            commit_git_dialog(runtime, &active_workspace, dialog);
-                                            git_status = runtime
-                                                .workspace_info(&active_workspace)
-                                                .ok()
-                                                .map(|info| parse_git_status(&info));
+                                        Some(view::Hit::GitGenerate) => {
+                                            if !dialog.generating_message && git_generation.is_none() {
+                                                git_generation_id = git_generation_id.wrapping_add(1);
+                                                dialog.generating_message = true;
+                                                dialog.editing_message = false;
+                                                dialog.feedback = None;
+                                                let selected_model = if model_override.is_empty() {
+                                                    projection.and_then(|item| item.model.as_deref()).unwrap_or("")
+                                                } else { &model_override };
+                                                let selected_provider = if provider_override.is_empty() {
+                                                    projection.and_then(|item| item.provider.as_deref()).unwrap_or("")
+                                                } else { &provider_override };
+                                                let options = tui_run_options(auto_approve, selected_model, selected_provider, passport_user_token.clone());
+                                                let sender = git_generation_tx.clone();
+                                                let generation = git_generation_id;
+                                                let original_message = dialog.message.clone();
+                                                let workspace = active_workspace.clone();
+                                                git_generation = Some(scope.spawn(move || {
+                                                    let result = runtime.generate_git_commit_message(&workspace, &options);
+                                                    let _ = sender.send((generation, original_message, result));
+                                                }));
+                                            }
                                         }
-                                        Some(view::Hit::GitRow(index)) => dialog.selected = index,
+                                        Some(view::Hit::GitPrimary) => {
+                                            match view::git_primary_action(&dialog.info, &dialog.excluded_files) {
+                                                view::GitPrimaryAction::Commit(_) => {
+                                                    commit_git_dialog(runtime, &active_workspace, dialog);
+                                                    git_status = runtime.workspace_info(&active_workspace).ok().map(|info| parse_git_status(&info));
+                                                }
+                                                action @ (view::GitPrimaryAction::Pull | view::GitPrimaryAction::Push)
+                                                    if !dialog.syncing && git_sync.is_none() => {
+                                                    dialog.syncing = true;
+                                                    dialog.feedback = None;
+                                                    git_sync_id = git_sync_id.wrapping_add(1);
+                                                    let id = git_sync_id;
+                                                    let sender = git_sync_tx.clone();
+                                                    let workspace = active_workspace.clone();
+                                                    git_sync = Some(scope.spawn(move || {
+                                                        let result = runtime.git_sync(&workspace, matches!(action, view::GitPrimaryAction::Pull));
+                                                        let _ = sender.send((id, result));
+                                                    }));
+                                                }
+                                                _ => {}
+                                            }
+                                        }
+                                        Some(view::Hit::GitFile(index)) => {
+                                            dialog.selected = index;
+                                            toggle_git_file(dialog);
+                                        }
+                                        Some(view::Hit::GitRow(index)) | Some(view::Hit::GitAction(index)) => dialog.selected = index,
                                         _ => {}
                                     }
                                     continue;
@@ -3675,43 +3813,80 @@ fn write_rules(workspace: &Path) -> String {
     }
 }
 
+fn toggle_git_file(dialog: &mut view::GitDialog) {
+    let files = view::git_changed_files(&dialog.info.raw);
+    if let Some(file) = files.get(dialog.selected) {
+        if !dialog.excluded_files.remove(&file.path) {
+            dialog.excluded_files.insert(file.path.clone());
+        }
+        dialog.feedback = None;
+    }
+}
+
 fn commit_git_dialog(runtime: &Runtime, workspace: &Path, dialog: &mut view::GitDialog) {
     if dialog.message.trim().is_empty() {
         dialog.editing_message = true;
         dialog.feedback = Some("请先输入提交说明".to_owned());
         return;
     }
-    let files: Vec<String> = dialog
-        .info
-        .raw
-        .lines()
-        .skip(1)
-        .filter_map(|line| {
-            let status = line.get(..2)?;
-            let path = line.get(3..)?.trim();
-            if path.is_empty() || status == "!!" {
-                return None;
-            }
-            Some(
-                path.rsplit_once(" -> ")
-                    .map_or(path, |(_, new)| new)
-                    .to_owned(),
-            )
-        })
+    let selected: Vec<String> = view::git_changed_files(&dialog.info.raw)
+        .iter()
+        .filter(|file| !dialog.excluded_files.contains(&file.path))
+        .map(|file| file.path.rsplit_once(" -> ").map_or(file.path.as_str(), |(_, new)| new).to_owned())
         .collect();
-    if files.is_empty() {
-        dialog.feedback = Some("没有待提交的更改".to_owned());
+    if selected.is_empty() {
+        dialog.feedback = Some("请勾选要提交的文件".to_owned());
         return;
     }
-    match runtime.git_commit_selected(workspace, &dialog.message, &files) {
+    match runtime.git_commit_selected(workspace, &dialog.message, &selected) {
         Ok(_) => {
             dialog.message.clear();
+            dialog.excluded_files.clear();
             dialog.feedback = Some("提交成功".to_owned());
             if let Ok(info) = runtime.workspace_info(workspace) {
                 dialog.info = parse_git_status(&info);
             }
         }
         Err(err) => dialog.feedback = Some(err.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod git_dialog_tests {
+    use super::*;
+
+    #[test]
+    fn file_toggle_changes_commit_selection_without_staging() {
+        let mut dialog = view::GitDialog {
+            info: view::GitStatusInfo {
+                branch: "main".into(),
+                added: 0,
+                removed: 0,
+                ahead: 0,
+                behind: 0,
+                stashes: 0,
+                clean: false,
+                raw: "## main\n M src/lib.rs\n?? notes.txt".into(),
+                diff: String::new(),
+                log: String::new(),
+            },
+            page: 2,
+            selected: 1,
+            message: String::new(),
+            editing_message: false,
+            generating_message: false,
+            syncing: false,
+            excluded_files: Default::default(),
+            scroll: 0,
+            feedback: None,
+            fullscreen: false,
+            minimized: false,
+        };
+        toggle_git_file(&mut dialog);
+        assert!(dialog.excluded_files.contains("notes.txt"));
+        assert_eq!(view::git_primary_action(&dialog.info, &dialog.excluded_files), view::GitPrimaryAction::Commit(1));
+        toggle_git_file(&mut dialog);
+        assert!(dialog.excluded_files.is_empty());
     }
 }
 
