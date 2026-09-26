@@ -40,6 +40,21 @@ cargo run -p blora-cli -- task pump
 cargo run -p blora-cli -- acp
 ```
 
+## 0.1.0 测试版
+
+GitHub 测试版和 npm 安装器发布后，可以这样安装：
+
+```bash
+npm install -g @bloret-crew/blora-agent@beta
+blora --version
+```
+
+npm 安装器会从对应的 GitHub Release 下载 Linux x86_64、macOS x86_64/Apple Silicon 或 Windows x86_64 二进制。源代码构建仍使用 Rust：
+
+```bash
+cargo install --path crates/blora-cli --locked
+```
+
 真实模型：
 
 ```bash

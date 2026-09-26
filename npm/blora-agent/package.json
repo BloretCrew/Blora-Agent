@@ -1,0 +1,29 @@
+{
+  "name": "@bloret-crew/blora-agent",
+  "version": "0.1.0-beta.0",
+  "description": "Blora Agent CLI installer",
+  "license": "GPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/BloretCrew/Blora-Agent.git",
+    "directory": "npm/blora-agent"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "bin": {
+    "blora": "bin/blora.js"
+  },
+  "files": [
+    "bin/blora.js",
+    "bin/install.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "postinstall": "node bin/install.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
