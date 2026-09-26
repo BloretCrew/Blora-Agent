@@ -490,16 +490,6 @@ pub struct HitMap {
 impl HitMap {
     #[must_use]
     pub fn hit(&self, col: u16, row: u16) -> Option<Hit> {
-        for (rect, indices) in &self.tool_summary_rows {
-            if contains(*rect, col, row) {
-                return Some(Hit::ToolSummary(indices.clone()));
-            }
-        }
-        for (rect, idx) in &self.slash_rows {
-            if contains(*rect, col, row) {
-                return Some(Hit::Slash(*idx));
-            }
-        }
         for (index, rect) in self.traffic_lights.iter().enumerate() {
             if let Some(rect) = rect
                 && contains(*rect, col, row)
@@ -555,6 +545,16 @@ impl HitMap {
         for (rect, idx) in &self.tool_detail_rows {
             if contains(*rect, col, row) {
                 return Some(Hit::ToolDetailRow(*idx));
+            }
+        }
+        for (rect, indices) in &self.tool_summary_rows {
+            if contains(*rect, col, row) {
+                return Some(Hit::ToolSummary(indices.clone()));
+            }
+        }
+        for (rect, idx) in &self.slash_rows {
+            if contains(*rect, col, row) {
+                return Some(Hit::Slash(*idx));
             }
         }
         for (rect, idx) in &self.provider_model_rows {
@@ -4860,6 +4860,37 @@ mod tests {
         let (lines, _) = render_passport_with_hits(area, &dialog, Some((green.x, green.y)));
         let chars = row_chars(&lines[green.y as usize]);
         assert_eq!(chars[green.x as usize], '+', "green shows + on hover");
+    }
+
+    #[test]
+    fn tool_dialog_controls_take_priority_over_background_tool_rows() {
+        let area = Rect::new(0, 0, 80, 24);
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let dialog = ToolDialog {
+            tools: Vec::new(),
+            scroll: 0,
+            fullscreen: false,
+            minimized: false,
+        };
+        let mut hits = HitMap::default();
+        terminal
+            .draw(|frame| {
+                hits = render_tool_dialog(frame, area, &dialog, None, &Theme::current());
+            })
+            .unwrap();
+        for (index, expected) in [
+            Hit::TrafficClose,
+            Hit::TrafficMinimize,
+            Hit::TrafficOpenBrowser,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let rect = hits.traffic_lights[index].expect("window control hit area");
+            hits.tool_summary_rows.push((rect, vec![0]));
+            assert_eq!(hits.hit(rect.x, rect.y), Some(expected));
+        }
     }
 
     #[test]

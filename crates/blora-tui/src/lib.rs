@@ -1285,6 +1285,52 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     }
                                     continue;
                                 }
+                                if matches!(
+                                    hit,
+                                    Some(
+                                        view::Hit::TrafficClose
+                                            | view::Hit::TrafficMinimize
+                                            | view::Hit::TrafficOpenBrowser,
+                                    )
+                                ) {
+                                    handle_traffic_light(
+                                        hit,
+                                        &mut project_picker,
+                                        &mut session_picker,
+                                        &mut mode_menu,
+                                        &mut tool_dialog,
+                                        &mut tool_detail_dialog,
+                                        &mut git_dialog,
+                                        &mut theme_dialog,
+                                        &mut add_provider_dialog,
+                                        &mut provider_dialog,
+                                        &mut context_dialog,
+                                        &mut passport_dialog,
+                                        &mut passport_browser_opened,
+                                        passport_url.as_deref(),
+                                        &mut cancel,
+                                        &mut status,
+                                    );
+                                    continue;
+                                }
+                                if tool_detail_dialog.is_some() {
+                                    continue;
+                                }
+                                if let Some(view::Hit::ToolDetailRow(index)) = hit.clone()
+                                    && let Some(dialog) = tool_dialog.as_ref()
+                                    && let Some(tool) = dialog.tools.get(index).cloned()
+                                {
+                                    tool_detail_dialog = Some(view::ToolDetailDialog {
+                                        tool,
+                                        scroll: 0,
+                                        fullscreen: false,
+                                        minimized: false,
+                                    });
+                                    continue;
+                                }
+                                if tool_dialog.is_some() {
+                                    continue;
+                                }
                                 if let Some(view::Hit::ToolSummary(indices)) = hit.clone() {
                                     selecting_text = false;
                                     text_selection = None;
@@ -1323,24 +1369,6 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     });
                                     continue;
                                 }
-                                if tool_detail_dialog.is_some() {
-                                    continue;
-                                }
-                                if let Some(view::Hit::ToolDetailRow(index)) = hit.clone()
-                                    && let Some(dialog) = tool_dialog.as_ref()
-                                    && let Some(tool) = dialog.tools.get(index).cloned()
-                                {
-                                    tool_detail_dialog = Some(view::ToolDetailDialog {
-                                        tool,
-                                        scroll: 0,
-                                        fullscreen: false,
-                                        minimized: false,
-                                    });
-                                    continue;
-                                }
-                                if tool_dialog.is_some() {
-                                    continue;
-                                }
                                 if matches!(hit, Some(view::Hit::GitStatus)) {
                                     if let Some(info) = git_status.clone() {
                                         git_dialog = Some(view::GitDialog {
@@ -1376,34 +1404,6 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     || tool_detail_dialog.is_some()
                                     || git_dialog.is_some()
                                     || passport_dialog.is_some();
-                                if matches!(
-                                    hit,
-                                    Some(
-                                        view::Hit::TrafficClose
-                                            | view::Hit::TrafficMinimize
-                                            | view::Hit::TrafficOpenBrowser,
-                                    )
-                                ) {
-                                    handle_traffic_light(
-                                        hit,
-                                        &mut project_picker,
-                                        &mut session_picker,
-                                        &mut mode_menu,
-                                        &mut tool_dialog,
-                                        &mut tool_detail_dialog,
-                                        &mut git_dialog,
-                                        &mut theme_dialog,
-                                        &mut add_provider_dialog,
-                                        &mut provider_dialog,
-                                        &mut context_dialog,
-                                        &mut passport_dialog,
-                                        &mut passport_browser_opened,
-                                        passport_url.as_deref(),
-                                        &mut cancel,
-                                        &mut status,
-                                    );
-                                    continue;
-                                }
                                 if matches!(hit, Some(view::Hit::ContextUsage)) {
                                     context_dialog = Some(view::ContextDialog {
                                         scroll: 0,
