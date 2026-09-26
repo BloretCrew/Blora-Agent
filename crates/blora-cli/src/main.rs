@@ -4,6 +4,7 @@
 //! Blora Agent command-line interface.
 
 mod acp;
+mod github;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -141,6 +142,45 @@ enum Commands {
     Memory {
         #[command(subcommand)]
         command: MemoryCommands,
+    },
+    /// Run Blora from a GitHub issue or pull request.
+    Github {
+        #[command(subcommand)]
+        command: GithubCommands,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum GithubCommands {
+    /// Write `.github/workflows/blora.yml` into the workspace.
+    Install {
+        /// Replace an existing workflow file.
+        #[arg(long)]
+        force: bool,
+        /// Provider written into the workflow. Empty keeps the runner environment.
+        #[arg(long)]
+        provider: Option<String>,
+        /// Model written into the workflow.
+        #[arg(long)]
+        model: Option<String>,
+        /// Permission mode used by the workflow.
+        #[arg(long, default_value = "yolo")]
+        permission: String,
+        /// Comma-separated trigger phrases.
+        #[arg(long, default_value = blora_github::DEFAULT_MENTIONS)]
+        mentions: String,
+    },
+    /// Handle one GitHub event. Used by the GitHub Action.
+    Run {
+        /// Event JSON. Defaults to `GITHUB_EVENT_PATH`.
+        #[arg(long)]
+        event: Option<PathBuf>,
+        /// GitHub token. Defaults to `BLORA_GITHUB_TOKEN` or `GITHUB_TOKEN`.
+        #[arg(long)]
+        token: Option<String>,
+        /// Print the prompt and do not call the model or push.
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -325,6 +365,26 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             Ok(())
         }
+        Some(Commands::Github { command }) => match command {
+            GithubCommands::Install {
+                force,
+                provider,
+                model,
+                permission,
+                mentions,
+            } => {
+                let workspace = cli.workspace.unwrap_or(std::env::current_dir()?);
+                github::install(&workspace, force, provider, model, permission, mentions)
+            }
+            GithubCommands::Run {
+                event,
+                token,
+                dry_run,
+            } => {
+                let runtime = Runtime::new(open_store(cli.home.as_deref())?);
+                github::run(&runtime, event, token, dry_run, cli.workspace)
+            }
+        },
         Some(Commands::Usage { session }) => {
             let runtime = Runtime::new(open_store(cli.home.as_deref())?);
             let session_id = session.as_deref().map(SessionId::parse).transpose()?;
@@ -358,7 +418,8 @@ fn dispatch(
         | Commands::Gateway { .. }
         | Commands::User { .. }
         | Commands::Plugin { .. }
-        | Commands::Memory { .. } => unreachable!(),
+        | Commands::Memory { .. }
+        | Commands::Github { .. } => unreachable!(),
         Commands::Task { command } => match command {
             TaskCommands::Create {
                 session,
@@ -786,6 +847,49 @@ mod tests {
         match cli.command {
             Some(Commands::Web { bind, .. }) => assert_eq!(bind, "127.0.0.1:9000"),
             other => panic!("expected web, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn github_commands_parse() {
+        let install = Cli::try_parse_from([
+            "blora",
+            "github",
+            "install",
+            "--provider",
+            "openai",
+            "--force",
+        ])
+        .unwrap();
+        match install.command {
+            Some(Commands::Github {
+                command:
+                    GithubCommands::Install {
+                        force, provider, ..
+                    },
+            }) => {
+                assert!(force);
+                assert_eq!(provider.as_deref(), Some("openai"));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        let run = Cli::try_parse_from([
+            "blora",
+            "github",
+            "run",
+            "--dry-run",
+            "--event",
+            "event.json",
+        ])
+        .unwrap();
+        match run.command {
+            Some(Commands::Github {
+                command: GithubCommands::Run { dry_run, event, .. },
+            }) => {
+                assert!(dry_run);
+                assert_eq!(event.unwrap(), PathBuf::from("event.json"));
+            }
+            other => panic!("unexpected {other:?}"),
         }
     }
 

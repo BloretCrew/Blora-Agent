@@ -24,6 +24,7 @@
 - 插件 JSON、显式记忆、sandbox/container 执行、`blora backup` / `usage`
 - 会话搜索、事件时间线、产物与工作区文件只读查看
 - Gemini、PTY、SSH 远程执行、多用户 Gateway、插件市场、自动记忆、WebSocket
+- GitHub：`blora github install` 后，在 Issue 或 PR 评论 `/blora`、`/ba` 或 `@blora`，由评论决定回复、改代码或开 PR
 
 ## 快速开始
 

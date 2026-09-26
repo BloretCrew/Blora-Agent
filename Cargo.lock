@@ -207,6 +207,7 @@ dependencies = [
 name = "blora-cli"
 version = "0.1.0"
 dependencies = [
+ "blora-github",
  "blora-runtime",
  "blora-server",
  "blora-session",
@@ -253,6 +254,17 @@ dependencies = [
  "regex",
  "tempfile",
  "walkdir",
+]
+
+[[package]]
+name = "blora-github"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "regex",
+ "serde_json",
+ "tempfile",
+ "ureq",
 ]
 
 [[package]]
