@@ -15,8 +15,8 @@ pub use payload::{
     HookCompleted, KnownPayload, ModeChanged, ModelRequested, ModelResponseCompleted, PlanStep,
     PlanUpdated, PolicyDenied, ProviderChanged, RetryStarted, RoutingChanged, RunCancelRequested,
     RunCancelled, RunCompleted, RunCreated, RunFailed, RunPaused, RunStarted, SessionArchived,
-    SessionCreated, SessionForked, SessionResumed, SessionTitleChanged, SubagentCompleted,
-    SubagentFailed, SubagentMessage, SubagentSpawned, TaskCompleted, TaskCreated, TaskFailed,
-    TaskProgress, TaskStarted, TaskWakeup, ToolCompleted, ToolFailed, ToolOutput, ToolRequested,
-    ToolStarted, UsageRecorded, UserInput,
+    SessionCreated, SessionCwdChanged, SessionForked, SessionResumed, SessionTitleChanged,
+    SubagentCompleted, SubagentFailed, SubagentMessage, SubagentSpawned, TaskCompleted,
+    TaskCreated, TaskFailed, TaskProgress, TaskStarted, TaskWakeup, ToolCompleted, ToolFailed,
+    ToolOutput, ToolRequested, ToolStarted, UsageRecorded, UserInput,
 };

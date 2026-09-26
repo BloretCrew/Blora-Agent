@@ -17,7 +17,7 @@
 
 use blora_events::{EventEnvelope, KnownPayload};
 use blora_model::{ChatMessage, ToolCall};
-use blora_types::Result;
+use blora_types::{BloraError, Result};
 
 /// Environment facts captured once per run so they stay stable across turns.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -28,6 +28,8 @@ pub struct EnvSnapshot {
     pub git: Option<String>,
     /// Permission mode for this run (`plan`, `ask`, `auto-edit`, `yolo`).
     pub permission_mode: String,
+    /// Workspace-relative shell directory remembered for this session.
+    pub shell_cwd: String,
 }
 
 impl EnvSnapshot {
@@ -45,6 +47,7 @@ impl EnvSnapshot {
             os: std::env::consts::OS.to_owned(),
             git: git_snapshot(workspace),
             permission_mode: permission_mode.to_owned(),
+            shell_cwd: ".".to_owned(),
         }
     }
 
@@ -66,6 +69,12 @@ impl EnvSnapshot {
                 }
                 _ => "Writes and shell commands are pre-approved; dangerous commands still pause for approval.\n",
             });
+        }
+        if !self.shell_cwd.is_empty() {
+            out.push_str(&format!(
+                "Shell cwd: {} (relative to the workspace; shell starts here until cd or cwd changes it)\n",
+                self.shell_cwd
+            ));
         }
         if let Some(git) = &self.git {
             out.push_str("Git status (snapshot at run start; run git_status for live state):\n");
@@ -110,6 +119,8 @@ pub fn stable_prompt(mode: &str) -> String {
          Use apply_patch for targeted edits; only use write_file to create files or replace them wholesale.\n\
          For work with three or more steps, keep a short checklist with update_plan and mark steps done as you go.\n\
          Tool results may be truncated or cleared; large results are saved under .blora/tool-output/ and can be paged with read_file offset/limit.\n\
+         Images and other non-text files are described, not inlined. Skills are listed by name; load one with the skill tool before following it.\n\
+         Shell commands start in the session working directory. A bare cd, or the cwd argument, moves it and stays inside the workspace.\n\
          Return a concise final answer when the task is done.\n\
          Do not exfiltrate secrets. Unknown event types in history must be ignored."
     )
@@ -120,7 +131,7 @@ pub fn stable_prompt(mode: &str) -> String {
 pub fn context_prompt(workspace: &str, mode: &str) -> String {
     let mut out = format!(
         "Mode: {mode}\n\
-         Tools: read_file, write_file, list_dir, glob, search, shell, apply_patch, git_status, git_diff, git_log, git_branch, git_worktree, process, schedule_task, delegate, handoff, remember, recall, forget, update_plan."
+         Tools: read_file, write_file, list_dir, glob, search, shell, skill, apply_patch, git_status, git_diff, git_log, git_branch, git_worktree, process, schedule_task, delegate, handoff, remember, recall, forget, update_plan."
     );
     if let Some(rules) = project_rules(workspace) {
         out.push_str("\n\nProject rules:\n");
@@ -216,29 +227,115 @@ fn blora_home() -> Option<std::path::PathBuf> {
     dirs::home_dir().map(|home| home.join(".blora"))
 }
 
-fn skill_summaries(workspace: &str) -> Option<String> {
+struct SkillFile {
+    name: String,
+    path: std::path::PathBuf,
+}
+
+fn discover_skills(workspace: &str) -> Vec<SkillFile> {
     let dir = std::path::Path::new(workspace).join(".blora/skills");
-    let entries = std::fs::read_dir(&dir).ok()?;
-    let mut paths: Vec<_> = entries
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("md"))
-        .collect();
-    paths.sort();
-    let mut chunks = Vec::new();
-    for path in paths.into_iter().take(8) {
-        if let Some(text) = read_capped(&path, 1500) {
-            chunks.push(format!(
-                "# {}\n{text}",
-                path.file_name().unwrap_or_default().to_string_lossy()
-            ));
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut found = std::collections::BTreeMap::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("md") {
+            if let Some(name) = path.file_stem().and_then(|stem| stem.to_str())
+                && skill_name_ok(name)
+            {
+                found.insert(name.to_owned(), path);
+            }
+        } else if path.is_dir()
+            && let Some(name) = path.file_name().and_then(|name| name.to_str())
+            && skill_name_ok(name)
+        {
+            let nested = path.join("SKILL.md");
+            if nested.is_file() {
+                found.entry(name.to_owned()).or_insert(nested);
+            }
         }
     }
-    if chunks.is_empty() {
-        None
-    } else {
-        Some(chunks.join("\n\n"))
+    found
+        .into_iter()
+        .map(|(name, path)| SkillFile { name, path })
+        .collect()
+}
+
+fn skill_name_ok(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_ascii_alphanumeric() || first == '_')
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+        && name.len() <= 64
+}
+
+fn skill_blurb(text: &str) -> String {
+    let Some(line) = text.lines().map(str::trim).find(|line| !line.is_empty()) else {
+        return "(no description)".to_owned();
+    };
+    let line = line.trim_start_matches('#').trim();
+    let mut blurb: String = line.chars().take(120).collect();
+    if line.chars().count() > 120 {
+        blurb.push('…');
     }
+    if blurb.is_empty() {
+        "(no description)".to_owned()
+    } else {
+        blurb
+    }
+}
+
+fn skill_summaries(workspace: &str) -> Option<String> {
+    let found = discover_skills(workspace);
+    if found.is_empty() {
+        return None;
+    }
+    let mut lines =
+        vec!["Names only; call the skill tool with the name before following a skill.".to_owned()];
+    for skill in found.into_iter().take(32) {
+        let blurb = std::fs::read_to_string(&skill.path)
+            .ok()
+            .map(|text| skill_blurb(&text))
+            .unwrap_or_else(|| "(unreadable)".to_owned());
+        lines.push(format!("- {}: {blurb}", skill.name));
+    }
+    Some(lines.join("\n"))
+}
+
+/// Full text of one skill. The prompt lists names; this is the on-demand load.
+pub fn read_skill(workspace: &str, name: &str) -> Result<String> {
+    let name = name.trim();
+    if !skill_name_ok(name) {
+        return Err(BloraError::Other(format!(
+            "invalid skill name {name}; use the name shown in the prompt"
+        )));
+    }
+    let found = discover_skills(workspace);
+    let Some(skill) = found.iter().find(|skill| skill.name == name) else {
+        let names = found
+            .iter()
+            .map(|skill| skill.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(BloraError::Other(format!(
+            "unknown skill {name}; available: {}",
+            if names.is_empty() { "(none)" } else { &names }
+        )));
+    };
+    let mut text = std::fs::read_to_string(&skill.path).map_err(BloraError::exec)?;
+    const MAX: usize = 16_000;
+    if text.len() > MAX {
+        let mut cut = MAX;
+        while cut > 0 && !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        text.truncate(cut);
+        text.push('…');
+    }
+    Ok(text)
 }
 
 fn git_snapshot(workspace: &str) -> Option<String> {
@@ -567,6 +664,7 @@ mod tests {
             os: "linux".to_owned(),
             git: Some("## main".to_owned()),
             permission_mode: "plan".to_owned(),
+            shell_cwd: ".".to_owned(),
         }
     }
 
@@ -603,6 +701,30 @@ mod tests {
         let prompt = context_prompt(dir.path().to_str().unwrap(), "code");
         assert!(prompt.contains("prefer tests"));
         assert!(prompt.contains("AGENTS.md"));
+    }
+
+    #[test]
+    fn skills_are_listed_by_name_until_loaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let skills = dir.path().join(".blora/skills");
+        std::fs::create_dir_all(skills.join("review")).unwrap();
+        std::fs::create_dir_all(skills.join("notes")).unwrap();
+        std::fs::write(skills.join("review.md"), "# Review\nBODY-SHOULD-STAY-OUT\n").unwrap();
+        std::fs::write(
+            skills.join("review/SKILL.md"),
+            "directory copy should lose to the file\n",
+        )
+        .unwrap();
+        std::fs::write(skills.join("notes/SKILL.md"), "# Notes\nnested body\n").unwrap();
+        let workspace = dir.path().to_str().unwrap();
+        let prompt = context_prompt(workspace, "code");
+        assert!(prompt.contains("- review: Review"));
+        assert!(prompt.contains("- notes: Notes"));
+        assert!(!prompt.contains("BODY-SHOULD-STAY-OUT"));
+        assert!(!prompt.contains("nested body"));
+        let loaded = read_skill(workspace, "notes").unwrap();
+        assert!(loaded.contains("nested body"));
+        assert!(read_skill(workspace, "../secret").is_err());
     }
 
     #[test]

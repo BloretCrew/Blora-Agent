@@ -122,6 +122,10 @@ pub struct SessionProjection {
     /// Permission mode of the most recent run (`plan`, `ask`, `auto-edit`, `yolo`).
     #[serde(default)]
     pub permission_mode: Option<String>,
+    /// Workspace-relative directory where the next shell command starts.
+    /// `None` and `.` both mean the workspace root.
+    #[serde(default)]
+    pub shell_cwd: Option<String>,
     #[serde(skip)]
     open_assistant: String,
     #[serde(skip)]
@@ -627,6 +631,13 @@ pub fn apply_event(projection: &mut SessionProjection, event: &EventEnvelope) ->
                 event_id: event.event_id.clone(),
             });
         }
+        KnownPayload::SessionCwdChanged(changed) => {
+            projection.shell_cwd = Some(changed.cwd);
+            if event.run_id.is_some() {
+                let run = run_mut(projection, event)?;
+                run.updated_at = event.timestamp;
+            }
+        }
         KnownPayload::PlanUpdated(plan) => {
             projection.plan = plan
                 .steps
@@ -939,6 +950,30 @@ mod tests {
             projection.transcript.as_slice(),
             [TranscriptItem::Reasoning { text, running: false, .. }] if text == "Let me think"
         ));
+    }
+
+    #[test]
+    fn shell_cwd_is_replayed() {
+        let session_id = SessionId::generate();
+        let created = envelope(
+            &session_id,
+            1,
+            KnownPayload::SessionCreated(SessionCreated {
+                title: None,
+                workspace_path: "/tmp/ws".to_owned(),
+                mode: Mode::Code,
+                parent_session_id: None,
+            }),
+        );
+        let cwd = envelope(
+            &session_id,
+            2,
+            KnownPayload::SessionCwdChanged(blora_events::SessionCwdChanged {
+                cwd: "src".to_owned(),
+            }),
+        );
+        let projection = rebuild(&[created, cwd]).unwrap();
+        assert_eq!(projection.shell_cwd.as_deref(), Some("src"));
     }
 
     #[test]

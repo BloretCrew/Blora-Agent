@@ -365,6 +365,13 @@ pub struct PlanUpdated {
     pub note: Option<String>,
 }
 
+/// The session shell directory changed. `cwd` is relative to the workspace,
+/// or `.` for the workspace root.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SessionCwdChanged {
+    pub cwd: String,
+}
+
 /// Strongly-typed payloads. Unknown wire types stay as raw JSON on the envelope.
 #[derive(Clone, Debug, PartialEq)]
 pub enum KnownPayload {
@@ -418,6 +425,7 @@ pub enum KnownPayload {
     ArtifactCreated(ArtifactCreated),
     CheckpointCreated(CheckpointCreated),
     PlanUpdated(PlanUpdated),
+    SessionCwdChanged(SessionCwdChanged),
 }
 
 impl KnownPayload {
@@ -474,6 +482,7 @@ impl KnownPayload {
             Self::ArtifactCreated(_) => "artifact.created",
             Self::CheckpointCreated(_) => "checkpoint.created",
             Self::PlanUpdated(_) => "plan.updated",
+            Self::SessionCwdChanged(_) => "session.cwd.changed",
         }
     }
 
@@ -556,6 +565,7 @@ impl KnownPayload {
             Self::ArtifactCreated(v) => serde_json::to_value(v),
             Self::CheckpointCreated(v) => serde_json::to_value(v),
             Self::PlanUpdated(v) => serde_json::to_value(v),
+            Self::SessionCwdChanged(v) => serde_json::to_value(v),
         };
         value.map_err(|err| BloraError::event(err.to_string()))
     }
@@ -613,6 +623,7 @@ impl KnownPayload {
             "artifact.created" => Self::ArtifactCreated(from_value(value)?),
             "checkpoint.created" => Self::CheckpointCreated(from_value(value)?),
             "plan.updated" => Self::PlanUpdated(from_value(value)?),
+            "session.cwd.changed" => Self::SessionCwdChanged(from_value(value)?),
             _ => return Ok(None),
         };
         Ok(Some(known))

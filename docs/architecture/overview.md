@@ -45,6 +45,7 @@ Blora Agent 是从零实现的本地优先 harness。第一阶段是单用户模
 - Work/Agent：cron 至多一次语义与失活恢复、任务退避重试与 180s 硬上限、子代理深度与用量回写、运行中 steer
 - 权限：四档 `PermissionMode`（plan / ask / auto-edit / yolo），shell 命令按段分级（只读 / 改动 / 危险），`run.created.permission_mode` 与 `<environment_context>` 告知模型；`update_plan` 清单工具与 `plan.updated` 事件
 - 工具与上下文：`glob` 工具、`search` 的 include/max_results、超长结果落盘到 `.blora/tool-output/`、规则文件从仓库根逐级发现并叠加全局 `~/.blora/rules.md`
+- 会话 shell 工作目录（`cwd` 参数或单独的 `cd`，记在 `session.cwd.changed`，不离开工作区）、技能只在上下文里列名字、用 `skill` 按需加载全文、非 UTF-8 文件（含 PNG/JPEG/GIF/WEBP）以类型和尺寸描述返回
 
 ```text
 cargo run -p blora-cli --         # TUI

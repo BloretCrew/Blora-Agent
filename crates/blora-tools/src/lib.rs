@@ -3,7 +3,8 @@
 
 //! Built-in tools. Schemas are provider-facing; execution stays in-process.
 
-use blora_exec::LocalBackend;
+use blora_context::read_skill;
+use blora_exec::{LocalBackend, ShellKind};
 use blora_types::{BloraError, Result};
 use serde_json::{Value, json};
 
@@ -25,7 +26,7 @@ impl ToolRegistry {
         vec![
             ToolSpec {
                 name: "read_file",
-                description: "Read a UTF-8 text file inside the workspace. Optional offset/limit select a line range for large files.",
+                description: "Read a UTF-8 text file inside the workspace. Optional offset/limit select a line range for large files. Images and other non-UTF-8 files return a short description (type, byte size, dimensions) instead of raw bytes.",
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -91,11 +92,12 @@ impl ToolRegistry {
             },
             ToolSpec {
                 name: "shell",
-                description: "Run a shell command in the workspace. Requires approval unless auto-approve is enabled. timeout_seconds caps foreground commands (default 30, max 600).",
+                description: "Run a shell command. The session remembers a working directory inside the workspace: pass cwd to set it, or use a bare cd. timeout_seconds caps foreground commands (default 30, max 600).",
                 parameters: json!({
                     "type": "object",
                     "properties": {
                         "command": {"type": "string"},
+                        "cwd": {"type": "string", "description": "Workspace-relative directory. Becomes the session working directory."},
                         "background": {"type": "boolean"},
                         "pty": {"type": "boolean"},
                         "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600}
@@ -246,6 +248,18 @@ impl ToolRegistry {
                 read_only: true,
             },
             ToolSpec {
+                name: "skill",
+                description: "Load the full instructions for one skill listed in the prompt. name is the skill file or directory name, without a path.",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"}
+                    },
+                    "required": ["name"]
+                }),
+                read_only: true,
+            },
+            ToolSpec {
                 name: "update_plan",
                 description: "Replace your working checklist. Send the full list every time; keep at most one step in_progress. Use it for multi-step work so the user can follow progress.",
                 parameters: json!({
@@ -310,27 +324,33 @@ impl ToolRegistry {
             ),
             "shell" => {
                 let command = required_str(arguments, "command")?;
-                if arguments
+                let cwd = optional_str(arguments, "cwd").unwrap_or(".");
+                let kind = if arguments
                     .get("background")
                     .and_then(Value::as_bool)
                     .unwrap_or(false)
                 {
-                    backend.shell_background(command)
+                    ShellKind::Background
                 } else if arguments
                     .get("pty")
                     .and_then(Value::as_bool)
                     .unwrap_or(false)
                     || std::env::var("BLORA_PTY").ok().as_deref() == Some("1")
                 {
-                    backend.shell_pty(command)
+                    ShellKind::Pty
                 } else {
                     let timeout = arguments
                         .get("timeout_seconds")
                         .and_then(Value::as_u64)
                         .map(|secs| std::time::Duration::from_secs(secs.clamp(1, 600)));
-                    backend.shell_with_timeout(command, timeout)
-                }
+                    ShellKind::Foreground(timeout)
+                };
+                Ok(backend.shell_prepared(command, cwd, kind)?.text)
             }
+            "skill" => read_skill(
+                backend.policy().workspace().to_str().unwrap_or("."),
+                required_str(arguments, "name")?,
+            ),
             "git_status" => backend.git_status(),
             "git_diff" => backend.git_diff(),
             "git_log" => backend.git_log(),
@@ -413,6 +433,7 @@ mod tests {
         assert!(ToolRegistry::is_read_only("search"));
         assert!(ToolRegistry::is_read_only("glob"));
         assert!(ToolRegistry::is_read_only("update_plan"));
+        assert!(ToolRegistry::is_read_only("skill"));
         assert!(!ToolRegistry::is_read_only("shell"));
         assert!(!ToolRegistry::is_read_only("apply_patch"));
     }

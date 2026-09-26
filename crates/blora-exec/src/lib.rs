@@ -14,6 +14,7 @@ use blora_policy::Policy;
 use blora_types::{BloraError, Result};
 mod glob;
 mod isolation;
+mod media;
 mod process;
 mod worktree;
 
@@ -30,6 +31,21 @@ const MAX_SEARCH_MATCHES: usize = 80;
 const MAX_GLOB_MATCHES: usize = 200;
 const MAX_SHELL_BYTES: usize = 200_000;
 const DEFAULT_SHELL_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How [`LocalBackend::shell_prepared`] waits for the command.
+#[derive(Clone, Copy, Debug)]
+pub enum ShellKind {
+    Foreground(Option<Duration>),
+    Background,
+    Pty,
+}
+
+/// Captured shell output plus whether the process exited zero.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShellOutput {
+    pub text: String,
+    pub success: bool,
+}
 
 #[derive(Clone, Debug)]
 pub struct LocalBackend {
@@ -78,7 +94,11 @@ impl LocalBackend {
                 path.display()
             )));
         }
-        Ok(String::from_utf8_lossy(&bytes).into_owned())
+        let label = relative_slashes(&path, self.policy.workspace());
+        match String::from_utf8(bytes) {
+            Ok(text) => Ok(text),
+            Err(err) => Ok(media::describe_bytes(&label, &err.into_bytes())),
+        }
     }
 
     pub fn write_file(&self, path: &str, contents: &str) -> Result<()> {
@@ -238,11 +258,78 @@ impl LocalBackend {
     }
 
     pub fn shell_with_timeout(&self, command: &str, timeout: Option<Duration>) -> Result<String> {
-        let timeout = timeout.unwrap_or(DEFAULT_SHELL_TIMEOUT);
+        Ok(self
+            .shell_prepared(command, ".", ShellKind::Foreground(timeout))?
+            .text)
+    }
+
+    /// Run `command` with the workspace-relative directory `cwd` as its start
+    /// directory. A bare `cd` is rewritten so `~` stays at the workspace root
+    /// and the destination must already be a directory inside the workspace.
+    /// Policy is applied to the caller's command, not to the directory prefix.
+    pub fn shell_prepared(&self, command: &str, cwd: &str, kind: ShellKind) -> Result<ShellOutput> {
         self.policy.require(
             self.policy.shell_command(command),
             &format!("shell {command}"),
         )?;
+        if command.trim().is_empty() {
+            return Err(BloraError::Exec("empty command".to_owned()));
+        }
+        let effective = self.normalize_cwd(cwd)?;
+        let (run, at) = if let Some(target) = plain_cd_target(command) {
+            let raw = match target {
+                CdTarget::Root => ".".to_owned(),
+                CdTarget::Path(path) => join_cwd(&effective, &path),
+            };
+            let dest = self.normalize_cwd(&raw)?;
+            (format!("cd {}", sh_quote(&dest)), ".".to_owned())
+        } else {
+            (command.to_owned(), effective)
+        };
+        let run = wrap_cwd(&at, &run);
+        match kind {
+            ShellKind::Foreground(timeout) => {
+                let (text, success) = self.spawn_shell(&run, timeout)?;
+                Ok(ShellOutput { text, success })
+            }
+            ShellKind::Background => Ok(ShellOutput {
+                text: self.spawn_background_unchecked(&run)?,
+                success: true,
+            }),
+            ShellKind::Pty => {
+                let (text, success) = self
+                    .clone()
+                    .with_isolation(Isolation::Pty)
+                    .spawn_shell(&run, None)?;
+                Ok(ShellOutput { text, success })
+            }
+        }
+    }
+
+    /// Workspace-relative directory, or `.` for the workspace root.
+    /// The path must exist, be a directory, and stay inside the workspace.
+    pub fn normalize_cwd(&self, cwd: &str) -> Result<String> {
+        let path = self.policy.resolve(cwd)?;
+        if !path.is_dir() {
+            return Err(BloraError::Exec(format!("cwd is not a directory: {cwd}")));
+        }
+        let rel = path
+            .strip_prefix(self.policy.workspace())
+            .map_err(|_| BloraError::Policy(format!("path escapes workspace: {cwd}")))?;
+        let text = rel
+            .components()
+            .map(|component| component.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("/");
+        if text.is_empty() {
+            Ok(".".to_owned())
+        } else {
+            Ok(text)
+        }
+    }
+
+    fn spawn_shell(&self, command: &str, timeout: Option<Duration>) -> Result<(String, bool)> {
+        let timeout = timeout.unwrap_or(DEFAULT_SHELL_TIMEOUT);
         if command.trim().is_empty() {
             return Err(BloraError::Exec("empty command".to_owned()));
         }
@@ -294,13 +381,14 @@ impl LocalBackend {
             out.push_str("stderr:\n");
             out.push_str(&stderr);
         }
-        if !status.success() {
+        let success = status.success();
+        if !success {
             out.push_str(&format!("\nexit {}", status.code().unwrap_or(-1)));
         }
         if out.is_empty() {
             out = "(no output)".to_owned();
         }
-        Ok(out)
+        Ok((out, success))
     }
 
     pub fn git_status(&self) -> Result<String> {
@@ -613,6 +701,98 @@ impl LocalBackend {
     }
 }
 
+/// Where a bare `cd` goes. `Root` is the workspace, including `cd` and `cd ~`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CdTarget {
+    Root,
+    Path(String),
+}
+
+/// Directory a later shell should start in.
+///
+/// `effective` is the directory this command already started in. A successful
+/// bare `cd` moves from there; every other command stays put. `~` is the
+/// workspace root, not the account home.
+#[must_use]
+pub fn shell_cwd_after(effective: &str, command: &str, success: bool) -> String {
+    if success && let Some(target) = plain_cd_target(command) {
+        return match target {
+            CdTarget::Root => ".".to_owned(),
+            CdTarget::Path(path) => join_cwd(effective, &path),
+        };
+    }
+    effective.to_owned()
+}
+
+/// Join `target` onto `current`. Absolute targets are returned unchanged so
+/// the caller can reject anything outside the workspace.
+#[must_use]
+pub fn join_cwd(current: &str, target: &str) -> String {
+    let target = target.trim();
+    if let Some(rest) = target.strip_prefix("~/") {
+        return rest.trim_start_matches('/').to_owned();
+    }
+    if target.starts_with('/') {
+        return target.to_owned();
+    }
+    let base = current.trim().trim_end_matches('/');
+    if base.is_empty() || base == "." {
+        target.to_owned()
+    } else {
+        format!("{base}/{target}")
+    }
+}
+
+/// `Some` when `command` is only `cd` plus an optional directory.
+/// Compound commands (`cd x && ls`) return `None` so they are not rewritten.
+#[must_use]
+pub fn plain_cd_target(command: &str) -> Option<CdTarget> {
+    let trimmed = command.trim();
+    let rest = trimmed.strip_prefix("cd")?;
+    if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let rest = rest.trim();
+    if rest.chars().any(|ch| {
+        matches!(
+            ch,
+            '&' | '|' | ';' | '\n' | '`' | '$' | '>' | '<' | '(' | ')'
+        )
+    }) {
+        return None;
+    }
+    let quoted = rest.len() >= 2
+        && ((rest.starts_with('"') && rest.ends_with('"'))
+            || (rest.starts_with('\'') && rest.ends_with('\'')));
+    let target = if quoted {
+        &rest[1..rest.len() - 1]
+    } else {
+        rest
+    };
+    if target.is_empty() || target == "~" || target == "~/" {
+        return Some(CdTarget::Root);
+    }
+    if !quoted && target.split_whitespace().nth(1).is_some() {
+        return None;
+    }
+    if let Some(rest) = target.strip_prefix("~/") {
+        return Some(CdTarget::Path(rest.trim_start_matches('/').to_owned()));
+    }
+    Some(CdTarget::Path(target.to_owned()))
+}
+
+fn wrap_cwd(cwd: &str, command: &str) -> String {
+    if cwd == "." {
+        command.to_owned()
+    } else {
+        format!("cd {} && {command}", sh_quote(cwd))
+    }
+}
+
+fn sh_quote(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "'\\''"))
+}
+
 fn should_skip(path: &Path) -> bool {
     path.components().any(|component| {
         matches!(
@@ -905,5 +1085,53 @@ mod tests {
         assert_eq!(backend.apply_patch("a.txt", "x", "y", true).unwrap(), 2);
         assert_eq!(backend.read_file("a.txt").unwrap(), "y\ny\n");
         assert!(backend.apply_patch("a.txt", "zzz", "y", false).is_err());
+    }
+
+    #[test]
+    fn shell_starts_in_the_requested_directory_and_rejects_escape() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = LocalBackend::new(Policy::new(dir.path(), true).unwrap());
+        backend.write_file("sub/note.txt", "inside\n").unwrap();
+        let output = backend
+            .shell_prepared("cat note.txt", "sub", ShellKind::Foreground(None))
+            .unwrap();
+        assert!(output.success);
+        assert!(output.text.contains("inside"));
+        assert!(backend.normalize_cwd("../..").is_err());
+        assert!(backend.normalize_cwd("sub/note.txt").is_err());
+    }
+
+    #[test]
+    fn bare_cd_stays_inside_the_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = LocalBackend::new(Policy::new(dir.path(), true).unwrap());
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        let moved = backend
+            .shell_prepared("cd sub", ".", ShellKind::Foreground(None))
+            .unwrap();
+        assert!(moved.success);
+        assert_eq!(shell_cwd_after(".", "cd sub", true), "sub");
+        assert_eq!(shell_cwd_after("sub", "cd ~", true), ".");
+        assert_eq!(shell_cwd_after("sub", "pwd", true), "sub");
+        assert_eq!(shell_cwd_after("sub", "cd ..", false), "sub");
+        assert!(plain_cd_target("cd sub && ls").is_none());
+        let escaped = backend.shell_prepared("cd ..", ".", ShellKind::Foreground(None));
+        assert!(escaped.is_err());
+    }
+
+    #[test]
+    fn read_file_describes_png_instead_of_lossy_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = LocalBackend::new(Policy::new(dir.path(), true).unwrap());
+        let mut bytes = vec![0u8; 24];
+        bytes[0..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+        bytes[12..16].copy_from_slice(b"IHDR");
+        bytes[16..20].copy_from_slice(&8u32.to_be_bytes());
+        bytes[20..24].copy_from_slice(&4u32.to_be_bytes());
+        let path = dir.path().join("icon.png");
+        std::fs::write(&path, &bytes).unwrap();
+        let text = backend.read_file("icon.png").unwrap();
+        assert!(text.contains("image/png 8x4"));
+        assert!(!text.contains('\u{fffd}'));
     }
 }

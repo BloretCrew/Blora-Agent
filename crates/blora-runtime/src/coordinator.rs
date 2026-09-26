@@ -6,11 +6,11 @@ use blora_events::{
     AssistantDelta, AssistantMessageCompleted, ContextSnapshotCreated, EventEnvelope,
     HookCompleted, KnownPayload, ModeChanged, ModelRequested, ModelResponseCompleted, NewEvent,
     PlanStep, PlanUpdated, ProviderChanged, RetryStarted, RoutingChanged, RunCancelRequested,
-    RunCancelled, RunCompleted, RunCreated, RunFailed, RunStarted, SessionArchived, SessionResumed,
-    SessionTitleChanged, ToolCompleted, ToolFailed, ToolOutput, ToolRequested, ToolStarted,
-    UsageRecorded, UserInput,
+    RunCancelled, RunCompleted, RunCreated, RunFailed, RunStarted, SessionArchived,
+    SessionCwdChanged, SessionResumed, SessionTitleChanged, ToolCompleted, ToolFailed, ToolOutput,
+    ToolRequested, ToolStarted, UsageRecorded, UserInput,
 };
-use blora_exec::{Isolation, LocalBackend, WorktreeHandle};
+use blora_exec::{Isolation, LocalBackend, ShellKind, WorktreeHandle, shell_cwd_after};
 use blora_model::retry::{self, RetryClass};
 use blora_model::{
     ChatMessage, Completion, CompletionRequest, Provider, StreamEvent, ToolCall, ToolDeclaration,
@@ -339,12 +339,9 @@ impl Runtime {
             files,
             entries,
             git_status: backend.git_status().unwrap_or_else(|err| err.to_string()),
-            git_branch_counts: backend.git_branch_counts().unwrap_or_default(),
             git_diff: backend.git_diff().unwrap_or_else(|err| err.to_string()),
-            git_numstat: backend.git_numstat().unwrap_or_else(|err| err.to_string()),
             git_log: backend.git_log().unwrap_or_else(|err| err.to_string()),
             git_branch: backend.git_branch().unwrap_or_else(|err| err.to_string()),
-            git_stashes: backend.git_stashes().unwrap_or_else(|err| err.to_string()),
         })
     }
 
@@ -817,7 +814,7 @@ impl Runtime {
                 self.set_session_title(session_id, title, true)?;
             }
         }
-        let env = EnvSnapshot::capture_with_mode(&exec_root, permission_mode.as_str());
+        let mut env = EnvSnapshot::capture_with_mode(&exec_root, permission_mode.as_str());
         self.emit(
             session_id,
             Some(&run_id),
@@ -879,6 +876,11 @@ impl Runtime {
                     }),
                 )?;
             }
+            env.shell_cwd = self
+                .show_session(session_id)?
+                .shell_cwd
+                .filter(|cwd| !cwd.is_empty())
+                .unwrap_or_else(|| ".".to_owned());
             let mut events = self.store.load_events(session_id)?;
             let mut messages = compile_messages(&events, &exec_root, mode.as_str(), &env)?;
             if estimate_messages(&messages) >= compact_at {
@@ -1410,6 +1412,7 @@ impl Runtime {
             }),
         )?;
         let execute = |backend: &LocalBackend| match call.name.as_str() {
+            "shell" => self.execute_shell(session_id, run_id, turn_id, backend, &arguments),
             "delegate" => {
                 let prompt = arguments
                     .get("prompt")
@@ -1712,6 +1715,68 @@ impl Runtime {
         self.notify(&stored);
         Ok(())
     }
+
+    fn execute_shell(
+        &self,
+        session_id: &SessionId,
+        run_id: &RunId,
+        turn_id: &TurnId,
+        backend: &LocalBackend,
+        arguments: &Value,
+    ) -> Result<String> {
+        let command = arguments
+            .get("command")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if command.is_empty() {
+            return Err(BloraError::Other("missing string field command".to_owned()));
+        }
+        let previous = self
+            .show_session(session_id)?
+            .shell_cwd
+            .filter(|cwd| !cwd.is_empty())
+            .unwrap_or_else(|| ".".to_owned());
+        let requested = arguments
+            .get("cwd")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|cwd| !cwd.is_empty())
+            .unwrap_or(previous.as_str());
+        let effective = backend.normalize_cwd(requested)?;
+        let kind = if arguments
+            .get("background")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            ShellKind::Background
+        } else if arguments
+            .get("pty")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            || std::env::var("BLORA_PTY").ok().as_deref() == Some("1")
+        {
+            ShellKind::Pty
+        } else {
+            let timeout = arguments
+                .get("timeout_seconds")
+                .and_then(Value::as_u64)
+                .map(|secs| std::time::Duration::from_secs(secs.clamp(1, 600)));
+            ShellKind::Foreground(timeout)
+        };
+        let output = backend.shell_prepared(command, &effective, kind)?;
+        let next = backend.normalize_cwd(&shell_cwd_after(&effective, command, output.success))?;
+        if next != previous {
+            self.emit(
+                session_id,
+                Some(run_id),
+                Some(turn_id),
+                KnownPayload::SessionCwdChanged(SessionCwdChanged { cwd: next.clone() }),
+            )?;
+        }
+        let mut text = output.text;
+        text.push_str(&format!("\n[cwd {next}]"));
+        Ok(text)
+    }
 }
 
 trait ClonedResult {
@@ -1721,7 +1786,7 @@ trait ClonedResult {
 /// Tools whose execution lives in `dispatch_tool` (they touch the store or emit
 /// events) rather than in `ToolRegistry::execute`.
 fn runtime_handled_tool(name: &str) -> bool {
-    matches!(name, "recall" | "update_plan")
+    matches!(name, "recall" | "update_plan" | "shell")
 }
 
 /// Keep at most this many spilled tool outputs per workspace.
@@ -2335,6 +2400,84 @@ mod tests {
                 if name == "update_plan"
                     && status == "completed"
                     && output.as_deref().is_some_and(|text| text.contains("1/2 done"))
+        )));
+    }
+
+    #[test]
+    fn shell_cwd_persists_across_calls() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("sub/note.txt"), "inside\n").unwrap();
+        let runtime = Runtime::new(SqliteStore::open_in_memory().unwrap());
+        let session = session(&runtime, Mode::Code, dir.path().to_str().unwrap());
+        let run_id = RunId::generate();
+        let turn_id = TurnId::generate();
+        runtime
+            .emit(
+                &session,
+                Some(&run_id),
+                Some(&turn_id),
+                KnownPayload::RunCreated(RunCreated {
+                    mode: Mode::Code,
+                    model: Some("mock".to_owned()),
+                    permission_mode: Some("yolo".to_owned()),
+                }),
+            )
+            .unwrap();
+        let backend = LocalBackend::new(Policy::new(dir.path(), true).unwrap());
+        let options = RunOptions::default();
+        let cancel = CancelToken::new();
+        runtime
+            .dispatch_tool(
+                &session,
+                &run_id,
+                &turn_id,
+                &backend,
+                &ToolCall {
+                    id: "call_cd".to_owned(),
+                    name: "shell".to_owned(),
+                    arguments: json!({"command": "cd sub"}).to_string(),
+                },
+                &options,
+                &cancel,
+                None,
+                &[],
+                dir.path().to_str().unwrap(),
+                None,
+                false,
+            )
+            .unwrap();
+        assert_eq!(
+            runtime.show_session(&session).unwrap().shell_cwd.as_deref(),
+            Some("sub")
+        );
+        runtime
+            .dispatch_tool(
+                &session,
+                &run_id,
+                &turn_id,
+                &backend,
+                &ToolCall {
+                    id: "call_cat".to_owned(),
+                    name: "shell".to_owned(),
+                    arguments: json!({"command": "cat note.txt"}).to_string(),
+                },
+                &options,
+                &cancel,
+                None,
+                &[],
+                dir.path().to_str().unwrap(),
+                None,
+                false,
+            )
+            .unwrap();
+        let projection = runtime.show_session(&session).unwrap();
+        assert_eq!(projection.shell_cwd.as_deref(), Some("sub"));
+        assert!(projection.transcript.iter().any(|item| matches!(
+            item,
+            TranscriptItem::Tool { name, output, .. }
+                if name == "shell"
+                    && output.as_deref().is_some_and(|text| text.contains("inside") && text.contains("[cwd sub]"))
         )));
     }
 

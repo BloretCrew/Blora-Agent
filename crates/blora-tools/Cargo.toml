@@ -8,6 +8,7 @@ authors.workspace = true
 description = "Built-in coding tools for Blora Agent."
 
 [dependencies]
+blora-context.workspace = true
 blora-exec.workspace = true
 blora-types.workspace = true
 serde.workspace = true

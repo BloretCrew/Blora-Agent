@@ -4,9 +4,11 @@
 
 - **Stable**（system 块 1）：身份、核心规则、安全策略。进程生命周期内字节不变，打缓存断点。
 - **Context**（system 块 2）：项目规则、`.blora/skills/*.md`、`.blora/memory.md`。只在磁盘文件变化时改变，打缓存断点。项目规则按从泛到专的顺序拼接：`$BLORA_HOME/rules.md`（全局）→ 从仓库根（含 `.git` 的目录，没有则最多向上 6 层）到工作区逐级的 `AGENTS.md` / `CLAUDE.md` → 工作区的 `.blora/rules.md`；每份最多 4000 字节，最多 10 份。
-- **Volatile**：日期、OS、Git 快照封装为 `<environment_context>` user 片段，放在最新一条用户输入之前，永不进入 system 块。
+- **Volatile**：日期、OS、Git 快照、当前 shell 工作目录封装为 `<environment_context>` user 片段，放在最新一条用户输入之前，永不进入 system 块。工作目录每轮从 `session.cwd.changed` 重读。
 
 `blora-context::compile_messages` 负责装配，并在最新用户输入与最新工具结果上再打两个断点，总数不超过 Anthropic 的 4 个上限。OpenAI 系与 Gemini 走服务端自动前缀缓存，请求携带 `prompt_cache_key`（会话 id）作为亲和键。
+
+技能目录 `.blora/skills/` 只把名字和一行摘要放进上下文（`*.md` 优先于同名目录里的 `SKILL.md`，最多 32 个）。全文由只读工具 `skill` 按名字读取，避免每轮把技能正文打进缓存前缀。
 
 ## 工具结果卫生
 

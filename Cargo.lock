@@ -347,6 +347,7 @@ dependencies = [
 name = "blora-tools"
 version = "0.1.0"
 dependencies = [
+ "blora-context",
  "blora-exec",
  "blora-types",
  "serde",

@@ -81,6 +81,7 @@ struct SessionJson {
     input_tokens: u64,
     output_tokens: u64,
     permission_mode: Option<String>,
+    shell_cwd: Option<String>,
     plan: Vec<PlanStepJson>,
     plan_note: Option<String>,
     transcript: Vec<TranscriptJson>,
@@ -1151,6 +1152,7 @@ fn to_json(state: &AppState, id: &SessionId) -> Result<SessionJson, ApiError> {
         input_tokens: projection.input_tokens,
         output_tokens: projection.output_tokens,
         permission_mode: projection.permission_mode.clone(),
+        shell_cwd: projection.shell_cwd.clone(),
         plan: projection
             .plan
             .iter()

@@ -34,6 +34,10 @@ impl LocalBackend {
             self.policy().shell_command(command),
             &format!("shell {command}"),
         )?;
+        self.spawn_background_unchecked(command)
+    }
+
+    pub(crate) fn spawn_background_unchecked(&self, command: &str) -> Result<String> {
         if command.trim().is_empty() {
             return Err(BloraError::Exec("empty command".to_owned()));
         }
