@@ -450,16 +450,6 @@ impl LocalBackend {
         self.git(&["stash", "list", "--format=%gd"])
     }
 
-    pub fn git_stage(&self, path: &str, stage: bool) -> Result<()> {
-        self.policy.require(self.policy.file_write(), "git_stage")?;
-        let args = if stage {
-            vec!["add", "--", path]
-        } else {
-            vec!["restore", "--staged", "--", path]
-        };
-        self.git_mutate(&args).map(|_| ())
-    }
-
     pub fn git_sync(&self, pull: bool) -> Result<String> {
         self.policy.require(self.policy.file_write(), "git_sync")?;
         let upstream = self.git_mutate(&[
@@ -500,32 +490,6 @@ impl LocalBackend {
         let mut args = vec!["commit", "-m", message.trim(), "--only", "--"];
         args.extend(selected.iter().map(String::as_str));
         self.git_mutate(&args)
-    }
-
-    pub fn git_commit(&self, message: &str) -> Result<String> {
-        self.policy
-            .require(self.policy.file_write(), "git_commit")?;
-        if message.trim().is_empty() {
-            return Err(BloraError::Exec("commit message is empty".to_owned()));
-        }
-        self.git_mutate(&["commit", "-m", message.trim()])
-    }
-
-    fn git_mutate(&self, args: &[&str]) -> Result<String> {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(self.policy.workspace())
-            .output()
-            .map_err(BloraError::exec)?;
-        let text = format!(
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        if !output.status.success() {
-            return Err(BloraError::Exec(text));
-        }
-        Ok(text)
     }
 
     pub fn git_worktree(&self, action: &str, path: Option<&str>) -> Result<String> {
@@ -644,6 +608,23 @@ impl LocalBackend {
                 path.display()
             )))
         }
+    }
+
+    fn git_mutate(&self, args: &[&str]) -> Result<String> {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(self.policy.workspace())
+            .output()
+            .map_err(BloraError::exec)?;
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if !output.status.success() {
+            return Err(BloraError::Exec(text));
+        }
+        Ok(text)
     }
 
     fn git(&self, args: &[&str]) -> Result<String> {
@@ -860,173 +841,6 @@ impl ExecutionBackend for LocalBackend {
 mod tests {
     use super::*;
     use blora_policy::Policy;
-
-    #[test]
-    fn git_commit_selected_commits_checked_files_without_other_staged_changes() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(
-            Command::new("git")
-                .args(["init", "-q"])
-                .current_dir(dir.path())
-                .status()
-                .unwrap()
-                .success()
-        );
-        let backend = LocalBackend::new(Policy::new(dir.path(), true).unwrap());
-        std::fs::write(dir.path().join("selected.txt"), "selected").unwrap();
-        std::fs::write(dir.path().join("other.txt"), "other").unwrap();
-        backend.git_stage("other.txt", true).unwrap();
-        assert!(
-            backend
-                .git_commit_selected(" ", &["selected.txt".to_owned()])
-                .is_err()
-        );
-        assert!(backend.git_commit_selected("subject", &[]).is_err());
-        let result = Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(dir.path())
-            .status()
-            .unwrap();
-        assert!(result.success());
-        assert!(
-            Command::new("git")
-                .args(["config", "user.email", "test@example.invalid"])
-                .current_dir(dir.path())
-                .status()
-                .unwrap()
-                .success()
-        );
-        backend
-            .git_commit_selected("selected commit", &["selected.txt".to_owned()])
-            .unwrap();
-        let committed = Command::new("git")
-            .args(["show", "--pretty=format:", "--name-only", "HEAD"])
-            .current_dir(dir.path())
-            .output()
-            .unwrap();
-        let committed = String::from_utf8(committed.stdout).unwrap();
-        assert!(committed.contains("selected.txt"));
-        assert!(!committed.contains("other.txt"));
-        let status = Command::new("git")
-            .args(["status", "--short"])
-            .current_dir(dir.path())
-            .output()
-            .unwrap();
-        assert!(
-            String::from_utf8(status.stdout)
-                .unwrap()
-                .contains("A  other.txt")
-        );
-    }
-
-    #[test]
-    fn git_sync_requires_an_upstream() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(
-            Command::new("git")
-                .args(["init", "-q"])
-                .current_dir(dir.path())
-                .status()
-                .unwrap()
-                .success()
-        );
-        let backend = LocalBackend::new(Policy::new(dir.path(), true).unwrap());
-        assert!(backend.git_sync(true).is_err());
-        assert!(backend.git_sync(false).is_err());
-    }
-
-    #[test]
-    fn git_commit_context_includes_tracked_changes_and_untracked_names() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(
-            Command::new("git")
-                .args(["init", "-q"])
-                .current_dir(dir.path())
-                .status()
-                .unwrap()
-                .success()
-        );
-        std::fs::write(dir.path().join("tracked.txt"), "before\n").unwrap();
-        let backend = LocalBackend::new(Policy::new(dir.path(), true).unwrap());
-        backend.git_stage("tracked.txt", true).unwrap();
-        assert!(
-            Command::new("git")
-                .args([
-                    "-c",
-                    "user.name=Test",
-                    "-c",
-                    "user.email=test@example.invalid",
-                    "commit",
-                    "-qm",
-                    "init"
-                ])
-                .current_dir(dir.path())
-                .status()
-                .unwrap()
-                .success()
-        );
-        std::fs::write(dir.path().join("tracked.txt"), "after\n").unwrap();
-        std::fs::write(dir.path().join("untracked.txt"), "private contents").unwrap();
-        let context = backend.git_commit_context().unwrap();
-        assert!(context.contains("+after"));
-        assert!(context.contains("untracked.txt"));
-        assert!(!context.contains("private contents"));
-    }
-
-    #[test]
-    fn git_stage_targets_one_file_and_rejects_empty_commit_message() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(
-            Command::new("git")
-                .args(["init", "-q"])
-                .current_dir(dir.path())
-                .status()
-                .unwrap()
-                .success()
-        );
-        std::fs::write(dir.path().join("one.txt"), "one").unwrap();
-        std::fs::write(dir.path().join("two.txt"), "two").unwrap();
-        let backend = LocalBackend::new(Policy::new(dir.path(), true).unwrap());
-        backend.git_stage("one.txt", true).unwrap();
-        let status = Command::new("git")
-            .args(["status", "--short"])
-            .current_dir(dir.path())
-            .output()
-            .unwrap();
-        let status = String::from_utf8(status.stdout).unwrap();
-        assert!(status.contains("A  one.txt"));
-        assert!(status.contains("?? two.txt"));
-        assert!(
-            Command::new("git")
-                .args([
-                    "-c",
-                    "user.name=Test",
-                    "-c",
-                    "user.email=test@example.invalid",
-                    "commit",
-                    "-qm",
-                    "init"
-                ])
-                .current_dir(dir.path())
-                .status()
-                .unwrap()
-                .success()
-        );
-        std::fs::write(dir.path().join("one.txt"), "changed").unwrap();
-        backend.git_stage("one.txt", true).unwrap();
-        backend.git_stage("one.txt", false).unwrap();
-        let status = Command::new("git")
-            .args(["status", "--short"])
-            .current_dir(dir.path())
-            .output()
-            .unwrap();
-        assert!(
-            String::from_utf8(status.stdout)
-                .unwrap()
-                .contains(" M one.txt")
-        );
-        assert!(backend.git_commit("  ").is_err());
-    }
 
     #[test]
     fn reads_and_writes_inside_workspace() {

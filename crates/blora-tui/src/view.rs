@@ -587,6 +587,11 @@ impl HitMap {
                 return Some(Hit::ModeRow(*idx));
             }
         }
+        for (rect, idx) in &self.project_picker_rows {
+            if contains(*rect, col, row) {
+                return Some(Hit::ProjectPickerRow(*idx));
+            }
+        }
         for (rect, idx) in &self.folder_picker_rows {
             if contains(*rect, col, row) {
                 return Some(Hit::FolderPickerRow(*idx));
@@ -597,11 +602,6 @@ impl HitMap {
             .is_some_and(|rect| contains(rect, col, row))
         {
             return Some(Hit::FolderPickerOpen);
-        }
-        for (rect, idx) in &self.project_picker_rows {
-            if contains(*rect, col, row) {
-                return Some(Hit::ProjectPickerRow(*idx));
-            }
         }
         if self
             .project_picker
@@ -1298,11 +1298,12 @@ fn render_header(
         .projection
         .and_then(|projection| projection.session.as_ref());
     let mode = session.map(|item| item.mode.as_str()).unwrap_or("code");
-    let project_name = model
+    let active_workspace = model
         .sessions
         .get(model.index)
         .map(|session| Path::new(&session.workspace_path))
-        .unwrap_or(model.workspace)
+        .unwrap_or(model.workspace);
+    let project_name = active_workspace
         .file_name()
         .and_then(|name| name.to_str())
         .filter(|name| !name.is_empty())
@@ -1418,7 +1419,7 @@ fn render_header(
         return;
     }
     let rect = Rect {
-        x: inner.right().saturating_sub(width),
+        x: inner.x + inner.width.saturating_sub(width),
         y: inner.y,
         width,
         height: 1,
@@ -1860,7 +1861,6 @@ fn transcript_lines(
                     theme,
                 );
             }
-            TranscriptItem::Reasoning { .. } => {}
             TranscriptItem::Tool {
                 name,
                 status,
@@ -1934,32 +1934,6 @@ fn transcript_lines(
             }
         }
     }
-    if let Some(reasoning) = projection
-        .transcript
-        .iter()
-        .rev()
-        .find_map(|item| match item {
-            TranscriptItem::Reasoning {
-                text,
-                running: true,
-                ..
-            } => Some(text.as_str()),
-            _ => None,
-        })
-    {
-        if !out.is_empty() {
-            out.push(Line::default());
-        }
-        push_reasoning_block(
-            &mut out,
-            reasoning,
-            true,
-            width,
-            needle.as_deref(),
-            theme,
-            tick,
-        );
-    }
     if let Some(live) = projection.live_assistant() {
         let show = match needle.as_deref() {
             None => true,
@@ -1971,7 +1945,7 @@ fn transcript_lines(
             }
             push_block(
                 &mut out,
-                "Blora",
+                "blora",
                 theme.sage,
                 live,
                 width,
@@ -2065,140 +2039,14 @@ fn highlight_selection(
         .collect()
 }
 
-fn pulse_brightness(tick: u64, speed: f32) -> f32 {
-    pulse_brightness_for_row(tick, speed, 0, 1)
-}
-
-fn pulse_brightness_for_row(tick: u64, speed: f32, row: u16, wave_rows: u16) -> f32 {
-    let phase = (row as f32 / wave_rows.max(1) as f32) * std::f32::consts::TAU;
-    let wave = (tick as f32 * speed + phase).sin();
-    wave * wave
-}
-
-fn blend_color(base: Color, accent: Color, opacity: f32) -> Option<Color> {
-    use ratatui::style::Color::*;
-    let (br, bg, bb) = color_rgb(base)?;
-    let (ar, ag, ab) = color_rgb(accent)?;
-    let blend = |b: u8, a: u8| (b as f32 * (1.0 - opacity) + a as f32 * opacity).round() as u8;
-    let rgb = (blend(br, ar), blend(bg, ag), blend(bb, ab));
-    Some(match (base, accent) {
-        (Indexed(_), _) | (_, Indexed(_)) => Indexed(nearest_indexed(rgb)),
-        _ => Rgb(rgb.0, rgb.1, rgb.2),
-    })
-}
-
-fn color_rgb(color: Color) -> Option<(u8, u8, u8)> {
-    use ratatui::style::Color::*;
-    match color {
-        Rgb(r, g, b) => Some((r, g, b)),
-        Black => Some((0, 0, 0)),
-        Red => Some((128, 0, 0)),
-        Green => Some((0, 128, 0)),
-        Yellow => Some((128, 128, 0)),
-        Blue => Some((0, 0, 128)),
-        Magenta => Some((128, 0, 128)),
-        Cyan => Some((0, 128, 128)),
-        Gray => Some((192, 192, 192)),
-        DarkGray => Some((128, 128, 128)),
-        LightRed => Some((255, 0, 0)),
-        LightGreen => Some((0, 255, 0)),
-        LightYellow => Some((255, 255, 0)),
-        LightBlue => Some((0, 0, 255)),
-        LightMagenta => Some((255, 0, 255)),
-        LightCyan => Some((0, 255, 255)),
-        White => Some((255, 255, 255)),
-        Indexed(index) => Some(indexed_rgb(index)),
-        Reset => None,
-    }
-}
-
-fn indexed_rgb(index: u8) -> (u8, u8, u8) {
-    const BASIC: [(u8, u8, u8); 16] = [
-        (0, 0, 0),
-        (128, 0, 0),
-        (0, 128, 0),
-        (128, 128, 0),
-        (0, 0, 128),
-        (128, 0, 128),
-        (0, 128, 128),
-        (192, 192, 192),
-        (128, 128, 128),
-        (255, 0, 0),
-        (0, 255, 0),
-        (255, 255, 0),
-        (0, 0, 255),
-        (255, 0, 255),
-        (0, 255, 255),
-        (255, 255, 255),
-    ];
-    if index < 16 {
-        return BASIC[index as usize];
-    }
-    if index >= 232 {
-        let v = 8 + (index - 232) * 10;
-        return (v, v, v);
-    }
-    let n = index - 16;
-    let c = |v: u8| if v == 0 { 0 } else { 55 + v * 40 };
-    (c(n / 36), c((n / 6) % 6), c(n % 6))
-}
-
-fn nearest_indexed((r, g, b): (u8, u8, u8)) -> u8 {
-    let mut best = (u32::MAX, 0);
-    for i in 0..=255u8 {
-        let (cr, cg, cb) = indexed_rgb(i);
-        let d = (r as i32 - cr as i32).pow(2) as u32
-            + (g as i32 - cg as i32).pow(2) as u32
-            + (b as i32 - cb as i32).pow(2) as u32;
-        if d < best.0 {
-            best = (d, i);
-        }
-    }
-    best.1
-}
-
-/// Render the provider's streamed reasoning with the running-state breathing accent.
-fn push_reasoning_block(
-    out: &mut Vec<Line<'static>>,
-    text: &str,
-    running: bool,
-    width: usize,
-    needle: Option<&str>,
-    theme: &Theme,
-    tick: u64,
-) {
-    let title = if running { "Thinking…" } else { "Thought" };
-    let title_color = if running {
-        blend_color(theme.bg, theme.sage, pulse_brightness(tick, 0.15)).unwrap_or(theme.sage)
-    } else {
-        theme.text_mute
-    };
-    out.push(Line::from(vec![
-        Span::styled("  ┃ ", theme.fg(title_color)),
-        Span::styled(title, theme.fg(title_color).add_modifier(Modifier::BOLD)),
-    ]));
-    let body_width = width.saturating_sub(4).max(8);
-    let body = crate::markdown::render(text, body_width.saturating_sub(2).max(1), needle, theme);
-    for (row, mut line) in body.into_iter().enumerate() {
-        let color = if running {
-            let brightness = pulse_brightness_for_row(tick, 0.15, row as u16, 32);
-            blend_color(theme.bg, theme.sage, brightness).unwrap_or(theme.sage)
-        } else {
-            theme.text_dim
-        };
-        line.spans.insert(0, Span::styled("  ┃ ", theme.fg(color)));
-        out.push(line);
-    }
-}
-
 fn item_matches(item: &TranscriptItem, needle: Option<&str>) -> bool {
     let Some(needle) = needle else {
         return true;
     };
     match item {
-        TranscriptItem::User { text, .. }
-        | TranscriptItem::Assistant { text, .. }
-        | TranscriptItem::Reasoning { text, .. } => text.to_ascii_lowercase().contains(needle),
+        TranscriptItem::User { text, .. } | TranscriptItem::Assistant { text, .. } => {
+            text.to_ascii_lowercase().contains(needle)
+        }
         TranscriptItem::Tool {
             name,
             arguments,
@@ -2964,7 +2812,6 @@ fn render_git_dialog(
         Constraint::Length(1),
     ])
     .areas(inner);
-
     if dialog.minimized {
         return hits;
     }
@@ -4194,115 +4041,6 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     #[test]
-    fn project_picker_shows_add_row_and_folder_open_target() {
-        let area = Rect::new(0, 0, 100, 30);
-        let sessions = vec![SessionSummary {
-            id: blora_types::SessionId::generate(),
-            title: None,
-            workspace_path: "/tmp/example-project".into(),
-            mode: Mode::Code,
-            status: blora_types::SessionStatus::Active,
-            updated_at: chrono::Utc::now(),
-            last_sequence: 0,
-        }];
-        let project = ProjectPicker {
-            selected: 1,
-            fullscreen: false,
-            minimized: false,
-        };
-        let mut folder = FolderPicker {
-            path: "/tmp".into(),
-            entries: vec!["..".into(), "/tmp/example-project".into()],
-            selected: 0,
-            scroll: 0,
-            fullscreen: false,
-            minimized: false,
-        };
-        let draw_picker = |folder: Option<&FolderPicker>| {
-            let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
-            let mut hits = HitMap::default();
-            terminal
-                .draw(|frame| {
-                    hits = draw(
-                        frame,
-                        &FrameModel {
-                            workspace: Path::new("/tmp/example-project"),
-                            sessions: &sessions,
-                            index: 0,
-                            projection: None,
-                            pending: &[],
-                            input: "",
-                            status: "",
-                            notice: None,
-                            paste_preview: None,
-                            passport_dialog: None,
-                            provider_dialog: None,
-                            add_provider_dialog: None,
-                            theme_dialog: None,
-                            context_dialog: None,
-                            tool_dialog: None,
-                            tool_detail_dialog: None,
-                            slash_hits: &[],
-                            slash_selected: 0,
-                            search: None,
-                            hide_tools: false,
-                            scroll: 0,
-                            auto_approve: false,
-                            model: "",
-                            provider: "",
-                            mode_menu: None,
-                            project_picker: Some(&project),
-                            folder_picker: folder,
-                            session_picker: None,
-                            git_dialog: None,
-                            git_status: None,
-                            user_label: "you",
-                            running: false,
-                            tick: 0,
-                            pointer: None,
-                            text_selection: None,
-                        },
-                    );
-                })
-                .unwrap();
-            let lines: Vec<String> = (0..area.height)
-                .map(|row| {
-                    (0..area.width)
-                        .map(|col| {
-                            terminal
-                                .backend()
-                                .buffer()
-                                .cell((col, row))
-                                .unwrap()
-                                .symbol()
-                                .to_owned()
-                        })
-                        .collect()
-                })
-                .collect();
-            (lines, hits)
-        };
-        let (lines, hits) = draw_picker(None);
-        assert!(
-            lines
-                .iter()
-                .any(|line| flatten(line).contains("打开新项目"))
-        );
-        let add = hits.project_picker_rows.last().unwrap().0;
-        assert_eq!(hits.hit(add.x, add.y), Some(Hit::ProjectPickerRow(1)));
-        folder.selected = 1;
-        let (lines, hits) = draw_picker(Some(&folder));
-        assert!(
-            lines
-                .iter()
-                .any(|line| flatten(line).contains("打开此目录"))
-        );
-        let open = hits.folder_picker_open.unwrap();
-        assert_eq!(hits.hit(open.x, open.y), Some(Hit::FolderPickerOpen));
-        assert_eq!(hits.folder_picker_rows.len(), 2);
-    }
-
-    #[test]
     fn idle_context_bar_fills_by_usage() {
         let theme = Theme::current();
         let empty = context_usage_line(0, 100_000, &theme);
@@ -4348,51 +4086,6 @@ mod tests {
             older.iter().map(ToString::to_string).collect::<Vec<_>>(),
             vec!["3", "4", "5", "6"]
         );
-    }
-
-    #[test]
-    fn git_primary_button_matches_changes_and_tracking_status() {
-        let mut excluded = std::collections::HashSet::new();
-        let mut info = GitStatusInfo {
-            branch: "main".into(),
-            added: 0,
-            removed: 0,
-            ahead: 5,
-            behind: 6,
-            stashes: 0,
-            clean: true,
-            raw: "## main...origin/main [ahead 5, behind 6]".into(),
-            diff: String::new(),
-            log: String::new(),
-        };
-        assert_eq!(git_primary_action(&info, &excluded), GitPrimaryAction::Pull);
-        assert_eq!(git_primary_label(&info, &excluded), "拉取 ↑5 ↓6");
-        info.ahead = 0;
-        info.behind = 7;
-        assert_eq!(git_primary_label(&info, &excluded), "拉取 ↓7");
-        info.ahead = 5;
-        info.behind = 0;
-        assert_eq!(git_primary_action(&info, &excluded), GitPrimaryAction::Push);
-        assert_eq!(git_primary_label(&info, &excluded), "推送 ↑5");
-        info.behind = 6;
-        info.raw.push_str("\n M file.rs\n?? notes.txt");
-        assert_eq!(
-            git_primary_action(&info, &excluded),
-            GitPrimaryAction::Commit(2)
-        );
-        assert_eq!(git_primary_label(&info, &excluded), "提交 2 个更改");
-        excluded.insert("file.rs".to_owned());
-        assert_eq!(git_primary_label(&info, &excluded), "提交 1 个更改");
-        excluded.insert("notes.txt".to_owned());
-        assert_eq!(
-            git_primary_action(&info, &excluded),
-            GitPrimaryAction::Commit(0)
-        );
-        info.raw = "## main".into();
-        info.ahead = 0;
-        info.behind = 0;
-        assert_eq!(git_primary_action(&info, &excluded), GitPrimaryAction::None);
-        assert_eq!(git_primary_label(&info, &excluded), "已同步");
     }
 
     #[test]
@@ -4540,116 +4233,6 @@ mod tests {
                 .symbol(),
             "✦"
         );
-    }
-
-    #[test]
-    fn git_dialog_preserves_background_and_exposes_traffic_lights() {
-        let area = Rect::new(0, 0, 110, 30);
-        let backend = TestBackend::new(area.width, area.height);
-        let mut terminal = Terminal::new(backend).unwrap();
-        let dialog = GitDialog {
-            info: GitStatusInfo {
-                branch: String::new(),
-                added: 0,
-                removed: 0,
-                ahead: 0,
-                behind: 0,
-                stashes: 0,
-                clean: true,
-                raw: "## main".into(),
-                diff: String::new(),
-                log: String::new(),
-            },
-            page: 0,
-            selected: 0,
-            message: String::new(),
-            editing_message: false,
-            generating_message: false,
-            syncing: false,
-            excluded_files: Default::default(),
-            scroll: 0,
-            feedback: None,
-            fullscreen: false,
-            minimized: false,
-        };
-        let mut hits = HitMap::default();
-        terminal
-            .draw(|frame| {
-                frame.render_widget(
-                    Paragraph::new("background text").style(Theme::current().base()),
-                    area,
-                );
-                hits = render_git_dialog(frame, area, &dialog, None, &Theme::current(), 0);
-            })
-            .unwrap();
-        assert_eq!(
-            terminal.backend().buffer().cell((0, 0)).unwrap().symbol(),
-            "b"
-        );
-        for (rect, page) in &hits.git_tabs {
-            assert_eq!(hits.hit(rect.x + 1, rect.y), Some(Hit::GitTab(*page)));
-        }
-        assert_eq!(hits.git_tabs.len(), 3);
-        let selected = hits.git_tabs[0].0;
-        assert_eq!(
-            terminal
-                .backend()
-                .buffer()
-                .cell((selected.x + 1, selected.y))
-                .unwrap()
-                .symbol(),
-            "▸"
-        );
-        let close = hits.traffic_lights[0].unwrap();
-        let minimize = hits.traffic_lights[1].unwrap();
-        let expand = hits.traffic_lights[2].unwrap();
-        assert_eq!(hits.hit(close.x, close.y), Some(Hit::TrafficClose));
-        assert_eq!(hits.hit(minimize.x, minimize.y), Some(Hit::TrafficMinimize));
-        assert_eq!(hits.hit(expand.x, expand.y), Some(Hit::TrafficOpenBrowser));
-    }
-
-    #[test]
-    fn git_dialog_controls_take_priority_over_transcript() {
-        let area = Rect::new(0, 0, 110, 30);
-        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
-        let dialog = GitDialog {
-            info: GitStatusInfo {
-                branch: "main".into(),
-                added: 1,
-                removed: 0,
-                ahead: 0,
-                behind: 0,
-                stashes: 0,
-                clean: false,
-                raw: "## main\n M src/lib.rs".into(),
-                diff: String::new(),
-                log: String::new(),
-            },
-            page: 2,
-            selected: 0,
-            message: String::new(),
-            editing_message: false,
-            generating_message: false,
-            syncing: false,
-            excluded_files: Default::default(),
-            scroll: 0,
-            feedback: None,
-            fullscreen: false,
-            minimized: false,
-        };
-        let mut hits = HitMap::default();
-        terminal
-            .draw(|frame| {
-                hits = render_git_dialog(frame, area, &dialog, None, &Theme::current(), 0);
-            })
-            .unwrap();
-        for (rect, page) in &hits.git_tabs {
-            hits.tool_summary_rows.push((*rect, vec![0]));
-            assert_eq!(hits.hit(rect.x + 1, rect.y), Some(Hit::GitTab(*page)));
-        }
-        let primary = hits.git_primary.expect("commit button");
-        hits.tool_summary_rows.push((primary, vec![0]));
-        assert_eq!(hits.hit(primary.x + 1, primary.y), Some(Hit::GitPrimary));
     }
 
     #[test]
@@ -5520,5 +5103,12 @@ mod tests {
         assert_eq!(hits.hit(4, 21), Some(Hit::Composer));
         assert!(hits.over_slash(5, 11));
         assert!(!hits.over_slash(4, 4));
+    }
+
+    #[test]
+    fn project_picker_rows_resolve_to_project_switch_targets() {
+        let mut hits = HitMap::default();
+        hits.project_picker_rows.push((Rect::new(4, 5, 20, 1), 0));
+        assert_eq!(hits.hit(5, 5), Some(Hit::ProjectPickerRow(0)));
     }
 }

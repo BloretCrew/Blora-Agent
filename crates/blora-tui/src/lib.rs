@@ -3913,8 +3913,16 @@ fn parse_git_status(info: &blora_runtime::WorkspaceInfo) -> view::GitStatusInfo 
         removed += deletions.parse::<usize>().unwrap_or(0);
     }
     let (ahead, behind) = git_branch_counts(&info.git_branch_counts);
-    let stashes = info.git_stashes.lines().filter(|line| line.starts_with("stash@{")).count();
-    let clean = info.git_status.lines().next().is_some_and(|line| line.starts_with("## "))
+    let stashes = info
+        .git_stashes
+        .lines()
+        .filter(|line| line.starts_with("stash@{"))
+        .count();
+    let clean = info
+        .git_status
+        .lines()
+        .next()
+        .is_some_and(|line| line.starts_with("## "))
         && info.git_status.lines().skip(1).all(str::is_empty);
     view::GitStatusInfo {
         branch,
@@ -3931,13 +3939,16 @@ fn parse_git_status(info: &blora_runtime::WorkspaceInfo) -> view::GitStatusInfo 
 }
 
 fn git_branch_counts(status: &str) -> (usize, usize) {
-    status.lines().find_map(|line| {
-        let counts = line.strip_prefix("# branch.ab ")?;
-        let mut parts = counts.split_whitespace();
-        let ahead = parts.next()?.strip_prefix('+')?.parse().ok()?;
-        let behind = parts.next()?.strip_prefix('-')?.parse().ok()?;
-        Some((ahead, behind))
-    }).unwrap_or((0, 0))
+    status
+        .lines()
+        .find_map(|line| {
+            let counts = line.strip_prefix("# branch.ab ")?;
+            let mut parts = counts.split_whitespace();
+            let ahead = parts.next()?.strip_prefix('+')?.parse().ok()?;
+            let behind = parts.next()?.strip_prefix('-')?.parse().ok()?;
+            Some((ahead, behind))
+        })
+        .unwrap_or((0, 0))
 }
 
 #[cfg(test)]

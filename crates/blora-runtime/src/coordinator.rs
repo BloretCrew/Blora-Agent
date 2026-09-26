@@ -351,11 +351,6 @@ impl Runtime {
         })
     }
 
-    pub fn git_stage(&self, path: &std::path::Path, file: &str, stage: bool) -> Result<()> {
-        let backend = LocalBackend::new(Policy::new(path, true)?);
-        backend.git_stage(file, stage)
-    }
-
     pub fn generate_git_commit_message(
         &self,
         path: &std::path::Path,
@@ -431,11 +426,6 @@ impl Runtime {
     ) -> Result<String> {
         let backend = LocalBackend::new(Policy::new(path, true)?);
         backend.git_commit_selected(message, selected)
-    }
-
-    pub fn git_commit(&self, path: &std::path::Path, message: &str) -> Result<String> {
-        let backend = LocalBackend::new(Policy::new(path, true)?);
-        backend.git_commit(message)
     }
 
     pub fn list_sessions(&self) -> Result<Vec<SessionSummary>> {
@@ -524,8 +514,7 @@ impl Runtime {
                 .iter()
                 .any(|item| match item {
                     blora_session::TranscriptItem::User { text, .. }
-                    | blora_session::TranscriptItem::Assistant { text, .. }
-                    | blora_session::TranscriptItem::Reasoning { text, .. } => {
+                    | blora_session::TranscriptItem::Assistant { text, .. } => {
                         text.to_ascii_lowercase().contains(&needle)
                     }
                     blora_session::TranscriptItem::Tool { name, .. } => {
@@ -1090,22 +1079,8 @@ impl Runtime {
             let mut attempt = 0u32;
             let outcome = loop {
                 let mut streamed = String::new();
-                let reasoning_open = std::cell::Cell::new(false);
                 let result = provider.complete(request, cancel, &mut |event| match event {
                     StreamEvent::TextDelta(text) => {
-                        if reasoning_open.replace(false) {
-                            self.emit(
-                                session_id,
-                                Some(run_id),
-                                Some(turn_id),
-                                KnownPayload::AssistantReasoning(
-                                    blora_events::AssistantReasoning {
-                                        text: String::new(),
-                                        completed: true,
-                                    },
-                                ),
-                            )?;
-                        }
                         streamed.push_str(&text);
                         self.emit(
                             session_id,
@@ -1114,44 +1089,8 @@ impl Runtime {
                             KnownPayload::AssistantDelta(AssistantDelta { text }),
                         )
                     }
-                    StreamEvent::ReasoningComplete => {
-                        reasoning_open.set(false);
-                        self.emit(
-                            session_id,
-                            Some(run_id),
-                            Some(turn_id),
-                            KnownPayload::AssistantReasoning(blora_events::AssistantReasoning {
-                                text: String::new(),
-                                completed: true,
-                            }),
-                        )
-                    }
-                    StreamEvent::ReasoningDelta(text) => {
-                        reasoning_open.set(true);
-                        self.emit(
-                            session_id,
-                            Some(run_id),
-                            Some(turn_id),
-                            KnownPayload::AssistantReasoning(blora_events::AssistantReasoning {
-                                text,
-                                completed: false,
-                            }),
-                        )
-                    }
+                    StreamEvent::ReasoningDelta(_) | StreamEvent::ReasoningComplete => Ok(()),
                     StreamEvent::ToolCall(call) => {
-                        if reasoning_open.replace(false) {
-                            self.emit(
-                                session_id,
-                                Some(run_id),
-                                Some(turn_id),
-                                KnownPayload::AssistantReasoning(
-                                    blora_events::AssistantReasoning {
-                                        text: String::new(),
-                                        completed: true,
-                                    },
-                                ),
-                            )?;
-                        }
                         let arguments = serde_json::from_str(&call.arguments)
                             .unwrap_or_else(|_| json!({ "raw": call.arguments }));
                         self.emit(
@@ -1167,22 +1106,7 @@ impl Runtime {
                     }
                 });
                 match result {
-                    Ok(completion) => {
-                        if reasoning_open.replace(false) {
-                            self.emit(
-                                session_id,
-                                Some(run_id),
-                                Some(turn_id),
-                                KnownPayload::AssistantReasoning(
-                                    blora_events::AssistantReasoning {
-                                        text: String::new(),
-                                        completed: true,
-                                    },
-                                ),
-                            )?;
-                        }
-                        break Ok((completion, streamed));
-                    }
+                    Ok(completion) => break Ok((completion, streamed)),
                     Err(BloraError::Cancelled) => return Err(BloraError::Cancelled),
                     Err(err) => {
                         // Partial text already streamed must not be retried into a

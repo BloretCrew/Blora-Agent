@@ -624,11 +624,9 @@ async fn run_session(
     ensure_session(&state, &headers, &session_id)?;
     // Logged-in PassPort users run on the PassPort provider by default, so
     // they never fall back to the mock provider for lack of an API key.
-    let passport_user = current_user(&state, &headers)?;
-    let passport_user_token = passport_user.as_ref().and_then(|user| {
+    let passport_user_token = current_user(&state, &headers)?.and_then(|user| {
         let token = user
             .passport_app_token
-            .as_deref()
             .filter(|token| !token.trim().is_empty())?;
         if user
             .passport_token_expires_at
@@ -636,13 +634,8 @@ async fn run_session(
         {
             return None;
         }
-        Some(token.to_owned())
+        Some(token)
     });
-    if passport_user.is_some() && passport_user_token.is_none() {
-        return Err(ApiError(
-            "PassPort 登录令牌已失效，请重新登录后再运行".to_owned(),
-        ));
-    }
     let runtime = state.runtime.clone();
     let prompt = body.prompt;
     let cancel = CancelToken::new();
@@ -1188,10 +1181,6 @@ fn to_json(state: &AppState, id: &SessionId) -> Result<SessionJson, ApiError> {
                     },
                     TranscriptItem::Assistant { text, .. } => TranscriptJson {
                         kind: "assistant".to_owned(),
-                        text: text.clone(),
-                    },
-                    TranscriptItem::Reasoning { text, .. } => TranscriptJson {
-                        kind: "reasoning".to_owned(),
                         text: text.clone(),
                     },
                     TranscriptItem::Tool { .. } => unreachable!(),
