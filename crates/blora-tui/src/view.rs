@@ -802,29 +802,21 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
         ) else {
             return hits;
         };
-        frame.render_widget(Clear, menu_area);
-        let block = Block::bordered()
-            .border_type(ratatui::widgets::BorderType::Rounded)
-            .title(i18n::tr("dialog.projects", "项目"))
-            .style(theme.base())
-            .border_style(theme.fg(theme.hairline).bg(theme.bg));
-        let inner = block.inner(menu_area);
-        frame.render_widget(block, menu_area);
-        let [title_row, body, hint_row] = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Min(2),
-            Constraint::Length(1),
-        ])
-        .areas(inner);
         let mut dialog_hits = HitMap::default();
-        paint_traffic_title(
+        let inner = paint_dialog_frame(
             frame,
-            title_row,
+            menu_area,
             &i18n::tr("dialog.projects", "项目"),
             model.pointer,
             &theme,
             &mut dialog_hits,
         );
+        let [_, body, hint_row] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Min(2),
+            Constraint::Length(1),
+        ])
+        .areas(inner);
         hits.traffic_lights = dialog_hits.traffic_lights;
         if picker.minimized {
             return hits;
@@ -889,8 +881,16 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
             return hits;
         };
         hits.project_picker_rows.clear();
-        let inner = paint_dialog_chrome(frame, modal, &theme);
-        let [title, path_row, body, action, hint] = Layout::vertical([
+        let mut dialog_hits = HitMap::default();
+        let inner = paint_dialog_frame(
+            frame,
+            modal,
+            "打开新项目",
+            model.pointer,
+            &theme,
+            &mut dialog_hits,
+        );
+        let [_, path_row, body, action, hint] = Layout::vertical([
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Min(1),
@@ -898,15 +898,6 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
             Constraint::Length(1),
         ])
         .areas(inner);
-        let mut dialog_hits = HitMap::default();
-        paint_traffic_title(
-            frame,
-            title,
-            "打开新项目",
-            model.pointer,
-            &theme,
-            &mut dialog_hits,
-        );
         hits.traffic_lights = dialog_hits.traffic_lights;
         if picker.minimized {
             return hits;
@@ -973,29 +964,21 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
         ) else {
             return hits;
         };
-        frame.render_widget(Clear, menu_area);
-        let block = Block::bordered()
-            .border_type(ratatui::widgets::BorderType::Rounded)
-            .title(i18n::tr("dialog.sessions", "会话"))
-            .style(theme.base())
-            .border_style(theme.fg(theme.hairline).bg(theme.bg));
-        let inner = block.inner(menu_area);
-        frame.render_widget(block, menu_area);
-        let [title_row, body, hint_row] = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Min(2),
-            Constraint::Length(1),
-        ])
-        .areas(inner);
         let mut dialog_hits = HitMap::default();
-        paint_traffic_title(
+        let inner = paint_dialog_frame(
             frame,
-            title_row,
+            menu_area,
             &i18n::tr("dialog.sessions", "会话"),
             model.pointer,
             &theme,
             &mut dialog_hits,
         );
+        let [_, body, hint_row] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Min(2),
+            Constraint::Length(1),
+        ])
+        .areas(inner);
         hits.traffic_lights = dialog_hits.traffic_lights;
         if picker.minimized {
             return hits;
@@ -1053,29 +1036,21 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
         ) else {
             return hits;
         };
-        frame.render_widget(Clear, menu_area);
-        let block = Block::bordered()
-            .border_type(ratatui::widgets::BorderType::Rounded)
-            .title(i18n::tr("dialog.mode", "运行模式"))
-            .style(theme.base())
-            .border_style(theme.fg(theme.hairline).bg(theme.bg));
-        let inner = block.inner(menu_area);
-        frame.render_widget(block, menu_area);
-        let [title_row, body, hint_row] = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Min(3),
-            Constraint::Length(1),
-        ])
-        .areas(inner);
         let mut dialog_hits = HitMap::default();
-        paint_traffic_title(
+        let inner = paint_dialog_frame(
             frame,
-            title_row,
+            menu_area,
             &i18n::tr("dialog.mode", "运行模式"),
             model.pointer,
             &theme,
             &mut dialog_hits,
         );
+        let [_, body, hint_row] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Min(3),
+            Constraint::Length(1),
+        ])
+        .areas(inner);
         hits.traffic_lights = dialog_hits.traffic_lights;
         if menu.minimized {
             return hits;
@@ -1220,6 +1195,21 @@ fn paint_dialog_chrome(frame: &mut Frame<'_>, area: Rect, theme: &Theme) -> Rect
         .border_style(theme.fg(theme.hairline).bg(theme.bg));
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    inner
+}
+
+/// Draw the common dialog border and title row, including clickable window controls.
+fn paint_dialog_frame(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    title: &str,
+    pointer: Option<(u16, u16)>,
+    theme: &Theme,
+    hits: &mut HitMap,
+) -> Rect {
+    let inner = paint_dialog_chrome(frame, area, theme);
+    let title_row = Rect::new(inner.x, inner.y, inner.width, inner.height.min(1));
+    paint_traffic_title(frame, title_row, title, pointer, theme, hits);
     inner
 }
 
@@ -1483,28 +1473,20 @@ fn render_context_dialog(
     ) else {
         return hits;
     };
-    frame.render_widget(Clear, modal);
-    let block = Block::bordered()
-        .border_type(ratatui::widgets::BorderType::Rounded)
-        .title(i18n::tr("dialog.context_usage", "上下文用量"))
-        .style(theme.base())
-        .border_style(theme.fg(theme.hairline).bg(theme.bg));
-    let inner = block.inner(modal);
-    frame.render_widget(block, modal);
-    let [title_row, content, hint_row] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Min(3),
-        Constraint::Length(1),
-    ])
-    .areas(inner);
-    paint_traffic_title(
+    let inner = paint_dialog_frame(
         frame,
-        title_row,
+        modal,
         &i18n::tr("dialog.context_usage", "上下文用量"),
         pointer,
         theme,
         &mut hits,
     );
+    let [_, content, hint_row] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(3),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
     if dialog.minimized {
         return hits;
     }
@@ -2496,34 +2478,20 @@ fn render_passport_dialog(
     }
     let uri_width = dialog.verification_uri.width() as u16;
     let dialog_width = (uri_width + 8).clamp(MIN_WIDTH, area.width.saturating_sub(4));
-    let [_, frame_x, _] = Layout::horizontal([
-        Constraint::Min(0),
-        Constraint::Length(dialog_width),
-        Constraint::Min(0),
-    ])
-    .flex(Flex::Center)
-    .areas(area);
-    let [_, frame_y, _] = Layout::vertical([
-        Constraint::Min(0),
-        Constraint::Length(DIALOG_HEIGHT),
-        Constraint::Min(0),
-    ])
-    .flex(Flex::Center)
-    .areas(frame_x);
-
-    let inner = paint_dialog_chrome(frame, frame_y, theme);
-
-    let rows: [Rect; 5] = split_dialog_rows(inner, DIALOG_HEIGHT - 2);
-    let wrap_width = inner.width.saturating_sub(2) as usize;
-
-    paint_traffic_title(
+    let Some(frame_y) = dialog_outer(area, dialog_width, DIALOG_HEIGHT, false, false) else {
+        return hits;
+    };
+    let inner = paint_dialog_frame(
         frame,
-        rows[0],
+        frame_y,
         &i18n::tr("dialog.passport_login", "Bloret PassPort 登录"),
         pointer,
         theme,
         &mut hits,
     );
+
+    let rows: [Rect; 5] = split_dialog_rows(inner, DIALOG_HEIGHT - 2);
+    let wrap_width = inner.width.saturating_sub(2) as usize;
 
     // Row 1: instructions.
     let instructions = wrap_text(
@@ -2612,25 +2580,25 @@ fn render_provider_dialog(
         return hits;
     };
 
-    let inner = paint_dialog_chrome(frame, frame_y, theme);
-    if inner.height == 0 {
-        return hits;
-    }
-
-    let [title_row, body, hint_row] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Min(3),
-        Constraint::Length(1),
-    ])
-    .areas(inner);
-    paint_traffic_title(
+    let inner = paint_dialog_frame(
         frame,
-        title_row,
+        frame_y,
         &i18n::tr("dialog.provider_model", "选择供应商与模型"),
         pointer,
         theme,
         &mut hits,
     );
+    if inner.height == 0 {
+        return hits;
+    }
+
+    let [_, body, hint_row] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(3),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+
     if dialog.minimized {
         return hits;
     }
@@ -2773,14 +2741,14 @@ fn render_tool_dialog(
     else {
         return hits;
     };
-    let inner = paint_dialog_chrome(frame, frame_area, theme);
-    let [title_row, body, hint_row] = Layout::vertical([
+    let inner = paint_dialog_frame(frame, frame_area, "详细工具调用", pointer, theme, &mut hits);
+    let [_, body, hint_row] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(3),
         Constraint::Length(1),
     ])
     .areas(inner);
-    paint_traffic_title(frame, title_row, "详细工具调用", pointer, theme, &mut hits);
+
     if dialog.minimized {
         return hits;
     }
@@ -2988,15 +2956,15 @@ fn render_git_dialog(
     let Some(frame_area) = dialog_outer(area, 88, 20, dialog.fullscreen, dialog.minimized) else {
         return hits;
     };
-    let inner = paint_dialog_chrome(frame, frame_area, theme);
-    let [title_row, tabs, body, hint_row] = Layout::vertical([
+    let inner = paint_dialog_frame(frame, frame_area, "Git 状态", pointer, theme, &mut hits);
+    let [_, tabs, body, hint_row] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Min(4),
         Constraint::Length(1),
     ])
     .areas(inner);
-    paint_traffic_title(frame, title_row, "Git 状态", pointer, theme, &mut hits);
+
     if dialog.minimized {
         return hits;
     }
@@ -3308,14 +3276,14 @@ fn render_tool_detail_dialog(
     let Some(frame_area) = frame_area else {
         return hits;
     };
-    let inner = paint_dialog_chrome(frame, frame_area, theme);
-    let [title_row, body, hint_row] = Layout::vertical([
+    let inner = paint_dialog_frame(frame, frame_area, "工具详细信息", pointer, theme, &mut hits);
+    let [_, body, hint_row] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(3),
         Constraint::Length(1),
     ])
     .areas(inner);
-    paint_traffic_title(frame, title_row, "工具详细信息", pointer, theme, &mut hits);
+
     if dialog.minimized {
         return hits;
     }
@@ -3358,16 +3326,6 @@ fn render_add_provider_dialog(
     ) else {
         return hits;
     };
-    let inner = paint_dialog_chrome(frame, frame_y, theme);
-    if inner.height == 0 {
-        return hits;
-    }
-    let [title_row, body, hint_row] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Min(3),
-        Constraint::Length(1),
-    ])
-    .areas(inner);
     let title = match dialog.step {
         AddProviderStep::Catalog => {
             i18n::tr("dialog.add_provider.catalog", "添加供应商 · 选择来源")
@@ -3379,7 +3337,16 @@ fn render_add_provider_dialog(
         AddProviderStep::ApiKey => i18n::tr("dialog.add_provider.key", "添加供应商 · API 密钥"),
         AddProviderStep::Review => i18n::tr("dialog.add_provider.review", "添加供应商 · 确认"),
     };
-    paint_traffic_title(frame, title_row, &title, pointer, theme, &mut hits);
+    let inner = paint_dialog_frame(frame, frame_y, &title, pointer, theme, &mut hits);
+    if inner.height == 0 {
+        return hits;
+    }
+    let [_, body, hint_row] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(3),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
     if dialog.minimized {
         return hits;
     }
@@ -3686,14 +3653,14 @@ fn render_theme_dialog(
         return hits;
     };
 
-    let inner = paint_dialog_chrome(frame, frame_y, theme);
+    let inner = paint_dialog_frame(frame, frame_y, "主题配色", pointer, theme, &mut hits);
 
     if inner.height == 0 {
         return hits;
     }
     let mut rows = split_n_rows(inner, row_count + 1);
-    let title_row = rows.remove(0);
-    paint_traffic_title(frame, title_row, "主题配色", pointer, theme, &mut hits);
+    rows.remove(0);
+
     if dialog.minimized {
         return hits;
     }
@@ -4749,6 +4716,43 @@ mod tests {
             lines.push(line);
         }
         (lines, hits)
+    }
+
+    #[test]
+    fn shared_dialog_frame_keeps_controls_inside_the_border() {
+        for (width, height, minimized) in [(80, 24, false), (24, 5, true), (20, 3, true)] {
+            let area = Rect::new(0, 0, width, height);
+            let outer = dialog_outer(area, 72, 17, false, minimized).unwrap();
+            let backend = TestBackend::new(width, height);
+            let mut terminal = Terminal::new(backend).unwrap();
+            let mut hits = HitMap::default();
+            let mut inner = Rect::default();
+            terminal
+                .draw(|frame| {
+                    inner = paint_dialog_frame(
+                        frame,
+                        outer,
+                        "测试对话框",
+                        None,
+                        &Theme::current(),
+                        &mut hits,
+                    );
+                })
+                .unwrap();
+            assert!(outer.contains(ratatui::layout::Position::new(inner.x, inner.y)));
+            for (index, expected) in [
+                Hit::TrafficClose,
+                Hit::TrafficMinimize,
+                Hit::TrafficOpenBrowser,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let rect = hits.traffic_lights[index].unwrap();
+                assert!(inner.contains(ratatui::layout::Position::new(rect.x, rect.y)));
+                assert_eq!(hits.hit(rect.x, rect.y), Some(expected));
+            }
+        }
     }
 
     #[test]
