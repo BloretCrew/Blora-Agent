@@ -5,6 +5,7 @@ const state = {
   query: "",
   running: false,
   streaming: null,
+  stick: true,
 };
 
 const sessionEmpty = document.querySelector("#session-empty");
@@ -218,6 +219,41 @@ function setView(view) {
       el.hidden = id !== view;
     }
   }
+  document.querySelectorAll(".ba-rail__link").forEach((link) => {
+    const current = (link.getAttribute("href") || "") === `#/${view}`;
+    if (current) {
+      link.setAttribute("aria-current", "page");
+    } else {
+      link.removeAttribute("aria-current");
+    }
+  });
+}
+
+function pinnedToBottom(el) {
+  if (!el) {
+    return true;
+  }
+  return el.scrollHeight - el.scrollTop - el.clientHeight < el.clientHeight;
+}
+
+function setJumpVisible(visible) {
+  const jump = document.querySelector("#jump-latest");
+  if (jump) {
+    jump.hidden = !visible;
+  }
+}
+
+function followTail(force) {
+  if (!thread) {
+    return;
+  }
+  if (force || state.stick) {
+    thread.scrollTop = thread.scrollHeight;
+    state.stick = true;
+    setJumpVisible(false);
+    return;
+  }
+  setJumpVisible(thread.scrollHeight > thread.clientHeight);
 }
 
 function setSessionCanvas(empty) {
@@ -231,40 +267,136 @@ function setSessionCanvas(empty) {
   }
 }
 
+function sessionTitle(session) {
+  return (session && session.title) || "未命名会话";
+}
+
+function formatTokens(value) {
+  const count = Number(value) || 0;
+  if (count >= 10000) {
+    return `${Math.round(count / 1000)}k`;
+  }
+  if (count >= 1000) {
+    return `${(count / 1000).toFixed(1)}k`;
+  }
+  return String(count);
+}
+
+function renderUsage(session) {
+  const usage = document.querySelector("#session-usage");
+  if (!usage) {
+    return;
+  }
+  if (!session) {
+    usage.textContent = "";
+    return;
+  }
+  usage.textContent = `${formatTokens(session.input_tokens)} 入 / ${formatTokens(session.output_tokens)} 出`;
+}
+
+function renderPlan(session) {
+  const host = document.querySelector("#session-plan");
+  if (!host) {
+    return;
+  }
+  const steps = (session && session.plan) || [];
+  host.replaceChildren();
+  if (!steps.length) {
+    host.hidden = true;
+    return;
+  }
+  host.hidden = false;
+  const widget = document.createElement("blora-steps");
+  widget.setAttribute("clickable", "false");
+  for (const step of steps) {
+    const item = document.createElement("blora-step");
+    const state = step.status === "done" ? "done" : step.status === "in_progress" ? "active" : "pending";
+    item.setAttribute("title", step.title || "");
+    item.setAttribute("state", state);
+    item.textContent = step.title || "";
+    widget.append(item);
+  }
+  host.append(widget);
+}
+
+function bubbleParts(kind) {
+  const root = document.createElement("article");
+  root.className = "blora-chat";
+  if (kind === "user") {
+    root.classList.add("blora-chat--end");
+  }
+  const avatar = document.createElement("span");
+  avatar.className = "blora-avatar blora-chat__avatar";
+  avatar.dataset.size = "sm";
+  const content = document.createElement("div");
+  content.className = "blora-chat__content";
+  const meta = document.createElement("div");
+  meta.className = "blora-chat__meta";
+  const author = document.createElement("span");
+  const body = document.createElement("div");
+  body.className = "blora-chat__bubble ba-bubble";
+  meta.append(author);
+  content.append(meta, body);
+  root.append(avatar, content);
+  if (kind === "user") {
+    author.textContent = "你";
+    avatar.textContent = "You";
+    avatar.dataset.variant = "primary";
+  } else if (kind === "assistant") {
+    author.textContent = "Blora";
+    avatar.textContent = "BA";
+    avatar.dataset.variant = "info";
+  } else if (kind === "routing") {
+    author.textContent = "路由";
+    avatar.textContent = "⇄";
+    avatar.dataset.variant = "neutral";
+  } else if (kind === "tools" || kind === "tool") {
+    author.textContent = "工具";
+    avatar.textContent = "⌘";
+    avatar.dataset.variant = "neutral";
+  } else {
+    author.textContent = kind;
+    avatar.textContent = (kind || "?").slice(0, 1).toUpperCase();
+    avatar.dataset.variant = "neutral";
+  }
+  return { root, body };
+}
+
+function setBubbleText(body, kind, text) {
+  if (kind === "user" || kind === "assistant") {
+    let node = body.querySelector("blora-markdown");
+    if (!node) {
+      body.replaceChildren();
+      node = document.createElement("blora-markdown");
+      body.append(node);
+    }
+    node.setAttribute("source", text);
+    return node;
+  }
+  body.replaceChildren(document.createTextNode(text));
+  return body;
+}
+
 function renderTranscript(items) {
+  const stick = state.stick || pinnedToBottom(thread);
   thread.replaceChildren();
   const empty = !items || items.length === 0;
   setSessionCanvas(empty);
   if (empty) {
     thread.append(threadEmpty);
     threadEmpty.hidden = true;
+    followTail(true);
     return;
   }
   threadEmpty.hidden = true;
   for (const item of items) {
-    const bubble = document.createElement("blora-chat");
-    if (item.kind === "user") {
-      bubble.setAttribute("author", "你");
-      bubble.setAttribute("avatar", "You");
-      bubble.setAttribute("side", "end");
-      bubble.setAttribute("avatar-variant", "primary");
-    } else if (item.kind === "assistant") {
-      bubble.setAttribute("author", "Blora");
-      bubble.setAttribute("avatar", "BA");
-    } else if (item.kind === "routing") {
-      bubble.setAttribute("author", "路由");
-      bubble.setAttribute("avatar", "⇄");
-    } else if (item.kind === "tools") {
-      bubble.setAttribute("author", "工具");
-      bubble.setAttribute("avatar", "⌘");
-    } else {
-      bubble.setAttribute("author", item.kind);
-      bubble.setAttribute("avatar", item.kind.slice(0, 1).toUpperCase());
-    }
-    bubble.setAttribute("message", item.text);
-    thread.append(bubble);
+    const kind = item.kind || "system";
+    const bubble = bubbleParts(kind);
+    setBubbleText(bubble.body, kind, item.text || "");
+    thread.append(bubble.root);
   }
-  thread.scrollTop = thread.scrollHeight;
+  state.stick = stick;
+  followTail(stick);
 }
 
 function renderSessions(sessions) {
@@ -282,7 +414,7 @@ function renderSessions(sessions) {
   }
   for (const session of sessions || []) {
     const link = document.createElement("blora-sidebar-nav-link");
-    link.setAttribute("label", session.title || session.id);
+    link.setAttribute("label", session.title || "未命名会话");
     link.setAttribute("value", session.id);
     link.setAttribute("href", `#/session/${session.id}`);
     if (session.id === state.sessionId && state.view === "session") {
@@ -306,10 +438,13 @@ async function refreshSessions() {
 
 async function selectSession(id) {
   state.sessionId = id;
+  state.stick = true;
   hideAlert();
   const session = await api(`/api/sessions/${id}`);
-  title.textContent = session.title || "会话";
-  pathEl.textContent = `${session.workspace_path} · ${session.status}`;
+  title.textContent = sessionTitle(session);
+  pathEl.textContent = `${session.workspace_path} · ${session.mode} · ${session.status}`;
+  renderUsage(session);
+  renderPlan(session);
   renderTranscript(session.transcript);
   renderSubagents(session.subagents);
   await refreshApprovals();
@@ -375,7 +510,9 @@ async function handleSessionEvent(id, data) {
   ) {
     state.streaming = null;
     const latest = await api(`/api/sessions/${id}`);
-    pathEl.textContent = `${latest.workspace_path} · ${latest.status} · ${latest.input_tokens}/${latest.output_tokens} tokens`;
+    pathEl.textContent = `${latest.workspace_path} · ${latest.mode} · ${latest.status}`;
+    renderUsage(latest);
+    renderPlan(latest);
     renderTranscript(latest.transcript);
     renderSubagents(latest.subagents);
   }
@@ -387,23 +524,11 @@ function appendBubble(kind, text) {
   if (threadEmpty.parentElement === thread) {
     threadEmpty.remove();
   }
-  const bubble = document.createElement("blora-chat");
-  if (kind === "user") {
-    bubble.setAttribute("author", "你");
-    bubble.setAttribute("avatar", "You");
-    bubble.setAttribute("side", "end");
-    bubble.setAttribute("avatar-variant", "primary");
-  } else if (kind === "assistant") {
-    bubble.setAttribute("author", "Blora");
-    bubble.setAttribute("avatar", "BA");
-  } else {
-    bubble.setAttribute("author", kind);
-    bubble.setAttribute("avatar", kind.slice(0, 1).toUpperCase());
-  }
-  bubble.setAttribute("message", text);
-  thread.append(bubble);
-  thread.scrollTop = thread.scrollHeight;
-  return bubble;
+  const bubble = bubbleParts(kind);
+  const node = setBubbleText(bubble.body, kind, text);
+  thread.append(bubble.root);
+  followTail(false);
+  return node;
 }
 
 function appendStreamingText(text) {
@@ -413,9 +538,9 @@ function appendStreamingText(text) {
   if (!state.streaming) {
     state.streaming = appendBubble("assistant", "");
   }
-  const current = state.streaming.getAttribute("message") || "";
-  state.streaming.setAttribute("message", current + text);
-  thread.scrollTop = thread.scrollHeight;
+  const current = state.streaming.getAttribute("source") || "";
+  state.streaming.setAttribute("source", current + text);
+  followTail(false);
 }
 
 async function applyRoute() {
@@ -481,7 +606,7 @@ document.querySelector("#new-session").addEventListener("click", async () => {
   hideAlert();
   const session = await api("/api/sessions", {
     method: "POST",
-    body: JSON.stringify({ title: "web" }),
+    body: JSON.stringify({}),
   });
   location.hash = `#/session/${session.id}`;
 });
@@ -492,7 +617,7 @@ document.querySelector("#composer").addEventListener("submit", async (event) => 
   if (!state.sessionId) {
     const session = await api("/api/sessions", {
       method: "POST",
-      body: JSON.stringify({ title: "web" }),
+      body: JSON.stringify({}),
     });
     state.sessionId = session.id;
   }
@@ -502,6 +627,8 @@ document.querySelector("#composer").addEventListener("submit", async (event) => 
     return;
   }
   box.value = "";
+  box.style.height = "";
+  state.stick = true;
   // While a run is in flight the composer becomes a steering channel: the
   // message is queued and delivered at the next model-turn boundary.
   if (state.running) {
@@ -569,6 +696,9 @@ function setRunning(running) {
 }
 
 function renderSubagents(items) {
+  if (!subagents) {
+    return;
+  }
   if (!items || items.length === 0) {
     subagents.hidden = true;
     subagents.replaceChildren();
@@ -709,16 +839,29 @@ function approvalItem(row, onDone) {
 }
 
 async function refreshApprovals() {
+  const strip = document.querySelector("#session-approvals");
   if (!state.sessionId) {
     approvalList.replaceChildren();
     listOrEmpty(approvalList, approvalEmpty, 0);
+    if (strip) {
+      strip.replaceChildren();
+      strip.hidden = true;
+    }
     return;
   }
   const rows = await api(`/api/approvals?session=${state.sessionId}`);
   approvalList.replaceChildren();
   listOrEmpty(approvalList, approvalEmpty, rows.length);
+  if (strip) {
+    strip.replaceChildren();
+    strip.hidden = rows.length === 0;
+  }
   for (const row of rows) {
-    approvalList.append(approvalItem(row, refreshApprovals));
+    const item = approvalItem(row, refreshApprovals);
+    approvalList.append(item);
+    if (strip) {
+      strip.append(approvalItem(row, refreshApprovals));
+    }
   }
   enhance();
 }
@@ -932,18 +1075,50 @@ const prefToken = fieldInput("#pref-token") || document.querySelector("#pref-tok
 if (prefToken) {
   prefToken.addEventListener("change", () => store("blora-token", prefToken.value));
 }
-try {
-  const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
-  window.bloraSocket = ws;
-} catch (err) {
-  /* optional control channel */
+const searchBox = fieldInput("#session-search") || document.querySelector("#session-search");
+let searchTimer = 0;
+if (searchBox) {
+  searchBox.addEventListener("input", () => {
+    window.clearTimeout(searchTimer);
+    searchTimer = window.setTimeout(async () => {
+      state.query = (searchBox.value || "").trim();
+      try {
+        await refreshSessions();
+      } catch (error) {
+        showAlert(error.message);
+      }
+    }, 200);
+  });
 }
 
-const searchBox = fieldInput("#session-search") || document.querySelector("#session-search");
-if (searchBox) {
-  searchBox.addEventListener("change", async () => {
-    state.query = (searchBox.value || "").trim();
-    await refreshSessions();
+const promptBox = fieldInput("#prompt") || prompt;
+if (promptBox) {
+  const growPrompt = () => {
+    promptBox.style.height = "auto";
+    const limit = 12 * 16;
+    promptBox.style.height = `${Math.min(promptBox.scrollHeight, limit)}px`;
+  };
+  promptBox.addEventListener("input", growPrompt);
+  promptBox.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+      event.preventDefault();
+      document.querySelector("#composer").requestSubmit();
+    }
+  });
+}
+
+if (thread) {
+  thread.addEventListener("scroll", () => {
+    state.stick = pinnedToBottom(thread);
+    setJumpVisible(!state.stick && thread.scrollHeight > thread.clientHeight + 8);
+  });
+}
+
+const jumpLatest = document.querySelector("#jump-latest");
+if (jumpLatest) {
+  jumpLatest.addEventListener("click", () => {
+    state.stick = true;
+    followTail(true);
   });
 }
 

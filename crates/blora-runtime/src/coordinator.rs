@@ -328,6 +328,13 @@ impl Runtime {
         self.store.queue_steer(session_id, message.trim())
     }
 
+    /// Branch, line counts, ahead/behind, and stashes for the header indicator.
+    /// Does not list files or load the diff and log.
+    pub fn git_indicator(&self, path: &std::path::Path) -> Result<blora_exec::GitIndicator> {
+        let policy = Policy::new(path, true)?;
+        LocalBackend::new(policy).git_indicator()
+    }
+
     pub fn workspace_info(&self, path: &std::path::Path) -> Result<WorkspaceInfo> {
         let policy = Policy::new(path, true)?;
         let backend = LocalBackend::new(policy);

@@ -8,7 +8,7 @@
     <script>
       (function () {
         var r = document.documentElement,
-          t = ["coral", "forest", "ocean", "sunset", "violet", "slate"],
+          t = ["coral", "indigo", "graphite", "mono", "circuit", "dusk"],
           s = "coral",
           c = "light";
         try {
@@ -27,6 +27,7 @@
     <link rel="stylesheet" href="/vendor/tokens.themes.css" />
     <link rel="stylesheet" href="/vendor/layout.css" />
     <link rel="stylesheet" href="/vendor/theming.css" />
+    <link rel="stylesheet" href="/vendor/markdown.css" />
     <link rel="stylesheet" href="/app.css" />
   </head>
   <body class="blora-page blora-scope">
@@ -69,6 +70,7 @@
             <div class="ba-toolbar__identity">
               <h1 id="session-title">Blora</h1>
               <p class="ba-toolbar__path" id="session-path"></p>
+              <p class="ba-toolbar__path" id="session-usage"></p>
             </div>
             <div class="ba-toolbar__actions" id="session-actions" hidden>
               <blora-switch id="auto-approve" name="auto_approve" value="on">自动批准</blora-switch>
@@ -97,14 +99,22 @@
                 <button type="button" class="ba-chip" data-prompt="找出可以安全改进的测试缺口">检查测试</button>
               </div>
             </div>
-            <section class="ba-thread" id="thread" aria-live="polite">
-              <blora-empty
-                id="thread-empty"
-                hidden
-                title="还没有消息"
-                description="从下方输入，或点上面的快捷动作。"
-              ></blora-empty>
-            </section>
+            <div class="ba-thread-wrap">
+              <div id="session-plan" hidden></div>
+              <div id="subagents" class="ba-subagents" hidden></div>
+              <div id="session-approvals" class="ba-approvals blora-list" hidden></div>
+              <section class="ba-thread" id="thread" aria-live="polite">
+                <blora-empty
+                  id="thread-empty"
+                  hidden
+                  title="还没有消息"
+                  description="从下方输入，或点上面的快捷动作。"
+                ></blora-empty>
+              </section>
+              <button type="button" class="blora-button ba-jump" data-variant="secondary" data-size="sm" id="jump-latest" hidden>
+                回到底部
+              </button>
+            </div>
             <form class="ba-composer" id="composer">
               <canvas
                 id="work-orb"
@@ -192,6 +202,7 @@
     <script src="/vendor/blora.global.js"></script>
     <script src="/vendor/layout.global.js"></script>
     <script src="/vendor/theming.global.js"></script>
+    <script src="/vendor/markdown.global.js"></script>
     <script src="/app.js"></script>
     <script type="module" src="/thinking-orbs-host.js"></script>
   </body>

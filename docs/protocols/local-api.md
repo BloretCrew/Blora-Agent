@@ -3,8 +3,8 @@
 `blora web` 提供本地 HTTP API。Web UI 只通过这些接口访问 Runtime。
 
 ```text
-GET    /api/sessions
-GET    /api/sessions?q=
+GET    /api/sessions          session summaries: id, title, workspace_path, mode, status, updated_at, last_sequence
+GET    /api/sessions?q=       same summary shape; full transcript stays on GET /api/sessions/:id
 POST   /api/sessions
 GET    /api/sessions/:id
 POST   /api/sessions/:id/run         {"prompt", "permission_mode": "plan|ask|auto-edit|yolo", ...}

@@ -693,7 +693,11 @@ fn contains(rect: Rect, col: u16, row: u16) -> bool {
         && row < rect.y.saturating_add(rect.height)
 }
 
-pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
+pub fn draw(
+    frame: &mut Frame<'_>,
+    model: &FrameModel<'_>,
+    transcript_cache: &mut TranscriptCache,
+) -> HitMap {
     let theme = Theme::current();
     let area = frame.area();
     frame.render_widget(Block::default().style(theme.base()), area);
@@ -765,7 +769,14 @@ pub fn draw(frame: &mut Frame<'_>, model: &FrameModel<'_>) -> HitMap {
     };
     render_header(frame, header, model, &theme, &mut hits);
     render_rule(frame, rule, &theme);
-    render_transcript(frame, transcript, model, &theme, &mut hits);
+    render_transcript(
+        frame,
+        transcript,
+        model,
+        &theme,
+        &mut hits,
+        transcript_cache,
+    );
     if let Some(rect) = approval {
         render_approval(frame, rect, model, &theme, &mut hits);
     }
@@ -1648,124 +1659,154 @@ fn render_transcript(
     model: &FrameModel<'_>,
     theme: &Theme,
     hits: &mut HitMap,
+    cache: &mut TranscriptCache,
 ) {
     let inner = inset(area);
-    let width = inner.width.saturating_sub(2) as usize;
-    let lines = model.projection.map_or_else(
-        || welcome_lines(theme),
-        |projection| {
-            let rendered = transcript_lines(
-                projection,
-                model.search,
-                model.hide_tools,
-                width.max(8),
-                model.running,
-                model.tick,
-                model.user_label,
-                model.text_selection,
-                theme,
-            );
-            if rendered.is_empty() {
-                welcome_lines(theme)
-            } else {
-                rendered
-            }
-        },
-    );
-    let visible = transcript_window(lines.clone(), inner.height as usize, model.scroll);
+    let width = inner.width.saturating_sub(2).max(8) as usize;
+    let session_id = model
+        .projection
+        .and_then(|projection| projection.session.as_ref())
+        .map(|session| session.id.to_string())
+        .unwrap_or_default();
+    if let Some(projection) = model.projection {
+        cache.ensure(
+            projection,
+            &session_id,
+            model.search,
+            model.hide_tools,
+            width,
+            model.user_label,
+            theme,
+        );
+    }
+    let show_cached = model.projection.is_some() && !cache.lines.is_empty();
+    let spinner = show_cached && cache.live_visible && model.running;
+    let line_count = if show_cached {
+        cache.lines.len() + usize::from(spinner)
+    } else {
+        0
+    };
+    let visible = if show_cached {
+        transcript_window(
+            &cache.lines,
+            spinner.then(|| spinner_line(model.tick, theme)),
+            inner.height as usize,
+            model.scroll,
+        )
+    } else {
+        welcome_lines(theme)
+    };
     let visible = highlight_selection(visible, inner, model.text_selection, theme);
     frame.render_widget(Paragraph::new(visible).style(theme.base()), inner);
-    hits.tool_summary_rows = tool_summary_hit_rows(
-        model.projection,
-        model.search,
-        model.hide_tools,
-        model.running,
-        &lines,
-        inner,
-        model.scroll,
-    );
+    hits.tool_summary_rows = if show_cached {
+        tool_summary_hit_rows(&cache.marks, line_count, inner, model.scroll)
+    } else {
+        Vec::new()
+    };
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TranscriptCacheKey {
+    session_id: String,
+    sequence: u64,
+    live: String,
+    width: usize,
+    search: String,
+    hide_tools: bool,
+    user_label: String,
+    theme: Theme,
+}
+
+#[derive(Clone, Debug)]
+struct ToolSummaryMark {
+    line: usize,
+    width: usize,
+    indices: Vec<usize>,
+}
+
+struct RenderedTranscript {
+    lines: Vec<Line<'static>>,
+    marks: Vec<ToolSummaryMark>,
+    live_visible: bool,
+}
+
+/// Cached transcript layout. `tick` repaints only the trailing spinner.
+#[derive(Default)]
+pub struct TranscriptCache {
+    key: Option<TranscriptCacheKey>,
+    lines: Vec<Line<'static>>,
+    marks: Vec<ToolSummaryMark>,
+    live_visible: bool,
+    rebuilds: u64,
+}
+
+impl TranscriptCache {
+    #[cfg(test)]
+    fn rebuilds(&self) -> u64 {
+        self.rebuilds
+    }
+
+    fn ensure(
+        &mut self,
+        projection: &SessionProjection,
+        session_id: &str,
+        search: Option<&str>,
+        hide_tools: bool,
+        width: usize,
+        user_label: &str,
+        theme: &Theme,
+    ) {
+        let key = TranscriptCacheKey {
+            session_id: session_id.to_owned(),
+            sequence: projection.last_sequence,
+            live: projection.live_assistant().unwrap_or("").to_owned(),
+            width,
+            search: search.unwrap_or("").to_owned(),
+            hide_tools,
+            user_label: user_label.to_owned(),
+            theme: *theme,
+        };
+        if self.key.as_ref() == Some(&key) {
+            return;
+        }
+        let rendered = transcript_lines(projection, search, hide_tools, width, user_label, theme);
+        self.lines = rendered.lines;
+        self.marks = rendered.marks;
+        self.live_visible = rendered.live_visible;
+        self.key = Some(key);
+        self.rebuilds += 1;
+    }
 }
 
 fn tool_summary_hit_rows(
-    projection: Option<&SessionProjection>,
-    search: Option<&str>,
-    hide_tools: bool,
-    running: bool,
-    lines: &[Line<'static>],
+    marks: &[ToolSummaryMark],
+    line_count: usize,
     rect: Rect,
     scroll: usize,
 ) -> Vec<(Rect, Vec<usize>)> {
-    let Some(projection) = projection else {
+    let height = rect.height as usize;
+    if height == 0 || line_count == 0 {
         return Vec::new();
-    };
-    let needle = search.map(str::to_ascii_lowercase);
-    let visible: Vec<(usize, &TranscriptItem)> = projection
-        .transcript
-        .iter()
-        .enumerate()
-        .filter(|(_, item)| {
-            !(hide_tools && matches!(item, TranscriptItem::Tool { .. }))
-                && item_matches(item, needle.as_deref())
-        })
-        .collect();
-    let mut groups = Vec::new();
-    let mut index = 0usize;
-    while index < visible.len() {
-        if matches!(visible[index].1, TranscriptItem::Tool { .. }) {
-            let start = index;
-            index += 1;
-            while index < visible.len() && matches!(visible[index].1, TranscriptItem::Tool { .. }) {
-                index += 1;
-            }
-            let items = visible[start..index]
-                .iter()
-                .map(|(_, item)| *item)
-                .collect::<Vec<_>>();
-            let summary = blora_session::summarize_tool_run(&items, running);
-            let indices = visible[start..index]
-                .iter()
-                .map(|(i, _)| *i)
-                .collect::<Vec<_>>();
-            groups.push((summary, indices));
-        } else {
-            index += 1;
-        }
     }
-    let window_start = lines
-        .len()
-        .saturating_sub(rect.height as usize)
-        .saturating_sub(scroll);
-    let mut cursor = 0usize;
+    let start = window_start(line_count, height, scroll);
     let mut rows = Vec::new();
-    for (summary, indices) in groups {
-        let Some(row) = lines
-            .iter()
-            .enumerate()
-            .skip(cursor)
-            .find_map(|(row, line)| {
-                let text = line
-                    .spans
-                    .iter()
-                    .map(|span| span.content.as_ref())
-                    .collect::<String>();
-                text.contains(&summary).then_some(row)
-            })
-        else {
+    for mark in marks {
+        if mark.line < start {
             continue;
-        };
-        cursor = row.saturating_add(1);
-        let visible_row = row.saturating_sub(window_start);
-        if row >= window_start && visible_row < rect.height as usize {
-            let offset = 2u16.min(rect.width);
-            let width = u16::try_from(summary.width())
-                .unwrap_or(u16::MAX)
-                .min(rect.width.saturating_sub(offset));
-            if width > 0 {
-                rows.push((
-                    Rect::new(rect.x + offset, rect.y + visible_row as u16, width, 1),
-                    indices,
-                ));
-            }
+        }
+        let visible_row = mark.line - start;
+        if visible_row >= height {
+            continue;
+        }
+        let offset = 2u16.min(rect.width);
+        let width = u16::try_from(mark.width)
+            .unwrap_or(u16::MAX)
+            .min(rect.width.saturating_sub(offset));
+        if width > 0 {
+            rows.push((
+                Rect::new(rect.x + offset, rect.y + visible_row as u16, width, 1),
+                mark.indices.clone(),
+            ));
         }
     }
     rows
@@ -1792,18 +1833,17 @@ fn transcript_lines(
     search: Option<&str>,
     hide_tools: bool,
     width: usize,
-    running: bool,
-    tick: u64,
     user_label: &str,
-    _selection: Option<Selection>,
     theme: &Theme,
-) -> Vec<Line<'static>> {
+) -> RenderedTranscript {
     let needle = search.map(str::to_ascii_lowercase);
     let mut out = Vec::new();
-    let visible: Vec<&TranscriptItem> = projection
+    let mut marks = Vec::new();
+    let visible: Vec<(usize, &TranscriptItem)> = projection
         .transcript
         .iter()
-        .filter(|item| {
+        .enumerate()
+        .filter(|(_, item)| {
             !(hide_tools && matches!(item, TranscriptItem::Tool { .. }))
                 && item_matches(item, needle.as_deref())
         })
@@ -1813,31 +1853,39 @@ fn transcript_lines(
         if !out.is_empty() {
             out.push(Line::default());
         }
-        if matches!(visible[index], TranscriptItem::Tool { .. }) {
+        if matches!(visible[index].1, TranscriptItem::Tool { .. }) {
             let start = index;
             index += 1;
-            while index < visible.len() && matches!(visible[index], TranscriptItem::Tool { .. }) {
+            while index < visible.len() && matches!(visible[index].1, TranscriptItem::Tool { .. }) {
                 index += 1;
             }
             let group = &visible[start..index];
-            let summary = blora_session::summarize_tool_run(group, running);
-            let failed = group.iter().any(|item| matches!(item, TranscriptItem::Tool { status, .. } if status == "failed" || status == "error"));
+            let items = group.iter().map(|(_, item)| *item).collect::<Vec<_>>();
+            let summary = blora_session::summarize_tool_run(&items, false);
+            let failed = group.iter().any(|(_, item)| {
+                matches!(item, TranscriptItem::Tool { status, .. } if status == "failed" || status == "error")
+            });
             let color = if failed {
                 theme.rust
-            } else if group.iter().any(|item| {
+            } else if group.iter().any(|(_, item)| {
                 matches!(item, TranscriptItem::Tool { status, .. } if status == "running" || status == "requested")
             }) {
                 theme.amber
             } else {
                 theme.text_dim
             };
+            marks.push(ToolSummaryMark {
+                line: out.len(),
+                width: summary.width(),
+                indices: group.iter().map(|(item_index, _)| *item_index).collect(),
+            });
             out.push(Line::from(vec![
                 Span::styled("  ", theme.mute()),
                 Span::styled(summary, theme.fg(color)),
             ]));
             continue;
         }
-        let item = visible[index];
+        let item = visible[index].1;
         index += 1;
         match item {
             TranscriptItem::User { text, .. } => {
@@ -1940,12 +1988,14 @@ fn transcript_lines(
             }
         }
     }
+    let mut live_visible = false;
     if let Some(live) = projection.live_assistant() {
         let show = match needle.as_deref() {
             None => true,
             Some(needle) => live.to_ascii_lowercase().contains(needle),
         };
         if show {
+            live_visible = true;
             if !out.is_empty() {
                 out.push(Line::default());
             }
@@ -1958,15 +2008,20 @@ fn transcript_lines(
                 needle.as_deref(),
                 theme,
             );
-            if running {
-                out.push(Line::from(vec![
-                    Span::styled("  ", theme.mute()),
-                    Span::styled(spinner(tick).to_string(), theme.fg(theme.sage)),
-                ]));
-            }
         }
     }
-    out
+    RenderedTranscript {
+        lines: out,
+        marks,
+        live_visible,
+    }
+}
+
+fn spinner_line(tick: u64, theme: &Theme) -> Line<'static> {
+    Line::from(vec![
+        Span::styled("  ", theme.mute()),
+        Span::styled(spinner(tick).to_string(), theme.fg(theme.sage)),
+    ])
 }
 
 /// Keep the latest lines in view. `scroll` is how many lines above the bottom
@@ -2087,22 +2142,41 @@ fn item_matches(item: &TranscriptItem, needle: Option<&str>) -> bool {
     }
 }
 
+fn window_start(total: usize, height: usize, scroll: usize) -> usize {
+    if height == 0 || total <= height {
+        return 0;
+    }
+    let max_scroll = total - height;
+    let from_bottom = scroll.min(max_scroll);
+    total - height - from_bottom
+}
+
 fn transcript_window(
-    lines: Vec<Line<'static>>,
+    lines: &[Line<'static>],
+    spinner: Option<Line<'static>>,
     height: usize,
     scroll: usize,
 ) -> Vec<Line<'static>> {
     if height == 0 {
         return Vec::new();
     }
-    let total = lines.len();
-    if total <= height {
-        return lines;
+    let total = lines.len() + usize::from(spinner.is_some());
+    if total == 0 {
+        return Vec::new();
     }
-    let max_scroll = total - height;
-    let from_bottom = scroll.min(max_scroll);
-    let start = total - height - from_bottom;
-    lines.into_iter().skip(start).take(height).collect()
+    let start = window_start(total, height, scroll);
+    let mut visible = Vec::new();
+    if start < lines.len() {
+        let end = (start + height).min(lines.len());
+        visible.extend(lines[start..end].iter().cloned());
+    }
+    if let Some(spinner) = spinner
+        && visible.len() < height
+        && start + visible.len() < total
+    {
+        visible.push(spinner);
+    }
+    visible
 }
 
 fn push_block(
@@ -4082,15 +4156,23 @@ mod tests {
     #[test]
     fn transcript_window_pins_newest_lines() {
         let lines: Vec<Line> = (0..10).map(|i| Line::from(i.to_string())).collect();
-        let visible = transcript_window(lines.clone(), 4, 0);
+        let visible = transcript_window(&lines, None, 4, 0);
         assert_eq!(
             visible.iter().map(ToString::to_string).collect::<Vec<_>>(),
             vec!["6", "7", "8", "9"]
         );
-        let older = transcript_window(lines, 4, 3);
+        let older = transcript_window(&lines, None, 4, 3);
         assert_eq!(
             older.iter().map(ToString::to_string).collect::<Vec<_>>(),
             vec!["3", "4", "5", "6"]
+        );
+        let with_spinner = transcript_window(&lines, Some(Line::from("spin")), 4, 0);
+        assert_eq!(
+            with_spinner
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            vec!["7", "8", "9", "spin"]
         );
     }
 
@@ -4168,11 +4250,20 @@ mod tests {
             log: String::new(),
         };
         let mut excluded = std::collections::HashSet::new();
-        assert_eq!(git_primary_action(&info, &excluded), GitPrimaryAction::Commit(2));
+        assert_eq!(
+            git_primary_action(&info, &excluded),
+            GitPrimaryAction::Commit(2)
+        );
         excluded.insert("src/lib.rs".into());
-        assert_eq!(git_primary_action(&info, &excluded), GitPrimaryAction::Commit(1));
+        assert_eq!(
+            git_primary_action(&info, &excluded),
+            GitPrimaryAction::Commit(1)
+        );
         excluded.insert("notes.txt".into());
-        assert_eq!(git_primary_action(&info, &excluded), GitPrimaryAction::Commit(0));
+        assert_eq!(
+            git_primary_action(&info, &excluded),
+            GitPrimaryAction::Commit(0)
+        );
         info.raw = "## main".into();
         assert_eq!(git_primary_action(&info, &excluded), GitPrimaryAction::Pull);
         info.behind = 0;
@@ -4535,18 +4626,8 @@ mod tests {
             });
         }
         let area = Rect::new(4, 5, 80, 8);
-        let lines = transcript_lines(
-            &projection,
-            None,
-            false,
-            78,
-            false,
-            0,
-            "you",
-            None,
-            &Theme::current(),
-        );
-        let rows = tool_summary_hit_rows(Some(&projection), None, false, false, &lines, area, 0);
+        let rendered = transcript_lines(&projection, None, false, 78, "you", &Theme::current());
+        let rows = tool_summary_hit_rows(&rendered.marks, rendered.lines.len(), area, 0);
         assert_eq!(rows.len(), 1);
         let (target, indices) = &rows[0];
         assert_eq!(indices, &vec![0, 1]);
@@ -4574,11 +4655,43 @@ mod tests {
             hits.hit(target.right(), target.y),
             Some(Hit::ToolSummary(vec![0, 1]))
         );
-        let mut scrolled_lines = lines.clone();
-        scrolled_lines.extend((0..12).map(|_| Line::default()));
-        assert!(tool_summary_hit_rows(
-            Some(&projection), None, false, false, &scrolled_lines, area, 0
-        ).is_empty());
+        let scrolled = rendered.lines.len() + 12;
+        assert!(tool_summary_hit_rows(&rendered.marks, scrolled, area, 0).is_empty());
+    }
+
+    #[test]
+    fn transcript_cache_keeps_layout_until_content_inputs_change() {
+        let mut projection = SessionProjection::new();
+        projection.transcript.push(TranscriptItem::User {
+            text: "hello".to_owned(),
+            event_id: blora_types::EventId::generate(),
+        });
+        let theme = Theme::current();
+        let mut cache = TranscriptCache::default();
+        cache.ensure(&projection, "ses_a", None, false, 40, "you", &theme);
+        assert_eq!(cache.rebuilds(), 1);
+        cache.ensure(&projection, "ses_a", None, false, 40, "you", &theme);
+        assert_eq!(cache.rebuilds(), 1);
+        cache.ensure(&projection, "ses_a", None, false, 80, "you", &theme);
+        assert_eq!(cache.rebuilds(), 2);
+
+        let session = blora_types::SessionId::generate();
+        let event = blora_events::EventEnvelope::stamped(
+            blora_events::NewEvent::new(
+                session,
+                blora_events::KnownPayload::AssistantDelta(blora_events::AssistantDelta {
+                    text: "Hi".to_owned(),
+                }),
+            ),
+            1,
+        )
+        .unwrap();
+        projection.apply(&event).unwrap();
+        cache.ensure(&projection, "ses_a", None, false, 80, "you", &theme);
+        assert_eq!(cache.rebuilds(), 3);
+        assert!(cache.live_visible);
+        cache.ensure(&projection, "ses_a", None, false, 80, "you", &theme);
+        assert_eq!(cache.rebuilds(), 3);
     }
 
     #[test]

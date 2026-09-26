@@ -71,6 +71,17 @@ struct RunBody {
 }
 
 #[derive(Serialize)]
+struct SessionListItem {
+    id: String,
+    title: Option<String>,
+    workspace_path: String,
+    mode: String,
+    status: String,
+    updated_at: String,
+    last_sequence: u64,
+}
+
+#[derive(Serialize)]
 struct SessionJson {
     id: String,
     title: Option<String>,
@@ -539,6 +550,9 @@ fn resolve_vendor(request: &str) -> Option<PathBuf> {
         "theming.css" | "theming.global.js" => {
             root.join("addons/theming/dist").join(path.file_name()?)
         }
+        "markdown.css" | "markdown.global.js" => {
+            root.join("addons/markdown/dist").join(path.file_name()?)
+        }
         _ => root.join("packages/blora-design/dist").join(path),
     };
     disk.is_file().then_some(disk)
@@ -553,7 +567,7 @@ async fn list_sessions(
     State(state): State<AppState>,
     headers: HttpHeaderMap,
     Query(query): Query<SessionListQuery>,
-) -> Result<Json<Vec<SessionJson>>, ApiError> {
+) -> Result<Json<Vec<SessionListItem>>, ApiError> {
     let user = current_user(&state, &headers)?;
     let user_id = user.as_ref().map(|item| item.id.as_str());
     let sessions = if let Some(q) = query.q.filter(|value| !value.trim().is_empty()) {
@@ -564,10 +578,18 @@ async fn list_sessions(
             .list_sessions_for_user(user_id)
             .map_err(ApiError::from)?
     };
-    let mut out = Vec::new();
-    for session in sessions {
-        out.push(to_json(&state, &session.id)?);
-    }
+    let out = sessions
+        .into_iter()
+        .map(|session| SessionListItem {
+            id: session.id.to_string(),
+            title: session.title,
+            workspace_path: session.workspace_path,
+            mode: session.mode.as_str().to_owned(),
+            status: session.status.as_str().to_owned(),
+            updated_at: session.updated_at.to_rfc3339(),
+            last_sequence: session.last_sequence,
+        })
+        .collect();
     Ok(Json(out))
 }
 
@@ -1500,6 +1522,13 @@ mod tests {
                 .to_string_lossy()
                 .contains("addons/layout")
         );
+        assert!(
+            resolve_vendor("markdown.css")
+                .unwrap()
+                .to_string_lossy()
+                .contains("addons/markdown")
+        );
+        assert!(resolve_vendor("markdown.global.js").is_some());
         assert!(resolve_vendor("../secret.css").is_none());
         assert!(resolve_vendor("components/alert/alert.rs").is_none());
     }
@@ -1523,7 +1552,7 @@ mod tests {
         tokio::spawn(async move {
             axum::serve(listener, app(state)).await.ok();
         });
-        let (css_status, session_id, contents) = tokio::task::spawn_blocking(move || {
+        let (css_status, session_id, contents, listed) = tokio::task::spawn_blocking(move || {
             let css_url = format!("http://{addr}/vendor/components/button/button.css");
             let mut css_status = 0;
             for _ in 0..40 {
@@ -1541,6 +1570,11 @@ mod tests {
                 .unwrap()
                 .into_json()
                 .unwrap();
+            let listed: serde_json::Value = ureq::get(&format!("http://{addr}/api/sessions"))
+                .call()
+                .unwrap()
+                .into_json()
+                .unwrap();
             let file: serde_json::Value =
                 ureq::get(&format!("http://{addr}/api/workspace/file?path=README.md"))
                     .call()
@@ -1551,12 +1585,18 @@ mod tests {
                 css_status,
                 created["id"].as_str().unwrap_or_default().to_owned(),
                 file["contents"].as_str().unwrap_or_default().to_owned(),
+                listed,
             )
         })
         .await
         .unwrap();
         assert_eq!(css_status, 200);
         assert!(session_id.starts_with("ses_"));
+        assert!(listed.as_array().is_some_and(|rows| {
+            rows.iter()
+                .any(|row| row["id"].as_str() == Some(session_id.as_str()))
+                && rows.iter().all(|row| row.get("transcript").is_none())
+        }));
         assert_eq!(contents, "hello");
         assert!(THINKING_ORBS_ENGINE.contains("resolvePreset"));
         assert!(THINKING_ORBS_HOST.contains("attachThinkingOrb"));

@@ -450,6 +450,47 @@ impl LocalBackend {
         self.git(&["stash", "list", "--format=%gd"])
     }
 
+    /// Header-sized Git snapshot. Three commands, no diff, log, or directory listing.
+    /// Fails when `path` is not a Git work tree so callers can hide the indicator.
+    pub fn git_indicator(&self) -> Result<GitIndicator> {
+        self.policy
+            .require(self.policy.file_read(), "git_indicator")?;
+        let status = self.git_strict(&[
+            "status",
+            "--porcelain=v2",
+            "--branch",
+            "--untracked-files=normal",
+        ])?;
+        // A repository with no commits has no HEAD. Line counts are then zero.
+        let numstat = self
+            .git_strict(&["diff", "--numstat", "HEAD"])
+            .unwrap_or_default();
+        let stashes = self
+            .git_strict(&["stash", "list", "--format=%gd"])
+            .unwrap_or_default();
+        Ok(parse_git_indicator(&status, &numstat, &stashes))
+    }
+
+    /// Like [`Self::git`], but a non-zero exit is an error and empty output stays empty.
+    fn git_strict(&self, args: &[&str]) -> Result<String> {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(self.policy.workspace())
+            .env("LC_ALL", "C")
+            .output()
+            .map_err(BloraError::exec)?;
+        if !output.status.success() {
+            let err = String::from_utf8_lossy(&output.stderr);
+            let text = err.trim();
+            return Err(BloraError::Exec(if text.is_empty() {
+                "git failed".to_owned()
+            } else {
+                text.to_owned()
+            }));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
     pub fn git_sync(&self, pull: bool) -> Result<String> {
         self.policy.require(self.policy.file_write(), "git_sync")?;
         let upstream = self.git_mutate(&[
@@ -805,6 +846,85 @@ fn read_capped<R: Read>(reader: Option<R>, max: usize) -> Result<String> {
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
+/// Counts the header indicator needs. Parsed from porcelain v2, which stays
+/// machine-readable when Git's human status is localized.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct GitIndicator {
+    pub branch: String,
+    pub added: usize,
+    pub removed: usize,
+    pub ahead: usize,
+    pub behind: usize,
+    pub stashes: usize,
+    pub clean: bool,
+}
+
+/// `status_v2` is `git status --porcelain=v2 --branch`. `numstat` is
+/// `git diff --numstat HEAD`. `stashes` is `git stash list --format=%gd`.
+#[must_use]
+pub fn parse_git_indicator(status_v2: &str, numstat: &str, stashes: &str) -> GitIndicator {
+    let mut branch = String::new();
+    let mut ahead = 0usize;
+    let mut behind = 0usize;
+    let mut clean = true;
+    for line in status_v2.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(name) = line.strip_prefix("# branch.head ") {
+            branch = name.trim().to_owned();
+            continue;
+        }
+        if let Some(counts) = line.strip_prefix("# branch.ab ") {
+            let mut parts = counts.split_whitespace();
+            if let (Some(add), Some(sub)) = (parts.next(), parts.next()) {
+                ahead = add
+                    .strip_prefix('+')
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(0);
+                behind = sub
+                    .strip_prefix('-')
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(0);
+            }
+            continue;
+        }
+        if !line.starts_with('#') {
+            clean = false;
+        }
+    }
+    let (added, removed) = numstat_totals(numstat);
+    let stash_count = stashes
+        .lines()
+        .filter(|line| line.starts_with("stash@{"))
+        .count();
+    GitIndicator {
+        branch,
+        added,
+        removed,
+        ahead,
+        behind,
+        stashes: stash_count,
+        clean,
+    }
+}
+
+fn numstat_totals(numstat: &str) -> (usize, usize) {
+    let mut added = 0usize;
+    let mut removed = 0usize;
+    for line in numstat.lines() {
+        let mut columns = line.split('\t');
+        let (Some(additions), Some(deletions), Some(_path)) =
+            (columns.next(), columns.next(), columns.next())
+        else {
+            continue;
+        };
+        added += additions.parse::<usize>().unwrap_or(0);
+        removed += deletions.parse::<usize>().unwrap_or(0);
+    }
+    (added, removed)
+}
+
 /// Local filesystem/process backend. Future sandbox/container backends
 /// should implement the same method set.
 pub trait ExecutionBackend {
@@ -947,5 +1067,85 @@ mod tests {
         let text = backend.read_file("icon.png").unwrap();
         assert!(text.contains("image/png 8x4"));
         assert!(!text.contains('\u{fffd}'));
+    }
+
+    #[test]
+    fn parses_porcelain_branch_ab_without_localized_status_text() {
+        let status = "\
+# branch.oid abc
+# branch.head main
+# branch.upstream origin/main
+# branch.ab +154 -0
+1 .M N... 100644 100644 100644 a b src/lib.rs
+";
+        let numstat = "12\t3\tsrc/lib.rs\n-\t-\timage.png\n4\t0\tnew file.rs\n";
+        let info = parse_git_indicator(status, numstat, "stash@{0}\nstash@{1}\n");
+        assert_eq!(info.branch, "main");
+        assert_eq!((info.ahead, info.behind), (154, 0));
+        assert_eq!((info.added, info.removed), (16, 3));
+        assert_eq!(info.stashes, 2);
+        assert!(!info.clean);
+
+        let clean = parse_git_indicator("# branch.head main\n# branch.ab +5 -2\n", "", "");
+        assert!(clean.clean);
+        assert_eq!((clean.ahead, clean.behind), (5, 2));
+    }
+
+    #[test]
+    fn git_indicator_reports_a_dirty_worktree_and_rejects_a_plain_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let plain = LocalBackend::new(Policy::new(dir.path(), true).unwrap());
+        assert!(plain.git_indicator().is_err());
+
+        assert!(
+            Command::new("git")
+                .args(["init"])
+                .current_dir(dir.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        std::fs::write(dir.path().join("notes.txt"), "hello\n").unwrap();
+        let backend = LocalBackend::new(Policy::new(dir.path(), true).unwrap());
+        let info = backend.git_indicator().unwrap();
+        assert!(!info.clean);
+        assert!(!info.branch.is_empty());
+
+        if !chinese_locale_available() {
+            return;
+        }
+        let output = Command::new("git")
+            .args([
+                "status",
+                "--porcelain=v2",
+                "--branch",
+                "--untracked-files=normal",
+            ])
+            .env("LC_ALL", "zh_CN.UTF-8")
+            .env("LANG", "zh_CN.UTF-8")
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            text.lines().any(|line| line.starts_with("# branch.head ")),
+            "{text}"
+        );
+        let parsed = parse_git_indicator(&text, "", "");
+        assert!(!parsed.clean);
+        assert_eq!(parsed.branch, info.branch);
+    }
+
+    fn chinese_locale_available() -> bool {
+        Command::new("locale")
+            .arg("-a")
+            .output()
+            .map(|output| {
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .any(|line| line.to_ascii_lowercase().starts_with("zh_cn"))
+            })
+            .unwrap_or(false)
     }
 }
