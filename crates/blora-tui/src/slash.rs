@@ -47,6 +47,13 @@ pub const COMMANDS: &[SlashCommand] = &[
         "Open the Blora Design palette picker",
         "system",
     ),
+    cmd(
+        "settings",
+        &[],
+        "[key=value]",
+        "Show or change TUI settings",
+        "system",
+    ),
     cmd("new", &[], "", "Create a new session", "session"),
     cmd("sessions", &["ls-sessions"], "", "List sessions", "session"),
     cmd(
@@ -290,7 +297,7 @@ pub const COMMANDS: &[SlashCommand] = &[
     cmd("pwd", &[], "", "Show workspace path", "session"),
     cmd(
         "doctor",
-        &["settings"],
+        &[],
         "",
         "Show runtime environment flags",
         "system",

@@ -3051,6 +3051,93 @@ fn workspace_key(workspace: &Path) -> String {
     workspace.display().to_string()
 }
 
+fn apply_settings(
+    args: &str,
+    auto_approve: &mut bool,
+    hide_tools: &mut bool,
+    model: &mut String,
+    provider: &mut String,
+) -> SlashOutcome {
+    let args = args.trim();
+    if args.is_empty() {
+        return panel(
+            "settings",
+            settings_text(*auto_approve, *hide_tools, model, provider),
+        );
+    }
+    let Some((key, value)) = args.split_once('=') else {
+        return SlashOutcome::Status("用法：/settings [theme=珊瑚|scheme=dark|auto-approve=on|hide-tools=on|provider=名称|model=名称]".to_owned());
+    };
+    let key = key.trim().to_ascii_lowercase();
+    let value = value.trim();
+    if value.is_empty() {
+        return SlashOutcome::Status("设置值不能为空".to_owned());
+    }
+    match key.as_str() {
+        "theme" | "palette" => match theme::Palette::parse(value) {
+            Some(palette) => {
+                let scheme = theme::scheme();
+                SlashOutcome::Status(apply_theme_pref(theme::ThemePref { palette, scheme }))
+            }
+            None => SlashOutcome::Status(
+                "可用主题：coral、indigo、graphite、mono、circuit、dusk".to_owned(),
+            ),
+        },
+        "scheme" | "color-scheme" => match theme::Scheme::parse(value) {
+            Some(scheme) => {
+                let palette = theme::palette();
+                SlashOutcome::Status(apply_theme_pref(theme::ThemePref { palette, scheme }))
+            }
+            None => SlashOutcome::Status("可用配色模式：auto、dark、light、plain".to_owned()),
+        },
+        "auto-approve" | "auto" => match parse_setting_bool(value) {
+            Some(enabled) => {
+                *auto_approve = enabled;
+                SlashOutcome::Status(format!("auto-approve={enabled}"))
+            }
+            None => SlashOutcome::Status("布尔设置使用 on 或 off".to_owned()),
+        },
+        "hide-tools" | "tools" => match parse_setting_bool(value) {
+            Some(enabled) => {
+                *hide_tools = enabled;
+                SlashOutcome::Status(format!("hide-tools={enabled}"))
+            }
+            None => SlashOutcome::Status("布尔设置使用 on 或 off".to_owned()),
+        },
+        "provider" => {
+            *provider = value.to_owned();
+            SlashOutcome::Status(format!("provider={provider}"))
+        }
+        "model" => {
+            *model = value.to_owned();
+            SlashOutcome::Status(format!("model={model}"))
+        }
+        _ => SlashOutcome::Status(format!("未知设置：{key}")),
+    }
+}
+
+fn parse_setting_bool(value: &str) -> Option<bool> {
+    match value.to_ascii_lowercase().as_str() {
+        "on" | "true" | "1" | "yes" | "是" | "开启" => Some(true),
+        "off" | "false" | "0" | "no" | "否" | "关闭" => Some(false),
+        _ => None,
+    }
+}
+
+fn settings_text(auto_approve: bool, hide_tools: bool, model: &str, provider: &str) -> String {
+    format!(
+        "当前设置\ntheme={}\nscheme={}\nauto-approve={auto_approve}\nhide-tools={hide_tools}\nprovider={}\nmodel={}\n\n修改示例：/settings theme=indigo、/settings auto-approve=on",
+        theme::palette().as_str(),
+        theme::scheme().as_str(),
+        if provider.is_empty() {
+            "(默认)"
+        } else {
+            provider
+        },
+        if model.is_empty() { "(默认)" } else { model },
+    )
+}
+
 fn apply_theme(args: &str) -> SlashOutcome {
     if args.is_empty() {
         return SlashOutcome::ThemeDialog;
@@ -3222,6 +3309,7 @@ fn slash(
         ),
         "keymap" => panel("keymap", slash::keymap_text()),
         "theme" => apply_theme(args),
+        "settings" => apply_settings(args, auto_approve, hide_tools, model, provider),
         "new" => open_session(runtime, workspace, sessions, index, Mode::Code, "tui"),
         "sessions" => panel("sessions", list_session_lines(sessions)),
         "goto" => goto_session(sessions, index, args),
