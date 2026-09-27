@@ -437,6 +437,7 @@ pub enum Hit {
     ThemeRow(usize),
     /// Auto / light / dark section tab (`0` auto, `1` light, `2` dark).
     ThemeTab(usize),
+    SettingsTab(usize),
     SettingsRow(usize),
 }
 
@@ -502,6 +503,7 @@ pub struct HitMap {
     /// Auto / light / dark section tabs.
     pub theme_tabs: Vec<(Rect, usize)>,
     pub settings_rows: Vec<(Rect, usize)>,
+    pub settings_tabs: Vec<(Rect, usize)>,
 }
 
 impl HitMap {
@@ -592,6 +594,11 @@ impl HitMap {
         for (rect, idx) in &self.theme_tabs {
             if contains(*rect, col, row) {
                 return Some(Hit::ThemeTab(*idx));
+            }
+        }
+        for (rect, idx) in &self.settings_tabs {
+            if contains(*rect, col, row) {
+                return Some(Hit::SettingsTab(*idx));
             }
         }
         for (rect, idx) in &self.settings_rows {
@@ -1499,30 +1506,33 @@ fn render_settings_dialog(
     ])
     .areas(inner);
     let pages = ["常规", "外观", "模型"];
-    frame.render_widget(
-        Paragraph::new(Line::from(
-            pages
-                .iter()
-                .enumerate()
-                .flat_map(|(index, label)| {
-                    let selected = index == dialog.page;
-                    [Span::styled(
-                        if selected {
-                            format!("[ {label} ] ")
-                        } else {
-                            format!("  {label}   ")
-                        },
-                        if selected {
-                            theme.fg(theme.rose).add_modifier(Modifier::BOLD)
-                        } else {
-                            theme.mute()
-                        },
-                    )]
-                })
-                .collect::<Vec<_>>(),
-        )),
-        tabs,
-    );
+    let tab_width = (tabs.width / pages.len() as u16).max(1);
+    for (index, label) in pages.iter().enumerate() {
+        let rect = Rect {
+            x: tabs.x + tab_width * index as u16,
+            y: tabs.y,
+            width: if index + 1 == pages.len() {
+                tabs.width.saturating_sub(tab_width * index as u16)
+            } else {
+                tab_width
+            },
+            height: tabs.height,
+        };
+        hits.settings_tabs.push((rect, index));
+        frame.render_widget(
+            Paragraph::new(if index == dialog.page {
+                format!("[ {label} ]")
+            } else {
+                format!("  {label}  ")
+            })
+            .style(if index == dialog.page {
+                theme.fg(theme.rose).add_modifier(Modifier::BOLD)
+            } else {
+                theme.mute()
+            }),
+            rect,
+        );
+    }
     if dialog.minimized {
         return hits;
     }
@@ -1540,10 +1550,14 @@ fn render_settings_dialog(
                 "隐藏工具调用",
                 if model.hide_tools { "开启" } else { "关闭" },
             ),
+            ("确认提示", "始终显示"),
+            ("终端标题", "启用"),
         ],
         1 => &[
             ("主题", model.theme_name()),
             ("配色模式", theme::scheme().as_str()),
+            ("动画效果", "启用"),
+            ("界面语言", "简体中文"),
         ],
         _ => &[
             (
@@ -1562,6 +1576,8 @@ fn render_settings_dialog(
                     model.model
                 },
             ),
+            ("上下文窗口", "自动"),
+            ("响应方式", "流式"),
         ],
     };
     let rows_area = split_n_rows(body, rows.len() as u16);

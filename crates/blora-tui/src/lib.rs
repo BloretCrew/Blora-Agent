@@ -1917,9 +1917,26 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     });
                                     continue;
                                 }
+                                if let Some(view::Hit::SettingsTab(idx)) = hit {
+                                    if let Some(dialog) = settings_dialog.as_mut() {
+                                        dialog.page = idx.min(2);
+                                        dialog.selected = 0;
+                                    }
+                                    continue;
+                                }
                                 if let Some(view::Hit::SettingsRow(idx)) = hit {
                                     if let Some(dialog) = settings_dialog.as_mut() {
-                                        dialog.selected = idx.min(5);
+                                        dialog.selected = idx
+                                            .min(settings_page_len(dialog.page).saturating_sub(1));
+                                        apply_settings_row(
+                                            dialog.page,
+                                            dialog.selected,
+                                            true,
+                                            &mut auto_approve,
+                                            &mut hide_tools,
+                                            &mut model_override,
+                                            &mut provider_override,
+                                        );
                                     }
                                     continue;
                                 }
@@ -3113,11 +3130,8 @@ fn workspace_key(workspace: &Path) -> String {
     workspace.display().to_string()
 }
 
-fn settings_page_len(page: usize) -> usize {
-    match page {
-        0..=2 => 2,
-        _ => 2,
-    }
+fn settings_page_len(_page: usize) -> usize {
+    4
 }
 
 fn apply_settings_row(
