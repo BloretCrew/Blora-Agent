@@ -767,13 +767,21 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             }
                             KeyCode::Down if settings_dialog.is_some() => {
                                 if let Some(dialog) = settings_dialog.as_mut() {
-                                    dialog.selected = (dialog.selected + 1).min(5);
+                                    dialog.selected = (dialog.selected + 1)
+                                        .min(settings_page_len(dialog.page).saturating_sub(1));
+                                }
+                            }
+                            KeyCode::Tab if settings_dialog.is_some() => {
+                                if let Some(dialog) = settings_dialog.as_mut() {
+                                    dialog.page = (dialog.page + 1) % 3;
+                                    dialog.selected = 0;
                                 }
                             }
                             KeyCode::Left | KeyCode::Right if settings_dialog.is_some() => {
                                 if let Some(dialog) = settings_dialog.as_mut() {
                                     let increase = key.code == KeyCode::Right;
                                     apply_settings_row(
+                                        dialog.page,
                                         dialog.selected,
                                         increase,
                                         &mut auto_approve,
@@ -1144,6 +1152,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                                 provider_dialog = None;
                                                 theme_dialog = None;
                                                 settings_dialog = Some(view::SettingsDialog {
+                                                    page: 0,
                                                     selected: 0,
                                                     fullscreen: false,
                                                     minimized: false,
@@ -3104,7 +3113,15 @@ fn workspace_key(workspace: &Path) -> String {
     workspace.display().to_string()
 }
 
+fn settings_page_len(page: usize) -> usize {
+    match page {
+        0..=2 => 2,
+        _ => 2,
+    }
+}
+
 fn apply_settings_row(
+    page: usize,
     selected: usize,
     increase: bool,
     auto_approve: &mut bool,
@@ -3112,8 +3129,8 @@ fn apply_settings_row(
     model: &mut String,
     provider: &mut String,
 ) {
-    match selected {
-        0 => {
+    match (page, selected) {
+        (1, 0) => {
             let palettes = theme::Palette::ALL;
             let current = palettes
                 .iter()
@@ -3129,7 +3146,7 @@ fn apply_settings_row(
                 scheme: theme::scheme(),
             });
         }
-        1 => {
+        (1, 1) => {
             let schemes = [
                 theme::Scheme::Auto,
                 theme::Scheme::Light,
@@ -3150,10 +3167,10 @@ fn apply_settings_row(
                 scheme: schemes[next],
             });
         }
-        2 => *auto_approve = if increase { true } else { !*auto_approve },
-        3 => *hide_tools = if increase { true } else { !*hide_tools },
-        4 => provider.clear(),
-        5 => model.clear(),
+        (0, 0) => *auto_approve = if increase { true } else { !*auto_approve },
+        (0, 1) => *hide_tools = if increase { true } else { !*hide_tools },
+        (2, 0) => provider.clear(),
+        (2, 1) => model.clear(),
         _ => {}
     }
 }

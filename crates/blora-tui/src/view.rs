@@ -338,6 +338,7 @@ pub struct ContextDialog {
 
 #[derive(Clone, Debug)]
 pub struct SettingsDialog {
+    pub page: usize,
     pub selected: usize,
     pub fullscreen: bool,
     pub minimized: bool,
@@ -1490,47 +1491,79 @@ fn render_settings_dialog(
         return hits;
     };
     let inner = paint_dialog_frame(frame, modal, "设置", model.pointer, theme, &mut hits);
-    let [_, body, hint] = Layout::vertical([
+    let [tabs, _, body, hint] = Layout::vertical([
+        Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Min(4),
         Constraint::Length(1),
     ])
     .areas(inner);
+    let pages = ["常规", "外观", "模型"];
+    frame.render_widget(
+        Paragraph::new(Line::from(
+            pages
+                .iter()
+                .enumerate()
+                .flat_map(|(index, label)| {
+                    let selected = index == dialog.page;
+                    [Span::styled(
+                        if selected {
+                            format!("[ {label} ] ")
+                        } else {
+                            format!("  {label}   ")
+                        },
+                        if selected {
+                            theme.fg(theme.rose).add_modifier(Modifier::BOLD)
+                        } else {
+                            theme.mute()
+                        },
+                    )]
+                })
+                .collect::<Vec<_>>(),
+        )),
+        tabs,
+    );
     if dialog.minimized {
         return hits;
     }
-    let rows = [
-        ("主题", model.theme_name()),
-        ("配色模式", theme::scheme().as_str()),
-        (
-            "自动批准",
-            if model.auto_approve {
-                "开启"
-            } else {
-                "关闭"
-            },
-        ),
-        (
-            "隐藏工具调用",
-            if model.hide_tools { "开启" } else { "关闭" },
-        ),
-        (
-            "供应商",
-            if model.provider.is_empty() {
-                "默认"
-            } else {
-                model.provider
-            },
-        ),
-        (
-            "模型",
-            if model.model.is_empty() {
-                "默认"
-            } else {
-                model.model
-            },
-        ),
-    ];
+    let rows: &[(&str, &str)] = match dialog.page {
+        0 => &[
+            (
+                "自动批准",
+                if model.auto_approve {
+                    "开启"
+                } else {
+                    "关闭"
+                },
+            ),
+            (
+                "隐藏工具调用",
+                if model.hide_tools { "开启" } else { "关闭" },
+            ),
+        ],
+        1 => &[
+            ("主题", model.theme_name()),
+            ("配色模式", theme::scheme().as_str()),
+        ],
+        _ => &[
+            (
+                "供应商",
+                if model.provider.is_empty() {
+                    "默认"
+                } else {
+                    model.provider
+                },
+            ),
+            (
+                "模型",
+                if model.model.is_empty() {
+                    "默认"
+                } else {
+                    model.model
+                },
+            ),
+        ],
+    };
     let rows_area = split_n_rows(body, rows.len() as u16);
     for (index, (label, value)) in rows.iter().enumerate() {
         let rect = rows_area[index];
