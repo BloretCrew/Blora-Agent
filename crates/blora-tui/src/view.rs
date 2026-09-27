@@ -1172,6 +1172,7 @@ pub fn draw(
     } else if let Some(dialog) = model.settings_dialog {
         let dialog_hits = render_settings_dialog(frame, area, model, dialog, &theme);
         hits.settings_rows = dialog_hits.settings_rows;
+        hits.settings_tabs = dialog_hits.settings_tabs;
         hits.traffic_lights = dialog_hits.traffic_lights;
     }
     hits
