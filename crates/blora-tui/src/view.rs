@@ -18,7 +18,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::i18n;
 use crate::selection::Selection;
 use crate::slash::{self, SlashCommand};
-use crate::theme::{Scheme, Theme, ThemePref};
+use crate::theme::{self, Scheme, Theme, ThemePref};
 
 const PAD: u16 = 2;
 /// Work indicator: ping-pong through this star sequence.
@@ -238,6 +238,12 @@ pub const MODE_OPTIONS: [ModeOption; 3] = [
     },
 ];
 
+impl<'a> FrameModel<'a> {
+    fn theme_name(&self) -> &'static str {
+        theme::palette().name_zh()
+    }
+}
+
 impl ModeMenu {
     #[must_use]
     pub fn current(&self) -> ModeOption {
@@ -330,6 +336,13 @@ pub struct ContextDialog {
     pub minimized: bool,
 }
 
+#[derive(Clone, Debug)]
+pub struct SettingsDialog {
+    pub selected: usize,
+    pub fullscreen: bool,
+    pub minimized: bool,
+}
+
 pub struct FrameModel<'a> {
     pub workspace: &'a Path,
     pub sessions: &'a [SessionSummary],
@@ -349,6 +362,7 @@ pub struct FrameModel<'a> {
     /// Color-scheme picker; renders as a centered modal dialog.
     pub theme_dialog: Option<&'a ThemeDialog>,
     pub context_dialog: Option<&'a ContextDialog>,
+    pub settings_dialog: Option<&'a SettingsDialog>,
     pub tool_dialog: Option<&'a ToolDialog>,
     pub tool_detail_dialog: Option<&'a ToolDetailDialog>,
     pub slash_hits: &'a [&'static SlashCommand],
@@ -422,6 +436,7 @@ pub enum Hit {
     ThemeRow(usize),
     /// Auto / light / dark section tab (`0` auto, `1` light, `2` dark).
     ThemeTab(usize),
+    SettingsRow(usize),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -485,6 +500,7 @@ pub struct HitMap {
     pub theme_rows: Vec<(Rect, usize)>,
     /// Auto / light / dark section tabs.
     pub theme_tabs: Vec<(Rect, usize)>,
+    pub settings_rows: Vec<(Rect, usize)>,
 }
 
 impl HitMap {
@@ -575,6 +591,11 @@ impl HitMap {
         for (rect, idx) in &self.theme_tabs {
             if contains(*rect, col, row) {
                 return Some(Hit::ThemeTab(*idx));
+            }
+        }
+        for (rect, idx) in &self.settings_rows {
+            if contains(*rect, col, row) {
+                return Some(Hit::SettingsRow(*idx));
             }
         }
         for (rect, idx) in &self.theme_rows {
@@ -1140,6 +1161,10 @@ pub fn draw(
         let dialog_hits =
             render_context_dialog(frame, area, model.projection, dialog, model.pointer, &theme);
         hits.traffic_lights = dialog_hits.traffic_lights;
+    } else if let Some(dialog) = model.settings_dialog {
+        let dialog_hits = render_settings_dialog(frame, area, model, dialog, &theme);
+        hits.settings_rows = dialog_hits.settings_rows;
+        hits.traffic_lights = dialog_hits.traffic_lights;
     }
     hits
 }
@@ -1451,6 +1476,86 @@ fn render_header(
             );
         }
     }
+}
+
+fn render_settings_dialog(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    model: &FrameModel<'_>,
+    dialog: &SettingsDialog,
+    theme: &Theme,
+) -> HitMap {
+    let mut hits = HitMap::default();
+    let Some(modal) = dialog_outer(area, 76, 15, dialog.fullscreen, dialog.minimized) else {
+        return hits;
+    };
+    let inner = paint_dialog_frame(frame, modal, "设置", model.pointer, theme, &mut hits);
+    let [_, body, hint] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(4),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+    if dialog.minimized {
+        return hits;
+    }
+    let rows = [
+        ("主题", model.theme_name()),
+        ("配色模式", theme::scheme().as_str()),
+        (
+            "自动批准",
+            if model.auto_approve {
+                "开启"
+            } else {
+                "关闭"
+            },
+        ),
+        (
+            "隐藏工具调用",
+            if model.hide_tools { "开启" } else { "关闭" },
+        ),
+        (
+            "供应商",
+            if model.provider.is_empty() {
+                "默认"
+            } else {
+                model.provider
+            },
+        ),
+        (
+            "模型",
+            if model.model.is_empty() {
+                "默认"
+            } else {
+                model.model
+            },
+        ),
+    ];
+    let rows_area = split_n_rows(body, rows.len() as u16);
+    for (index, (label, value)) in rows.iter().enumerate() {
+        let rect = rows_area[index];
+        let selected = index == dialog.selected;
+        let style = if selected {
+            theme.base().bg(theme.bg_select)
+        } else {
+            theme.base()
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(if selected { "❯ " } else { "  " }, theme.fg(theme.rose)),
+                Span::styled(format!("{label:<12}"), theme.fg(theme.text)),
+                Span::styled(*value, theme.fg(theme.sage)),
+            ]))
+            .style(style),
+            rect,
+        );
+        hits.settings_rows.push((rect, index));
+    }
+    frame.render_widget(
+        Paragraph::new("↑↓ 选择 · ←→ 修改 · Enter 确认 · Esc 关闭").style(theme.mute()),
+        hint,
+    );
+    hits
 }
 
 fn render_context_dialog(

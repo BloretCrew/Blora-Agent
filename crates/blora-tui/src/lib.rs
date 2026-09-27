@@ -112,6 +112,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut provider_dialog: Option<view::ProviderDialog> = None;
     let mut add_provider_dialog: Option<view::AddProviderDialog> = None;
     let mut theme_dialog: Option<view::ThemeDialog> = None;
+    let mut settings_dialog: Option<view::SettingsDialog> = None;
     let mut context_dialog: Option<view::ContextDialog> = None;
     let mut tool_dialog: Option<view::ToolDialog> = None;
     let mut tool_detail_dialog: Option<view::ToolDetailDialog> = None;
@@ -371,6 +372,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             provider_dialog: provider_dialog.as_ref(),
                             add_provider_dialog: add_provider_dialog.as_ref(),
                             theme_dialog: theme_dialog.as_ref(),
+                            settings_dialog: settings_dialog.as_ref(),
                             context_dialog: context_dialog.as_ref(),
                             tool_dialog: tool_dialog.as_ref(),
                             tool_detail_dialog: tool_detail_dialog.as_ref(),
@@ -758,6 +760,33 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     status = commit_theme_dialog(&dialog);
                                 }
                             }
+                            KeyCode::Up if settings_dialog.is_some() => {
+                                if let Some(dialog) = settings_dialog.as_mut() {
+                                    dialog.selected = dialog.selected.saturating_sub(1);
+                                }
+                            }
+                            KeyCode::Down if settings_dialog.is_some() => {
+                                if let Some(dialog) = settings_dialog.as_mut() {
+                                    dialog.selected = (dialog.selected + 1).min(5);
+                                }
+                            }
+                            KeyCode::Left | KeyCode::Right if settings_dialog.is_some() => {
+                                if let Some(dialog) = settings_dialog.as_mut() {
+                                    let increase = key.code == KeyCode::Right;
+                                    apply_settings_row(
+                                        dialog.selected,
+                                        increase,
+                                        &mut auto_approve,
+                                        &mut hide_tools,
+                                        &mut model_override,
+                                        &mut provider_override,
+                                    );
+                                }
+                            }
+                            KeyCode::Enter if settings_dialog.is_some() => {
+                                settings_dialog = None;
+                                status = "设置已保存".to_owned();
+                            }
                             KeyCode::Up if provider_dialog.is_some() => {
                                 if let Some(dialog) = provider_dialog.as_mut() {
                                     match dialog.pane {
@@ -1111,6 +1140,15 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                                 provider_dialog = None;
                                                 theme_dialog = Some(open_theme_dialog());
                                             }
+                                            SlashOutcome::SettingsDialog => {
+                                                provider_dialog = None;
+                                                theme_dialog = None;
+                                                settings_dialog = Some(view::SettingsDialog {
+                                                    selected: 0,
+                                                    fullscreen: false,
+                                                    minimized: false,
+                                                });
+                                            }
                                         }
                                     }
                                 } else if !input.trim().is_empty() {
@@ -1294,6 +1332,9 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             }
                             KeyCode::Esc if passport_dialog.is_some() => {
                                 passport_dialog = None;
+                            }
+                            KeyCode::Esc if settings_dialog.is_some() => {
+                                settings_dialog = None;
                             }
                             KeyCode::Esc if theme_dialog.is_some() => {
                                 if let Some(dialog) = theme_dialog.take() {
@@ -1762,6 +1803,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     || add_provider_dialog.is_some()
                                     || provider_dialog.is_some()
                                     || context_dialog.is_some()
+                                    || settings_dialog.is_some()
                                     || tool_dialog.is_some()
                                     || tool_detail_dialog.is_some()
                                     || git_dialog.is_some()
@@ -1864,6 +1906,12 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                         fullscreen: false,
                                         minimized: false,
                                     });
+                                    continue;
+                                }
+                                if let Some(view::Hit::SettingsRow(idx)) = hit {
+                                    if let Some(dialog) = settings_dialog.as_mut() {
+                                        dialog.selected = idx.min(5);
+                                    }
                                     continue;
                                 }
                                 // Provider dialog rows: click selects and confirms.
@@ -2040,6 +2088,8 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                         status = "provider picker closed".to_owned();
                                     } else if context_dialog.take().is_some() {
                                         status = "context dialog closed".to_owned();
+                                    } else if settings_dialog.take().is_some() {
+                                        status = "settings dialog closed".to_owned();
                                     } else {
                                         cancel.cancel();
                                         break Ok(());
@@ -2309,6 +2359,8 @@ enum SlashOutcome {
     ProviderDialog,
     /// Open the color-scheme picker.
     ThemeDialog,
+    /// Open the settings dialog.
+    SettingsDialog,
     LoggedOut(String),
     Quit,
 }
@@ -2359,6 +2411,7 @@ fn apply_slash(
             *theme_dialog = Some(open_theme_dialog());
             false
         }
+        SlashOutcome::SettingsDialog => false,
         SlashOutcome::LoggedOut(text) => {
             *notice = None;
             *status = text;
@@ -3051,6 +3104,60 @@ fn workspace_key(workspace: &Path) -> String {
     workspace.display().to_string()
 }
 
+fn apply_settings_row(
+    selected: usize,
+    increase: bool,
+    auto_approve: &mut bool,
+    hide_tools: &mut bool,
+    model: &mut String,
+    provider: &mut String,
+) {
+    match selected {
+        0 => {
+            let palettes = theme::Palette::ALL;
+            let current = palettes
+                .iter()
+                .position(|item| *item == theme::palette())
+                .unwrap_or(0);
+            let next = if increase {
+                (current + 1) % palettes.len()
+            } else {
+                (current + palettes.len() - 1) % palettes.len()
+            };
+            let _ = apply_theme_pref(theme::ThemePref {
+                palette: palettes[next],
+                scheme: theme::scheme(),
+            });
+        }
+        1 => {
+            let schemes = [
+                theme::Scheme::Auto,
+                theme::Scheme::Light,
+                theme::Scheme::Dark,
+                theme::Scheme::Plain,
+            ];
+            let current = schemes
+                .iter()
+                .position(|item| *item == theme::scheme())
+                .unwrap_or(0);
+            let next = if increase {
+                (current + 1) % schemes.len()
+            } else {
+                (current + schemes.len() - 1) % schemes.len()
+            };
+            let _ = apply_theme_pref(theme::ThemePref {
+                palette: theme::palette(),
+                scheme: schemes[next],
+            });
+        }
+        2 => *auto_approve = if increase { true } else { !*auto_approve },
+        3 => *hide_tools = if increase { true } else { !*hide_tools },
+        4 => provider.clear(),
+        5 => model.clear(),
+        _ => {}
+    }
+}
+
 fn apply_settings(
     args: &str,
     auto_approve: &mut bool,
@@ -3309,6 +3416,7 @@ fn slash(
         ),
         "keymap" => panel("keymap", slash::keymap_text()),
         "theme" => apply_theme(args),
+        "settings" if args.is_empty() => SlashOutcome::SettingsDialog,
         "settings" => apply_settings(args, auto_approve, hide_tools, model, provider),
         "new" => open_session(runtime, workspace, sessions, index, Mode::Code, "tui"),
         "sessions" => panel("sessions", list_session_lines(sessions)),
