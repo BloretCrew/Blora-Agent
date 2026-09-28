@@ -3,8 +3,12 @@
 const { createWriteStream, existsSync, mkdirSync, renameSync, rmSync } = require("node:fs");
 const { tmpdir } = require("node:os");
 const path = require("node:path");
+const { execFile } = require("node:child_process");
+const { promisify } = require("node:util");
 const { pipeline } = require("node:stream/promises");
 const { request } = require("node:https");
+
+const execFileAsync = promisify(execFile);
 
 const version = require("../package.json").version;
 const repo = "BloretCrew/Blora-Agent";
@@ -67,6 +71,7 @@ async function downloadWithRetry(url, destinationPath) {
       return;
     } catch (error) {
       lastError = error;
+      if (error.code === "ECONNRESET" || error.message === "socket hang up") throw error;
       if (attempt < MAX_ATTEMPTS) {
         const delay = 1_000 * 2 ** (attempt - 1);
         console.error(`Download attempt ${attempt} failed (${error.message}); retrying in ${delay / 1000}s…`);
@@ -75,6 +80,19 @@ async function downloadWithRetry(url, destinationPath) {
     }
   }
   throw lastError;
+}
+
+async function downloadWithCurl(url, destinationPath) {
+  await execFileAsync("curl", [
+    "--fail",
+    "--location",
+    "--retry", String(MAX_ATTEMPTS - 1),
+    "--retry-delay", "2",
+    "--connect-timeout", "20",
+    "--max-time", String(DOWNLOAD_TIMEOUT_MS / 1000),
+    "--output", destinationPath,
+    url,
+  ]);
 }
 
 async function extract(archive, target) {
@@ -109,7 +127,13 @@ async function main() {
   const url = `https://github.com/${repo}/releases/download/v${version}/${asset}`;
   try {
     console.log(`Downloading Blora ${version} for ${process.platform}/${process.arch}…`);
-    await downloadWithRetry(url, archive);
+    try {
+      await downloadWithRetry(url, archive);
+    } catch (error) {
+      if (error.code !== "ECONNRESET" && error.message !== "socket hang up") throw error;
+      console.error(`Node download failed (${error.message}); retrying with curl…`);
+      await downloadWithCurl(url, archive);
+    }
     await extract(archive, target);
     const extracted = path.join(target, executable);
     if (!existsSync(extracted)) throw new Error(`release archive does not contain ${executable}`);
