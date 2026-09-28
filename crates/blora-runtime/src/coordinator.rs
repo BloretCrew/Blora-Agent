@@ -1561,15 +1561,17 @@ impl Runtime {
                 )?;
                 Ok(())
             }
-            Err(BloraError::ApprovalRequired(summary)) => self.record_tool_failure(
-                session_id,
-                run_id,
-                turn_id,
-                call,
-                format!(
-                    "approval required for {summary}. Ask the user to rerun with --yes or approve interactively."
-                ),
-            ),
+            Err(BloraError::ApprovalRequired(summary)) => {
+                let message = format!(
+                    "approval required for {summary}. Rerun with --permission yolo or auto-edit, or approve interactively."
+                );
+                self.record_tool_failure(session_id, run_id, turn_id, call, message)?;
+                if !options.interactive {
+                    Err(BloraError::ApprovalRequired(summary))
+                } else {
+                    Ok(())
+                }
+            }
             Err(err) => self.record_tool_failure(
                 session_id,
                 run_id,

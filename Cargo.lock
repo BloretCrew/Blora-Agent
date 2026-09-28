@@ -184,7 +184,7 @@ dependencies = [
 
 [[package]]
 name = "blora-auth"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -194,7 +194,7 @@ dependencies = [
 
 [[package]]
 name = "blora-catalog"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "blora-types",
  "dirs",
@@ -205,7 +205,7 @@ dependencies = [
 
 [[package]]
 name = "blora-cli"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "blora-github",
  "blora-runtime",
@@ -225,7 +225,7 @@ dependencies = [
 
 [[package]]
 name = "blora-context"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "blora-events",
  "blora-model",
@@ -237,7 +237,7 @@ dependencies = [
 
 [[package]]
 name = "blora-events"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "blora-types",
  "chrono",
@@ -247,7 +247,7 @@ dependencies = [
 
 [[package]]
 name = "blora-exec"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "blora-policy",
  "blora-types",
@@ -258,7 +258,7 @@ dependencies = [
 
 [[package]]
 name = "blora-github"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "chrono",
  "regex",
@@ -269,7 +269,7 @@ dependencies = [
 
 [[package]]
 name = "blora-model"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "blora-auth",
  "blora-catalog",
@@ -281,7 +281,7 @@ dependencies = [
 
 [[package]]
 name = "blora-policy"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "blora-types",
  "tempfile",
@@ -289,7 +289,7 @@ dependencies = [
 
 [[package]]
 name = "blora-runtime"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "blora-context",
  "blora-events",
@@ -309,7 +309,7 @@ dependencies = [
 
 [[package]]
 name = "blora-server"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "axum",
  "blora-auth",
@@ -331,7 +331,7 @@ dependencies = [
 
 [[package]]
 name = "blora-session"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "blora-events",
  "blora-types",
@@ -342,7 +342,7 @@ dependencies = [
 
 [[package]]
 name = "blora-storage"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "blora-events",
  "blora-session",
@@ -357,7 +357,7 @@ dependencies = [
 
 [[package]]
 name = "blora-tools"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "blora-context",
  "blora-exec",
@@ -368,7 +368,7 @@ dependencies = [
 
 [[package]]
 name = "blora-tui"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "blora-auth",
  "blora-catalog",
@@ -389,7 +389,7 @@ dependencies = [
 
 [[package]]
 name = "blora-types"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "chrono",
  "serde",
