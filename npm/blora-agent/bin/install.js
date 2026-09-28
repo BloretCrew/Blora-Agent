@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-const { createWriteStream, existsSync, mkdirSync, renameSync, rmSync } = require("node:fs");
+const { chmodSync, copyFileSync, createWriteStream, existsSync, mkdirSync, rmSync, unlinkSync } = require("node:fs");
 const { tmpdir } = require("node:os");
 const path = require("node:path");
 const { execFile } = require("node:child_process");
@@ -137,8 +137,13 @@ async function main() {
     await extract(archive, target);
     const extracted = path.join(target, executable);
     if (!existsSync(extracted)) throw new Error(`release archive does not contain ${executable}`);
-    renameSync(extracted, destination);
-    if (process.platform !== "win32") require("node:fs").chmodSync(destination, 0o755);
+    try {
+      copyFileSync(extracted, destination);
+      unlinkSync(extracted);
+    } catch (error) {
+      throw new Error(`could not install binary: ${error.message}`);
+    }
+    if (process.platform !== "win32") chmodSync(destination, 0o755);
     console.log("Blora installed.");
   } catch (error) {
     console.error(`Blora binary download failed: ${error.message}`);

@@ -1,6 +1,6 @@
 {
   "name": "@bloret-crew/blora-agent",
-  "version": "0.1.0-beta.2",
+  "version": "0.1.0-beta.3",
   "description": "Blora Agent CLI installer",
   "license": "GPL-3.0-or-later",
   "repository": {
