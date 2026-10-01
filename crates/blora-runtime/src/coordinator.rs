@@ -800,7 +800,9 @@ impl Runtime {
             session_id,
             Some(&run_id),
             Some(&turn_id),
-            KnownPayload::UserInput(UserInput { text: prompt }),
+            KnownPayload::UserInput(UserInput {
+                text: prompt.clone(),
+            }),
         )?;
         if should_generate_title {
             let title = generate_session_title(
@@ -856,7 +858,7 @@ impl Runtime {
         let mut repeat_count: u32 = 0;
 
         if imagine {
-            let image = blora_imagine::ImageRequest::from_user_text(prompt);
+            let image = blora_imagine::ImageRequest::from_user_text(&prompt);
             let call = ToolCall {
                 id: "imagine-direct".to_owned(),
                 name: "generate_image".to_owned(),
