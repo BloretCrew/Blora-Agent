@@ -64,7 +64,7 @@ async function refreshPassport() {
     passportUser.hidden = false;
     passportUser.textContent = user.name || user.username;
     const hero = document.querySelector("#hero-title");
-    if (hero && !state.sessionId) {
+    if (hero && !state.sessionId && currentRunMode() !== "imagine") {
       hero.textContent = `继续，${user.name || user.username}`;
     }
     if (passportLogout) passportLogout.hidden = false;
@@ -432,6 +432,10 @@ function appendGeneratedImages(body, text) {
 }
 
 function renderTranscript(items) {
+  if (currentRunMode() === "imagine") {
+    renderGallery(items);
+    return;
+  }
   const stick = state.stick || pinnedToBottom(thread);
   thread.replaceChildren();
   const empty = !items || items.length === 0;
@@ -451,6 +455,40 @@ function renderTranscript(items) {
   }
   state.stick = stick;
   followTail(stick);
+}
+
+function renderGallery(items) {
+  const board = imagineBoard(items);
+  const empty = board.cards.length === 0 && board.errors.length === 0;
+  setSessionCanvas(empty);
+  thread.replaceChildren();
+  if (empty) {
+    followTail(true);
+    return;
+  }
+  const gallery = document.createElement("div");
+  gallery.className = "ba-gallery";
+  for (const message of board.errors) {
+    const alert = document.createElement("blora-alert");
+    alert.setAttribute("variant", "danger");
+    alert.textContent = message;
+    gallery.append(alert);
+  }
+  for (const card of board.cards) {
+    const figure = document.createElement("figure");
+    figure.className = "ba-card";
+    if (state.sessionId && card.session === state.sessionId) {
+      const image = document.createElement("img");
+      image.alt = card.prompt || "生成的图片";
+      image.src = `/api/sessions/${encodeURIComponent(state.sessionId)}/images/${encodeURIComponent(card.name)}`;
+      figure.append(image);
+    }
+    const caption = document.createElement("figcaption");
+    caption.textContent = card.prompt || card.path;
+    figure.append(caption);
+    gallery.append(figure);
+  }
+  thread.append(gallery);
 }
 
 function renderSessions(sessions) {
@@ -579,6 +617,9 @@ async function handleSessionEvent(id, data) {
 }
 
 function appendBubble(kind, text) {
+  if (currentRunMode() === "imagine") {
+    return;
+  }
   setSessionCanvas(false);
   threadEmpty.hidden = true;
   if (threadEmpty.parentElement === thread) {
@@ -592,7 +633,7 @@ function appendBubble(kind, text) {
 }
 
 function appendStreamingText(text) {
-  if (!text) {
+  if (!text || currentRunMode() === "imagine") {
     return;
   }
   if (!state.streaming) {
@@ -708,7 +749,7 @@ document.querySelector("#composer").addEventListener("submit", async (event) => 
     await api(`/api/sessions/${state.sessionId}/run`, {
       method: "POST",
       body: JSON.stringify({
-        prompt: text,
+        prompt: imaginePrompt(text),
         permission_mode: currentPermission(),
         auto_approve: currentPermission() === "yolo",
         provider: stored("blora-provider"),
@@ -1207,6 +1248,15 @@ if (promptBox) {
   });
 }
 
+function imaginePrompt(text) {
+  if (currentRunMode() !== "imagine" || text.startsWith("/")) {
+    return text;
+  }
+  const aspect = document.querySelector("#imagine-aspect")?.value || "1:1";
+  const count = document.querySelector("#imagine-count")?.value || "1";
+  return `${text}\n画幅 ${aspect}，张数 ${count}`;
+}
+
 function currentPermission() {
   const select = document.querySelector("#permission-mode");
   return select?.value || stored("blora-permission", "ask");
@@ -1221,18 +1271,76 @@ function currentRunMode() {
   return RUN_MODES.includes(select?.value) ? select.value : stored("blora-run-mode", "code");
 }
 
+const CODE_CHIPS = [
+  ["列出当前工作区的文件结构", "列出工作区"],
+  ["总结 git 状态和最近提交", "查看 git 状态"],
+  ["阅读 README 并说明这个项目做什么", "阅读 README"],
+  ["找出可以安全改进的测试缺口", "检查测试"],
+];
+
+const IMAGINE_CHIPS = [
+  ["一张珊瑚配色的桌面壁纸，留出中间的空白", "珊瑚壁纸"],
+  ["一张安静的书桌照片，暖光，没有文字", "书桌"],
+  ["一张几何海报，只有色块和细线", "几何海报"],
+];
+
+function paintStudio(mode) {
+  const imagine = mode === "imagine";
+  const view = document.querySelector("#view-session");
+  if (view) {
+    view.classList.toggle("ba-session--imagine", imagine);
+  }
+  document.querySelectorAll(".ba-imagine-only").forEach((node) => {
+    node.hidden = !imagine;
+  });
+  const send = document.querySelector("#send");
+  if (send) {
+    send.textContent = imagine ? "生成" : "发送";
+  }
+  const box = fieldInput("#prompt") || prompt;
+  if (box) {
+    box.placeholder = imagine
+      ? "描述要生成的画面。输入 / 查看命令"
+      : "要在这个工作区做什么？输入 / 查看命令";
+  }
+  const kicker = document.querySelector(".ba-hero__kicker");
+  const hero = document.querySelector("#hero-title");
+  const lede = document.querySelector(".ba-hero__lede");
+  const chips = document.querySelector("#hero-chips");
+  if (!kicker || !hero || !lede || !chips) {
+    return;
+  }
+  if (imagine) {
+    kicker.textContent = "Imagine";
+    if (!state.sessionId || hero.dataset.studio !== "code-named") {
+      hero.textContent = "描述一张图";
+    }
+    lede.textContent = "图片保存在工作区 .blora/images/。画幅和张数写在下面。";
+  } else {
+    kicker.textContent = "Code · Work · Agent";
+    if (hero.dataset.studio !== "code-named") {
+      hero.textContent = "工作区已就绪";
+    }
+    lede.textContent = "在仓库里读、改、跑。会话、工具和审批都留在本地。";
+  }
+  chips.replaceChildren();
+  for (const [promptText, label] of imagine ? IMAGINE_CHIPS : CODE_CHIPS) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "ba-chip";
+    button.dataset.prompt = promptText;
+    button.textContent = label;
+    chips.append(button);
+  }
+}
+
 function applyRunMode(mode, persist = true) {
   const next = RUN_MODES.includes(mode) ? mode : "code";
   const select = document.querySelector("#run-mode");
   if (select) {
     select.value = next;
   }
-  const box = fieldInput("#prompt") || prompt;
-  if (box) {
-    box.placeholder = next === "imagine"
-      ? "描述要生成的图片。输入 / 查看命令"
-      : "要在这个工作区做什么？输入 / 查看命令";
-  }
+  paintStudio(next);
   if (persist) {
     store("blora-run-mode", next);
   }
@@ -1479,15 +1587,14 @@ if (jumpLatest) {
   });
 }
 
-document.querySelectorAll(".ba-chip").forEach((chip) => {
-  chip.addEventListener("click", () => {
-    const box = fieldInput("#prompt") || prompt;
-    if (!box) {
-      return;
-    }
-    box.value = chip.getAttribute("data-prompt") || "";
-    box.focus();
-  });
+document.querySelector("#hero-chips")?.addEventListener("click", (event) => {
+  const chip = event.target.closest(".ba-chip");
+  const box = fieldInput("#prompt") || prompt;
+  if (!chip || !box) {
+    return;
+  }
+  box.value = chip.getAttribute("data-prompt") || "";
+  box.focus();
 });
 
 applyPermission(stored("blora-permission", "ask"), false);

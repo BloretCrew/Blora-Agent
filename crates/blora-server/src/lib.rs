@@ -32,6 +32,7 @@ use tower_http::cors::CorsLayer;
 
 const INDEX_HTML: &str = include_str!("../../../web/index.html");
 const APP_JS: &str = include_str!("../../../web/app.js");
+const IMAGINE_JS: &str = include_str!("../../../web/imagine.js");
 const APP_CSS: &str = include_str!("../../../web/app.css");
 const THINKING_ORBS_ENGINE: &str = include_str!("../../../web/vendor/thinking-orbs.engine.js");
 const THINKING_ORBS_HOST: &str = include_str!("../../../web/thinking-orbs-host.js");
@@ -182,6 +183,7 @@ fn app(state: AppState) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/app.js", get(app_js))
+        .route("/imagine.js", get(imagine_js))
         .route("/app.css", get(app_css))
         .route("/thinking-orbs-host.js", get(thinking_orbs_host))
         .route("/vendor/thinking-orbs.engine.js", get(thinking_orbs_engine))
@@ -483,6 +485,10 @@ fn cookie_value(headers: &HttpHeaderMap, name: &str) -> Option<String> {
 
 async fn app_js() -> Response {
     js(APP_JS)
+}
+
+async fn imagine_js() -> Response {
+    js(IMAGINE_JS)
 }
 
 async fn app_css() -> Response {
@@ -1222,6 +1228,43 @@ fn task_json(task: blora_storage::TaskRecord) -> TaskJson {
     }
 }
 
+/// Imagine gallery reads image paths and failures, not the coding-tool summary.
+fn imagine_tool_text(group: &[&blora_session::TranscriptItem]) -> String {
+    let mut lines = Vec::new();
+    for item in group {
+        let blora_session::TranscriptItem::Tool {
+            name,
+            status,
+            output,
+            ..
+        } = item
+        else {
+            continue;
+        };
+        if status == "failed" || status == "error" {
+            lines.push(
+                output
+                    .clone()
+                    .filter(|text| !text.trim().is_empty())
+                    .unwrap_or_else(|| format!("{name} 失败")),
+            );
+            continue;
+        }
+        if let Some(output) = output {
+            for line in output.lines() {
+                if line.contains(".blora/images/") {
+                    lines.push(line.trim().to_owned());
+                }
+            }
+        }
+    }
+    if lines.is_empty() {
+        blora_session::summarize_tool_run(group, false)
+    } else {
+        lines.join("\n")
+    }
+}
+
 fn to_json(state: &AppState, id: &SessionId) -> Result<SessionJson, ApiError> {
     let projection = state.runtime.show_session(id).map_err(ApiError::from)?;
     let session = projection
@@ -1262,7 +1305,11 @@ fn to_json(state: &AppState, id: &SessionId) -> Result<SessionJson, ApiError> {
                     let group: Vec<&TranscriptItem> = items[start..index].iter().collect();
                     out.push(TranscriptJson {
                         kind: "tools".to_owned(),
-                        text: blora_session::summarize_tool_run(&group, false),
+                        text: if session.mode == Mode::Imagine {
+                            imagine_tool_text(&group)
+                        } else {
+                            blora_session::summarize_tool_run(&group, false)
+                        },
                     });
                     continue;
                 }

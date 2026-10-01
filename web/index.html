@@ -135,6 +135,25 @@
                 placeholder="要在这个工作区做什么？输入 / 查看命令"
               ></textarea>
               <div class="ba-composer__bar">
+                <label class="ba-perm ba-imagine-only" hidden>
+                  <span>画幅</span>
+                  <select id="imagine-aspect" class="blora-input">
+                    <option value="1:1">1:1</option>
+                    <option value="16:9">16:9</option>
+                    <option value="9:16">9:16</option>
+                    <option value="4:3">4:3</option>
+                    <option value="3:4">3:4</option>
+                  </select>
+                </label>
+                <label class="ba-perm ba-imagine-only" hidden>
+                  <span>张数</span>
+                  <select id="imagine-count" class="blora-input">
+                    <option value="1">1</option>
+                    <option value="2">2</option>
+                    <option value="3">3</option>
+                    <option value="4">4</option>
+                  </select>
+                </label>
                 <label class="ba-perm">
                   <span>模式</span>
                   <select id="run-mode" class="blora-input">
@@ -230,6 +249,7 @@
     <script src="/vendor/layout.global.js"></script>
     <script src="/vendor/theming.global.js"></script>
     <script src="/vendor/markdown.global.js"></script>
+    <script src="/imagine.js"></script>
     <script src="/app.js"></script>
     <script type="module" src="/thinking-orbs-host.js"></script>
   </body>

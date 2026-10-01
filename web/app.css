@@ -283,6 +283,48 @@ blora-sidebar-layout {
   justify-content: space-between;
 }
 
+.ba-session--imagine .ba-thread {
+  width: min(64rem, 100%);
+  margin: 0 auto;
+}
+
+.ba-gallery {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--blora-space-4);
+  width: 100%;
+}
+
+@media (min-width: 800px) {
+  .ba-gallery {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+.ba-card {
+  margin: 0;
+  overflow: hidden;
+  background: var(--blora-color-raised, var(--blora-color-surface));
+  border: var(--blora-border-width) solid var(--blora-color-border);
+  border-radius: var(--blora-radius-lg, 1rem);
+}
+
+.ba-card img {
+  display: block;
+  width: 100%;
+  height: auto;
+  background: var(--blora-color-sunken, var(--blora-color-surface));
+}
+
+.ba-card figcaption {
+  padding: var(--blora-space-3);
+  color: var(--blora-color-text);
+}
+
+.ba-gallery blora-alert {
+  grid-column: 1 / -1;
+}
+
 .ba-generated {
   display: flex;
   flex-wrap: wrap;

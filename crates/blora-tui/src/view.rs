@@ -1988,6 +1988,89 @@ fn welcome_lines(theme: &Theme) -> Vec<Line<'static>> {
     ]
 }
 
+/// Imagine sessions list saved files instead of a coding transcript.
+fn imagine_lines(
+    projection: &SessionProjection,
+    width: usize,
+    theme: &Theme,
+) -> RenderedTranscript {
+    let mut out = vec![Line::from(Span::styled(
+        "已生成",
+        theme.fg(theme.text).add_modifier(Modifier::BOLD),
+    ))];
+    let mut prompt = String::new();
+    let mut any = false;
+    for item in &projection.transcript {
+        match item {
+            TranscriptItem::User { text, .. } => {
+                prompt = text.lines().next().unwrap_or("").trim().to_owned();
+            }
+            TranscriptItem::Tool { status, output, .. } => {
+                let output = output.as_deref().unwrap_or("");
+                let mut images = Vec::new();
+                for line in output.lines() {
+                    if let Some(path) = image_path_token(line) {
+                        images.push((path.to_owned(), line.trim().to_owned()));
+                    }
+                }
+                if !images.is_empty() {
+                    any = true;
+                    for (path, line) in images {
+                        out.push(Line::default());
+                        let caption = if prompt.is_empty() {
+                            path
+                        } else {
+                            prompt.clone()
+                        };
+                        for wrapped in wrap_text(&caption, width.saturating_sub(2).max(8)) {
+                            out.push(Line::from(Span::styled(wrapped, theme.fg(theme.text))));
+                        }
+                        for wrapped in wrap_text(&line, width.saturating_sub(2).max(8)) {
+                            out.push(Line::from(Span::styled(wrapped, theme.mute())));
+                        }
+                    }
+                } else if status == "failed" || status == "error" {
+                    any = true;
+                    let message = if output.trim().is_empty() {
+                        "生成失败".to_owned()
+                    } else {
+                        output.trim().to_owned()
+                    };
+                    out.push(Line::default());
+                    for wrapped in wrap_text(&message, width.saturating_sub(2).max(8))
+                        .into_iter()
+                        .take(4)
+                    {
+                        out.push(Line::from(Span::styled(wrapped, theme.fg(theme.rust))));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if !any {
+        out.push(Line::default());
+        out.push(Line::from(Span::styled(
+            "还没有图片。在下面描述画面。",
+            theme.mute(),
+        )));
+    }
+    RenderedTranscript {
+        lines: out,
+        marks: Vec::new(),
+        live_visible: false,
+    }
+}
+
+fn image_path_token(line: &str) -> Option<&str> {
+    let start = line.find(".blora/images/")?;
+    let rest = &line[start..];
+    let end = rest
+        .find(|ch: char| ch.is_whitespace())
+        .unwrap_or(rest.len());
+    Some(rest[..end].trim_end_matches(|ch: char| matches!(ch, ',' | ')' | ']' | '.')))
+}
+
 fn transcript_lines(
     projection: &SessionProjection,
     search: Option<&str>,
@@ -1996,6 +2079,13 @@ fn transcript_lines(
     user_label: &str,
     theme: &Theme,
 ) -> RenderedTranscript {
+    if projection
+        .session
+        .as_ref()
+        .is_some_and(|session| session.mode == Mode::Imagine)
+    {
+        return imagine_lines(projection, width, theme);
+    }
     let needle = search.map(str::to_ascii_lowercase);
     let mut out = Vec::new();
     let mut marks = Vec::new();
@@ -3904,10 +3994,21 @@ fn render_composer(
     };
     let available = prompt.width.saturating_sub(2) as usize;
     let (visible, cursor_col) = visible_input(model.input, available);
+    let imagine = model
+        .projection
+        .and_then(|projection| projection.session.as_ref())
+        .is_some_and(|session| session.mode == Mode::Imagine);
     let prompt_line = if model.input.is_empty() {
         Line::from(vec![
             Span::styled("❯ ", theme.rose_bold()),
-            Span::styled("message or /command", theme.mute()),
+            Span::styled(
+                if imagine {
+                    "描述画面，或输入 / 命令"
+                } else {
+                    "message or /command"
+                },
+                theme.mute(),
+            ),
         ])
     } else {
         Line::from(vec![
@@ -4770,6 +4871,55 @@ mod tests {
         let (lines, _) = render_passport_with_hits(area, &dialog, Some((green.x, green.y)));
         let chars = row_chars(&lines[green.y as usize]);
         assert_eq!(chars[green.x as usize], '+', "green shows + on hover");
+    }
+
+    #[test]
+    #[test]
+    fn imagine_transcript_lists_saved_images_and_failures() {
+        let mut projection = SessionProjection::new();
+        projection.session = Some(blora_session::SessionRecord {
+            id: blora_types::SessionId::generate(),
+            title: None,
+            workspace_path: "/tmp".to_owned(),
+            mode: Mode::Imagine,
+            status: blora_types::SessionStatus::Active,
+            parent_session_id: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        });
+        let hash = "a".repeat(64);
+        projection.transcript.push(TranscriptItem::User {
+            text: "一张珊瑚壁纸\n画幅 16:9，张数 1".to_owned(),
+            event_id: blora_types::EventId::generate(),
+        });
+        projection.transcript.push(TranscriptItem::Tool {
+            name: "generate_image".to_owned(),
+            status: "completed".to_owned(),
+            event_id: blora_types::EventId::generate(),
+            arguments: None,
+            output: Some(format!(".blora/images/sess/{hash}.png image/png 1x1")),
+            call_id: None,
+        });
+        projection.transcript.push(TranscriptItem::Tool {
+            name: "generate_image".to_owned(),
+            status: "failed".to_owned(),
+            event_id: blora_types::EventId::generate(),
+            arguments: None,
+            output: Some("image API HTTP 401".to_owned()),
+            call_id: None,
+        });
+        let rendered = transcript_lines(&projection, None, false, 78, "you", &Theme::current());
+        let text = rendered
+            .lines
+            .iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("已生成"));
+        assert!(text.contains("一张珊瑚壁纸"));
+        assert!(text.contains(".blora/images/sess/"));
+        assert!(text.contains("HTTP 401"));
+        assert!(!text.contains("you"));
     }
 
     #[test]
