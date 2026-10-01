@@ -28,7 +28,7 @@ See LICENSE or https://www.gnu.org/licenses/ for details.";
 #[command(
     name = "blora",
     version,
-    about = "Blora Agent. Run `blora` for the TUI, `blora --web` or `blora web` for the browser UI.",
+    about = "Blora Agent. Run `blora` for the TUI, `blora -p` for a headless one-shot, `blora --web` for the browser UI.",
     after_help = LICENSE_NOTICE,
     args_conflicts_with_subcommands = true
 )]
@@ -45,6 +45,36 @@ struct Cli {
     /// Bind address used with `--web` (default: 127.0.0.1:8787).
     #[arg(long, default_value = "127.0.0.1:8787")]
     bind: String,
+    /// Headless one-shot. Creates a session, runs the prompt, prints the result, and exits.
+    #[arg(short = 'p', long = "print")]
+    print: bool,
+    /// Output for `--print`: `text`, `json`, or `stream-json`.
+    #[arg(long, default_value = "text", value_parser = ["text", "json", "stream-json"])]
+    output_format: String,
+    /// Turn budget for `--print` (default 12).
+    #[arg(long)]
+    max_turns: Option<u32>,
+    /// Existing session for `--print` (`ses_…`). Omit to create one.
+    #[arg(long)]
+    session: Option<String>,
+    /// Permission mode for `--print`: plan, ask, auto-edit, or yolo.
+    #[arg(long, value_parser = parse_permission)]
+    permission: Option<PermissionMode>,
+    /// Same as `--permission yolo` for `--print`.
+    #[arg(long)]
+    yes: bool,
+    /// Force the mock provider for `--print`.
+    #[arg(long)]
+    mock: bool,
+    /// Model override for `--print`.
+    #[arg(long)]
+    model: Option<String>,
+    /// Provider for `--print`: openai, responses, anthropic, or mock.
+    #[arg(long)]
+    provider: Option<String>,
+    /// Prompt words for `--print`. If omitted, the prompt is read from stdin.
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    prompt: Vec<String>,
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -281,8 +311,14 @@ enum TaskCommands {
 
 fn main() {
     if let Err(err) = run() {
-        eprintln!("error: {err}");
-        std::process::exit(1);
+        let code = err
+            .downcast_ref::<HeadlessExit>()
+            .map(|exit| exit.code)
+            .unwrap_or(1);
+        if code != 2 || !err.to_string().is_empty() {
+            eprintln!("error: {err}");
+        }
+        std::process::exit(code);
     }
 }
 
@@ -295,6 +331,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     match cli.command {
         None if cli.web => serve_web(cli.home.as_deref(), &cli.bind, cli.workspace, false),
+        None if cli.print => headless(&cli),
+        None if !cli.prompt.is_empty() => Err(
+            "a prompt is only accepted with --print. Example: blora -p \"fix the tests\"".into(),
+        ),
         None => {
             let runtime = Runtime::new(open_store(cli.home.as_deref())?);
             let workspace = cli.workspace.unwrap_or(std::env::current_dir()?);
@@ -680,6 +720,158 @@ fn print_projection(
     Ok(())
 }
 
+#[derive(Debug)]
+struct HeadlessExit {
+    code: i32,
+    message: String,
+}
+
+impl std::fmt::Display for HeadlessExit {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}", self.message)
+    }
+}
+
+impl std::error::Error for HeadlessExit {}
+
+fn headless(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    let prompt = if cli.prompt.is_empty() {
+        let mut buffer = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut buffer)?;
+        buffer
+    } else {
+        cli.prompt.join(" ")
+    };
+    if prompt.trim().is_empty() {
+        return Err("prompt is empty; pass it after -p or on stdin".into());
+    }
+    let runtime = Runtime::new(open_store(cli.home.as_deref())?);
+    let workspace = cli.workspace.clone().unwrap_or(std::env::current_dir()?);
+    let workspace_path = workspace
+        .canonicalize()
+        .unwrap_or(workspace)
+        .display()
+        .to_string();
+    let session_id = if let Some(id) = &cli.session {
+        SessionId::parse(id)?
+    } else {
+        let title: String = prompt.chars().take(80).collect();
+        runtime.create_session(CreateSession {
+            title: Some(title),
+            workspace_path,
+            mode: Mode::Code,
+            parent_session_id: None,
+        })?
+    };
+    let permission = cli.permission;
+    let auto_approve = permission.map_or(cli.yes, PermissionMode::auto_approve);
+    let events = runtime.subscribe();
+    let streaming = cli.output_format == "stream-json";
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop_flag = Arc::clone(&stop);
+    let printer = streaming.then(|| {
+        std::thread::spawn(move || {
+            use std::sync::atomic::Ordering;
+            while !stop_flag.load(Ordering::Relaxed) {
+                match events.recv_timeout(std::time::Duration::from_millis(40)) {
+                    Ok(event) => {
+                        if let Ok(line) = serde_json::to_string(&event) {
+                            println!("{line}");
+                        }
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+            }
+            while let Ok(event) = events.try_recv() {
+                if let Ok(line) = serde_json::to_string(&event) {
+                    println!("{line}");
+                }
+            }
+        })
+    });
+    let run_result = runtime.run(
+        &session_id,
+        &prompt,
+        &CancelToken::new(),
+        &RunOptions {
+            model: cli.model.clone().unwrap_or_default(),
+            mock: cli.mock,
+            auto_approve,
+            interactive: false,
+            max_turns: cli.max_turns.unwrap_or(12),
+            provider: cli.provider.clone().unwrap_or_default(),
+            read_only: false,
+            worktree: false,
+            passport_user_token: None,
+            permission,
+        },
+    );
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    if let Some(printer) = printer {
+        let _ = printer.join();
+    }
+    let assistant = last_assistant(&runtime, &session_id).unwrap_or_default();
+    let approval = run_result
+        .as_ref()
+        .err()
+        .is_some_and(|err| err.to_string().contains("approval required"));
+    match cli.output_format.as_str() {
+        "json" => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "session_id": session_id.to_string(),
+                    "ok": run_result.is_ok(),
+                    "approval_required": approval,
+                    "result": assistant,
+                    "error": run_result.as_ref().err().map(ToString::to_string),
+                })
+            );
+        }
+        "stream-json" => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "type": "result",
+                    "session_id": session_id.to_string(),
+                    "ok": run_result.is_ok(),
+                    "approval_required": approval,
+                    "result": assistant,
+                    "error": run_result.as_ref().err().map(ToString::to_string),
+                })
+            );
+        }
+        _ => {
+            eprintln!("session {session_id}");
+            if !assistant.is_empty() {
+                println!("{assistant}");
+            }
+        }
+    }
+    match run_result {
+        Ok(_) => Ok(()),
+        Err(err) if approval => Err(Box::new(HeadlessExit {
+            code: 2,
+            message: err.to_string(),
+        })),
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn last_assistant(runtime: &Runtime, session_id: &SessionId) -> Result<String, blora_types::BloraError> {
+    let projection = runtime.show_session(session_id)?;
+    Ok(projection
+        .transcript
+        .iter()
+        .rev()
+        .find_map(|item| match item {
+            TranscriptItem::Assistant { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .unwrap_or_default())
+}
+
 fn parse_permission(text: &str) -> Result<PermissionMode, String> {
     PermissionMode::parse(text)
         .ok_or_else(|| format!("expected plan, ask, auto-edit, or yolo (got {text})"))
@@ -879,6 +1071,28 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[test]
+    fn print_flag_parses_prompt_and_format() {
+        let cli = Cli::try_parse_from([
+            "blora",
+            "-p",
+            "--output-format",
+            "json",
+            "--permission",
+            "yolo",
+            "--max-turns",
+            "4",
+            "fix the tests",
+        ])
+        .unwrap();
+        assert!(cli.print);
+        assert!(cli.command.is_none());
+        assert_eq!(cli.output_format, "json");
+        assert_eq!(cli.max_turns, Some(4));
+        assert_eq!(cli.permission, Some(PermissionMode::Yolo));
+        assert_eq!(cli.prompt, vec!["fix the tests".to_owned()]);
     }
 
     #[test]
