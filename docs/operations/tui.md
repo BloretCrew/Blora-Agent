@@ -26,6 +26,12 @@
 
 `/help`、`/git`、`/files` 等较长输出显示在 prompt 上方的结果面板，`Esc` 或点击关闭。
 
+## 首次使用引导
+
+首次启动进入欢迎、账号、完成三个步骤。`Tab` / 方向键选择操作，`Enter` 确认，鼠标可直接点击操作行。点击登录后显示设备码与授权地址，可打开浏览器、复制或取消。`Esc` 先取消正在进行的登录，再关闭引导；`Ctrl+C` / `Ctrl+Q` 退出程序。小终端会保留当前选中的操作，方向键可查看其他选项。
+
+选择“稍后设置”保留已有供应商配置，点击“开始使用”保存引导版本。`/login` 打开账号步骤，`/onboarding` 重开完整引导；关闭引导后保留原会话和输入状态。
+
 ## 斜杠命令
 
 会话：`/new` `/sessions` `/goto` `/status` `/context` `/id` `/pwd` `/fork` `/resume` `/archive` `/export` `/timeline` `/code` `/work` `/agent` `/plan` `/mode` `/next` `/prev` `/reload` `/quit`

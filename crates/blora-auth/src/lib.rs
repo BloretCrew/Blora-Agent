@@ -178,60 +178,101 @@ impl PassportConfig {
     }
 
     pub fn poll_device(&self, device: &DeviceCode) -> Result<PassportUser, AuthError> {
-        let deadline = std::time::Instant::now() + Duration::from_secs(device.expires_in);
+        self.poll_device_cancellable(device, &std::sync::atomic::AtomicBool::new(false))
+    }
+
+    /// Poll without sleeping; callers own the deadline and polling interval.
+    pub fn poll_device_once(&self, device: &DeviceCode) -> Result<DevicePoll, AuthError> {
+        let body = format!(
+            "client_id={}&client_secret={}&grant_type={}&device_code={}",
+            encode_form(&self.app_id),
+            encode_form(&self.app_secret),
+            encode_form("urn:ietf:params:oauth:grant-type:device_code"),
+            encode_form(&device.device_code),
+        );
+        let response = ureq::post(&format!("{}/oauth/token", self.base_url))
+            .set("Content-Type", "application/x-www-form-urlencoded")
+            .set("Accept", "application/json")
+            .timeout(Duration::from_secs(20))
+            .send_string(&body)
+            .or_any_status()
+            .map_err(|err| AuthError::Network(err.to_string()))?;
+        let status = response.status();
+        let value: Value = response
+            .into_json()
+            .map_err(|err| AuthError::Protocol(err.to_string()))?;
+        match value.get("error").and_then(Value::as_str).unwrap_or("") {
+            "authorization_pending" => return Ok(DevicePoll::Pending),
+            "slow_down" => return Ok(DevicePoll::SlowDown),
+            "access_denied" | "expired_token" | "invalid_client" | "invalid_scope" => {
+                return Err(AuthError::Rejected(error_message(&value, status)));
+            }
+            _ => {}
+        }
+        if !(200..300).contains(&status) {
+            return Err(AuthError::Rejected(error_message(&value, status)));
+        }
+        let access_token = value
+            .get("access_token")
+            .and_then(Value::as_str)
+            .filter(|token| !token.trim().is_empty())
+            .ok_or_else(|| {
+                AuthError::Protocol("Passport token response has no access_token".to_owned())
+            })?;
+        let mut user = self.userinfo(access_token)?;
+        // PassPort AI accepts the OAuth access_token as Bearer.
+        user.apptoken = Some(access_token.to_owned());
+        user.refresh_token = value
+            .get("refresh_token")
+            .and_then(Value::as_str)
+            .filter(|token| !token.is_empty())
+            .map(ToOwned::to_owned);
+        user.expires_in = value.get("expires_in").and_then(Value::as_u64);
+        Ok(DevicePoll::Authenticated(user))
+    }
+
+    /// Cancellation is checked while waiting and after each blocking polling attempt.
+    pub fn poll_device_cancellable(
+        &self,
+        device: &DeviceCode,
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> Result<PassportUser, AuthError> {
+        use std::sync::atomic::Ordering;
+        let started = std::time::Instant::now();
+        let expires_in = Duration::from_secs(device.expires_in);
         let mut interval = device.interval.max(1);
         loop {
-            if std::time::Instant::now() >= deadline {
+            let waiting = std::time::Instant::now();
+            let delay = Duration::from_secs(interval);
+            loop {
+                if cancelled.load(Ordering::Relaxed) {
+                    return Err(AuthError::Cancelled);
+                }
+                let remaining = expires_in.saturating_sub(started.elapsed());
+                if remaining.is_zero() {
+                    return Err(AuthError::Rejected("expired_token".to_owned()));
+                }
+                let wait_remaining = delay.saturating_sub(waiting.elapsed());
+                if wait_remaining.is_zero() {
+                    break;
+                }
+                thread::sleep(
+                    Duration::from_millis(100)
+                        .min(remaining)
+                        .min(wait_remaining),
+                );
+            }
+            let result = self.poll_device_once(device);
+            if cancelled.load(Ordering::Relaxed) {
+                return Err(AuthError::Cancelled);
+            }
+            if started.elapsed() >= expires_in {
                 return Err(AuthError::Rejected("expired_token".to_owned()));
             }
-            thread::sleep(Duration::from_secs(interval));
-            let body = format!(
-                "client_id={}&client_secret={}&grant_type={}&device_code={}",
-                encode_form(&self.app_id),
-                encode_form(&self.app_secret),
-                encode_form("urn:ietf:params:oauth:grant-type:device_code"),
-                encode_form(&device.device_code),
-            );
-            let response = ureq::post(&format!("{}/oauth/token", self.base_url))
-                .set("Content-Type", "application/x-www-form-urlencoded")
-                .set("Accept", "application/json")
-                .timeout(Duration::from_secs(20))
-                .send_string(&body)
-                .or_any_status()
-                .map_err(|err| AuthError::Network(err.to_string()))?;
-            let status = response.status();
-            let value: Value = response
-                .into_json()
-                .map_err(|err| AuthError::Protocol(err.to_string()))?;
-            if let Some(access_token) = value.get("access_token").and_then(Value::as_str) {
-                let mut user = self.userinfo(access_token)?;
-                // PassPort AI accepts the OAuth access_token as Bearer.
-                user.apptoken = Some(access_token.to_owned());
-                user.refresh_token = value
-                    .get("refresh_token")
-                    .and_then(Value::as_str)
-                    .filter(|token| !token.is_empty())
-                    .map(ToOwned::to_owned);
-                user.expires_in = value.get("expires_in").and_then(Value::as_u64);
-                return Ok(user);
-            }
-            let error = value.get("error").and_then(Value::as_str).unwrap_or("");
-            match error {
-                "authorization_pending" => continue,
-                "slow_down" => {
-                    interval = interval.saturating_add(5);
-                }
-                "access_denied" | "expired_token" | "invalid_client" | "invalid_scope" => {
-                    return Err(AuthError::Rejected(error_message(&value, status)));
-                }
-                _ if !(200..300).contains(&status) => {
-                    return Err(AuthError::Rejected(error_message(&value, status)));
-                }
-                _ => {
-                    return Err(AuthError::Protocol(
-                        "Passport token response has no access_token".to_owned(),
-                    ));
-                }
+            match result? {
+                DevicePoll::Authenticated(user) => return Ok(user),
+                DevicePoll::Pending => {}
+                DevicePoll::SlowDown => interval = interval.saturating_add(5),
             }
         }
     }
@@ -279,6 +320,13 @@ impl PassportConfig {
         }
         parse_user(value)
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DevicePoll {
+    Pending,
+    SlowDown,
+    Authenticated(PassportUser),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -341,6 +389,8 @@ impl PassportUser {
 
 #[derive(Debug, thiserror::Error)]
 pub enum AuthError {
+    #[error("authentication cancelled")]
+    Cancelled,
     #[error("authentication configuration error: {0}")]
     Config(String),
     #[error("authentication network error: {0}")]
@@ -532,6 +582,304 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(user.apptoken.as_deref(), Some("tok-1"));
+    }
+
+    fn device(expires_in: u64, interval: u64) -> DeviceCode {
+        DeviceCode::from_public(
+            "dc",
+            "ABCD-EFGH",
+            "https://passport.example",
+            expires_in,
+            interval,
+        )
+    }
+
+    fn mock_passport(
+        responses: Vec<(&'static str, u16, &'static [u8])>,
+    ) -> (PassportConfig, thread::JoinHandle<Vec<std::time::Instant>>) {
+        mock_passport_owned(
+            responses
+                .into_iter()
+                .map(|(path, status, body)| (path, status, body.to_vec()))
+                .collect(),
+        )
+    }
+
+    fn mock_passport_owned(
+        responses: Vec<(&'static str, u16, Vec<u8>)>,
+    ) -> (PassportConfig, thread::JoinHandle<Vec<std::time::Instant>>) {
+        use std::io::Read;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let mut received = Vec::new();
+            for (path, status, body) in responses {
+                let deadline = std::time::Instant::now() + Duration::from_secs(15);
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(
+                                std::time::Instant::now() < deadline,
+                                "missing request: {path}"
+                            );
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(err) => panic!("accept failed: {err}"),
+                    }
+                };
+                received.push(std::time::Instant::now());
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut request = Vec::new();
+                loop {
+                    let mut buffer = [0; 4096];
+                    let read = stream.read(&mut buffer).unwrap();
+                    assert!(read > 0, "incomplete request");
+                    request.extend_from_slice(&buffer[..read]);
+                    if let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&request[..end]);
+                        let length = headers
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().unwrap())
+                            })
+                            .unwrap_or(0);
+                        if request.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
+                }
+                let request = String::from_utf8_lossy(&request);
+                assert!(request.starts_with(path), "unexpected request: {request}");
+                if path.starts_with("POST") {
+                    assert!(request.contains("device_code=dc"));
+                    assert!(request.contains(
+                        "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code"
+                    ));
+                } else {
+                    assert!(
+                        request
+                            .to_ascii_lowercase()
+                            .contains("authorization: bearer access")
+                    );
+                }
+                write_response(&mut stream, status, "Mock", &body);
+            }
+            received
+        });
+        let config = PassportConfig::new("bp_app", "bs_secret", format!("http://{addr}")).unwrap();
+        (config, server)
+    }
+
+    #[test]
+    fn poll_device_once_reports_pending_and_slow_down() {
+        for (body, expected) in [
+            (
+                br#"{"error":"authorization_pending"}"#.as_slice(),
+                DevicePoll::Pending,
+            ),
+            (br#"{"error":"slow_down"}"#.as_slice(), DevicePoll::SlowDown),
+        ] {
+            let (config, server) = mock_passport(vec![("POST /oauth/token", 400, body)]);
+            assert_eq!(config.poll_device_once(&device(0, 60)).unwrap(), expected);
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn poll_device_once_preserves_authenticated_tokens() {
+        let (config, server) = mock_passport(vec![
+            (
+                "POST /oauth/token",
+                200,
+                br#"{"access_token":"access","refresh_token":"refresh","expires_in":3600}"#,
+            ),
+            (
+                "GET /oauth/userinfo",
+                200,
+                br#"{"username":"alice","apptoken":"other"}"#,
+            ),
+        ]);
+        let DevicePoll::Authenticated(user) = config.poll_device_once(&device(60, 1)).unwrap()
+        else {
+            panic!("expected authenticated user");
+        };
+        assert_eq!(user.username, "alice");
+        assert_eq!(user.apptoken.as_deref(), Some("access"));
+        assert_eq!(user.refresh_token.as_deref(), Some("refresh"));
+        assert_eq!(user.expires_in, Some(3600));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn poll_device_once_rejects_errors_even_with_a_token() {
+        for status in [200, 400] {
+            for error in [
+                "access_denied",
+                "expired_token",
+                "invalid_client",
+                "invalid_scope",
+            ] {
+                let body = format!("{{\"error\":\"{error}\",\"access_token\":\"access\"}}");
+                let (config, server) =
+                    mock_passport_owned(vec![("POST /oauth/token", status, body.into_bytes())]);
+                assert!(
+                    matches!(config.poll_device_once(&device(60, 1)), Err(AuthError::Rejected(message)) if message == error)
+                );
+                server.join().unwrap();
+            }
+        }
+        let (config, server) = mock_passport(vec![(
+            "POST /oauth/token",
+            500,
+            br#"{"access_token":"access"}"#,
+        )]);
+        assert!(
+            matches!(config.poll_device_once(&device(60, 1)), Err(AuthError::Rejected(message)) if message == "HTTP 500")
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn poll_device_once_requires_a_nonempty_token_and_valid_json() {
+        for body in [
+            br#"{}"#.as_slice(),
+            br#"{"access_token":""}"#.as_slice(),
+            br#"{"access_token":"   "}"#.as_slice(),
+            br#"{"access_token":123}"#.as_slice(),
+            b"not json".as_slice(),
+        ] {
+            let (config, server) = mock_passport(vec![("POST /oauth/token", 200, body)]);
+            assert!(matches!(
+                config.poll_device_once(&device(60, 1)),
+                Err(AuthError::Protocol(_))
+            ));
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn poll_device_reports_network_failure() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let config = PassportConfig::new("app", "secret", format!("http://{addr}")).unwrap();
+        assert!(matches!(
+            config.poll_device_once(&device(60, 1)),
+            Err(AuthError::Network(_))
+        ));
+        assert!(matches!(
+            config.poll_device_cancellable(
+                &device(60, 1),
+                &std::sync::atomic::AtomicBool::new(false)
+            ),
+            Err(AuthError::Network(_))
+        ));
+    }
+
+    #[test]
+    fn poll_device_cancellable_stops_before_request() {
+        use std::sync::atomic::AtomicBool;
+        let config = PassportConfig::new("app", "secret", "http://127.0.0.1:1").unwrap();
+        assert!(matches!(
+            config.poll_device_cancellable(&device(60, 1), &AtomicBool::new(true)),
+            Err(AuthError::Cancelled)
+        ));
+        assert!(
+            matches!(config.poll_device_cancellable(&device(0, 1), &AtomicBool::new(false)), Err(AuthError::Rejected(message)) if message == "expired_token")
+        );
+        let started = std::time::Instant::now();
+        assert!(
+            matches!(config.poll_device_cancellable(&device(1, 1), &AtomicBool::new(false)), Err(AuthError::Rejected(message)) if message == "expired_token")
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn poll_device_cancellable_interrupts_wait() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let cancelled = AtomicBool::new(false);
+        let config = PassportConfig::new("app", "secret", "http://127.0.0.1:1").unwrap();
+        thread::scope(|scope| {
+            let poll = scope.spawn(|| config.poll_device_cancellable(&device(60, 30), &cancelled));
+            thread::sleep(Duration::from_millis(150));
+            cancelled.store(true, Ordering::Relaxed);
+            let started = std::time::Instant::now();
+            assert!(matches!(poll.join().unwrap(), Err(AuthError::Cancelled)));
+            assert!(started.elapsed() < Duration::from_secs(1));
+        });
+    }
+
+    #[test]
+    fn poll_device_cancellable_checks_cancellation_after_http_failure() {
+        use std::io::Read;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let cancelled = AtomicBool::new(false);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let config = PassportConfig::new("app", "secret", format!("http://{addr}")).unwrap();
+        thread::scope(|scope| {
+            let server = scope.spawn(|| {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut buffer = [0; 4096];
+                assert!(stream.read(&mut buffer).unwrap() > 0);
+                cancelled.store(true, Ordering::Relaxed);
+                write_response(&mut stream, 200, "OK", b"invalid json");
+            });
+            assert!(matches!(
+                config.poll_device_cancellable(&device(60, 1), &cancelled),
+                Err(AuthError::Cancelled)
+            ));
+            server.join().unwrap();
+        });
+    }
+
+    #[test]
+    fn poll_device_cancellable_checks_expiry_after_http_response() {
+        use std::io::Read;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let config = PassportConfig::new("app", "secret", format!("http://{addr}")).unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut buffer = [0; 4096];
+            assert!(stream.read(&mut buffer).unwrap() > 0);
+            thread::sleep(Duration::from_millis(1100));
+            write_response(
+                &mut stream,
+                400,
+                "Bad Request",
+                br#"{"error":"authorization_pending"}"#,
+            );
+        });
+        assert!(
+            matches!(config.poll_device_cancellable(&device(2, 1), &std::sync::atomic::AtomicBool::new(false)), Err(AuthError::Rejected(message)) if message == "expired_token")
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn poll_device_cancellable_slow_down_increases_interval() {
+        let (config, server) = mock_passport(vec![
+            ("POST /oauth/token", 400, br#"{"error":"slow_down"}"#),
+            ("POST /oauth/token", 400, br#"{"error":"access_denied"}"#),
+        ]);
+        assert!(
+            matches!(config.poll_device_cancellable(&device(30, 0), &std::sync::atomic::AtomicBool::new(false)), Err(AuthError::Rejected(message)) if message == "access_denied")
+        );
+        let received = server.join().unwrap();
+        assert!(received[1].duration_since(received[0]) >= Duration::from_millis(5900));
     }
 
     fn write_response(stream: &mut std::net::TcpStream, status: u16, text: &str, body: &[u8]) {

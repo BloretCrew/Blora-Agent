@@ -12,6 +12,7 @@ pub mod hooks;
 mod market;
 mod mcp;
 mod memory;
+mod onboarding;
 mod plugins;
 mod work;
 

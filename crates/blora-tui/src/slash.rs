@@ -32,6 +32,7 @@ const fn cmd(
 pub const COMMANDS: &[SlashCommand] = &[
     cmd("help", &["?"], "[query]", "List slash commands", "system"),
     cmd("login", &[], "", "Sign in with Bloret PassPort", "system"),
+    cmd("onboarding", &[], "", "Reopen first-use setup", "system"),
     cmd("logout", &[], "", "Sign out of Bloret PassPort", "system"),
     cmd(
         "keymap",

@@ -180,3 +180,8 @@ CREATE TRIGGER IF NOT EXISTS events_no_delete BEFORE DELETE ON events
 BEGIN
     SELECT RAISE(ABORT, 'events are append-only');
 END;
+
+CREATE TABLE IF NOT EXISTS onboarding (
+    surface TEXT PRIMARY KEY,
+    version INTEGER NOT NULL CHECK (version >= 0)
+);

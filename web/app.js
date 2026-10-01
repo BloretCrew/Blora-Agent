@@ -26,6 +26,8 @@ const SLASH = [
   ["tasks", "打开任务"],
   ["approvals", "打开审批"],
   ["settings", "打开设置"],
+  ["login", "连接 PassPort 账号"],
+  ["onboarding", "重新打开首次使用引导"],
   ["timeline", "打开时间线"],
   ["artifacts", "打开产物"],
   ["git", "打开工作区 Git"],
@@ -54,67 +56,6 @@ const pageAlert = document.querySelector("#page-alert");
 const passportLogin = document.querySelector("#passport-login");
 const passportUser = document.querySelector("#passport-user");
 const passportLogout = document.querySelector("#passport-logout");
-let passportDevice = null;
-
-async function refreshPassport() {
-  if (!passportLogin || !passportUser) return;
-  try {
-    const user = await api("/api/auth/me");
-    passportLogin.hidden = true;
-    passportUser.hidden = false;
-    passportUser.textContent = user.name || user.username;
-    const hero = document.querySelector("#hero-title");
-    if (hero && !state.sessionId && currentRunMode() !== "imagine") {
-      hero.textContent = `继续，${user.name || user.username}`;
-    }
-    if (passportLogout) passportLogout.hidden = false;
-  } catch (_) {
-    passportLogin.hidden = false;
-    passportUser.hidden = true;
-    if (passportLogout) passportLogout.hidden = true;
-    const payload = await fetch("/api/auth/device").then((response) => response.json());
-    passportDevice = payload;
-    passportLogin.href = payload.verification_uri || "/auth/start";
-    passportLogin.textContent = "PassPort 登录";
-    if (payload.user_code) {
-      passportLogin.title = `设备码 ${payload.user_code}`;
-    }
-    pollPassportDevice();
-  }
-}
-
-if (passportLogout) {
-  passportLogout.addEventListener("click", async () => {
-    await api("/api/auth/logout", { method: "POST", body: "{}" });
-    passportDevice = null;
-    await refreshPassport();
-  });
-}
-
-async function pollPassportDevice() {
-  if (!passportDevice) return;
-  try {
-    const result = await api("/api/auth/device/poll", {
-      method: "POST",
-      body: "{}",
-      silent: true,
-    });
-    passportDevice = null;
-    passportLogin.hidden = true;
-    passportUser.hidden = false;
-    passportUser.textContent = `已登录 · ${result.name || result.username}`;
-    if (passportLogout) passportLogout.hidden = false;
-  } catch (error) {
-    const message = String(error.message || "");
-    if (message.includes("authorization_pending") || message.includes("authorization pending")) {
-      setTimeout(pollPassportDevice, Math.max(1000, Number(passportDevice.interval || 5) * 1000));
-    } else if (message.includes("slow_down")) {
-      passportDevice.interval = Number(passportDevice.interval || 5) + 5;
-      setTimeout(pollPassportDevice, passportDevice.interval * 1000);
-    }
-  }
-}
-
 function enhance() {
   if (typeof Blora !== "undefined" && typeof Blora.enhanceButtons === "function") {
     Blora.enhanceButtons(document);
@@ -205,7 +146,9 @@ async function api(path, options = {}) {
       headers,
     });
     if (!response.ok) {
-      throw new Error(await response.text());
+      const error = new Error(await response.text());
+      error.status = response.status;
+      throw error;
     }
     if (response.status === 204) {
       return null;
@@ -645,6 +588,13 @@ function appendStreamingText(text) {
 }
 
 async function applyRoute() {
+  if (location.hash === "#/onboarding") {
+    if (!onboarding.active) enterOnboarding();
+    return;
+  }
+  if (onboarding.active) leaveOnboarding();
+  document.querySelector("blora-sidebar-layout").hidden = false;
+  onboarding.lastHash = location.hash || "#/session";
   const parsed = parseHash();
   setView(parsed.view);
   if (parsed.sessionId && parsed.sessionId !== state.sessionId) {
@@ -715,13 +665,6 @@ document.querySelector("#new-session").addEventListener("click", async () => {
 document.querySelector("#composer").addEventListener("submit", async (event) => {
   event.preventDefault();
   hideAlert();
-  if (!state.sessionId) {
-    const session = await api("/api/sessions", {
-      method: "POST",
-      body: JSON.stringify({ mode: currentRunMode() }),
-    });
-    state.sessionId = session.id;
-  }
   const box = fieldInput("#prompt") || prompt;
   const text = (box?.value || "").trim();
   if (!text) {
@@ -734,6 +677,12 @@ document.querySelector("#composer").addEventListener("submit", async (event) => 
   if (text.startsWith("/")) {
     await runSlash(text);
     return;
+  }
+  if (!state.sessionId) {
+    const session = await api("/api/sessions", {
+      method: "POST", body: JSON.stringify({ mode: currentRunMode() }),
+    });
+    state.sessionId = session.id;
   }
   // While a run is in flight the composer becomes a steering channel: the
   // message is queued and delivered at the next model-turn boundary.
@@ -1064,6 +1013,7 @@ async function refreshWorkspace() {
 }
 
 async function refreshSettings() {
+  await refreshPassport();
   const info = await api("/api/settings");
   const provider = fieldInput("#pref-provider") || document.querySelector("#pref-provider");
   const model = fieldInput("#pref-model") || document.querySelector("#pref-model");
@@ -1431,6 +1381,10 @@ async function runSlash(raw) {
     showNotice(SLASH.map((row) => `/${row[0]} ${row[1]}`).join(" · "), "info", "命令");
     return;
   }
+  if (name === "login" || name === "onboarding") {
+    enterOnboarding(name === "login" ? "account" : "welcome");
+    return;
+  }
   if (name === "new") {
     const session = await api("/api/sessions", { method: "POST", body: "{}" });
     location.hash = `#/session/${session.id}`;
@@ -1651,8 +1605,5 @@ document.querySelector("#export-session")?.addEventListener("click", async () =>
   await downloadExport(state.sessionId);
 });
 
+
 enhance();
-refreshPassport();
-applyRoute().catch((error) => {
-  showAlert(error.message);
-});

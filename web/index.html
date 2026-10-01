@@ -31,7 +31,39 @@
     <link rel="stylesheet" href="/app.css" />
   </head>
   <body class="blora-page blora-scope">
-    <blora-sidebar-layout variant="seamless" sticky label="Blora Agent" toggle-label="打开导航">
+    <section id="view-onboarding" class="ba-onboarding" hidden aria-labelledby="onboarding-title">
+      <div class="ba-onboarding__card">
+        <header class="ba-onboarding__brand"><span class="blora-avatar" data-size="lg" data-variant="primary">BA</span><strong>Blora</strong></header>
+        <ol class="ba-onboarding__steps" aria-label="首次使用步骤">
+          <li data-step="welcome">01 欢迎</li><li data-step="account">02 账号</li><li data-step="complete">03 完成</li>
+        </ol>
+        <h1 id="onboarding-title" tabindex="-1"></h1>
+        <p id="onboarding-description" class="ba-onboarding__lede"></p>
+        <div id="onboarding-account" class="ba-onboarding__account" hidden>
+          <p id="onboarding-account-name"></p>
+          <div id="onboarding-device" hidden>
+            <p>在授权页面输入设备码</p>
+            <input id="onboarding-code" class="blora-input" readonly aria-label="设备码" />
+            <div class="ba-onboarding__actions">
+              <a id="onboarding-link" class="blora-button" data-variant="secondary" target="_blank" rel="noopener noreferrer">打开授权页面</a>
+              <button id="onboarding-copy" class="blora-button" data-variant="ghost" type="button">复制设备码</button>
+            </div>
+            <p id="onboarding-expiry" class="ba-brand__meta"></p>
+          </div>
+          <button id="onboarding-login" class="blora-button" data-variant="primary" type="button">登录 Bloret PassPort</button>
+          <button id="onboarding-check" class="blora-button" data-variant="ghost" type="button">重新检查账号与服务</button>
+        </div>
+        <p id="onboarding-status" role="status" aria-live="polite"></p>
+        <div class="ba-onboarding__actions">
+          <button id="onboarding-next" class="blora-button" data-variant="primary" type="button">开始设置</button>
+          <button id="onboarding-skip" class="blora-button" data-variant="ghost" type="button" hidden>稍后设置</button>
+          <button id="onboarding-back" class="blora-button" data-variant="ghost" type="button" hidden>上一步</button>
+          <button id="onboarding-cancel" class="blora-button" data-variant="ghost" type="button">返回工作台</button>
+        </div>
+        <p class="ba-brand__meta">设置仅记录在当前浏览器，不影响终端引导。凭据和访问权限由服务端管理。</p>
+      </div>
+    </section>
+    <blora-sidebar-layout hidden variant="seamless" sticky label="Blora Agent" toggle-label="打开导航">
       <blora-sidebar-layout-sidebar>
         <header class="ba-brand">
           <span class="blora-avatar" data-size="md" data-variant="primary">BA</span>
@@ -59,7 +91,7 @@
           <a class="ba-rail__link" href="#/settings">设置</a>
         </nav>
         <div class="ba-account">
-          <a class="blora-button" data-variant="ghost" data-size="sm" id="passport-login" href="/auth/start">PassPort 登录</a>
+          <a class="blora-button" data-variant="ghost" data-size="sm" id="passport-login" href="#/onboarding">PassPort 登录</a>
           <span class="ba-brand__meta" id="passport-user" hidden></span>
           <button class="blora-button" data-variant="ghost" data-size="sm" id="passport-logout" hidden>退出</button>
         </div>
@@ -221,6 +253,10 @@
           </section>
           <section id="view-settings" hidden>
             <div class="ba-settings">
+              <h2 class="ba-section__title">账号与引导</h2>
+              <p id="settings-account" role="status"></p>
+              <button id="settings-login" type="button" class="blora-button" data-variant="secondary">连接账号</button>
+              <button id="settings-onboarding" type="button" class="blora-button" data-variant="ghost">重新打开首次使用引导</button>
               <blora-field label="主题">
                 <blora-palette-picker></blora-palette-picker>
               </blora-field>
@@ -251,6 +287,7 @@
     <script src="/vendor/markdown.global.js"></script>
     <script src="/imagine.js"></script>
     <script src="/app.js"></script>
+    <script src="/onboarding.js"></script>
     <script type="module" src="/thinking-orbs-host.js"></script>
   </body>
 </html>

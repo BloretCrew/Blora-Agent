@@ -5,6 +5,7 @@
 
 mod i18n;
 mod markdown;
+mod onboarding;
 mod selection;
 mod slash;
 mod theme;
@@ -55,58 +56,11 @@ impl ToolSummaryClick {
     }
 }
 
-fn begin_passport_login(
-    passport_url: &mut Option<String>,
-    passport_receiver: &mut Option<std::sync::mpsc::Receiver<blora_auth::PassportUser>>,
-    passport_browser_opened: &mut bool,
-    passport_dialog: &mut Option<view::PassportDialog>,
-) -> String {
-    match start_passport_login() {
-        Ok(Some((device, receiver))) => {
-            *passport_url = Some(device.verification_uri.clone());
-            *passport_receiver = Some(receiver);
-            *passport_browser_opened = false;
-            *passport_dialog = Some(view::PassportDialog {
-                user_code: device.user_code.clone(),
-                verification_uri: device.verification_uri.clone(),
-                opened_browser: false,
-            });
-            format!("{}\n设备码：{}", device.verification_uri, device.user_code)
-        }
-        Ok(None) => "PassPort 登录未配置".to_owned(),
-        Err(err) => err.to_string(),
-    }
-}
-
-fn start_passport_login() -> Result<
-    Option<(
-        blora_auth::DeviceCode,
-        std::sync::mpsc::Receiver<blora_auth::PassportUser>,
-    )>,
-> {
-    let config = match blora_auth::PassportConfig::from_env() {
-        Ok(config) => config,
-        Err(_) => return Ok(None),
-    };
-    let device = config
-        .request_device_code()
-        .map_err(|err| blora_types::BloraError::Other(err.to_string()))?;
-    let (sender, receiver) = std::sync::mpsc::channel();
-    let polling_device = device.clone();
-    std::thread::spawn(move || {
-        if let Ok(user) = config.poll_device(&polling_device) {
-            let _ = sender.send(user);
-        }
-    });
-    Ok(Some((device, receiver)))
-}
-
 pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let _ = i18n::init();
-    let mut passport_url = None;
-    let mut passport_receiver: Option<std::sync::mpsc::Receiver<blora_auth::PassportUser>> = None;
+    let passport_url: Option<String> = None;
     let mut passport_browser_opened = false;
-    // Pending device-flow login, shown as a centered dialog; hidden with Esc.
+    // Legacy dialog chrome remains available to the shared dialog helpers.
     let mut passport_dialog: Option<view::PassportDialog> = None;
     // Model-provider switch dialog opened via `/provider`.
     let mut provider_dialog: Option<view::ProviderDialog> = None;
@@ -129,22 +83,41 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     // PassPort user token of the logged-in user; drives the default provider.
     let mut passport_user_token: Option<String> = None;
     let mut passport_username = String::from("you");
-    let mut passport_needs_login = false;
+    let mut passport_needs_login = true;
+    let mut passport_startup_error = None;
     if let Ok(users) = runtime.list_users() {
         for user in &users {
-            if let Some(token) = usable_passport_token(runtime, user)? {
-                passport_user_token = Some(token);
-                break;
+            match usable_passport_token(runtime, user) {
+                Ok(Some(token)) => {
+                    passport_user_token = Some(token);
+                    passport_needs_login = false;
+                    passport_username =
+                        passport_display_name(user).unwrap_or_else(|| "you".to_owned());
+                    break;
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    passport_startup_error = Some(format!("检查账号失败：{err}；请重试登录"))
+                }
             }
-        }
-        if let Some(name) = users.iter().find_map(passport_display_name) {
-            passport_username = name;
         }
         // Do not start an interactive login on every TUI launch. An expired
         // access token is reported as unavailable; the user can run /login.
         if passport_user_token.is_none() {
             passport_needs_login = true;
         }
+    }
+    let onboarding_version = runtime.tui_onboarding_version()?;
+    if onboarding_version < onboarding::VERSION && passport_user_token.is_some() {
+        runtime.complete_tui_onboarding(onboarding::VERSION)?;
+    }
+    let mut onboarding =
+        onboarding::needs_onboarding(onboarding_version, passport_user_token.is_some())
+            .then(|| onboarding::Onboarding::new(false));
+    if let Some(guide) = onboarding.as_mut()
+        && let Some(error) = passport_startup_error.as_ref()
+    {
+        guide.error(error.clone());
     }
     let mut sessions = runtime.list_sessions()?;
     if sessions.is_empty() {
@@ -173,7 +146,8 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut history_index: Option<usize> = None;
     let mut paste_preview: Option<String> = None;
     let mut status = if passport_needs_login {
-        "PassPort 未登录或令牌已过期，请执行 /login".to_owned()
+        passport_startup_error
+            .unwrap_or_else(|| "PassPort 未登录或令牌已过期，请执行 /login".to_owned())
     } else {
         String::new()
     };
@@ -209,40 +183,41 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
         let mut git_header_after = Instant::now() - Duration::from_secs(1);
         loop {
             refresh_sessions(runtime, &mut sessions, &mut index);
-            if let Some(receiver) = passport_receiver.as_ref()
-                && let Ok(user) = receiver.try_recv()
+            if let Some(guide) = onboarding.as_mut()
+                && let Some(user) = guide.poll()
             {
-                runtime.upsert_passport_user(
+                match runtime.upsert_passport_user(
                     &user.username,
                     user.nickname.as_deref(),
                     user.avatar.as_deref(),
                     user.email.as_deref(),
                     user.apptoken.as_deref(),
                     user.refresh_token.as_deref(),
-                    user.expires_in
-                        .map(|secs| chrono::Utc::now() + chrono::Duration::seconds(secs as i64)),
-                )?;
-                passport_user_token = user
-                    .apptoken
-                    .clone()
-                    .filter(|token| !token.trim().is_empty());
-                passport_receiver = None;
-                passport_dialog = None;
-                passport_needs_login = false;
-                passport_username = user
-                    .nickname
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|name| !name.is_empty())
-                    .unwrap_or("you")
-                    .to_owned();
-                status = format!("PassPort 登录成功：{}", user.display_name());
-                if provider_dialog.is_some() {
-                    provider_dialog = Some(open_provider_dialog(
-                        &provider_override,
-                        &model_override,
-                        passport_user_token.is_some(),
-                    ));
+                    Some(
+                        chrono::Utc::now()
+                            + chrono::Duration::seconds(user.expires_in.unwrap_or(3600) as i64),
+                    ),
+                ) {
+                    Ok(_) => {
+                        passport_user_token = user
+                            .apptoken
+                            .clone()
+                            .filter(|token| !token.trim().is_empty());
+                        passport_needs_login = passport_user_token.is_none();
+                        passport_username = user.display_name().to_owned();
+                        status = format!("PassPort 登录成功：{}", user.display_name());
+                        if provider_dialog.is_some() {
+                            provider_dialog = Some(open_provider_dialog(
+                                &provider_override,
+                                &model_override,
+                                passport_user_token.is_some(),
+                            ));
+                        }
+                        if passport_needs_login {
+                            guide.error("账号未返回可用令牌，请重新登录".to_owned());
+                        }
+                    }
+                    Err(err) => guide.error(format!("保存账号失败：{err}，请重试")),
                 }
             }
             let active_workspace = sessions
@@ -350,6 +325,21 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
             }
             terminal
                 .draw(|frame| {
+                    if let Some(guide) = onboarding.as_mut() {
+                        guide.draw(frame, &passport_username, passport_user_token.is_some());
+                        return;
+                    }
+                    if frame.area().width < 30 || frame.area().height < 10 {
+                        hits = view::HitMap::default();
+                        frame.render_widget(
+                            ratatui::widgets::Paragraph::new(
+                                "终端较小，请扩大窗口；/onboarding 打开引导",
+                            )
+                            .wrap(ratatui::widgets::Wrap { trim: false }),
+                            frame.area(),
+                        );
+                        return;
+                    }
                     hits = view::draw(
                         frame,
                         &view::FrameModel {
@@ -360,13 +350,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             pending: &pending,
                             input: &input,
                             paste_preview: paste_preview.as_deref(),
-                            status: if let Some(url) = passport_url.as_deref()
-                                && passport_receiver.is_some()
-                            {
-                                url
-                            } else {
-                                &status
-                            },
+                            status: &status,
                             notice: notice.as_deref(),
                             passport_dialog: passport_dialog.as_ref(),
                             provider_dialog: provider_dialog.as_ref(),
@@ -400,17 +384,6 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                     );
                 })
                 .map_err(blora_types::BloraError::exec)?;
-            if !passport_browser_opened
-                && passport_receiver.is_some()
-                && let Some(url) = passport_url.as_deref()
-            {
-                blora_runtime::open_url(url);
-                passport_browser_opened = true;
-                if let Some(dialog) = passport_dialog.as_mut() {
-                    dialog.opened_browser = true;
-                }
-            }
-
             if let Some(handle) =
                 job.take_if(|handle: &mut thread::ScopedJoinHandle<'_, _>| handle.is_finished())
             {
@@ -477,7 +450,31 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                 200
             };
             if event::poll(Duration::from_millis(wait_ms)).map_err(blora_types::BloraError::exec)? {
-                match event::read().map_err(blora_types::BloraError::exec)? {
+                let event = event::read().map_err(blora_types::BloraError::exec)?;
+                if let Some(guide) = onboarding.as_mut() {
+                    match guide.event(event, passport_user_token.is_some()) {
+                        onboarding::Outcome::Stay => {}
+                        onboarding::Outcome::Close => {
+                            onboarding = None;
+                            status = "引导已关闭，未保存完成状态；/onboarding 可重开".to_owned();
+                        }
+                        onboarding::Outcome::Finish => {
+                            match runtime.complete_tui_onboarding(onboarding::VERSION) {
+                                Ok(()) => {
+                                    onboarding = None;
+                                    status = "引导完成".to_owned();
+                                }
+                                Err(err) => guide.error(format!("保存引导失败：{err}")),
+                            }
+                        }
+                        onboarding::Outcome::Quit => {
+                            cancel.cancel();
+                            break Ok(());
+                        }
+                    }
+                    continue;
+                }
+                match event {
                     Event::Paste(text)
                         if git_dialog
                             .as_ref()
@@ -778,6 +775,14 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 }
                             }
                             KeyCode::Left | KeyCode::Right if settings_dialog.is_some() => {
+                                if settings_dialog
+                                    .as_ref()
+                                    .is_some_and(|dialog| dialog.page == 0 && dialog.selected == 4)
+                                {
+                                    settings_dialog = None;
+                                    onboarding = Some(onboarding::Onboarding::new(false));
+                                    continue;
+                                }
                                 if let Some(dialog) = settings_dialog.as_mut() {
                                     let increase = key.code == KeyCode::Right;
                                     apply_settings_row(
@@ -790,6 +795,14 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                         &mut provider_override,
                                     );
                                 }
+                            }
+                            KeyCode::Enter
+                                if settings_dialog.as_ref().is_some_and(|dialog| {
+                                    dialog.page == 0 && dialog.selected == 4
+                                }) =>
+                            {
+                                settings_dialog = None;
+                                onboarding = Some(onboarding::Onboarding::new(false));
                             }
                             KeyCode::Enter if settings_dialog.is_some() => {
                                 settings_dialog = None;
@@ -834,12 +847,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                         .current()
                                         .is_some_and(|option| !option.available)
                                     {
-                                        status = begin_passport_login(
-                                            &mut passport_url,
-                                            &mut passport_receiver,
-                                            &mut passport_browser_opened,
-                                            &mut passport_dialog,
-                                        );
+                                        onboarding = Some(onboarding::Onboarding::new(true));
                                     } else if dialog.pane == view::ProviderPane::Providers
                                         && !dialog.current_models().is_empty()
                                     {
@@ -1119,21 +1127,13 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                                 status = text;
                                                 notice = Some(body);
                                             }
-                                            SlashOutcome::Login { url, receiver } => {
-                                                // Surface the device code as a centered
-                                                // dialog; the URL also stays in the status.
-                                                passport_dialog =
-                                                    url_parts(&url).map(|(uri, code)| {
-                                                        view::PassportDialog {
-                                                            user_code: code,
-                                                            verification_uri: uri,
-                                                            opened_browser: false,
-                                                        }
-                                                    });
-                                                status = url;
-                                                passport_receiver = Some(receiver);
-                                                passport_browser_opened = false;
-                                                passport_needs_login = false;
+                                            SlashOutcome::Login => {
+                                                onboarding =
+                                                    Some(onboarding::Onboarding::new(true));
+                                            }
+                                            SlashOutcome::Onboarding => {
+                                                onboarding =
+                                                    Some(onboarding::Onboarding::new(false));
                                             }
                                             SlashOutcome::ProviderDialog => {
                                                 theme_dialog = None;
@@ -1222,8 +1222,6 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 paste_preview = None;
                                 slash_selected = 0;
                             }
-                            // The login dialog is only hidden: polling keeps
-                            // running so completing authorization still lands.
                             KeyCode::Enter
                                 if session_picker
                                     .as_ref()
@@ -1925,6 +1923,15 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     continue;
                                 }
                                 if let Some(view::Hit::SettingsRow(idx)) = hit {
+                                    if idx == 4
+                                        && settings_dialog
+                                            .as_ref()
+                                            .is_some_and(|dialog| dialog.page == 0)
+                                    {
+                                        settings_dialog = None;
+                                        onboarding = Some(onboarding::Onboarding::new(false));
+                                        continue;
+                                    }
                                     if let Some(dialog) = settings_dialog.as_mut() {
                                         dialog.selected = idx
                                             .min(settings_page_len(dialog.page).saturating_sub(1));
@@ -1966,12 +1973,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                             .current()
                                             .is_some_and(|option| !option.available)
                                         {
-                                            status = begin_passport_login(
-                                                &mut passport_url,
-                                                &mut passport_receiver,
-                                                &mut passport_browser_opened,
-                                                &mut passport_dialog,
-                                            );
+                                            onboarding = Some(onboarding::Onboarding::new(true));
                                         } else {
                                             dialog.pane = view::ProviderPane::Models;
                                         }
@@ -2063,6 +2065,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                                 &mut theme_dialog,
                                                 &mut passport_user_token,
                                                 &mut passport_username,
+                                                &mut onboarding,
                                             ) {
                                                 break Ok(());
                                             }
@@ -2103,8 +2106,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     auto_approve = !auto_approve;
                                     status = format!("auto-approve={auto_approve}");
                                 } else if hit == Some(view::Hit::TrafficClose) {
-                                    // Red: close the front dialog. Login still
-                                    // quits the TUI (the dialog is the session).
+                                    // Red closes the front dialog.
                                     if let Some(dialog) = theme_dialog.take() {
                                         cancel_theme_dialog(&dialog);
                                         status = "theme picker closed".to_owned();
@@ -2121,8 +2123,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                         break Ok(());
                                     }
                                 } else if hit == Some(view::Hit::TrafficMinimize) {
-                                    // Yellow: collapse pickers to a title bar;
-                                    // hide the login dialog while polling continues.
+                                    // Yellow collapses pickers to a title bar.
                                     if let Some(dialog) = theme_dialog.as_mut() {
                                         dialog.minimized = true;
                                         dialog.fullscreen = false;
@@ -2139,8 +2140,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                         passport_dialog = None;
                                     }
                                 } else if hit == Some(view::Hit::TrafficOpenBrowser) {
-                                    // Green: fullscreen the picker, or restore
-                                    // from minimized. Login still opens the browser.
+                                    // Green toggles fullscreen or restores the picker.
                                     if let Some(dialog) = theme_dialog.as_mut() {
                                         if dialog.minimized {
                                             dialog.minimized = false;
@@ -2257,6 +2257,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                                 &mut theme_dialog,
                                                 &mut passport_user_token,
                                                 &mut passport_username,
+                                                &mut onboarding,
                                             ) {
                                                 break Ok(());
                                             }
@@ -2377,10 +2378,8 @@ enum SlashOutcome {
         status: String,
         body: String,
     },
-    Login {
-        url: String,
-        receiver: std::sync::mpsc::Receiver<blora_auth::PassportUser>,
-    },
+    Login,
+    Onboarding,
     /// Open the model-provider switch dialog.
     ProviderDialog,
     /// Open the color-scheme picker.
@@ -2403,6 +2402,7 @@ fn apply_slash(
     theme_dialog: &mut Option<view::ThemeDialog>,
     passport_user_token: &mut Option<String>,
     passport_username: &mut String,
+    onboarding: &mut Option<onboarding::Onboarding>,
 ) -> bool {
     match outcome {
         SlashOutcome::Quit => {
@@ -2419,8 +2419,12 @@ fn apply_slash(
             *notice = Some(body);
             false
         }
-        SlashOutcome::Login { .. } => {
-            *status = "PassPort 登录已启动".to_owned();
+        SlashOutcome::Login => {
+            *onboarding = Some(onboarding::Onboarding::new(true));
+            false
+        }
+        SlashOutcome::Onboarding => {
+            *onboarding = Some(onboarding::Onboarding::new(false));
             false
         }
         SlashOutcome::ProviderDialog => {
@@ -2703,7 +2707,9 @@ fn usable_passport_token(
             )?;
             Ok(Some(refreshed.access_token))
         }
-        Err(_) => Ok(None),
+        Err(err) => Err(blora_types::BloraError::Other(format!(
+            "PassPort 令牌刷新失败：{err}"
+        ))),
     }
 }
 
@@ -2800,6 +2806,7 @@ fn passport_display_name(user: &blora_storage::UserRecord) -> Option<String> {
         .as_deref()
         .map(str::trim)
         .filter(|name| !name.is_empty())
+        .or(user.passport_username.as_deref())
         .map(ToOwned::to_owned)
 }
 
@@ -2822,6 +2829,40 @@ mod passport_login_tests {
         assert!(passport_login_required("", None));
         assert!(passport_login_required("Bloret PassPort", None));
         assert!(!passport_login_required("", Some("token")));
+    }
+
+    #[test]
+    fn only_usable_old_credentials_bypass_first_use() {
+        let runtime =
+            blora_runtime::Runtime::new(blora_storage::SqliteStore::open_in_memory().unwrap());
+        let expiry = chrono::Utc::now() + chrono::Duration::hours(1);
+        let user = runtime
+            .upsert_passport_user("valid", None, None, None, Some("token"), None, Some(expiry))
+            .unwrap();
+        assert_eq!(
+            super::usable_passport_token(&runtime, &user)
+                .unwrap()
+                .as_deref(),
+            Some("token")
+        );
+        assert!(!super::onboarding::needs_onboarding(0, true));
+        let expired = runtime
+            .upsert_passport_user(
+                "expired",
+                None,
+                None,
+                None,
+                Some("token"),
+                None,
+                Some(chrono::Utc::now() - chrono::Duration::hours(1)),
+            )
+            .unwrap();
+        assert!(
+            super::usable_passport_token(&runtime, &expired)
+                .unwrap()
+                .is_none()
+        );
+        assert!(super::onboarding::needs_onboarding(0, false));
     }
 
     #[test]
@@ -3094,22 +3135,6 @@ fn finish_add_provider(dialog: &view::AddProviderDialog) -> AddAdvance {
     AddAdvance::Saved(saved)
 }
 
-/// Split the `/login` status text (`<url>\n设备码：<code>`) back into its URL
-/// and device code so the dialog can be rebuilt from the slash outcome.
-fn url_parts(text: &str) -> Option<(String, String)> {
-    let mut lines = text.lines();
-    let url = lines.next()?.trim().to_owned();
-    if url.is_empty() {
-        return None;
-    }
-    let code = lines
-        .next()
-        .and_then(|line| line.split_once('：'))
-        .map(|(_, code)| code.trim().to_owned())
-        .unwrap_or_default();
-    Some((url, code))
-}
-
 fn clip_text(text: &str, max_lines: usize) -> String {
     let mut lines: Vec<&str> = text.lines().collect();
     if lines.len() > max_lines {
@@ -3130,8 +3155,8 @@ fn workspace_key(workspace: &Path) -> String {
     workspace.display().to_string()
 }
 
-fn settings_page_len(_page: usize) -> usize {
-    4
+fn settings_page_len(page: usize) -> usize {
+    if page == 0 { 5 } else { 4 }
 }
 
 fn apply_settings_row(
@@ -3431,14 +3456,8 @@ fn slash(
     };
     match spec.name {
         "help" => panel("help", slash::help_text(args)),
-        "login" => match start_passport_login() {
-            Ok(Some((device, receiver))) => SlashOutcome::Login {
-                url: format!("{}\n设备码：{}", device.verification_uri, device.user_code),
-                receiver,
-            },
-            Ok(None) => SlashOutcome::Status("Passport 未配置".to_owned()),
-            Err(err) => SlashOutcome::Status(err.to_string()),
-        },
+        "login" => SlashOutcome::Login,
+        "onboarding" => SlashOutcome::Onboarding,
         "logout" => SlashOutcome::LoggedOut(
             runtime
                 .clear_passport_users()

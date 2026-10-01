@@ -467,3 +467,100 @@ blora-sidebar-layout {
     align-items: stretch;
   }
 }
+
+.ba-onboarding {
+  height: 100dvh;
+  overflow: auto;
+  display: grid;
+  place-items: center;
+  padding: var(--blora-space-6);
+  color: var(--blora-color-text);
+  background: var(--blora-color-canvas, var(--blora-color-surface));
+}
+
+.ba-onboarding[hidden],
+blora-sidebar-layout[hidden] {
+  display: none !important;
+}
+
+.ba-onboarding__card {
+  width: min(100%, 38rem);
+  box-sizing: border-box;
+  display: grid;
+  gap: var(--blora-space-5);
+  padding: var(--blora-space-6);
+  border: var(--blora-border-width) solid var(--blora-color-border);
+  border-radius: var(--blora-radius-lg);
+  background: var(--blora-color-raised, var(--blora-color-surface));
+}
+
+.ba-onboarding__brand,
+.ba-onboarding__actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--blora-space-3);
+}
+
+.ba-onboarding__steps {
+  display: flex;
+  gap: var(--blora-space-4);
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  color: var(--blora-color-text-muted);
+  font-size: var(--blora-text-sm);
+}
+
+.ba-onboarding__steps [aria-current="step"] {
+  color: var(--blora-color-text);
+  font-weight: 600;
+}
+
+.ba-onboarding h1,
+.ba-onboarding p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.ba-onboarding__lede {
+  color: var(--blora-color-text-muted);
+  line-height: 1.7;
+}
+
+.ba-onboarding__account,
+#onboarding-device {
+  display: grid;
+  gap: var(--blora-space-3);
+}
+
+.ba-onboarding [hidden] {
+  display: none !important;
+}
+
+#onboarding-code {
+  width: 100%;
+  box-sizing: border-box;
+  font-size: var(--blora-text-xl);
+  letter-spacing: 0.12em;
+  text-align: center;
+}
+
+@media (max-width: 720px) {
+  .ba-onboarding {
+    place-items: start center;
+    padding: var(--blora-space-4);
+  }
+
+  .ba-onboarding__card {
+    padding: var(--blora-space-4);
+  }
+
+  .ba-onboarding__actions > * {
+    flex: 1 1 10rem;
+  }
+
+  .ba-onboarding__steps {
+    gap: var(--blora-space-3);
+  }
+}

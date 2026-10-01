@@ -4,6 +4,7 @@
 //! Local SQLite persistence. The event table is the source of truth.
 
 mod approvals;
+mod onboarding;
 mod sqlite;
 mod tasks;
 mod users;

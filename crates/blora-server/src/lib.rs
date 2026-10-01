@@ -32,6 +32,7 @@ use tower_http::cors::CorsLayer;
 
 const INDEX_HTML: &str = include_str!("../../../web/index.html");
 const APP_JS: &str = include_str!("../../../web/app.js");
+const ONBOARDING_JS: &str = include_str!("../../../web/onboarding.js");
 const IMAGINE_JS: &str = include_str!("../../../web/imagine.js");
 const APP_CSS: &str = include_str!("../../../web/app.css");
 const THINKING_ORBS_ENGINE: &str = include_str!("../../../web/vendor/thinking-orbs.engine.js");
@@ -43,7 +44,18 @@ struct AppState {
     cancels: Arc<Mutex<HashMap<String, CancelToken>>>,
     require_auth: bool,
     passport: Option<PassportConfig>,
-    device_code: Arc<Mutex<Option<blora_auth::DeviceCode>>>,
+    device_attempts: Arc<Mutex<HashMap<String, DeviceAttempt>>>,
+    passport_sessions: Arc<Mutex<HashMap<String, (String, std::time::Instant)>>>,
+}
+
+#[derive(Clone)]
+struct DeviceAttempt {
+    owner: String,
+    device: blora_auth::DeviceCode,
+    deadline: std::time::Instant,
+    next_poll: std::time::Instant,
+    interval: u64,
+    polling: bool,
 }
 
 #[derive(Deserialize)]
@@ -168,7 +180,8 @@ pub async fn serve(
         cancels: Arc::new(Mutex::new(HashMap::new())),
         require_auth,
         passport: passport_config(),
-        device_code: Arc::new(Mutex::new(None)),
+        device_attempts: Arc::new(Mutex::new(HashMap::new())),
+        passport_sessions: Arc::new(Mutex::new(HashMap::new())),
     };
     let listener = TcpListener::bind(bind)
         .await
@@ -194,6 +207,8 @@ fn app(state: AppState) -> Router {
         .route("/api/auth/url", get(passport_url))
         .route("/api/auth/device", get(passport_device))
         .route("/api/auth/device/poll", post(passport_device_poll))
+        .route("/api/auth/device/cancel", post(passport_device_cancel))
+        .route("/onboarding.js", get(|| async { js(ONBOARDING_JS) }))
         .route("/auth/callback", get(passport_callback))
         .route("/api/auth/me", get(auth_me))
         .route("/api/auth/logout", post(auth_logout))
@@ -229,8 +244,28 @@ fn app(state: AppState) -> Router {
             get(marketplace).post(install_market_plugin),
         )
         .route("/ws", get(ws_upgrade))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            gateway_auth,
+        ))
         .layer(CorsLayer::permissive())
         .with_state(state)
+}
+
+async fn gateway_auth(
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let path = request.uri().path();
+    let public_api =
+        path.starts_with("/api/auth/") || path == "/api/login" || path == "/api/settings";
+    if state.require_auth && ((path.starts_with("/api/") && !public_api) || path == "/ws") {
+        if let Err(err) = current_user(&state, request.headers()) {
+            return err.into_response();
+        }
+    }
+    next.run(request).await
 }
 
 async fn index() -> Html<&'static str> {
@@ -248,7 +283,7 @@ fn passport_config() -> Option<PassportConfig> {
 }
 
 async fn passport_start(State(state): State<AppState>, headers: HttpHeaderMap) -> Response {
-    let Some(config) = state.passport else {
+    let Some(config) = state.passport.clone() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             "Passport login is not configured",
@@ -283,89 +318,175 @@ async fn passport_start(State(state): State<AppState>, headers: HttpHeaderMap) -
 
 async fn passport_device(
     State(state): State<AppState>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+    headers: HttpHeaderMap,
+) -> Result<Response, ApiError> {
     let config = state
         .passport
+        .clone()
         .ok_or_else(|| ApiError("Passport login is not configured".to_owned()))?;
-    let request_config = config.clone();
-    let device = tokio::task::spawn_blocking(move || request_config.request_device_code())
+    let supplied_owner = cookie_value(&headers, "blora_device_owner");
+    let owner = {
+        let attempts = state
+            .device_attempts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        supplied_owner
+            .filter(|owner| attempts.values().any(|attempt| attempt.owner == *owner))
+            .unwrap_or_else(|| SessionId::generate().to_string())
+    };
+    let device = tokio::task::spawn_blocking(move || config.request_device_code())
         .await
         .map_err(|err| ApiError(err.to_string()))?
-        .map_err(|err| ApiError::from(blora_types::BloraError::Other(err.to_string())))?;
-    *state
-        .device_code
+        .map_err(|err| ApiError(err.to_string()))?;
+    let id = SessionId::generate().to_string();
+    let now = std::time::Instant::now();
+    let interval = device.interval.max(1);
+    let mut attempts = state
+        .device_attempts
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(device.clone());
-    Ok(Json(serde_json::json!({
-        "user_code": device.user_code,
-        "verification_uri": device.verification_uri,
-        "expires_in": device.expires_in,
-        "interval": device.interval
-    })))
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    attempts.retain(|_, attempt| attempt.deadline > now && attempt.owner != owner);
+    if attempts.len() >= 128 {
+        return Err(ApiError("Too many pending login attempts".to_owned()));
+    }
+    attempts.insert(
+        id.clone(),
+        DeviceAttempt {
+            owner: owner.clone(),
+            device: device.clone(),
+            deadline: now
+                .checked_add(Duration::from_secs(device.expires_in))
+                .ok_or_else(|| ApiError("invalid device expiry".to_owned()))?,
+            next_poll: now
+                .checked_add(Duration::from_secs(interval))
+                .ok_or_else(|| ApiError("invalid polling interval".to_owned()))?,
+            interval,
+            polling: false,
+        },
+    );
+    let cookie = format!(
+        "blora_device_owner={owner}; HttpOnly; SameSite=Strict; Path=/; Max-Age={}",
+        device.expires_in
+    );
+    Ok(([(header::SET_COOKIE, HeaderValue::from_str(&cookie).map_err(|err| ApiError(err.to_string()))?),
+        (header::CACHE_CONTROL, HeaderValue::from_static("no-store"))],
+        Json(serde_json::json!({"attempt_id":id,"user_code":device.user_code,
+            "verification_uri":device.verification_uri,"expires_in":device.expires_in,"interval":interval}))).into_response())
+}
+
+#[derive(Deserialize)]
+struct DevicePollBody {
+    attempt_id: String,
+}
+
+async fn passport_device_cancel(
+    State(state): State<AppState>,
+    headers: HttpHeaderMap,
+    Json(body): Json<DevicePollBody>,
+) -> Result<StatusCode, ApiError> {
+    let owner = cookie_value(&headers, "blora_device_owner").ok_or_else(ApiError::unauthorized)?;
+    let mut attempts = state
+        .device_attempts
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if attempts
+        .get(&body.attempt_id)
+        .is_some_and(|attempt| attempt.owner == owner)
+    {
+        attempts.remove(&body.attempt_id);
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn passport_device_poll(
     State(state): State<AppState>,
-    Json(_body): Json<DevicePollBody>,
+    headers: HttpHeaderMap,
+    Json(body): Json<DevicePollBody>,
 ) -> Result<Response, ApiError> {
+    let owner = cookie_value(&headers, "blora_device_owner").ok_or_else(ApiError::unauthorized)?;
     let config = state
         .passport
-        .ok_or_else(|| ApiError("Passport login is not configured".to_owned()))?;
-    let device = state
-        .device_code
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone()
-        .ok_or_else(|| ApiError("device code is not initialized".to_owned()))?;
-    let result = tokio::task::spawn_blocking(move || config.poll_device(&device))
-        .await
-        .map_err(|err| ApiError(err.to_string()))?;
-    let user =
-        result.map_err(|err| ApiError::from(blora_types::BloraError::Other(err.to_string())))?;
-    state
-        .runtime
-        .upsert_passport_user(
-            &user.username,
-            user.nickname.as_deref(),
-            user.avatar.as_deref(),
-            user.email.as_deref(),
-            user.apptoken.as_deref(),
-            user.refresh_token.as_deref(),
-            user.expires_in
-                .map(|secs| chrono::Utc::now() + chrono::Duration::seconds(secs as i64)),
-        )
-        .map_err(ApiError::from)?;
-    let cookie = format!(
-        "blora_passport_user={}; HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000",
-        user.username
-    );
-    Ok((
-        [(
-            header::SET_COOKIE,
-            HeaderValue::from_str(&cookie).unwrap_or_else(|_| HeaderValue::from_static("")),
-        )],
-        Json(serde_json::json!({
-            "authenticated": true,
-            "username": user.username,
-            "name": user.display_name()
-        })),
-    )
-        .into_response())
-}
-
-#[derive(Deserialize, Default)]
-#[allow(dead_code)]
-struct DevicePollBody {
-    #[serde(default)]
-    device_code: String,
-    #[serde(default)]
-    user_code: String,
-    #[serde(default)]
-    verification_uri: String,
-    #[serde(default)]
-    expires_in: u64,
-    #[serde(default)]
-    interval: u64,
+        .ok_or_else(|| ApiError("Passport login is not configured".to_owned()))?;
+    let device = {
+        let mut attempts = state
+            .device_attempts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let attempt = attempts
+            .get_mut(&body.attempt_id)
+            .filter(|attempt| attempt.owner == owner)
+            .ok_or_else(ApiError::unauthorized)?;
+        let now = std::time::Instant::now();
+        if now >= attempt.deadline {
+            attempts.remove(&body.attempt_id);
+            return Err(ApiError("expired_token".to_owned()));
+        }
+        if attempt.polling || now < attempt.next_poll {
+            return Ok(
+                Json(serde_json::json!({"status":"pending","interval":attempt.interval}))
+                    .into_response(),
+            );
+        }
+        attempt.polling = true;
+        attempt.device.clone()
+    };
+    let result = tokio::task::spawn_blocking(move || config.poll_device_once(&device)).await;
+    let mut attempts = state
+        .device_attempts
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let attempt = attempts
+        .get_mut(&body.attempt_id)
+        .filter(|attempt| attempt.owner == owner)
+        .ok_or_else(|| ApiError("authentication cancelled".to_owned()))?;
+    attempt.polling = false;
+    if std::time::Instant::now() >= attempt.deadline {
+        attempts.remove(&body.attempt_id);
+        return Err(ApiError("expired_token".to_owned()));
+    }
+    let result = match result {
+        Ok(result) => result,
+        Err(err) => {
+            attempts.remove(&body.attempt_id);
+            return Err(ApiError(err.to_string()));
+        }
+    };
+    match result {
+        Ok(blora_auth::DevicePoll::Pending) | Ok(blora_auth::DevicePoll::SlowDown) => {
+            let slow = matches!(result, Ok(blora_auth::DevicePoll::SlowDown));
+            if slow {
+                attempt.interval = attempt.interval.saturating_add(5);
+            }
+            attempt.next_poll = std::time::Instant::now()
+                .checked_add(Duration::from_secs(attempt.interval))
+                .unwrap_or(attempt.deadline);
+            Ok(Json(serde_json::json!({"status":if slow {"slow_down"} else {"pending"},"interval":attempt.interval})).into_response())
+        }
+        Ok(blora_auth::DevicePoll::Authenticated(user)) => {
+            // Keep the attempt lock until persistence completes so cancellation cannot race success.
+            attempts.remove(&body.attempt_id);
+            state
+                .runtime
+                .upsert_passport_user(
+                    &user.username,
+                    user.nickname.as_deref(),
+                    user.avatar.as_deref(),
+                    user.email.as_deref(),
+                    user.apptoken.as_deref(),
+                    user.refresh_token.as_deref(),
+                    Some(passport_token_expiry(user.expires_in)?),
+                )
+                .map_err(ApiError::from)?;
+            let cookie = passport_session_cookie(&state, &user.username);
+            Ok(([(header::SET_COOKIE, HeaderValue::from_str(&cookie).map_err(|err| ApiError(err.to_string()))?)],
+                Json(serde_json::json!({"status":"authenticated","authenticated":true,"username":user.username,"name":user.display_name()}))).into_response())
+        }
+        Err(err) => {
+            attempts.remove(&body.attempt_id);
+            Err(ApiError(err.to_string()))
+        }
+    }
 }
 
 async fn passport_url(
@@ -389,7 +510,7 @@ async fn passport_callback(
     Query(query): Query<HashMap<String, String>>,
     _headers: HttpHeaderMap,
 ) -> Response {
-    let Some(config) = state.passport else {
+    let Some(config) = state.passport.clone() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             "Passport login is not configured",
@@ -416,15 +537,18 @@ async fn passport_callback(
         user.email.as_deref(),
         user.apptoken.as_deref(),
         user.refresh_token.as_deref(),
-        user.expires_in
-            .map(|secs| chrono::Utc::now() + chrono::Duration::seconds(secs as i64)),
+        match user
+            .expires_in
+            .map(|secs| passport_token_expiry(Some(secs)))
+            .transpose()
+        {
+            Ok(expiry) => expiry,
+            Err(err) => return err.into_response(),
+        },
     ) {
         return ApiError::from(err).into_response();
     }
-    let cookie = format!(
-        "blora_passport_user={}; HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000",
-        user.username
-    );
+    let cookie = passport_session_cookie(&state, &user.username);
     (
         [
             (header::LOCATION, HeaderValue::from_static("/")),
@@ -438,7 +562,21 @@ async fn passport_callback(
         .into_response()
 }
 
-async fn auth_logout() -> Response {
+async fn auth_logout(State(state): State<AppState>, headers: HttpHeaderMap) -> Response {
+    if let Some(session) = cookie_value(&headers, "blora_passport_user") {
+        state
+            .passport_sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&session);
+    }
+    if let Some(owner) = cookie_value(&headers, "blora_device_owner") {
+        state
+            .device_attempts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|_, attempt| attempt.owner != owner);
+    }
     (
         [(
             header::SET_COOKIE,
@@ -456,19 +594,85 @@ async fn auth_me(
     headers: HttpHeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let username =
-        cookie_value(&headers, "blora_passport_user").ok_or_else(ApiError::unauthorized)?;
+        passport_session_username(&state, &headers).ok_or_else(ApiError::unauthorized)?;
     let user = state
         .runtime
         .user_by_passport_username(&username)
         .map_err(ApiError::from)?
         .ok_or_else(ApiError::unauthorized)?;
-    Ok(Json(serde_json::json!({
-        "authenticated": true,
-        "id": user.id,
-        "username": user.passport_username,
-        "name": user.passport_nickname.unwrap_or(user.name),
-        "avatar": user.passport_avatar
-    })))
+    let token_present = user
+        .passport_app_token
+        .as_deref()
+        .is_some_and(|token| !token.trim().is_empty());
+    let refresh_soon = user
+        .passport_token_expires_at
+        .is_some_and(|expires| expires <= chrono::Utc::now() + chrono::Duration::minutes(2));
+    let mut valid = token_present && !refresh_soon;
+    if token_present && refresh_soon {
+        if let (Some(config), Some(refresh)) = (
+            state.passport.clone(),
+            user.passport_refresh_token
+                .clone()
+                .filter(|token| !token.trim().is_empty()),
+        ) {
+            match tokio::task::spawn_blocking(move || config.refresh_access_token(&refresh)).await {
+                Ok(Ok(refreshed)) => {
+                    state
+                        .runtime
+                        .refresh_passport_token(
+                            &username,
+                            &refreshed.access_token,
+                            refreshed.refresh_token.as_deref(),
+                            Some(passport_token_expiry(refreshed.expires_in)?),
+                        )
+                        .map_err(ApiError::from)?;
+                    valid = true;
+                }
+                Ok(Err(blora_auth::AuthError::Network(message))) => return Err(ApiError(message)),
+                Err(err) => return Err(ApiError(err.to_string())),
+                _ => {}
+            }
+        }
+    }
+    Ok(Json(
+        serde_json::json!({"authenticated":true,"credentials_valid":valid,
+        "id":user.id,"username":user.passport_username,"name":user.passport_nickname.unwrap_or(user.name),"avatar":user.passport_avatar}),
+    ))
+}
+
+fn passport_token_expiry(seconds: Option<u64>) -> Result<chrono::DateTime<chrono::Utc>, ApiError> {
+    let seconds = i64::try_from(seconds.unwrap_or(3600))
+        .map_err(|_| ApiError("invalid token expiry".to_owned()))?;
+    let duration = chrono::Duration::try_seconds(seconds)
+        .ok_or_else(|| ApiError("invalid token expiry".to_owned()))?;
+    chrono::Utc::now()
+        .checked_add_signed(duration)
+        .ok_or_else(|| ApiError("invalid token expiry".to_owned()))
+}
+
+fn passport_session_cookie(state: &AppState, username: &str) -> String {
+    let session = SessionId::generate().to_string();
+    let now = std::time::Instant::now();
+    let mut sessions = state
+        .passport_sessions
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    sessions.retain(|_, (_, deadline)| *deadline > now);
+    sessions.insert(
+        session.clone(),
+        (username.to_owned(), now + Duration::from_secs(2592000)),
+    );
+    format!("blora_passport_user={session}; HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000")
+}
+
+fn passport_session_username(state: &AppState, headers: &HttpHeaderMap) -> Option<String> {
+    let session = cookie_value(headers, "blora_passport_user")?;
+    let mut sessions = state
+        .passport_sessions
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    sessions.retain(|_, (_, deadline)| *deadline > std::time::Instant::now());
+    sessions.get(&session).map(|(username, _)| username.clone())
 }
 
 fn cookie_value(headers: &HttpHeaderMap, name: &str) -> Option<String> {
@@ -1415,7 +1619,9 @@ fn current_user(
         return Ok(Some(user));
     }
     if state.passport.is_some() {
-        if let Some(username) = cookie_value(headers, "blora_passport_user") {
+        if cookie_value(headers, "blora_passport_user").is_some() {
+            let username =
+                passport_session_username(state, headers).ok_or_else(ApiError::unauthorized)?;
             let user = state
                 .runtime
                 .user_by_passport_username(&username)
@@ -1620,6 +1826,469 @@ fn js_owned(body: String) -> Response {
 mod tests {
     use super::*;
 
+    #[derive(Clone, Default)]
+    struct MockOAuth {
+        issued: Arc<std::sync::atomic::AtomicUsize>,
+        calls: Arc<Mutex<Vec<String>>>,
+        replies: Arc<Mutex<HashMap<String, Vec<serde_json::Value>>>>,
+        gate: Arc<tokio::sync::Notify>,
+        entered: Arc<tokio::sync::Notify>,
+        blocked: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    async fn mock_device(State(mock): State<MockOAuth>) -> Json<serde_json::Value> {
+        let n = mock
+            .issued
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Json(
+            serde_json::json!({"device_code":format!("dc{n}"),"user_code":format!("USER{n}"),
+            "verification_uri":"https://passport.example/verify","expires_in":600,"interval":1}),
+        )
+    }
+
+    async fn mock_token(State(mock): State<MockOAuth>, body: String) -> Response {
+        assert!(body.contains("client_id=test") && body.contains("client_secret=secret"));
+        let code = body
+            .split('&')
+            .find_map(|part| part.strip_prefix("device_code="))
+            .unwrap()
+            .to_owned();
+        mock.calls.lock().unwrap().push(code.clone());
+        if mock.blocked.load(std::sync::atomic::Ordering::SeqCst) {
+            mock.entered.notify_one();
+            mock.gate.notified().await;
+        }
+        let value = mock
+            .replies
+            .lock()
+            .unwrap()
+            .get_mut(&code)
+            .and_then(|rows| {
+                if rows.is_empty() {
+                    None
+                } else {
+                    Some(rows.remove(0))
+                }
+            })
+            .unwrap_or_else(|| serde_json::json!({"error":"authorization_pending"}));
+        let status = if value.get("error").is_some() {
+            StatusCode::BAD_REQUEST
+        } else {
+            StatusCode::OK
+        };
+        (status, Json(value)).into_response()
+    }
+
+    async fn mock_user(headers: HttpHeaderMap) -> Json<serde_json::Value> {
+        assert_eq!(
+            headers.get(header::AUTHORIZATION).unwrap(),
+            "Bearer access-test"
+        );
+        Json(
+            serde_json::json!({"username":"alice","nickname":"Alice","email":"alice@example.test"}),
+        )
+    }
+
+    struct OAuthHarness {
+        _dir: tempfile::TempDir,
+        state: AppState,
+        mock: MockOAuth,
+        base: String,
+        servers: Vec<tokio::task::JoinHandle<()>>,
+    }
+
+    impl Drop for OAuthHarness {
+        fn drop(&mut self) {
+            for server in &self.servers {
+                server.abort();
+            }
+        }
+    }
+
+    impl OAuthHarness {
+        async fn new(require_auth: bool) -> Self {
+            let mock = MockOAuth::default();
+            let oauth = Router::new()
+                .route("/oauth/device/code", post(mock_device))
+                .route("/oauth/token", post(mock_token))
+                .route("/oauth/userinfo", get(mock_user))
+                .with_state(mock.clone());
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let oauth_base = format!("http://{}", listener.local_addr().unwrap());
+            let oauth_server = tokio::spawn(async move {
+                axum::serve(listener, oauth).await.unwrap();
+            });
+            let dir = tempfile::tempdir().unwrap();
+            let runtime = Arc::new(Runtime::new(
+                blora_storage::SqliteStore::open(dir.path().join("state.sqlite")).unwrap(),
+            ));
+            let state = AppState {
+                runtime,
+                workspace: dir.path().to_path_buf(),
+                cancels: Arc::new(Mutex::new(HashMap::new())),
+                require_auth,
+                passport: Some(PassportConfig::new("test", "secret", oauth_base).unwrap()),
+                device_attempts: Arc::new(Mutex::new(HashMap::new())),
+                passport_sessions: Arc::new(Mutex::new(HashMap::new())),
+            };
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let router = app(state.clone());
+            let server = tokio::spawn(async move {
+                axum::serve(listener, router).await.unwrap();
+            });
+            Self {
+                _dir: dir,
+                state,
+                mock,
+                base,
+                servers: vec![oauth_server, server],
+            }
+        }
+
+        async fn request(
+            &self,
+            path: &str,
+            cookie: &str,
+            body: Option<serde_json::Value>,
+            bearer: &str,
+        ) -> (u16, String, String) {
+            let url = format!("{}{path}", self.base);
+            let cookie = cookie.to_owned();
+            let bearer = bearer.to_owned();
+            tokio::task::spawn_blocking(move || {
+                let mut request = if body.is_some() {
+                    ureq::post(&url)
+                } else {
+                    ureq::get(&url)
+                };
+                if !cookie.is_empty() {
+                    request = request.set("Cookie", &cookie);
+                }
+                if !bearer.is_empty() {
+                    request = request.set("Authorization", &format!("Bearer {bearer}"));
+                }
+                let result = match body {
+                    Some(body) => request
+                        .set("Content-Type", "application/json")
+                        .send_string(&body.to_string()),
+                    None => request.call(),
+                };
+                let response = match result {
+                    Ok(response) | Err(ureq::Error::Status(_, response)) => response,
+                    Err(err) => panic!("{err}"),
+                };
+                let status = response.status();
+                let cookie = response.header("Set-Cookie").unwrap_or("").to_owned();
+                (status, cookie, response.into_string().unwrap())
+            })
+            .await
+            .unwrap()
+        }
+
+        async fn start(&self, cookie: &str) -> (String, String) {
+            let (status, cookie, body) = self.request("/api/auth/device", cookie, None, "").await;
+            assert_eq!(status, 200, "{body}");
+            assert!(cookie.contains("HttpOnly; SameSite=Strict"));
+            let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert!(body.get("device_code").is_none());
+            (
+                body["attempt_id"].as_str().unwrap().to_owned(),
+                cookie.split(';').next().unwrap().to_owned(),
+            )
+        }
+
+        fn ready(&self, id: &str) {
+            self.state
+                .device_attempts
+                .lock()
+                .unwrap()
+                .get_mut(id)
+                .unwrap()
+                .next_poll = std::time::Instant::now();
+        }
+
+        fn reply(&self, id: &str, value: serde_json::Value) {
+            let attempts = self.state.device_attempts.lock().unwrap();
+            let device = &attempts[id].device;
+            let code = self
+                .state
+                .passport
+                .as_ref()
+                .unwrap()
+                .device_code(device)
+                .to_owned();
+            self.mock
+                .replies
+                .lock()
+                .unwrap()
+                .entry(code)
+                .or_default()
+                .push(value);
+        }
+
+        async fn poll(&self, id: &str, cookie: &str) -> (u16, String, String) {
+            self.request(
+                "/api/auth/device/poll",
+                cookie,
+                Some(serde_json::json!({"attempt_id":id})),
+                "",
+            )
+            .await
+        }
+    }
+
+    fn success_token() -> serde_json::Value {
+        serde_json::json!({"access_token":"access-test","refresh_token":"refresh-test","expires_in":3600})
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn device_owners_are_isolated_and_cancel_is_idempotent() {
+        let h = OAuthHarness::new(false).await;
+        let (a, ca) = h.start("blora_device_owner=attacker-chosen").await;
+        let (b, cb) = h.start("").await;
+        assert_ne!(ca, "blora_device_owner=attacker-chosen");
+        assert_ne!(ca, cb);
+        assert_eq!(h.poll(&a, "").await.0, 401);
+        assert_eq!(h.poll(&a, &cb).await.0, 401);
+        assert_eq!(
+            h.request(
+                "/api/auth/device/cancel",
+                &cb,
+                Some(serde_json::json!({"attempt_id":a})),
+                ""
+            )
+            .await
+            .0,
+            204
+        );
+        assert!(h.state.device_attempts.lock().unwrap().contains_key(&a));
+        let (replacement, _) = h.start(&ca).await;
+        assert_eq!(h.poll(&a, &ca).await.0, 401);
+        assert!(h.state.device_attempts.lock().unwrap().contains_key(&b));
+        for _ in 0..2 {
+            assert_eq!(
+                h.request(
+                    "/api/auth/device/cancel",
+                    &ca,
+                    Some(serde_json::json!({"attempt_id":replacement})),
+                    ""
+                )
+                .await
+                .0,
+                204
+            );
+        }
+        assert_eq!(h.poll(&replacement, &ca).await.0, 401);
+        assert!(h.mock.calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn device_pending_slowdown_expiry_and_terminal_error() {
+        let h = OAuthHarness::new(false).await;
+        let (id, cookie) = h.start("").await;
+        assert!(h.poll(&id, &cookie).await.2.contains("pending"));
+        assert!(h.mock.calls.lock().unwrap().is_empty());
+        h.ready(&id);
+        assert!(h.poll(&id, &cookie).await.2.contains("pending"));
+        h.reply(&id, serde_json::json!({"error":"slow_down"}));
+        h.ready(&id);
+        let (_, _, body) = h.poll(&id, &cookie).await;
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(body["status"], "slow_down");
+        assert_eq!(body["interval"], 6);
+        h.poll(&id, &cookie).await;
+        assert_eq!(h.mock.calls.lock().unwrap().len(), 2);
+        h.state
+            .device_attempts
+            .lock()
+            .unwrap()
+            .get_mut(&id)
+            .unwrap()
+            .deadline = std::time::Instant::now();
+        let expired = h.poll(&id, &cookie).await;
+        assert_eq!(expired.0, 400);
+        assert_eq!(expired.2, "expired_token");
+        assert_eq!(h.poll(&id, &cookie).await.0, 401);
+        let (id, cookie) = h.start("").await;
+        h.reply(&id, serde_json::json!({"error":"access_denied"}));
+        h.ready(&id);
+        assert_eq!(h.poll(&id, &cookie).await.0, 400);
+        assert_eq!(h.poll(&id, &cookie).await.0, 401);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn device_success_persists_credentials_and_gateway_requires_bearer() {
+        for require_auth in [false, true] {
+            let h = OAuthHarness::new(require_auth).await;
+            let (id, owner) = h.start("").await;
+            h.reply(&id, success_token());
+            h.ready(&id);
+            let (status, cookie, body) = h.poll(&id, &owner).await;
+            assert_eq!(status, 200, "{body}");
+            assert!(cookie.contains("HttpOnly; SameSite=Lax"));
+            assert!(!cookie.contains("alice"));
+            assert!(!body.contains("access-test") && !body.contains("refresh-test"));
+            let user = h
+                .state
+                .runtime
+                .user_by_passport_username("alice")
+                .unwrap()
+                .unwrap();
+            assert_eq!(user.passport_app_token.as_deref(), Some("access-test"));
+            assert_eq!(user.passport_refresh_token.as_deref(), Some("refresh-test"));
+            assert!(user.passport_token_expires_at.unwrap() > chrono::Utc::now());
+            assert_eq!(h.poll(&id, &owner).await.0, 401);
+            let cookie = cookie.split(';').next().unwrap();
+            let me = h.request("/api/auth/me", cookie, None, "").await;
+            assert_eq!(me.0, 200);
+            assert!(me.2.contains("\"credentials_valid\":true"));
+            assert_eq!(
+                h.request("/api/auth/me", "blora_passport_user=alice", None, "")
+                    .await
+                    .0,
+                401
+            );
+            assert_eq!(
+                h.request("/api/sessions", cookie, None, "").await.0,
+                if require_auth { 401 } else { 200 }
+            );
+            if require_auth {
+                assert_eq!(h.request("/api/sessions", "", None, "invalid").await.0, 401);
+                for path in [
+                    "/api/workspace",
+                    "/api/workspace/file?path=secret",
+                    "/api/tasks",
+                    "/api/usage",
+                    "/api/artifacts",
+                    "/api/plugins",
+                    "/ws",
+                ] {
+                    assert_eq!(h.request(path, cookie, None, "").await.0, 401, "{path}");
+                }
+                assert_eq!(h.request("/api/settings", "", None, "").await.0, 200);
+                let (_, token) = h.state.runtime.create_user("gateway").unwrap();
+                assert_eq!(
+                    h.request("/api/sessions", cookie, None, &token).await.0,
+                    200
+                );
+            }
+            h.state
+                .runtime
+                .upsert_passport_user(
+                    "alice",
+                    Some("Alice"),
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(chrono::Utc::now() - chrono::Duration::minutes(5)),
+                )
+                .unwrap();
+            let invalid = h.request("/api/auth/me", cookie, None, "").await;
+            assert_eq!(invalid.0, 200);
+            assert!(invalid.2.contains("\"credentials_valid\":false"));
+            assert_eq!(
+                h.request("/api/auth/logout", cookie, Some(serde_json::json!({})), "")
+                    .await
+                    .0,
+                204
+            );
+            assert_eq!(h.request("/api/auth/me", cookie, None, "").await.0, 401);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancel_and_expiry_discard_inflight_success() {
+        for cancel in [true, false] {
+            let h = OAuthHarness::new(false).await;
+            let (id, cookie) = h.start("").await;
+            h.reply(&id, success_token());
+            h.ready(&id);
+            h.mock
+                .blocked
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            let poll = h.poll(&id, &cookie);
+            let intervene = async {
+                tokio::time::timeout(Duration::from_secs(5), h.mock.entered.notified())
+                    .await
+                    .unwrap();
+                assert!(h.poll(&id, &cookie).await.2.contains("pending"));
+                if cancel {
+                    assert_eq!(
+                        h.request(
+                            "/api/auth/device/cancel",
+                            &cookie,
+                            Some(serde_json::json!({"attempt_id":id})),
+                            ""
+                        )
+                        .await
+                        .0,
+                        204
+                    );
+                } else {
+                    h.state
+                        .device_attempts
+                        .lock()
+                        .unwrap()
+                        .get_mut(&id)
+                        .unwrap()
+                        .deadline = std::time::Instant::now();
+                }
+                h.mock.gate.notify_one();
+            };
+            let ((status, cookie, _), ()) = tokio::join!(poll, intervene);
+            assert_eq!(status, 400);
+            assert!(cookie.is_empty());
+            assert!(
+                h.state
+                    .runtime
+                    .user_by_passport_username("alice")
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(h.mock.calls.lock().unwrap().len(), 1);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn logout_revokes_pending_attempt_and_invalid_token_expiry_cannot_persist() {
+        let h = OAuthHarness::new(false).await;
+        let (id, owner) = h.start("").await;
+        assert_eq!(
+            h.request("/api/auth/logout", &owner, Some(serde_json::json!({})), "")
+                .await
+                .0,
+            204
+        );
+        assert_eq!(h.poll(&id, &owner).await.0, 401);
+        let (id, owner) = h.start(&owner).await;
+        h.reply(
+            &id,
+            serde_json::json!({"access_token":"access-test","expires_in":u64::MAX}),
+        );
+        h.ready(&id);
+        let (status, cookie, body) = h.poll(&id, &owner).await;
+        assert_eq!(status, 400);
+        assert!(body.contains("invalid token expiry"));
+        assert!(cookie.is_empty());
+        assert!(!h.state.device_attempts.lock().unwrap().contains_key(&id));
+        assert!(
+            h.state
+                .runtime
+                .user_by_passport_username("alice")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn oauth_expiry_rejects_overflow() {
+        assert!(passport_token_expiry(Some(u64::MAX)).is_err());
+        assert!(passport_token_expiry(Some(i64::MAX as u64)).is_err());
+        assert!(passport_token_expiry(None).is_ok_and(|expiry| expiry > chrono::Utc::now()));
+    }
+
     #[test]
     fn serves_nested_component_css() {
         let path = resolve_vendor("components/alert/alert.css").expect("alert.css");
@@ -1662,7 +2331,8 @@ mod tests {
             cancels: Arc::new(Mutex::new(HashMap::new())),
             require_auth: false,
             passport: None,
-            device_code: Arc::new(Mutex::new(None)),
+            device_attempts: Arc::new(Mutex::new(HashMap::new())),
+            passport_sessions: Arc::new(Mutex::new(HashMap::new())),
         };
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
