@@ -304,6 +304,7 @@ dependencies = [
  "blora-context",
  "blora-events",
  "blora-exec",
+ "blora-imagine",
  "blora-model",
  "blora-policy",
  "blora-session",

@@ -2029,7 +2029,9 @@ fn imagine_lines(
                             out.push(Line::from(Span::styled(wrapped, theme.mute())));
                         }
                     }
-                } else if status == "failed" || status == "error" {
+                } else if (status == "failed" || status == "error")
+                    && !output.contains("missing string field path")
+                {
                     any = true;
                     let message = if output.trim().is_empty() {
                         "生成失败".to_owned()

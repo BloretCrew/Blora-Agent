@@ -67,6 +67,32 @@ impl ImageEndpoint {
 }
 
 impl ImageRequest {
+    /// Build a request from the user's message, including lines like `画幅 16:9，张数 2`.
+    #[must_use]
+    pub fn from_user_text(text: &str) -> Self {
+        let aspect_ratio = ["9:16", "16:9", "4:3", "3:4", "1:1"]
+            .into_iter()
+            .find(|ratio| text.contains(ratio))
+            .unwrap_or("1:1");
+        let count = text
+            .split("张数")
+            .nth(1)
+            .and_then(|rest| rest.trim().chars().next())
+            .and_then(|ch| ch.to_digit(10))
+            .filter(|count| (1..=4).contains(count))
+            .unwrap_or(1);
+        let prompt = text
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty() && !line.starts_with("画幅") && !line.starts_with("张数"))
+            .unwrap_or("image");
+        Self {
+            prompt: prompt.to_owned(),
+            aspect_ratio: aspect_ratio.to_owned(),
+            count,
+        }
+    }
+
     pub fn parse(prompt: &str, aspect_ratio: Option<&str>, count: Option<u64>) -> Result<Self> {
         let prompt = prompt.trim();
         if prompt.is_empty() {
@@ -338,6 +364,14 @@ mod tests {
         assert!(ImageRequest::parse("a cat", Some("2:1"), Some(1)).is_err());
         assert!(ImageRequest::parse("a cat", Some("1:1"), Some(5)).is_err());
         assert_eq!(size_for("16:9"), Some("1792x1024"));
+    }
+
+    #[test]
+    fn reads_aspect_and_count_from_the_user_message() {
+        let request = ImageRequest::from_user_text("一张珊瑚壁纸\n画幅 16:9，张数 2");
+        assert_eq!(request.prompt, "一张珊瑚壁纸");
+        assert_eq!(request.aspect_ratio, "16:9");
+        assert_eq!(request.count, 2);
     }
 
     fn base64_of_png() -> String {

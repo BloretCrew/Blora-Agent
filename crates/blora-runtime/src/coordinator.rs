@@ -855,6 +855,63 @@ impl Runtime {
         let mut last_fingerprint: Option<String> = None;
         let mut repeat_count: u32 = 0;
 
+        if imagine {
+            let image = blora_imagine::ImageRequest::from_user_text(prompt);
+            let call = ToolCall {
+                id: "imagine-direct".to_owned(),
+                name: "generate_image".to_owned(),
+                arguments: json!({
+                    "prompt": image.prompt,
+                    "aspect_ratio": image.aspect_ratio,
+                    "n": image.count,
+                })
+                .to_string(),
+            };
+            self.dispatch_tool(
+                session_id,
+                &run_id,
+                &turn_id,
+                &backend,
+                &call,
+                options,
+                cancel,
+                mode,
+                mcp.as_ref(),
+                &plugins,
+                &exec_root,
+                None,
+                false,
+            )?;
+            let summary = self
+                .show_session(session_id)?
+                .transcript
+                .into_iter()
+                .rev()
+                .find_map(|item| match item {
+                    blora_session::TranscriptItem::Tool { output, .. } => output,
+                    _ => None,
+                })
+                .unwrap_or_else(|| "generate_image finished".to_owned());
+            self.emit(
+                session_id,
+                Some(&run_id),
+                Some(&turn_id),
+                KnownPayload::AssistantMessageCompleted(AssistantMessageCompleted {
+                    text: summary.clone(),
+                }),
+            )?;
+            self.emit(
+                session_id,
+                Some(&run_id),
+                Some(&turn_id),
+                KnownPayload::RunCompleted(RunCompleted {
+                    summary: Some(summary),
+                }),
+            )?;
+            let _ = self.checkpoint(session_id, Some(&run_id), Some("imagine completed"));
+            return Ok(run_id);
+        }
+
         for turn in 0..options.max_turns {
             if cancel.is_cancelled() {
                 return self.cancel_run(session_id, &run_id, &turn_id);

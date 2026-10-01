@@ -11,6 +11,7 @@ description = "Agent loop coordinator for Blora Agent."
 blora-context.workspace = true
 blora-events.workspace = true
 blora-exec.workspace = true
+blora-imagine.workspace = true
 blora-model.workspace = true
 blora-policy.workspace = true
 blora-session.workspace = true
