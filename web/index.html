@@ -83,6 +83,9 @@
               <button type="button" class="blora-button" data-variant="ghost" data-size="sm" data-icon="square" id="cancel-run">
                 停止
               </button>
+              <button type="button" class="blora-button" data-variant="ghost" data-size="sm" id="archive">归档</button>
+              <button type="button" class="blora-button" data-variant="ghost" data-size="sm" id="resume">恢复</button>
+              <button type="button" class="blora-button" data-variant="ghost" data-size="sm" id="export-session">导出</button>
               <blora-spinner id="page-loading" label="加载中" hidden></blora-spinner>
             </div>
           </header>
@@ -116,6 +119,7 @@
               </button>
             </div>
             <form class="ba-composer" id="composer">
+              <div id="slash-menu" class="ba-slash" hidden role="listbox" aria-label="斜杠命令"></div>
               <canvas
                 id="work-orb"
                 class="ba-work-orb"
@@ -128,15 +132,29 @@
                 class="blora-textarea"
                 id="prompt"
                 rows="2"
-                placeholder="要在这个工作区做什么？"
+                placeholder="要在这个工作区做什么？输入 / 查看命令"
               ></textarea>
-              <button type="submit" class="blora-button" data-variant="primary" data-icon="send" id="send">发送</button>
+              <div class="ba-composer__bar">
+                <label class="ba-perm">
+                  <span>权限</span>
+                  <select id="permission-mode" class="blora-input">
+                    <option value="ask">询问</option>
+                    <option value="plan">计划</option>
+                    <option value="auto-edit">自动编辑</option>
+                    <option value="yolo">全部允许</option>
+                  </select>
+                </label>
+                <button type="submit" class="blora-button" data-variant="primary" data-icon="send" id="send">发送</button>
+              </div>
             </form>
           </section>
           <section id="view-tasks" hidden>
             <form class="ba-task-form" id="task-form">
-              <blora-field label="排队后台任务" name="title" required>
+              <blora-field label="任务标题" name="title" required>
                 <input class="blora-input" id="task-title" maxlength="80" />
+              </blora-field>
+              <blora-field label="提示词" name="prompt" required>
+                <input class="blora-input" id="task-prompt" />
               </blora-field>
               <blora-number-input id="task-delay" name="delay" label="延迟秒数" min="0" value="0"></blora-number-input>
               <blora-field label="Cron（可选）" name="cron">

@@ -6,7 +6,36 @@ const state = {
   running: false,
   streaming: null,
   stick: true,
+  slashIndex: 0,
 };
+
+const SLASH = [
+  ["help", "列出命令"],
+  ["new", "新建会话"],
+  ["compact", "压缩当前会话"],
+  ["fork", "派生当前会话"],
+  ["cancel", "停止当前运行"],
+  ["archive", "归档当前会话"],
+  ["resume", "恢复当前会话"],
+  ["export", "导出事件日志"],
+  ["yes", "权限设为全部允许"],
+  ["no", "权限设为询问"],
+  ["plan", "权限设为计划"],
+  ["model", "设置模型，例如 /model gpt-4o-mini"],
+  ["provider", "设置供应商，例如 /provider openai"],
+  ["tasks", "打开任务"],
+  ["approvals", "打开审批"],
+  ["settings", "打开设置"],
+  ["timeline", "打开时间线"],
+  ["artifacts", "打开产物"],
+  ["git", "打开工作区 Git"],
+  ["usage", "显示用量"],
+  ["mode", "新建 code、work 或 agent 会话"],
+  ["install", "安装市场插件"],
+  ["read", "读取工作区文件"],
+  ["steer", "向运行中的回合插话"],
+  ["theme", "打开主题设置"],
+];
 
 const sessionEmpty = document.querySelector("#session-empty");
 const thread = document.querySelector("#thread");
@@ -92,12 +121,16 @@ function enhance() {
 }
 
 function showAlert(message) {
+  showNotice(message, "danger", "出错了");
+}
+
+function showNotice(message, variant, titleText) {
   if (!pageAlert) {
     return;
   }
   pageAlert.hidden = false;
-  pageAlert.setAttribute("variant", "danger");
-  pageAlert.setAttribute("title", "出错了");
+  pageAlert.setAttribute("variant", variant);
+  pageAlert.setAttribute("title", titleText);
   pageAlert.setAttribute("description", message);
 }
 
@@ -443,6 +476,9 @@ async function selectSession(id) {
   const session = await api(`/api/sessions/${id}`);
   title.textContent = sessionTitle(session);
   pathEl.textContent = `${session.workspace_path} · ${session.mode} · ${session.status}`;
+  if (session.permission_mode) {
+    applyPermission(session.permission_mode, false);
+  }
   renderUsage(session);
   renderPlan(session);
   renderTranscript(session.transcript);
@@ -628,7 +664,12 @@ document.querySelector("#composer").addEventListener("submit", async (event) => 
   }
   box.value = "";
   box.style.height = "";
+  hideSlash();
   state.stick = true;
+  if (text.startsWith("/")) {
+    await runSlash(text);
+    return;
+  }
   // While a run is in flight the composer becomes a steering channel: the
   // message is queued and delivered at the next model-turn boundary.
   if (state.running) {
@@ -644,7 +685,8 @@ document.querySelector("#composer").addEventListener("submit", async (event) => 
       method: "POST",
       body: JSON.stringify({
         prompt: text,
-        auto_approve: isChecked(autoApprove),
+        permission_mode: currentPermission(),
+        auto_approve: currentPermission() === "yolo",
         provider: stored("blora-provider"),
         model: stored("blora-model"),
         worktree: isChecked(document.querySelector("#pref-worktree")),
@@ -1051,7 +1093,7 @@ document.querySelector("#task-form").addEventListener("submit", async (event) =>
     body: JSON.stringify({
       session_id: state.sessionId,
       title: (titleInput?.value || "").trim(),
-      prompt: (titleInput?.value || "").trim(),
+      prompt: ((fieldInput("#task-prompt") || document.querySelector("#task-prompt"))?.value || titleInput?.value || "").trim(),
       delay_seconds: numberValue(delayInput),
       cron: (cronInput?.value || "").trim() || null,
       auto_approve: isChecked(autoApprove),
@@ -1059,6 +1101,10 @@ document.querySelector("#task-form").addEventListener("submit", async (event) =>
   });
   if (titleInput) {
     titleInput.value = "";
+  }
+  const taskPrompt = fieldInput("#task-prompt") || document.querySelector("#task-prompt");
+  if (taskPrompt) {
+    taskPrompt.value = "";
   }
   await refreshTasks();
 });
@@ -1098,13 +1144,268 @@ if (promptBox) {
     const limit = 12 * 16;
     promptBox.style.height = `${Math.min(promptBox.scrollHeight, limit)}px`;
   };
-  promptBox.addEventListener("input", growPrompt);
+  promptBox.addEventListener("input", () => {
+    growPrompt();
+    state.slashIndex = 0;
+    renderSlash(promptBox.value);
+  });
   promptBox.addEventListener("keydown", (event) => {
+    const menu = document.querySelector("#slash-menu");
+    const open = menu && !menu.hidden;
+    if (open && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
+      event.preventDefault();
+      const count = menu.querySelectorAll(".ba-slash__item").length;
+      if (!count) {
+        return;
+      }
+      state.slashIndex = (state.slashIndex + (event.key === "ArrowDown" ? 1 : -1) + count) % count;
+      renderSlash(promptBox.value);
+      return;
+    }
+    if (open && event.key === "Tab") {
+      event.preventDefault();
+      const picked = SLASH.filter((row) => row[0].startsWith(slashToken(promptBox.value)))[state.slashIndex];
+      if (picked) {
+        promptBox.value = `/${picked[0]} `;
+        hideSlash();
+      }
+      return;
+    }
+    if (open && event.key === "Escape") {
+      event.preventDefault();
+      hideSlash();
+      return;
+    }
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
       event.preventDefault();
       document.querySelector("#composer").requestSubmit();
     }
   });
+}
+
+function currentPermission() {
+  const select = document.querySelector("#permission-mode");
+  return select?.value || stored("blora-permission", "ask");
+}
+
+let syncingPermission = false;
+
+function applyPermission(mode, persist = true) {
+  const allowed = ["ask", "plan", "auto-edit", "yolo"];
+  const next = allowed.includes(mode) ? mode : "ask";
+  const select = document.querySelector("#permission-mode");
+  if (select) {
+    select.value = next;
+  }
+  if (autoApprove) {
+    const value = next === "yolo" ? "on" : "off";
+    if (autoApprove.getAttribute("value") !== value) {
+      syncingPermission = true;
+      autoApprove.setAttribute("value", value);
+      syncingPermission = false;
+    }
+  }
+  if (persist) {
+    store("blora-permission", next);
+  }
+}
+
+function slashToken(text) {
+  const match = String(text || "").match(/^\/([^\s]*)$/);
+  return match ? match[1] : null;
+}
+
+function hideSlash() {
+  const menu = document.querySelector("#slash-menu");
+  if (menu) {
+    menu.hidden = true;
+    menu.replaceChildren();
+  }
+}
+
+function renderSlash(text) {
+  const menu = document.querySelector("#slash-menu");
+  const token = slashToken(text);
+  if (!menu || token === null) {
+    hideSlash();
+    return;
+  }
+  const hits = SLASH.filter((row) => row[0].startsWith(token));
+  if (!hits.length) {
+    hideSlash();
+    return;
+  }
+  state.slashIndex = Math.min(state.slashIndex, hits.length - 1);
+  menu.hidden = false;
+  menu.replaceChildren();
+  hits.forEach((row, index) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "ba-slash__item";
+    button.setAttribute("role", "option");
+    button.setAttribute("aria-selected", index === state.slashIndex ? "true" : "false");
+    const name = document.createElement("div");
+    name.className = "ba-slash__name";
+    name.textContent = `/${row[0]}`;
+    const about = document.createElement("div");
+    about.className = "ba-slash__about";
+    about.textContent = row[1];
+    button.append(name, about);
+    button.addEventListener("mousedown", (event) => {
+      event.preventDefault();
+      const box = fieldInput("#prompt") || prompt;
+      if (box) {
+        box.value = `/${row[0]} `;
+      }
+      hideSlash();
+      box?.focus();
+    });
+    menu.append(button);
+  });
+}
+
+async function runSlash(raw) {
+  const parts = raw.trim().slice(1).split(/\s+/);
+  const name = (parts.shift() || "").toLowerCase();
+  const rest = parts.join(" ");
+  const go = (view) => {
+    location.hash = `#/${view}`;
+  };
+  if (name === "help" || name === "?") {
+    showNotice(SLASH.map((row) => `/${row[0]} ${row[1]}`).join(" · "), "info", "命令");
+    return;
+  }
+  if (name === "new") {
+    const session = await api("/api/sessions", { method: "POST", body: "{}" });
+    location.hash = `#/session/${session.id}`;
+    return;
+  }
+  if (name === "mode" && rest) {
+    const session = await api("/api/sessions", {
+      method: "POST",
+      body: JSON.stringify({ mode: rest, title: rest }),
+    });
+    location.hash = `#/session/${session.id}`;
+    return;
+  }
+  if (name === "yes" || name === "yolo") {
+    applyPermission("yolo");
+    return;
+  }
+  if (name === "no") {
+    applyPermission("ask");
+    return;
+  }
+  if (name === "plan") {
+    applyPermission("plan");
+    return;
+  }
+  if (name === "model") {
+    if (rest) {
+      store("blora-model", rest);
+      const model = fieldInput("#pref-model");
+      if (model) model.value = rest;
+    }
+    showNotice(`模型 ${stored("blora-model") || "默认"}`, "info", "模型");
+    return;
+  }
+  if (name === "provider") {
+    if (rest) {
+      store("blora-provider", rest);
+      const provider = fieldInput("#pref-provider");
+      if (provider) provider.value = rest;
+    }
+    showNotice(`供应商 ${stored("blora-provider") || "默认"}`, "info", "供应商");
+    return;
+  }
+  if (name === "theme" || name === "settings") {
+    go("settings");
+    return;
+  }
+  if (["tasks", "approvals", "timeline", "artifacts"].includes(name)) {
+    go(name);
+    return;
+  }
+  if (name === "git" || name === "files") {
+    go("workspace");
+    return;
+  }
+  if (name === "usage") {
+    const query = state.sessionId ? `?session=${state.sessionId}` : "";
+    const usage = await api(`/api/usage${query}`);
+    showNotice(`输入 ${usage.input_tokens || 0} · 输出 ${usage.output_tokens || 0}`, "info", "用量");
+    return;
+  }
+  if (name === "read" && rest) {
+    go("workspace");
+    const file = await api(`/api/workspace/file?path=${encodeURIComponent(rest)}`);
+    document.querySelector("#workspace-file").textContent = file.contents || "";
+    return;
+  }
+  if (name === "install" && rest) {
+    await api("/api/marketplace", { method: "POST", body: JSON.stringify({ name: rest }) });
+    showNotice(`已安装 ${rest}`, "info", "插件");
+    return;
+  }
+  if (!state.sessionId && ["compact", "fork", "cancel", "archive", "resume", "export", "steer"].includes(name)) {
+    showAlert("先打开一个会话");
+    return;
+  }
+  if (name === "compact") {
+    await api(`/api/sessions/${state.sessionId}/compact`, { method: "POST", body: "{}" });
+    await selectSession(state.sessionId);
+    return;
+  }
+  if (name === "fork") {
+    const child = await api(`/api/sessions/${state.sessionId}/fork`, { method: "POST", body: "{}" });
+    location.hash = `#/session/${child.id}`;
+    return;
+  }
+  if (name === "cancel" || name === "stop") {
+    await api(`/api/sessions/${state.sessionId}/cancel`, { method: "POST", body: "{}" });
+    return;
+  }
+  if (name === "archive") {
+    await api(`/api/sessions/${state.sessionId}/archive`, { method: "POST", body: "{}" });
+    await selectSession(state.sessionId);
+    return;
+  }
+  if (name === "resume") {
+    await api(`/api/sessions/${state.sessionId}/resume`, { method: "POST", body: "{}" });
+    await selectSession(state.sessionId);
+    return;
+  }
+  if (name === "export") {
+    await downloadExport(state.sessionId);
+    return;
+  }
+  if (name === "steer") {
+    if (!rest) {
+      showAlert("用法：/steer 要补充的话");
+      return;
+    }
+    await api(`/api/sessions/${state.sessionId}/steer`, {
+      method: "POST",
+      body: JSON.stringify({ message: rest }),
+    });
+    return;
+  }
+  showAlert(`未知命令 /${name}。输入 /help 查看。`);
+}
+
+async function downloadExport(id) {
+  const response = await fetch(`/api/sessions/${id}/export`, {
+    headers: stored("blora-token") ? { authorization: `Bearer ${stored("blora-token")}` } : {},
+  });
+  if (!response.ok) {
+    throw new Error(await response.text());
+  }
+  const blob = await response.blob();
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = `${id}.jsonl`;
+  link.click();
+  URL.revokeObjectURL(link.href);
 }
 
 if (thread) {
@@ -1131,6 +1432,40 @@ document.querySelectorAll(".ba-chip").forEach((chip) => {
     box.value = chip.getAttribute("data-prompt") || "";
     box.focus();
   });
+});
+
+applyPermission(stored("blora-permission", "ask"), false);
+const permissionSelect = document.querySelector("#permission-mode");
+if (permissionSelect) {
+  permissionSelect.addEventListener("change", () => applyPermission(permissionSelect.value));
+}
+if (autoApprove) {
+  autoApprove.addEventListener("blora-change", () => {
+    if (syncingPermission) {
+      return;
+    }
+    applyPermission(isChecked(autoApprove) ? "yolo" : "ask");
+  });
+}
+for (const [id, action] of [
+  ["#archive", "archive"],
+  ["#resume", "resume"],
+]) {
+  document.querySelector(id)?.addEventListener("click", async () => {
+    if (!state.sessionId) {
+      return;
+    }
+    hideAlert();
+    await api(`/api/sessions/${state.sessionId}/${action}`, { method: "POST", body: "{}" });
+    await selectSession(state.sessionId);
+  });
+}
+document.querySelector("#export-session")?.addEventListener("click", async () => {
+  if (!state.sessionId) {
+    return;
+  }
+  hideAlert();
+  await downloadExport(state.sessionId);
 });
 
 enhance();
