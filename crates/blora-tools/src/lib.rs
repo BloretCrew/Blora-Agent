@@ -306,12 +306,7 @@ impl ToolRegistry {
         if mode == Mode::Imagine {
             Self::specs()
                 .into_iter()
-                .filter(|spec| {
-                    matches!(
-                        spec.name,
-                        "generate_image" | "read_file" | "list_dir" | "update_plan"
-                    )
-                })
+                .filter(|spec| spec.name == "generate_image")
                 .collect()
         } else {
             Self::specs()
@@ -513,9 +508,7 @@ mod tests {
             .into_iter()
             .map(|spec| spec.name)
             .collect();
-        assert!(names.contains(&"generate_image"));
-        assert!(!names.contains(&"shell"));
-        assert!(!names.contains(&"write_file"));
+        assert_eq!(names, vec!["generate_image"]);
         let code: Vec<_> = ToolRegistry::specs_for(Mode::Code)
             .into_iter()
             .map(|spec| spec.name)

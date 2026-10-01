@@ -1051,6 +1051,7 @@ impl Runtime {
                 &completion.tool_calls,
                 options,
                 cancel,
+                mode,
                 mcp.as_ref(),
                 &plugins,
                 &exec_root,
@@ -1188,6 +1189,7 @@ impl Runtime {
         calls: &[ToolCall],
         options: &RunOptions,
         cancel: &CancelToken,
+        mode: Mode,
         mcp: Option<&crate::mcp::McpClient>,
         plugins: &[crate::plugins::PluginSpec],
         workspace: &str,
@@ -1213,12 +1215,18 @@ impl Runtime {
                         Some(scope.spawn(move || {
                             let arguments: Value = serde_json::from_str(&call.arguments)
                                 .unwrap_or_else(|_| json!({ "raw": call.arguments }));
-                            ToolRegistry::execute_for(
-                                backend,
-                                session_id.as_str(),
-                                &call.name,
-                                &arguments,
-                            )
+                            if mode == Mode::Imagine && call.name != "generate_image" {
+                                Err(BloraError::Other(
+                                    "Imagine mode only runs generate_image".to_owned(),
+                                ))
+                            } else {
+                                ToolRegistry::execute_for(
+                                    backend,
+                                    session_id.as_str(),
+                                    &call.name,
+                                    &arguments,
+                                )
+                            }
                         }))
                     })
                     .collect();
@@ -1252,6 +1260,7 @@ impl Runtime {
                 call,
                 options,
                 cancel,
+                mode,
                 mcp,
                 plugins,
                 workspace,
@@ -1272,6 +1281,7 @@ impl Runtime {
         call: &ToolCall,
         options: &RunOptions,
         cancel: &CancelToken,
+        mode: Mode,
         mcp: Option<&crate::mcp::McpClient>,
         plugins: &[crate::plugins::PluginSpec],
         workspace: &str,
@@ -1280,6 +1290,15 @@ impl Runtime {
     ) -> Result<()> {
         let arguments: Value = serde_json::from_str(&call.arguments)
             .unwrap_or_else(|_| json!({ "raw": call.arguments }));
+        if mode == Mode::Imagine && call.name != "generate_image" {
+            return self.record_tool_failure(
+                session_id,
+                run_id,
+                turn_id,
+                call,
+                "Imagine 只生成图片。请调用 generate_image，参数是 prompt、aspect_ratio 和 n。不要读取文件。".to_owned(),
+            );
+        }
         self.emit(
             session_id,
             Some(run_id),

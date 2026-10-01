@@ -264,6 +264,22 @@ impl Provider for MockProvider {
                 finish_reason: "tool_calls".to_owned(),
                 ..Completion::default()
             }
+        } else if system.contains("Imagine mode") {
+            let prompt = last_user.lines().next().unwrap_or("image").trim();
+            Completion {
+                tool_calls: vec![ToolCall {
+                    id: "call_mock_image".to_owned(),
+                    name: "generate_image".to_owned(),
+                    arguments: json!({
+                        "prompt": prompt,
+                        "aspect_ratio": "1:1",
+                        "n": 1
+                    })
+                    .to_string(),
+                }],
+                finish_reason: "tool_calls".to_owned(),
+                ..Completion::default()
+            }
         } else if system.contains("local work harness") {
             Completion {
                 tool_calls: vec![ToolCall {
