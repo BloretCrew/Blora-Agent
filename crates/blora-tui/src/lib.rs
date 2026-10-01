@@ -3607,6 +3607,14 @@ fn slash(
         "code" => open_session(runtime, workspace, sessions, index, Mode::Code, "code"),
         "work" => open_session(runtime, workspace, sessions, index, Mode::Work, "work"),
         "agent" => open_session(runtime, workspace, sessions, index, Mode::Agent, "agent"),
+        "imagine" => open_session(
+            runtime,
+            workspace,
+            sessions,
+            index,
+            Mode::Imagine,
+            "imagine",
+        ),
         "plan" => open_session(runtime, workspace, sessions, index, Mode::Agent, "plan"),
         "exec" => SlashOutcome::Status(env_flag("BLORA_EXEC", "local")),
         "worktree" => SlashOutcome::Status(format!(

@@ -113,6 +113,15 @@ pub const CLEARED_TOOL_RESULT: &str = "[old tool result cleared to save context]
 /// Byte-stable identity and safety rules. Do not put dates or cwd here.
 #[must_use]
 pub fn stable_prompt(mode: &str) -> String {
+    if mode == "imagine" {
+        return "You are Blora Agent in Imagine mode.\n\
+             Turn the user's description into images with generate_image.\n\
+             Save every image in the workspace and answer with the relative path.\n\
+             Use read_file or list_dir only to check files that already exist.\n\
+             Do not write source code, run shell commands, or exfiltrate secrets.\n\
+             Unknown event types in history must be ignored."
+            .to_owned();
+    }
     format!(
         "You are Blora Agent, a local {mode} harness.\n\
          Stay inside the workspace. Prefer read_file, list_dir, glob, and search before write_file or shell.\n\
@@ -129,10 +138,12 @@ pub fn stable_prompt(mode: &str) -> String {
 /// Project rules, skills, and memories. Stable within a session unless files change.
 #[must_use]
 pub fn context_prompt(workspace: &str, mode: &str) -> String {
-    let mut out = format!(
-        "Mode: {mode}\n\
-         Tools: read_file, write_file, list_dir, glob, search, shell, skill, apply_patch, git_status, git_diff, git_log, git_branch, git_worktree, process, schedule_task, delegate, handoff, remember, recall, forget, update_plan."
-    );
+    let tools = if mode == "imagine" {
+        "generate_image, read_file, list_dir, update_plan"
+    } else {
+        "read_file, write_file, list_dir, glob, search, shell, skill, apply_patch, git_status, git_diff, git_log, git_branch, git_worktree, process, schedule_task, delegate, handoff, remember, recall, forget, update_plan"
+    };
+    let mut out = format!("Mode: {mode}\nTools: {tools}");
     if let Some(rules) = project_rules(workspace) {
         out.push_str("\n\nProject rules:\n");
         out.push_str(&rules);
@@ -688,6 +699,8 @@ mod tests {
     fn stable_prefix_does_not_include_volatile_facts() {
         let stable = stable_prompt("code");
         assert!(stable.contains("Blora Agent"));
+        assert!(stable_prompt("imagine").contains("generate_image"));
+        assert!(!stable.contains("generate_image"));
         assert!(!stable.contains("Date:"));
         assert!(!context_prompt("/tmp", "code").contains("Date:"));
         assert!(env().render().contains("Date: 2026-09-14"));

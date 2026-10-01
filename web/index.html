@@ -92,7 +92,7 @@
           <blora-alert id="page-alert" variant="danger" hidden></blora-alert>
           <section id="view-session" class="ba-session ba-session--empty">
             <div class="ba-hero" id="session-hero">
-              <p class="ba-hero__kicker">Code · Work · Agent</p>
+              <p class="ba-hero__kicker">Code · Work · Agent · Imagine</p>
               <h2 class="ba-hero__title" id="hero-title">工作区已就绪</h2>
               <p class="ba-hero__lede">在仓库里读、改、跑。会话、工具和审批都留在本地。</p>
               <div class="ba-chips" id="hero-chips">
@@ -135,6 +135,15 @@
                 placeholder="要在这个工作区做什么？输入 / 查看命令"
               ></textarea>
               <div class="ba-composer__bar">
+                <label class="ba-perm">
+                  <span>模式</span>
+                  <select id="run-mode" class="blora-input">
+                    <option value="code">Code</option>
+                    <option value="work">Work</option>
+                    <option value="agent">Agent</option>
+                    <option value="imagine">Imagine</option>
+                  </select>
+                </label>
                 <label class="ba-perm">
                   <span>权限</span>
                   <select id="permission-mode" class="blora-input">

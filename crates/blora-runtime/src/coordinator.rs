@@ -829,7 +829,8 @@ impl Runtime {
         let mcp = std::env::var("BLORA_MCP_COMMAND")
             .ok()
             .and_then(|command| crate::mcp::McpClient::connect(&command).ok());
-        let mut tools = ToolRegistry::specs()
+        let imagine = mode == Mode::Imagine;
+        let mut tools = ToolRegistry::specs_for(mode)
             .into_iter()
             .filter(|spec| !options.read_only || spec.read_only)
             .map(|spec| ToolDeclaration {
@@ -838,13 +839,15 @@ impl Runtime {
                 parameters: spec.parameters,
             })
             .collect::<Vec<_>>();
-        if let Some(client) = &mcp {
-            if let Ok(extra) = client.list_tools() {
-                tools.extend(extra);
+        if !imagine {
+            if let Some(client) = &mcp {
+                if let Ok(extra) = client.list_tools() {
+                    tools.extend(extra);
+                }
             }
         }
         let plugins = crate::plugins::load(std::path::Path::new(&exec_root));
-        if !options.read_only {
+        if !options.read_only && !imagine {
             tools.extend(plugins.iter().map(crate::plugins::PluginSpec::declaration));
         }
         let window = blora_context::context_window();
@@ -1210,7 +1213,12 @@ impl Runtime {
                         Some(scope.spawn(move || {
                             let arguments: Value = serde_json::from_str(&call.arguments)
                                 .unwrap_or_else(|_| json!({ "raw": call.arguments }));
-                            ToolRegistry::execute(backend, &call.name, &arguments)
+                            ToolRegistry::execute_for(
+                                backend,
+                                session_id.as_str(),
+                                &call.name,
+                                &arguments,
+                            )
                         }))
                     })
                     .collect();
@@ -1488,7 +1496,7 @@ impl Runtime {
                 )?;
                 Ok(format!("plan recorded ({done}/{total} done)"))
             }
-            _ => ToolRegistry::execute(backend, &call.name, &arguments),
+            _ => ToolRegistry::execute_for(backend, session_id.as_str(), &call.name, &arguments),
         };
         let first = match precomputed {
             Some(result) => result,

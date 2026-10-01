@@ -11,6 +11,8 @@ pub enum Mode {
     Code,
     Work,
     Agent,
+    /// Generate images from a description and save them in the workspace.
+    Imagine,
 }
 
 impl Mode {
@@ -20,6 +22,7 @@ impl Mode {
             Self::Code => "code",
             Self::Work => "work",
             Self::Agent => "agent",
+            Self::Imagine => "imagine",
         }
     }
 
@@ -28,7 +31,20 @@ impl Mode {
             "code" => Ok(Self::Code),
             "work" => Ok(Self::Work),
             "agent" => Ok(Self::Agent),
+            "imagine" => Ok(Self::Imagine),
             other => Err(crate::BloraError::Other(format!("unknown mode: {other}"))),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_imagine_and_rejects_unknown() {
+        assert_eq!(Mode::parse("imagine").unwrap(), Mode::Imagine);
+        assert_eq!(Mode::Imagine.as_str(), "imagine");
+        assert!(Mode::parse("picture").is_err());
     }
 }

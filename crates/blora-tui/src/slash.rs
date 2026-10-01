@@ -150,13 +150,20 @@ pub const COMMANDS: &[SlashCommand] = &[
     cmd(
         "mode",
         &[],
-        "[code|work|agent]",
+        "[code|work|agent|imagine]",
         "Show or open a session in a mode",
         "session",
     ),
     cmd("code", &[], "", "Open a new code session", "session"),
     cmd("work", &[], "", "Open a new work session", "session"),
     cmd("agent", &[], "", "Open a new agent session", "session"),
+    cmd(
+        "imagine",
+        &[],
+        "",
+        "Open a new Imagine session for image generation",
+        "session",
+    ),
     cmd(
         "plan",
         &[],

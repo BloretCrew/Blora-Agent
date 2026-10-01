@@ -283,6 +283,21 @@ blora-sidebar-layout {
   justify-content: space-between;
 }
 
+.ba-generated {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--blora-space-2);
+  margin-top: var(--blora-space-2);
+}
+
+.ba-generated img {
+  max-width: min(100%, 36rem);
+  height: auto;
+  background: var(--blora-color-sunken, var(--blora-color-surface));
+  border: var(--blora-border-width) solid var(--blora-color-border);
+  border-radius: var(--blora-radius-md, 0.75rem);
+}
+
 .ba-perm {
   display: flex;
   gap: var(--blora-space-2);

@@ -197,6 +197,8 @@ fn app(state: AppState) -> Router {
         .route("/api/auth/logout", post(auth_logout))
         .route("/api/sessions", get(list_sessions).post(create_session))
         .route("/api/sessions/{id}", get(show_session))
+        .route("/api/sessions/{id}/mode", post(set_session_mode))
+        .route("/api/sessions/{id}/images/{name}", get(session_image))
         .route("/api/sessions/{id}/run", post(run_session))
         .route("/api/sessions/{id}/events", get(session_events))
         .route("/api/sessions/{id}/fork", post(fork_session))
@@ -624,6 +626,74 @@ async fn create_session(
             .map_err(ApiError::from)?;
     }
     to_json(&state, &id).map(Json)
+}
+
+#[derive(Deserialize)]
+struct ModeBody {
+    mode: String,
+}
+
+async fn set_session_mode(
+    State(state): State<AppState>,
+    headers: HttpHeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<ModeBody>,
+) -> Result<Json<SessionJson>, ApiError> {
+    let session_id = SessionId::parse(&id).map_err(ApiError::from)?;
+    ensure_session(&state, &headers, &session_id)?;
+    let mode = Mode::parse(&body.mode).map_err(ApiError::from)?;
+    state
+        .runtime
+        .set_session_mode(&session_id, mode)
+        .map_err(ApiError::from)?;
+    to_json(&state, &session_id).map(Json)
+}
+
+async fn session_image(
+    State(state): State<AppState>,
+    headers: HttpHeaderMap,
+    Path((id, name)): Path<(String, String)>,
+) -> Result<Response, ApiError> {
+    let session_id = SessionId::parse(&id).map_err(ApiError::from)?;
+    ensure_session(&state, &headers, &session_id)?;
+    if !image_name_ok(&name) {
+        return Err(ApiError("image not found".to_owned()));
+    }
+    let projection = state
+        .runtime
+        .show_session(&session_id)
+        .map_err(ApiError::from)?;
+    let workspace = projection
+        .session
+        .as_ref()
+        .map(|session| session.workspace_path.clone())
+        .ok_or_else(|| ApiError("image not found".to_owned()))?;
+    let path = FsPath::new(&workspace)
+        .join(".blora")
+        .join("images")
+        .join(session_id.as_str())
+        .join(&name);
+    let bytes = std::fs::read(&path).map_err(|_| ApiError("image not found".to_owned()))?;
+    let mime = match name.rsplit('.').next() {
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("webp") => "image/webp",
+        _ => "image/png",
+    };
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_str(mime).unwrap_or(HeaderValue::from_static("image/png")),
+    );
+    Ok((headers, bytes).into_response())
+}
+
+fn image_name_ok(name: &str) -> bool {
+    let Some((hash, ext)) = name.rsplit_once('.') else {
+        return false;
+    };
+    matches!(ext, "png" | "jpg" | "jpeg" | "webp")
+        && hash.len() == 64
+        && hash.chars().all(|ch| ch.is_ascii_hexdigit())
 }
 
 async fn show_session(

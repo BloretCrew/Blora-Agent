@@ -5,7 +5,8 @@
 
 use blora_context::read_skill;
 use blora_exec::{LocalBackend, ShellKind};
-use blora_types::{BloraError, Result};
+use blora_imagine::{self, permission_path};
+use blora_types::{BloraError, Mode, Result};
 use serde_json::{Value, json};
 
 #[derive(Clone, Debug)]
@@ -260,6 +261,20 @@ impl ToolRegistry {
                 read_only: true,
             },
             ToolSpec {
+                name: "generate_image",
+                description: "Generate images from a text prompt and save them in the workspace under .blora/images/. Use this in Imagine mode. aspect_ratio is 1:1, 16:9, 9:16, 4:3, or 3:4. n is 1 to 4.",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "prompt": {"type": "string", "description": "What the image should show"},
+                        "aspect_ratio": {"type": "string", "enum": ["1:1", "16:9", "9:16", "4:3", "3:4"]},
+                        "n": {"type": "integer", "minimum": 1, "maximum": 4}
+                    },
+                    "required": ["prompt"]
+                }),
+                read_only: false,
+            },
+            ToolSpec {
                 name: "update_plan",
                 description: "Replace your working checklist. Send the full list every time; keep at most one step in_progress. Use it for multi-step work so the user can follow progress.",
                 parameters: json!({
@@ -285,6 +300,27 @@ impl ToolRegistry {
         ]
     }
 
+    /// Tools offered to the model for this session strategy.
+    #[must_use]
+    pub fn specs_for(mode: Mode) -> Vec<ToolSpec> {
+        if mode == Mode::Imagine {
+            Self::specs()
+                .into_iter()
+                .filter(|spec| {
+                    matches!(
+                        spec.name,
+                        "generate_image" | "read_file" | "list_dir" | "update_plan"
+                    )
+                })
+                .collect()
+        } else {
+            Self::specs()
+                .into_iter()
+                .filter(|spec| spec.name != "generate_image")
+                .collect()
+        }
+    }
+
     /// True for tools that never mutate workspace, processes, or memory.
     #[must_use]
     pub fn is_read_only(name: &str) -> bool {
@@ -294,6 +330,15 @@ impl ToolRegistry {
     }
 
     pub fn execute(backend: &LocalBackend, name: &str, arguments: &Value) -> Result<String> {
+        Self::execute_for(backend, "", name, arguments)
+    }
+
+    pub fn execute_for(
+        backend: &LocalBackend,
+        session_id: &str,
+        name: &str,
+        arguments: &Value,
+    ) -> Result<String> {
         match name {
             "read_file" => {
                 let text = backend.read_file(required_str(arguments, "path")?)?;
@@ -374,6 +419,7 @@ impl ToolRegistry {
                 let files = optional_str(arguments, "files").unwrap_or("");
                 Ok(format!("HANDOFF\n{summary}\n{files}"))
             }
+            "generate_image" => generate_image(backend, session_id, arguments),
             "apply_patch" => {
                 let replace_all = arguments
                     .get("replace_all")
@@ -412,6 +458,28 @@ fn slice_lines(text: &str, offset: Option<u64>, limit: Option<u64>) -> String {
     out.join("\n")
 }
 
+fn generate_image(backend: &LocalBackend, session_id: &str, arguments: &Value) -> Result<String> {
+    if session_id.is_empty() {
+        return Err(BloraError::Other(
+            "generate_image needs a session id".to_owned(),
+        ));
+    }
+    let request = blora_imagine::ImageRequest::parse(
+        required_str(arguments, "prompt")?,
+        optional_str(arguments, "aspect_ratio"),
+        arguments.get("n").and_then(Value::as_u64),
+    )?;
+    let check = permission_path(session_id);
+    let check = check.to_string_lossy();
+    backend
+        .policy()
+        .require(backend.policy().file_write_path(&check), "generate_image")?;
+    let endpoint = blora_imagine::ImageEndpoint::from_env()?;
+    let images = blora_imagine::fetch_images(&endpoint, &request)?;
+    let saved = blora_imagine::write_images(backend.policy().workspace(), session_id, &images)?;
+    Ok(blora_imagine::format_saved(&saved))
+}
+
 fn required_str<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
     value
         .get(key)
@@ -436,6 +504,23 @@ mod tests {
         assert!(ToolRegistry::is_read_only("skill"));
         assert!(!ToolRegistry::is_read_only("shell"));
         assert!(!ToolRegistry::is_read_only("apply_patch"));
+        assert!(!ToolRegistry::is_read_only("generate_image"));
+    }
+
+    #[test]
+    fn imagine_mode_hides_shell_and_writes() {
+        let names: Vec<_> = ToolRegistry::specs_for(Mode::Imagine)
+            .into_iter()
+            .map(|spec| spec.name)
+            .collect();
+        assert!(names.contains(&"generate_image"));
+        assert!(!names.contains(&"shell"));
+        assert!(!names.contains(&"write_file"));
+        let code: Vec<_> = ToolRegistry::specs_for(Mode::Code)
+            .into_iter()
+            .map(|spec| spec.name)
+            .collect();
+        assert!(!code.contains(&"generate_image"));
     }
 
     #[test]

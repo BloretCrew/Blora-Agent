@@ -239,6 +239,7 @@ enum SessionCommands {
         workspace: PathBuf,
         #[arg(long)]
         title: Option<String>,
+        /// Session mode: code, work, agent, or imagine.
         #[arg(long, default_value = "code")]
         mode: String,
     },
@@ -859,7 +860,10 @@ fn headless(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-fn last_assistant(runtime: &Runtime, session_id: &SessionId) -> Result<String, blora_types::BloraError> {
+fn last_assistant(
+    runtime: &Runtime,
+    session_id: &SessionId,
+) -> Result<String, blora_types::BloraError> {
     let projection = runtime.show_session(session_id)?;
     Ok(projection
         .transcript

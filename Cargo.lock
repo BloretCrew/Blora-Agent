@@ -268,6 +268,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "blora-imagine"
+version = "0.1.0-beta.3"
+dependencies = [
+ "blora-types",
+ "serde_json",
+ "sha2",
+ "ureq",
+]
+
+[[package]]
 name = "blora-model"
 version = "0.1.0-beta.3"
 dependencies = [
@@ -361,6 +371,7 @@ version = "0.1.0-beta.3"
 dependencies = [
  "blora-context",
  "blora-exec",
+ "blora-imagine",
  "blora-types",
  "serde",
  "serde_json",

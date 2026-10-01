@@ -10,6 +10,7 @@ members = [
     "crates/blora-policy",
     "crates/blora-exec",
     "crates/blora-tools",
+    "crates/blora-imagine",
     "crates/blora-catalog",
     "crates/blora-model",
     "crates/blora-runtime",
@@ -40,6 +41,7 @@ blora-storage = { path = "crates/blora-storage" }
 blora-policy = { path = "crates/blora-policy" }
 blora-exec = { path = "crates/blora-exec" }
 blora-tools = { path = "crates/blora-tools" }
+blora-imagine = { path = "crates/blora-imagine" }
 blora-catalog = { path = "crates/blora-catalog" }
 blora-model = { path = "crates/blora-model" }
 blora-runtime = { path = "crates/blora-runtime" }

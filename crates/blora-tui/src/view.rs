@@ -220,7 +220,7 @@ pub struct ModeOption {
     pub description: &'static str,
 }
 
-pub const MODE_OPTIONS: [ModeOption; 3] = [
+pub const MODE_OPTIONS: [ModeOption; 4] = [
     ModeOption {
         mode: Mode::Code,
         title: "Code",
@@ -235,6 +235,11 @@ pub const MODE_OPTIONS: [ModeOption; 3] = [
         mode: Mode::Agent,
         title: "Agent",
         description: "自主拆解任务，使用工具并在需要时派发子代理。",
+    },
+    ModeOption {
+        mode: Mode::Imagine,
+        title: "Imagine",
+        description: "根据描述生成图片，并保存在工作区。",
     },
 ];
 

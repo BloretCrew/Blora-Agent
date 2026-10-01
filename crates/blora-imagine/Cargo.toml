@@ -1,19 +1,17 @@
 [package]
-name = "blora-tools"
+name = "blora-imagine"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 authors.workspace = true
-description = "Built-in coding tools for Blora Agent."
+description = "Workspace image generation for Blora Agent Imagine mode."
 
 [dependencies]
-blora-context.workspace = true
-blora-exec.workspace = true
-blora-imagine.workspace = true
 blora-types.workspace = true
-serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+ureq.workspace = true
 
 [lints]
 workspace = true

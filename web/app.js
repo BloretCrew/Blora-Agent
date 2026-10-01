@@ -30,7 +30,8 @@ const SLASH = [
   ["artifacts", "打开产物"],
   ["git", "打开工作区 Git"],
   ["usage", "显示用量"],
-  ["mode", "新建 code、work 或 agent 会话"],
+  ["mode", "新建 code、work、agent 或 imagine 会话"],
+  ["imagine", "新建 Imagine 生图会话"],
   ["install", "安装市场插件"],
   ["read", "读取工作区文件"],
   ["steer", "向运行中的回合插话"],
@@ -407,7 +408,27 @@ function setBubbleText(body, kind, text) {
     return node;
   }
   body.replaceChildren(document.createTextNode(text));
+  appendGeneratedImages(body, text);
   return body;
+}
+
+function appendGeneratedImages(body, text) {
+  const pattern = /\.blora\/images\/([A-Za-z0-9_-]+)\/([a-fA-F0-9]{64}\.(?:png|jpe?g|webp))/g;
+  const gallery = document.createElement("div");
+  gallery.className = "ba-generated";
+  let match = pattern.exec(text);
+  while (match) {
+    if (state.sessionId && match[1] === state.sessionId) {
+      const image = document.createElement("img");
+      image.alt = "生成的图片";
+      image.src = `/api/sessions/${encodeURIComponent(state.sessionId)}/images/${encodeURIComponent(match[2])}`;
+      gallery.append(image);
+    }
+    match = pattern.exec(text);
+  }
+  if (gallery.childElementCount) {
+    body.append(gallery);
+  }
 }
 
 function renderTranscript(items) {
@@ -478,6 +499,9 @@ async function selectSession(id) {
   pathEl.textContent = `${session.workspace_path} · ${session.mode} · ${session.status}`;
   if (session.permission_mode) {
     applyPermission(session.permission_mode, false);
+  }
+  if (session.mode) {
+    applyRunMode(session.mode, false);
   }
   renderUsage(session);
   renderPlan(session);
@@ -642,7 +666,7 @@ document.querySelector("#new-session").addEventListener("click", async () => {
   hideAlert();
   const session = await api("/api/sessions", {
     method: "POST",
-    body: JSON.stringify({}),
+    body: JSON.stringify({ mode: currentRunMode() }),
   });
   location.hash = `#/session/${session.id}`;
 });
@@ -653,7 +677,7 @@ document.querySelector("#composer").addEventListener("submit", async (event) => 
   if (!state.sessionId) {
     const session = await api("/api/sessions", {
       method: "POST",
-      body: JSON.stringify({}),
+      body: JSON.stringify({ mode: currentRunMode() }),
     });
     state.sessionId = session.id;
   }
@@ -1190,6 +1214,30 @@ function currentPermission() {
 
 let syncingPermission = false;
 
+const RUN_MODES = ["code", "work", "agent", "imagine"];
+
+function currentRunMode() {
+  const select = document.querySelector("#run-mode");
+  return RUN_MODES.includes(select?.value) ? select.value : stored("blora-run-mode", "code");
+}
+
+function applyRunMode(mode, persist = true) {
+  const next = RUN_MODES.includes(mode) ? mode : "code";
+  const select = document.querySelector("#run-mode");
+  if (select) {
+    select.value = next;
+  }
+  const box = fieldInput("#prompt") || prompt;
+  if (box) {
+    box.placeholder = next === "imagine"
+      ? "描述要生成的图片。输入 / 查看命令"
+      : "要在这个工作区做什么？输入 / 查看命令";
+  }
+  if (persist) {
+    store("blora-run-mode", next);
+  }
+}
+
 function applyPermission(mode, persist = true) {
   const allowed = ["ask", "plan", "auto-edit", "yolo"];
   const next = allowed.includes(mode) ? mode : "ask";
@@ -1277,6 +1325,14 @@ async function runSlash(raw) {
   }
   if (name === "new") {
     const session = await api("/api/sessions", { method: "POST", body: "{}" });
+    location.hash = `#/session/${session.id}`;
+    return;
+  }
+  if (name === "imagine") {
+    const session = await api("/api/sessions", {
+      method: "POST",
+      body: JSON.stringify({ mode: "imagine", title: "imagine" }),
+    });
     location.hash = `#/session/${session.id}`;
     return;
   }
@@ -1435,6 +1491,26 @@ document.querySelectorAll(".ba-chip").forEach((chip) => {
 });
 
 applyPermission(stored("blora-permission", "ask"), false);
+const runModeSelect = document.querySelector("#run-mode");
+if (runModeSelect) {
+  applyRunMode(stored("blora-run-mode", "code"), false);
+  runModeSelect.addEventListener("change", async () => {
+    applyRunMode(runModeSelect.value);
+    if (!state.sessionId) {
+      return;
+    }
+    try {
+      await api(`/api/sessions/${state.sessionId}/mode`, {
+        method: "POST",
+        body: JSON.stringify({ mode: currentRunMode() }),
+      });
+      await selectSession(state.sessionId);
+    } catch (error) {
+      showAlert(error.message);
+    }
+  });
+}
+
 const permissionSelect = document.querySelector("#permission-mode");
 if (permissionSelect) {
   permissionSelect.addEventListener("change", () => applyPermission(permissionSelect.value));
