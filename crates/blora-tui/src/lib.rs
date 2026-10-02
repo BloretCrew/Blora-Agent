@@ -1087,15 +1087,21 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             }
                             KeyCode::Right if git_dialog.is_some() => {
                                 if let Some(dialog) = git_dialog.as_mut() {
-                                    dialog.page = (dialog.page + 1).min(1);
+                                    dialog.page = (dialog.page + 1).min(2);
                                     dialog.scroll = 0;
                                     dialog.editing_message = false;
                                 }
                             }
                             KeyCode::PageUp | KeyCode::PageDown if git_dialog.is_some() => {
-                                if let Some(dialog) = git_dialog.as_mut()
-                                    && dialog.page == 0
-                                {
+                                if let Some(dialog) = git_dialog.as_mut() {
+                                    if dialog.page > 0 {
+                                        dialog.scroll = if key.code == KeyCode::PageUp {
+                                            dialog.scroll.saturating_sub(10)
+                                        } else {
+                                            dialog.scroll.saturating_add(10)
+                                        };
+                                        continue;
+                                    }
                                     dialog.diff_scroll = if key.code == KeyCode::PageUp {
                                         dialog.diff_scroll.saturating_sub(10)
                                     } else {
@@ -1109,7 +1115,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             KeyCode::Up if git_dialog.is_some() => {
                                 git_file_click = None;
                                 if let Some(dialog) = git_dialog.as_mut() {
-                                    if dialog.page == 1 {
+                                    if dialog.page > 0 {
                                         dialog.scroll = dialog.scroll.saturating_sub(1);
                                     } else {
                                         dialog.selected = dialog.selected.saturating_sub(1);
@@ -1120,11 +1126,14 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             KeyCode::Down if git_dialog.is_some() => {
                                 git_file_click = None;
                                 if let Some(dialog) = git_dialog.as_mut() {
-                                    if dialog.page == 1 {
-                                        dialog.scroll = dialog
-                                            .scroll
-                                            .saturating_add(1)
-                                            .min(dialog.info.log.lines().count().saturating_sub(1));
+                                    if dialog.page > 0 {
+                                        dialog.scroll = dialog.scroll.saturating_add(1).min(
+                                            if dialog.page == 1 {
+                                                dialog.info.log.lines().count().saturating_sub(1)
+                                            } else {
+                                                usize::MAX
+                                            },
+                                        );
                                     } else {
                                         let count = view::git_changed_files(&dialog.info.raw).len();
                                         dialog.selected =
@@ -1645,6 +1654,8 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     if let Some(dialog) = git_dialog.as_mut() {
                                         let count = if dialog.page == 1 {
                                             dialog.info.log.lines().count()
+                                        } else if dialog.page == 2 {
+                                            usize::MAX
                                         } else {
                                             view::git_changed_files(&dialog.info.raw).len()
                                         };
@@ -4454,11 +4465,11 @@ fn commit_git_dialog(runtime: &Runtime, workspace: &Path, dialog: &mut view::Git
     let selected: Vec<String> = view::git_changed_files(&dialog.info.raw)
         .iter()
         .filter(|file| !dialog.excluded_files.contains(&file.path))
-        .map(|file| {
-            file.path
-                .rsplit_once(" -> ")
-                .map_or(file.path.as_str(), |(_, new)| new)
-                .to_owned()
+        .flat_map(|file| {
+            file.original_path
+                .iter()
+                .chain(std::iter::once(&file.path))
+                .cloned()
         })
         .collect();
     if selected.is_empty() {
@@ -4474,13 +4485,96 @@ fn commit_git_dialog(runtime: &Runtime, workspace: &Path, dialog: &mut view::Git
                 dialog.info = parse_git_status(&info);
             }
         }
-        Err(err) => dialog.feedback = Some(err.to_string()),
+        Err(err) => {
+            dialog.feedback = Some(err.to_string());
+            dialog.page = 2;
+            dialog.scroll = 0;
+            dialog.editing_message = false;
+        }
     }
 }
 
 #[cfg(test)]
 mod git_dialog_tests {
     use super::*;
+
+    #[test]
+    fn commit_dialog_handles_real_git_quoted_paths_and_reports_full_failure() {
+        use std::process::Command;
+        struct Repo(PathBuf);
+        impl Drop for Repo {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let repo = Repo(std::env::temp_dir().join(format!(
+            "blora-git-dialog-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        )));
+        std::fs::create_dir(&repo.0).unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(&repo.0)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout).unwrap()
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.name", "Test"]);
+        git(&["config", "user.email", "test@example.invalid"]);
+        git(&["config", "core.quotePath", "true"]);
+        std::fs::write(repo.0.join("old 中文.txt"), "original\n").unwrap();
+        std::fs::write(repo.0.join("delete me.txt"), "removed\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "initial"]);
+        git(&["mv", "old 中文.txt", "new 中文.txt"]);
+        git(&["rm", "delete me.txt"]);
+        std::fs::write(repo.0.join("new file.txt"), "new\n").unwrap();
+        let runtime = Runtime::new(blora_storage::SqliteStore::open_in_memory().unwrap());
+        let mut dialog = view::GitDialog {
+            info: parse_git_status(&runtime.workspace_info(&repo.0).unwrap()),
+            page: 0,
+            selected: 0,
+            message: "quoted paths".to_owned(),
+            editing_message: false,
+            generating_message: false,
+            syncing: false,
+            excluded_files: Default::default(),
+            diff_path: None,
+            diff_text: String::new(),
+            diff_scroll: 0,
+            scroll: 0,
+            feedback: None,
+            fullscreen: false,
+            minimized: false,
+        };
+        commit_git_dialog(&runtime, &repo.0, &mut dialog);
+        assert_eq!(dialog.feedback.as_deref(), Some("提交成功"));
+        assert!(git(&["status", "--porcelain"]).is_empty());
+        assert_eq!(git(&["show", "HEAD:new 中文.txt"]), "original\n");
+        assert!(!git(&["ls-tree", "--name-only", "HEAD"]).contains("old"));
+
+        dialog.info.raw = "## main\n M missing file.txt".to_owned();
+        dialog.message = "failure".to_owned();
+        dialog.scroll = 100;
+        commit_git_dialog(&runtime, &repo.0, &mut dialog);
+        assert_eq!(dialog.page, 2);
+        assert_eq!(dialog.scroll, 0);
+        assert!(
+            dialog
+                .feedback
+                .as_deref()
+                .unwrap()
+                .contains("missing file.txt")
+        );
+    }
 
     #[test]
     fn file_click_selects_first_and_toggles_only_on_second_click() {

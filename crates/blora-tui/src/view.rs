@@ -3153,7 +3153,7 @@ fn render_git_dialog(
     if dialog.minimized {
         return hits;
     }
-    let labels = ["操作", "Git 图"];
+    let labels = ["操作", "Git 图", "输出"];
     for (index, label) in labels.iter().enumerate() {
         let start = tabs.x + tabs.width * index as u16 / labels.len() as u16;
         let end = tabs.x + tabs.width * (index as u16 + 1) / labels.len() as u16;
@@ -3194,6 +3194,23 @@ fn render_git_dialog(
                 body,
             );
         }
+        2 => {
+            let lines = git_feedback_lines(dialog.feedback.as_deref(), body.width as usize);
+            let scroll = dialog
+                .scroll
+                .min(lines.len().saturating_sub(body.height as usize));
+            frame.render_widget(
+                Paragraph::new(
+                    lines
+                        .into_iter()
+                        .skip(scroll)
+                        .map(Line::from)
+                        .collect::<Vec<_>>(),
+                )
+                .style(theme.fg(theme.amber)),
+                body,
+            );
+        }
         _ => render_git_commit_page(frame, body, dialog, theme, &mut hits, tick),
     }
     frame.render_widget(
@@ -3203,7 +3220,7 @@ fn render_git_dialog(
             } else if dialog.page == 1 {
                 "↑/↓ 或滚轮浏览 · ←/→ 分页 · 最近 100 次提交 · Esc 关闭"
             } else {
-                "←/→ 分页 · Esc 关闭"
+                "↑/↓、PgUp/Dn 或滚轮浏览完整输出 · ←/→ 分页 · Esc 关闭"
             },
             theme.mute(),
         )))
@@ -3215,9 +3232,52 @@ fn render_git_dialog(
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GitChangedFile {
+    pub original_path: Option<String>,
     pub path: String,
     pub status: String,
     pub staged: bool,
+}
+
+fn git_feedback_lines(feedback: Option<&str>, width: usize) -> Vec<String> {
+    wrap_text(feedback.unwrap_or("暂无操作输出"), width)
+}
+
+fn decode_git_path(path: &str) -> String {
+    let Some(quoted) = path.strip_prefix('"').and_then(|p| p.strip_suffix('"')) else {
+        return path.to_owned();
+    };
+    let mut bytes = quoted.bytes().peekable();
+    let mut decoded = Vec::new();
+    while let Some(byte) = bytes.next() {
+        if byte != b'\\' {
+            decoded.push(byte);
+            continue;
+        }
+        let Some(escaped) = bytes.next() else { break };
+        if (b'0'..=b'7').contains(&escaped) {
+            let mut value = escaped - b'0';
+            for _ in 0..2 {
+                if let Some(next) = bytes.next_if(|next| (b'0'..=b'7').contains(next)) {
+                    value = value.wrapping_mul(8).wrapping_add(next - b'0');
+                } else {
+                    break;
+                }
+            }
+            decoded.push(value);
+        } else {
+            decoded.push(match escaped {
+                b'a' => 7,
+                b'b' => 8,
+                b't' => b'\t',
+                b'n' => b'\n',
+                b'v' => 11,
+                b'f' => 12,
+                b'r' => b'\r',
+                other => other,
+            });
+        }
+    }
+    String::from_utf8_lossy(&decoded).into_owned()
 }
 
 pub fn git_changed_files(raw: &str) -> Vec<GitChangedFile> {
@@ -3229,7 +3289,31 @@ pub fn git_changed_files(raw: &str) -> Vec<GitChangedFile> {
             if path.is_empty() || status == "!!" {
                 return None;
             }
+            let (original_path, path) = if status.contains(['R', 'C']) {
+                let mut quoted = false;
+                let mut escaped = false;
+                let split = path.char_indices().find_map(|(index, ch)| {
+                    if escaped {
+                        escaped = false;
+                    } else if quoted && ch == '\\' {
+                        escaped = true;
+                    } else if ch == '"' {
+                        quoted = !quoted;
+                    } else if !quoted && path[index..].starts_with(" -> ") {
+                        return Some(index);
+                    }
+                    None
+                })?;
+                let (old, new) = (&path[..split], &path[split + 4..]);
+                (
+                    status.contains('R').then(|| decode_git_path(old)),
+                    decode_git_path(new),
+                )
+            } else {
+                (None, decode_git_path(&path))
+            };
             Some(GitChangedFile {
+                original_path,
                 staged: status.as_bytes()[0] != b' ' && status.as_bytes()[0] != b'?',
                 path,
                 status,
@@ -3435,7 +3519,11 @@ fn render_git_commit_page(
     }
     if let Some(feedback) = &dialog.feedback {
         frame.render_widget(
-            Paragraph::new(feedback.as_str()).style(theme.fg(theme.amber)),
+            Paragraph::new(format!(
+                "{} · → 输出页查看完整内容",
+                feedback.lines().next().unwrap_or("")
+            ))
+            .style(theme.fg(theme.amber)),
             Rect::new(message.x, body.bottom() - 1, message.width, 1),
         );
     }
@@ -4612,6 +4700,92 @@ mod tests {
     }
 
     #[test]
+    fn git_paths_decode_quotes_octal_and_rename_pairs() {
+        let files = git_changed_files(
+            "## main\n D \"node_modules/a file.txt\"\n?? \"\\344\\270\\255\\346\\226\\207.txt\"\nR  \"old -> name.txt\" -> \"new name.txt\"\n?? plain -> name.txt\n?? \"tab\\tquote\\\"slash\\\\.txt\"",
+        );
+        assert_eq!(files[0].path, "node_modules/a file.txt");
+        assert_eq!(files[1].path, "中文.txt");
+        assert_eq!(files[2].original_path.as_deref(), Some("old -> name.txt"));
+        assert_eq!(files[2].path, "new name.txt");
+        assert_eq!(files[3].path, "plain -> name.txt");
+        assert!(files[3].original_path.is_none());
+        assert_eq!(files[4].path, "tab\tquote\"slash\\.txt");
+    }
+
+    #[test]
+    fn git_output_page_wraps_and_scrolls_to_last_error_line() {
+        for (width, height) in [(110, 30), (48, 18)] {
+            let area = Rect::new(0, 0, width, height);
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            let feedback = format!(
+                "execution error: {}\n{}\nEND_OF_ERROR",
+                "long/path/".repeat(40),
+                "details\n".repeat(50)
+            );
+            let mut dialog = GitDialog {
+                info: GitStatusInfo {
+                    branch: String::new(),
+                    added: 0,
+                    removed: 0,
+                    ahead: 0,
+                    behind: 0,
+                    stashes: 0,
+                    clean: true,
+                    raw: String::new(),
+                    diff: String::new(),
+                    log: String::new(),
+                },
+                page: 2,
+                selected: 0,
+                message: String::new(),
+                editing_message: false,
+                generating_message: false,
+                syncing: false,
+                excluded_files: Default::default(),
+                diff_path: None,
+                diff_text: String::new(),
+                diff_scroll: 0,
+                scroll: 0,
+                feedback: Some(feedback.clone()),
+                fullscreen: false,
+                minimized: false,
+            };
+            let wrapped = git_feedback_lines(Some(&feedback), width as usize);
+            assert_eq!(wrapped.join(""), feedback.replace('\n', ""));
+            terminal
+                .draw(|frame| {
+                    render_git_dialog(frame, area, &dialog, None, &Theme::current(), 0);
+                })
+                .unwrap();
+            let rendered: String = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            assert!(rendered.contains("execution error:"));
+            assert!(!rendered.contains("END_OF_ERROR"));
+            dialog.scroll = usize::MAX;
+            terminal
+                .draw(|frame| {
+                    render_git_dialog(frame, area, &dialog, None, &Theme::current(), 0);
+                })
+                .unwrap();
+            let rendered: String = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            assert!(rendered.contains("END_OF_ERROR"));
+        }
+        assert_eq!(git_feedback_lines(None, 80), vec!["暂无操作输出"]);
+    }
+
+    #[test]
     fn git_commit_page_renders_files_and_click_targets() {
         let area = Rect::new(0, 0, 110, 30);
         let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
@@ -4649,13 +4823,13 @@ mod tests {
                 hits = render_git_dialog(frame, area, &dialog, None, &Theme::current(), 0);
             })
             .unwrap();
-        assert_eq!(hits.git_tabs.len(), 2);
+        assert_eq!(hits.git_tabs.len(), 3);
         assert_eq!(
             hits.git_tabs
                 .iter()
                 .map(|(_, page)| *page)
                 .collect::<Vec<_>>(),
-            vec![0, 1]
+            vec![0, 1, 2]
         );
         let rendered: String = terminal
             .backend()
