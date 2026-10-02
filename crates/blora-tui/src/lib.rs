@@ -56,6 +56,22 @@ impl ToolSummaryClick {
     }
 }
 
+fn git_file_double_click(
+    pending: &mut Option<(String, Instant)>,
+    path: &str,
+    now: Instant,
+) -> bool {
+    if pending.as_ref().is_some_and(|(previous, at)| {
+        previous == path && now.saturating_duration_since(*at) <= Duration::from_millis(500)
+    }) {
+        *pending = None;
+        true
+    } else {
+        *pending = Some((path.to_owned(), now));
+        false
+    }
+}
+
 fn browse_input_history(
     history: &[String],
     index: &mut Option<usize>,
@@ -135,6 +151,11 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut tool_dialog: Option<view::ToolDialog> = None;
     let mut tool_detail_dialog: Option<view::ToolDetailDialog> = None;
     let mut git_dialog: Option<view::GitDialog> = None;
+    let mut git_file_click: Option<(String, Instant)> = None;
+    let (git_diff_tx, git_diff_rx) =
+        std::sync::mpsc::channel::<(u64, PathBuf, String, Result<String>)>();
+    let mut git_diff_generation = 0u64;
+    let mut git_diff_requested: Option<(PathBuf, String, String)> = None;
     let (git_generation_tx, git_generation_rx) =
         std::sync::mpsc::channel::<(u64, String, Result<String>)>();
     let mut git_generation_id = 0u64;
@@ -239,6 +260,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut cancel = CancelToken::new();
     let mut cached: Option<(SessionId, blora_session::SessionProjection)> = None;
     let result = thread::scope(|scope| -> Result<()> {
+        let mut git_diff_job: Option<thread::ScopedJoinHandle<'_, ()>> = None;
         let mut job: Option<thread::ScopedJoinHandle<'_, Result<blora_types::RunId>>> = None;
         let mut git_generation: Option<thread::ScopedJoinHandle<'_, ()>> = None;
         let mut git_sync: Option<thread::ScopedJoinHandle<'_, ()>> = None;
@@ -351,6 +373,72 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                         .map(git_status_from_indicator);
                     (workspace, info)
                 }));
+            }
+            if let Some(job) = git_diff_job.take_if(|job| job.is_finished()) {
+                let _ = job.join();
+            }
+            if git_dialog.is_none() {
+                if git_diff_requested.take().is_some() {
+                    git_diff_generation = git_diff_generation.wrapping_add(1);
+                }
+                git_file_click = None;
+            }
+            if let Some(dialog) = git_dialog.as_mut()
+                && dialog.page == 0
+            {
+                let file = view::git_changed_files(&dialog.info.raw)
+                    .get(dialog.selected)
+                    .map(|file| file.path.clone());
+                if let Some(file) = file {
+                    if dialog.diff_path.as_ref() != Some(&file) {
+                        git_diff_requested = None;
+                        git_diff_generation = git_diff_generation.wrapping_add(1);
+                        dialog.diff_path = Some(file.clone());
+                        dialog.diff_text = "正在读取差异…".to_owned();
+                        dialog.diff_scroll = 0;
+                    }
+                    let fingerprint = format!("{}{}", dialog.info.raw, dialog.info.diff);
+                    let key = (active_workspace.clone(), file.clone(), fingerprint);
+                    if git_diff_requested.as_ref() != Some(&key) && git_diff_job.is_none() {
+                        git_diff_generation = git_diff_generation.wrapping_add(1);
+                        let generation = git_diff_generation;
+                        dialog.diff_path = Some(file.clone());
+                        dialog.diff_text = "正在读取差异…".to_owned();
+                        dialog.diff_scroll = 0;
+                        git_diff_requested = Some(key);
+                        let sender = git_diff_tx.clone();
+                        let path = active_workspace.clone();
+                        git_diff_job = Some(scope.spawn(move || {
+                            let result = if let Some((old, new)) = file.split_once(" -> ") {
+                                runtime.git_file_diff(&path, old).and_then(|mut diff| {
+                                    diff.push_str(&runtime.git_file_diff(&path, new)?);
+                                    Ok(diff)
+                                })
+                            } else {
+                                runtime.git_file_diff(&path, &file)
+                            };
+                            let _ = sender.send((generation, path, file, result));
+                        }));
+                    }
+                } else {
+                    dialog.diff_path = None;
+                    dialog.diff_text.clear();
+                }
+            }
+            while let Ok((generation, path, file, result)) = git_diff_rx.try_recv() {
+                if generation == git_diff_generation
+                    && path == active_workspace
+                    && let Some(dialog) = git_dialog.as_mut()
+                    && view::git_changed_files(&dialog.info.raw)
+                        .get(dialog.selected)
+                        .is_some_and(|selected| selected.path == file)
+                {
+                    dialog.diff_text = match result {
+                        Ok(text) if text.is_empty() => "没有代码差异".to_owned(),
+                        Ok(text) => text,
+                        Err(err) => format!("读取差异失败：{err}"),
+                    };
+                }
             }
             let logged_in = passport_user_token.is_some();
             let model = if model_override.is_empty() {
@@ -770,18 +858,22 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     dialog.pane = view::ProviderPane::Models;
                                 }
                             }
-                            KeyCode::Left | KeyCode::Char('[') if input.is_empty() => {
+                            KeyCode::Left | KeyCode::Char('[')
+                                if input.is_empty() && git_dialog.is_none() =>
+                            {
                                 index = index.saturating_sub(1);
                             }
-                            KeyCode::Right | KeyCode::Char(']') if input.is_empty() => {
+                            KeyCode::Right | KeyCode::Char(']')
+                                if input.is_empty() && git_dialog.is_none() =>
+                            {
                                 if index + 1 < sessions.len() {
                                     index += 1;
                                 }
                             }
-                            KeyCode::PageUp if input.is_empty() => {
+                            KeyCode::PageUp if input.is_empty() && git_dialog.is_none() => {
                                 scroll = scroll.saturating_add(8);
                             }
-                            KeyCode::PageDown if input.is_empty() => {
+                            KeyCode::PageDown if input.is_empty() && git_dialog.is_none() => {
                                 scroll = scroll.saturating_sub(8);
                             }
                             KeyCode::Home if input.is_empty() => scroll = usize::MAX / 4,
@@ -1000,7 +1092,22 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     dialog.editing_message = false;
                                 }
                             }
+                            KeyCode::PageUp | KeyCode::PageDown if git_dialog.is_some() => {
+                                if let Some(dialog) = git_dialog.as_mut()
+                                    && dialog.page == 0
+                                {
+                                    dialog.diff_scroll = if key.code == KeyCode::PageUp {
+                                        dialog.diff_scroll.saturating_sub(10)
+                                    } else {
+                                        dialog
+                                            .diff_scroll
+                                            .saturating_add(10)
+                                            .min(dialog.diff_text.lines().count().saturating_sub(1))
+                                    };
+                                }
+                            }
                             KeyCode::Up if git_dialog.is_some() => {
+                                git_file_click = None;
                                 if let Some(dialog) = git_dialog.as_mut() {
                                     if dialog.page == 1 {
                                         dialog.scroll = dialog.scroll.saturating_sub(1);
@@ -1011,6 +1118,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 }
                             }
                             KeyCode::Down if git_dialog.is_some() => {
+                                git_file_click = None;
                                 if let Some(dialog) = git_dialog.as_mut() {
                                     if dialog.page == 1 {
                                         dialog.scroll = dialog
@@ -1486,6 +1594,13 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                         pointer = Some((mouse.column, mouse.row));
                         match mouse.kind {
                             MouseEventKind::ScrollUp => {
+                                if hits.git_diff.is_some_and(|rect| {
+                                    rect.contains((mouse.column, mouse.row).into())
+                                }) && let Some(dialog) = git_dialog.as_mut()
+                                {
+                                    dialog.diff_scroll = dialog.diff_scroll.saturating_sub(3);
+                                    continue;
+                                }
                                 if let Some(picker) = folder_picker.as_mut() {
                                     picker.scroll = picker.scroll.saturating_sub(1);
                                     continue;
@@ -1511,6 +1626,16 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 }
                             }
                             MouseEventKind::ScrollDown => {
+                                if hits.git_diff.is_some_and(|rect| {
+                                    rect.contains((mouse.column, mouse.row).into())
+                                }) && let Some(dialog) = git_dialog.as_mut()
+                                {
+                                    dialog.diff_scroll = dialog
+                                        .diff_scroll
+                                        .saturating_add(3)
+                                        .min(dialog.diff_text.lines().count().saturating_sub(1));
+                                    continue;
+                                }
                                 if let Some(picker) = folder_picker.as_mut() {
                                     picker.scroll = (picker.scroll + 1)
                                         .min(picker.entries.len().saturating_sub(1));
@@ -1767,6 +1892,9 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                                 generating_message: false,
                                                 syncing: false,
                                                 excluded_files: Default::default(),
+                                                diff_path: None,
+                                                diff_text: String::new(),
+                                                diff_scroll: 0,
                                                 scroll: 0,
                                                 feedback: None,
                                                 fullscreen: false,
@@ -1778,8 +1906,12 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     continue;
                                 }
                                 if let Some(dialog) = git_dialog.as_mut() {
+                                    if !matches!(hit, Some(view::Hit::GitFile(_))) {
+                                        git_file_click = None;
+                                    }
                                     match hit {
                                         Some(view::Hit::GitTab(page)) => {
+                                            git_file_click = None;
                                             dialog.page = page;
                                             dialog.scroll = 0;
                                             dialog.selected = 0;
@@ -1878,7 +2010,18 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                         }
                                         Some(view::Hit::GitFile(index)) => {
                                             dialog.selected = index;
-                                            toggle_git_file(dialog);
+                                            if let Some(file) =
+                                                view::git_changed_files(&dialog.info.raw).get(index)
+                                            {
+                                                let now = Instant::now();
+                                                if git_file_double_click(
+                                                    &mut git_file_click,
+                                                    &file.path,
+                                                    now,
+                                                ) {
+                                                    toggle_git_file(dialog);
+                                                }
+                                            }
                                         }
                                         Some(view::Hit::GitRow(index))
                                         | Some(view::Hit::GitAction(index)) => {
@@ -4340,6 +4483,33 @@ mod git_dialog_tests {
     use super::*;
 
     #[test]
+    fn file_click_selects_first_and_toggles_only_on_second_click() {
+        let now = Instant::now();
+        let mut pending = None;
+        assert!(!git_file_double_click(&mut pending, "one.rs", now));
+        assert!(git_file_double_click(
+            &mut pending,
+            "one.rs",
+            now + Duration::from_millis(100)
+        ));
+        assert!(!git_file_double_click(
+            &mut pending,
+            "one.rs",
+            now + Duration::from_millis(200)
+        ));
+        assert!(!git_file_double_click(
+            &mut pending,
+            "other.rs",
+            now + Duration::from_millis(300)
+        ));
+        assert!(!git_file_double_click(
+            &mut pending,
+            "other.rs",
+            now + Duration::from_secs(1)
+        ));
+    }
+
+    #[test]
     fn file_toggle_changes_commit_selection_without_staging() {
         let mut dialog = view::GitDialog {
             info: view::GitStatusInfo {
@@ -4361,6 +4531,9 @@ mod git_dialog_tests {
             generating_message: false,
             syncing: false,
             excluded_files: Default::default(),
+            diff_path: None,
+            diff_text: String::new(),
+            diff_scroll: 0,
             scroll: 0,
             feedback: None,
             fullscreen: false,

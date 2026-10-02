@@ -328,6 +328,9 @@ pub struct GitDialog {
     pub generating_message: bool,
     pub syncing: bool,
     pub excluded_files: std::collections::HashSet<String>,
+    pub diff_path: Option<String>,
+    pub diff_text: String,
+    pub diff_scroll: usize,
     pub scroll: usize,
     pub feedback: Option<String>,
     pub fullscreen: bool,
@@ -491,6 +494,7 @@ pub struct HitMap {
     pub git_generate: Option<Rect>,
     pub git_primary: Option<Rect>,
     pub git_files: Vec<(Rect, usize)>,
+    pub git_diff: Option<Rect>,
     pub git_rows: Vec<(Rect, usize)>,
     pub git_actions: Vec<(Rect, usize)>,
     pub hints: Vec<(Rect, HintAction)>,
@@ -1144,6 +1148,7 @@ pub fn draw(
         hits.git_generate = dialog_hits.git_generate;
         hits.git_primary = dialog_hits.git_primary;
         hits.git_files = dialog_hits.git_files;
+        hits.git_diff = dialog_hits.git_diff;
         hits.git_rows = dialog_hits.git_rows;
         hits.git_actions = dialog_hits.git_actions;
     } else if let Some(dialog) = model.tool_detail_dialog {
@@ -3134,7 +3139,7 @@ fn render_git_dialog(
     tick: u64,
 ) -> HitMap {
     let mut hits = HitMap::default();
-    let Some(frame_area) = dialog_outer(area, 88, 20, dialog.fullscreen, dialog.minimized) else {
+    let Some(frame_area) = dialog_outer(area, 132, 28, dialog.fullscreen, dialog.minimized) else {
         return hits;
     };
     let inner = paint_dialog_frame(frame, frame_area, "Git", pointer, theme, &mut hits);
@@ -3194,7 +3199,7 @@ fn render_git_dialog(
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             if dialog.page == 0 {
-                "点击消息输入 · 点击文件切换勾选 · ↑/↓ 选择 · 空格切换 · Enter 提交 · Esc 关闭"
+                "单击选中 · 双击/空格勾选 · PgUp/Dn 差异 · Enter 提交 · Esc 关闭"
             } else if dialog.page == 1 {
                 "↑/↓ 或滚轮浏览 · ←/→ 分页 · 最近 100 次提交 · Esc 关闭"
             } else {
@@ -3294,6 +3299,21 @@ fn render_git_commit_page(
     if body.height < 5 || body.width < 20 {
         return;
     }
+    let (body, diff_area) = if dialog.diff_path.is_some() && body.width >= 72 {
+        let [list, diff] =
+            Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)])
+                .areas(body);
+        (list, Some(diff))
+    } else if dialog.diff_path.is_some() && body.height >= 14 {
+        let [list, diff] =
+            Layout::vertical([Constraint::Length(9), Constraint::Min(5)]).areas(body);
+        (list, Some(diff))
+    } else {
+        (body, None)
+    };
+    if let Some(diff) = diff_area {
+        render_git_diff(frame, diff, dialog, theme, hits);
+    }
     let message = Rect::new(body.x + 1, body.y + 1, body.width.saturating_sub(2), 1);
     let left_width = message.width / 2;
     let generate = Rect::new(message.x, body.y + 2, left_width.saturating_sub(1), 1);
@@ -3377,7 +3397,7 @@ fn render_git_commit_page(
     }
     frame.render_widget(
         Paragraph::new(format!(
-            "更改 {}  ·  已勾选 {}  ·  空格切换勾选",
+            "更改 {} · 已勾选 {} · 双击/空格勾选",
             files.len(),
             selected
         ))
@@ -3419,6 +3439,75 @@ fn render_git_commit_page(
             Rect::new(message.x, body.bottom() - 1, message.width, 1),
         );
     }
+}
+
+fn render_git_diff(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    dialog: &GitDialog,
+    theme: &Theme,
+    hits: &mut HitMap,
+) {
+    let block = Block::default()
+        .borders(ratatui::widgets::Borders::LEFT)
+        .border_style(theme.fg(theme.hairline))
+        .style(theme.base());
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let content = Rect::new(
+        inner.x + 1,
+        inner.y,
+        inner.width.saturating_sub(1),
+        inner.height,
+    );
+    if content.height < 3 || content.width == 0 {
+        return;
+    }
+    let title = dialog.diff_path.as_deref().unwrap_or("");
+    frame.render_widget(
+        Paragraph::new(format!("差异 · {title}"))
+            .style(theme.fg(theme.text).add_modifier(Modifier::BOLD)),
+        Rect::new(content.x, content.y, content.width, 1),
+    );
+    let text_area = Rect::new(
+        content.x,
+        content.y + 2,
+        content.width,
+        content.height.saturating_sub(3),
+    );
+    hits.git_diff = Some(text_area);
+    let lines: Vec<Line<'static>> = dialog
+        .diff_text
+        .lines()
+        .skip(dialog.diff_scroll)
+        .map(|line| {
+            let color = if line.starts_with("+++")
+                || line.starts_with("---")
+                || line.starts_with("diff ")
+            {
+                theme.text_dim
+            } else if line.starts_with('+') {
+                theme.sage
+            } else if line.starts_with('-') {
+                theme.rust
+            } else if line.starts_with("@@") {
+                theme.rose
+            } else {
+                theme.text
+            };
+            Line::from(Span::styled(line.to_owned(), theme.fg(color)))
+        })
+        .collect();
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(theme.base())
+            .wrap(ratatui::widgets::Wrap { trim: false }),
+        text_area,
+    );
+    frame.render_widget(
+        Paragraph::new("滚轮 / PgUp PgDn 浏览完整差异").style(theme.mute()),
+        Rect::new(content.x, content.bottom() - 1, content.width, 1),
+    );
 }
 
 fn git_graph_lines(log: &str, theme: &Theme) -> Vec<Line<'static>> {
@@ -4520,6 +4609,9 @@ mod tests {
             generating_message: false,
             syncing: false,
             excluded_files: Default::default(),
+            diff_path: None,
+            diff_text: String::new(),
+            diff_scroll: 0,
             scroll: 0,
             feedback: None,
             fullscreen: false,
@@ -4563,6 +4655,25 @@ mod tests {
         let files = git_changed_files(&dialog.info.raw);
         assert!(files[0].staged);
         assert!(!files[1].staged);
+        let mut with_diff = dialog.clone();
+        with_diff.diff_path = Some("src/main.rs".into());
+        with_diff.diff_text = "@@ -1 +1 @@\n-old code\n+new code".into();
+        terminal
+            .draw(|frame| {
+                hits = render_git_dialog(frame, area, &with_diff, None, &Theme::current(), 0);
+            })
+            .unwrap();
+        let diff = hits.git_diff.expect("selected file has a diff sidebar");
+        assert!(hits.git_files.iter().all(|(row, _)| row.right() <= diff.x));
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(rendered.contains("+new code"));
+        assert!(rendered.contains("-old code"));
         assert!(!files[2].staged);
         assert!(dialog.excluded_files.is_empty());
         assert!(
@@ -4631,6 +4742,9 @@ mod tests {
             generating_message: true,
             syncing: false,
             excluded_files: Default::default(),
+            diff_path: None,
+            diff_text: String::new(),
+            diff_scroll: 0,
             scroll: 0,
             feedback: None,
             fullscreen: false,

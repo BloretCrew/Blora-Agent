@@ -335,6 +335,10 @@ impl Runtime {
         LocalBackend::new(policy).git_indicator()
     }
 
+    pub fn git_file_diff(&self, path: &std::path::Path, file: &str) -> Result<String> {
+        LocalBackend::new(Policy::new(path, true)?).git_file_diff(file)
+    }
+
     pub fn workspace_info(&self, path: &std::path::Path) -> Result<WorkspaceInfo> {
         let policy = Policy::new(path, true)?;
         let backend = LocalBackend::new(policy);

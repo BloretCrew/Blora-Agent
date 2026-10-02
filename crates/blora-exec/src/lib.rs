@@ -416,6 +416,142 @@ impl LocalBackend {
         self.git(&["diff", "--stat", "HEAD"])
     }
 
+    /// Full file patch, including staged and unstaged changes.
+    pub fn git_file_diff(&self, file: &str) -> Result<String> {
+        use std::path::Component;
+
+        let invalid_path = || BloraError::Policy("invalid Git file path".to_owned());
+        let workspace = self.policy.workspace();
+        let requested = Path::new(file);
+        let relative = if requested.is_absolute() {
+            requested
+                .strip_prefix(workspace)
+                .map_err(|_| invalid_path())?
+        } else {
+            requested
+        };
+        if relative.as_os_str().is_empty()
+            || relative
+                .components()
+                .any(|part| !matches!(part, Component::Normal(_) | Component::CurDir))
+        {
+            return Err(invalid_path());
+        }
+        let relative: PathBuf = relative
+            .components()
+            .filter(|part| matches!(part, Component::Normal(_)))
+            .map(|part| part.as_os_str())
+            .collect();
+        let label = relative_slashes(&relative, Path::new(""));
+        if label.is_empty() {
+            return Err(invalid_path());
+        }
+        self.policy
+            .require(self.policy.file_read_path(&label), "git_file_diff")?;
+        let mut candidate = workspace.to_path_buf();
+        for part in relative.components() {
+            candidate.push(part.as_os_str());
+            match candidate.canonicalize() {
+                Ok(resolved) if !resolved.starts_with(workspace) => return Err(invalid_path()),
+                Ok(_) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    // A deleted file still has a patch; validate every existing ancestor.
+                    if std::fs::symlink_metadata(&candidate).is_ok() {
+                        return Err(invalid_path());
+                    }
+                }
+                Err(_) => return Err(invalid_path()),
+            }
+        }
+        if candidate.is_dir() {
+            return Err(invalid_path());
+        }
+
+        let run = |args: &[&str], diff: bool| -> Result<std::process::Output> {
+            let output = command("git")
+                .args(args)
+                .current_dir(workspace)
+                .env("LC_ALL", "C")
+                .env("GIT_LITERAL_PATHSPECS", "1")
+                .output()
+                .map_err(|_| BloraError::Exec("could not run Git file diff".to_owned()))?;
+            if !output.status.success() && !(diff && output.status.code() == Some(1)) {
+                return Err(BloraError::Exec("Git file diff failed".to_owned()));
+            }
+            Ok(output)
+        };
+        let indexed = run(&["ls-files", "--cached", "-z", "--", &label], false)?;
+        let head = command("git")
+            .args(["rev-parse", "--verify", "HEAD"])
+            .current_dir(workspace)
+            .output()
+            .map_err(|_| BloraError::Exec("could not resolve Git HEAD".to_owned()))?
+            .status
+            .success();
+        if indexed
+            .stdout
+            .split(|byte| *byte == 0)
+            .any(|entry| !entry.is_empty() && entry != label.as_bytes())
+        {
+            return Err(invalid_path());
+        }
+        let committed = if head {
+            let tree = run(&["ls-tree", "-z", "HEAD", "--", &label], false)?;
+            if tree.stdout.starts_with(b"040000 tree ") {
+                return Err(invalid_path());
+            }
+            !tree.stdout.is_empty()
+        } else {
+            false
+        };
+        let patch = |extra: &[&str]| -> Result<String> {
+            let mut args = vec![
+                "diff",
+                "--patch",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--color=never",
+                "--no-renames",
+                "--no-relative",
+                "--src-prefix=a/",
+                "--dst-prefix=b/",
+            ];
+            args.extend_from_slice(extra);
+            args.extend_from_slice(&["--", &label]);
+            Ok(String::from_utf8_lossy(&run(&args, true)?.stdout).into_owned())
+        };
+        if !indexed.stdout.is_empty() || committed {
+            if head {
+                patch(&["HEAD"])
+            } else {
+                let mut text = patch(&["--cached"])?;
+                text.push_str(&patch(&[])?);
+                Ok(text)
+            }
+        } else if candidate.exists() {
+            // Relative operands keep workspace paths out of no-index patch headers.
+            let output = run(
+                &[
+                    "diff",
+                    "--patch",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "--color=never",
+                    "--no-index",
+                    "--src-prefix=a/",
+                    "--dst-prefix=b/",
+                    "--",
+                    "/dev/null",
+                    &label,
+                ],
+                true,
+            )?;
+            Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        } else {
+            Ok(String::new())
+        }
+    }
+
     pub fn git_commit_context(&self) -> Result<String> {
         self.policy
             .require(self.policy.file_read(), "git_commit_context")?;
@@ -975,6 +1111,234 @@ mod tests {
     use super::*;
     use blora_policy::Policy;
     use std::process::Command;
+
+    fn diff_repo() -> (tempfile::TempDir, LocalBackend) {
+        let dir = tempfile::tempdir().unwrap();
+        repo_git(dir.path(), &["init", "-q"]);
+        repo_git(dir.path(), &["config", "user.name", "Diff Test"]);
+        repo_git(
+            dir.path(),
+            &["config", "user.email", "diff@example.invalid"],
+        );
+        let backend = LocalBackend::new(Policy::new(dir.path(), true).unwrap());
+        (dir, backend)
+    }
+
+    fn repo_git(path: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn git_file_diff_combines_staged_and_unstaged_without_other_files() {
+        let (dir, backend) = diff_repo();
+        backend.write_file("tracked.txt", "original\n").unwrap();
+        repo_git(dir.path(), &["add", "."]);
+        repo_git(dir.path(), &["commit", "-qm", "initial"]);
+        assert_eq!(backend.git_file_diff("tracked.txt").unwrap(), "");
+        backend.write_file("tracked.txt", "staged\n").unwrap();
+        assert!(
+            backend
+                .git_file_diff("tracked.txt")
+                .unwrap()
+                .contains("-original\n+staged")
+        );
+        repo_git(dir.path(), &["add", "tracked.txt"]);
+        assert!(
+            backend
+                .git_file_diff("tracked.txt")
+                .unwrap()
+                .contains("-original\n+staged")
+        );
+        backend.write_file("tracked.txt", "working\n").unwrap();
+        backend
+            .write_file("other.txt", "must not appear\n")
+            .unwrap();
+        let diff = backend.git_file_diff("tracked.txt").unwrap();
+        assert!(diff.contains("@@"));
+        assert!(diff.contains("-original\n+working\n"));
+        assert!(!diff.contains("staged"));
+        assert!(!diff.contains("other.txt"));
+        assert!(!diff.contains(&dir.path().display().to_string()));
+        assert!(backend.git_diff().unwrap().contains("tracked.txt"));
+        assert!(!backend.git_diff().unwrap().contains("@@"));
+        assert_eq!(backend.git_file_diff("./tracked.txt").unwrap(), diff);
+        assert_eq!(
+            backend
+                .git_file_diff(dir.path().join("tracked.txt").to_str().unwrap())
+                .unwrap(),
+            diff
+        );
+    }
+
+    #[test]
+    fn git_file_diff_untracked_is_complete_and_literal() {
+        let (dir, backend) = diff_repo();
+        let contents = format!("{}last line\n", "long line\n".repeat(120_000));
+        backend.write_file("new [file].txt", &contents).unwrap();
+        backend.write_file("new f.txt", "unrelated\n").unwrap();
+        let diff = backend.git_file_diff("new [file].txt").unwrap();
+        assert!(diff.contains("--- /dev/null"));
+        assert!(diff.contains("+last line\n"));
+        assert_eq!(
+            diff.lines().filter(|line| *line == "+long line").count(),
+            120_000
+        );
+        assert!(!diff.contains("unrelated"));
+        assert!(!diff.contains(&dir.path().display().to_string()));
+    }
+
+    #[test]
+    fn git_file_diff_handles_deleted_files_and_missing_parents() {
+        let (dir, backend) = diff_repo();
+        backend.write_file("sub/deleted.txt", "removed\n").unwrap();
+        repo_git(dir.path(), &["add", "."]);
+        repo_git(dir.path(), &["commit", "-qm", "initial"]);
+        std::fs::remove_dir_all(dir.path().join("sub")).unwrap();
+        assert!(backend.git_file_diff("sub").is_err());
+        let diff = backend.git_file_diff("sub/deleted.txt").unwrap();
+        assert!(diff.contains("deleted file mode"));
+        assert!(diff.contains("-removed"));
+        repo_git(dir.path(), &["add", "-u"]);
+        assert_eq!(backend.git_file_diff("sub/deleted.txt").unwrap(), diff);
+    }
+
+    #[test]
+    fn git_file_diff_shows_both_sides_of_renamed_paths() {
+        let (dir, backend) = diff_repo();
+        backend.write_file("old.txt", "renamed\n").unwrap();
+        repo_git(dir.path(), &["add", "."]);
+        repo_git(dir.path(), &["commit", "-qm", "initial"]);
+        repo_git(dir.path(), &["mv", "old.txt", "new.txt"]);
+        let old = backend.git_file_diff("old.txt").unwrap();
+        let new = backend.git_file_diff("new.txt").unwrap();
+        assert!(old.contains("-renamed"));
+        assert!(!old.contains("new.txt"));
+        assert!(new.contains("+renamed"));
+        assert!(!new.contains("old.txt"));
+    }
+
+    #[test]
+    fn git_file_diff_unborn_includes_index_and_worktree_patches() {
+        let (dir, backend) = diff_repo();
+        backend.write_file("new.txt", "staged\n").unwrap();
+        repo_git(dir.path(), &["add", "new.txt"]);
+        backend.write_file("new.txt", "working\n").unwrap();
+        let diff = backend.git_file_diff("new.txt").unwrap();
+        assert!(diff.contains("--- /dev/null"));
+        assert!(diff.contains("+staged"));
+        assert!(diff.contains("-staged\n+working"));
+        std::fs::remove_file(dir.path().join("new.txt")).unwrap();
+        assert!(
+            backend
+                .git_file_diff("new.txt")
+                .unwrap()
+                .contains("-staged")
+        );
+    }
+
+    #[test]
+    fn git_file_diff_describes_binary_files() {
+        let (dir, backend) = diff_repo();
+        std::fs::write(dir.path().join("binary.dat"), b"before\0data").unwrap();
+        assert!(
+            backend
+                .git_file_diff("binary.dat")
+                .unwrap()
+                .contains("Binary files")
+        );
+        repo_git(dir.path(), &["add", "."]);
+        repo_git(dir.path(), &["commit", "-qm", "initial"]);
+        std::fs::write(dir.path().join("binary.dat"), b"after\0data").unwrap();
+        let diff = backend.git_file_diff("binary.dat").unwrap();
+        assert!(diff.contains("Binary files"));
+        assert!(!diff.contains(&dir.path().display().to_string()));
+    }
+
+    #[test]
+    fn git_file_diff_rejects_traversal_and_directory_pathspecs() {
+        let (_dir, backend) = diff_repo();
+        for file in [
+            "../outside",
+            "sub/../../outside",
+            "",
+            ".",
+            "./",
+            ":(glob)*",
+            "sub/../file",
+        ] {
+            let result = backend.git_file_diff(file);
+            if file == ":(glob)*" {
+                assert_eq!(result.unwrap(), "");
+            } else {
+                assert!(result.is_err(), "accepted {file}");
+            }
+        }
+        let outside = tempfile::tempdir().unwrap();
+        assert!(
+            backend
+                .git_file_diff(outside.path().join("missing").to_str().unwrap())
+                .is_err()
+        );
+        assert_eq!(backend.git_file_diff("missing.txt").unwrap(), "");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_file_diff_rejects_symlinks_to_outside_even_for_deleted_children() {
+        let (dir, backend) = diff_repo();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "secret outside\n").unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("link")).unwrap();
+        std::os::unix::fs::symlink(outside.path().join("missing"), dir.path().join("dangling"))
+            .unwrap();
+        for file in [
+            "link/secret.txt",
+            "link/deleted.txt",
+            "dangling",
+            "dangling/deleted.txt",
+        ] {
+            let err = backend.git_file_diff(file).unwrap_err().to_string();
+            assert!(!err.contains(&outside.path().display().to_string()));
+            assert!(!err.contains("secret outside"));
+        }
+    }
+
+    #[test]
+    fn git_file_diff_disables_external_diff_and_textconv() {
+        let (dir, backend) = diff_repo();
+        backend
+            .write_file(".gitattributes", "*.txt diff=blocked\n")
+            .unwrap();
+        backend.write_file("file.txt", "before\n").unwrap();
+        repo_git(dir.path(), &["add", "."]);
+        repo_git(dir.path(), &["commit", "-qm", "initial"]);
+        repo_git(
+            dir.path(),
+            &["config", "diff.blocked.command", "not-a-real-diff-command"],
+        );
+        repo_git(
+            dir.path(),
+            &[
+                "config",
+                "diff.blocked.textconv",
+                "not-a-real-textconv-command",
+            ],
+        );
+        repo_git(dir.path(), &["config", "color.ui", "always"]);
+        backend.write_file("file.txt", "after\n").unwrap();
+        let diff = backend.git_file_diff("file.txt").unwrap();
+        assert!(diff.contains("-before\n+after"));
+        assert!(!diff.contains('\u{1b}'));
+    }
 
     #[test]
     fn reads_and_writes_inside_workspace() {
