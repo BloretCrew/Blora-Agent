@@ -56,6 +56,70 @@ impl ToolSummaryClick {
     }
 }
 
+fn browse_input_history(
+    history: &[String],
+    index: &mut Option<usize>,
+    draft: &mut String,
+    input: &mut String,
+    older: bool,
+) {
+    if history.is_empty() {
+        return;
+    }
+    if older {
+        if index.is_none() {
+            draft.clone_from(input);
+        }
+        let next = index.map_or(history.len() - 1, |position| position.saturating_sub(1));
+        *index = Some(next);
+        input.clone_from(&history[next]);
+    } else if let Some(position) = *index {
+        if position + 1 < history.len() {
+            *index = Some(position + 1);
+            input.clone_from(&history[position + 1]);
+        } else {
+            *index = None;
+            input.clone_from(draft);
+        }
+    }
+}
+
+#[cfg(test)]
+mod input_history_tests {
+    use super::browse_input_history;
+    #[test]
+    fn arrows_browse_history_and_restore_unsubmitted_draft() {
+        let history = vec!["first".into(), "second".into()];
+        let mut index = None;
+        let mut draft = String::new();
+        let mut input = "unfinished".to_owned();
+        for expected in ["second", "first", "first"] {
+            browse_input_history(&history, &mut index, &mut draft, &mut input, true);
+            assert_eq!(input, expected);
+        }
+        for expected in ["second", "unfinished", "unfinished"] {
+            browse_input_history(&history, &mut index, &mut draft, &mut input, false);
+            assert_eq!(input, expected);
+        }
+        assert!(index.is_none());
+    }
+    #[test]
+    fn empty_history_preserves_input_and_editing_starts_new_draft() {
+        let mut index = None;
+        let mut draft = String::new();
+        let mut input = "draft".to_owned();
+        browse_input_history(&[], &mut index, &mut draft, &mut input, true);
+        assert_eq!(input, "draft");
+        let history = vec!["old".into()];
+        browse_input_history(&history, &mut index, &mut draft, &mut input, true);
+        input.push_str(" edited");
+        index = None;
+        browse_input_history(&history, &mut index, &mut draft, &mut input, true);
+        browse_input_history(&history, &mut index, &mut draft, &mut input, false);
+        assert_eq!(input, "old edited");
+    }
+}
+
 pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let _ = i18n::init();
     let passport_url: Option<String> = None;
@@ -144,6 +208,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut input = String::new();
     let mut input_history: Vec<String> = Vec::new();
     let mut history_index: Option<usize> = None;
+    let mut history_draft = String::new();
     let mut paste_preview: Option<String> = None;
     let mut status = if passport_needs_login {
         passport_startup_error
@@ -1031,12 +1096,14 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     && passport_dialog.is_none() =>
                             {
                                 if !input_history.is_empty() {
-                                    let next = history_index
-                                        .map_or(input_history.len().saturating_sub(1), |index| {
-                                            index.saturating_sub(1)
-                                        });
-                                    history_index = Some(next);
-                                    input = input_history[next].clone();
+                                    browse_input_history(
+                                        &input_history,
+                                        &mut history_index,
+                                        &mut history_draft,
+                                        &mut input,
+                                        true,
+                                    );
+                                    paste_preview = None;
                                     slash_selected = 0;
                                 } else if input.is_empty() {
                                     scroll = scroll.saturating_add(1);
@@ -1054,15 +1121,15 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     && tool_detail_dialog.is_none()
                                     && passport_dialog.is_none() =>
                             {
-                                if let Some(index) = history_index {
-                                    if index + 1 < input_history.len() {
-                                        let next = index + 1;
-                                        history_index = Some(next);
-                                        input = input_history[next].clone();
-                                    } else {
-                                        history_index = None;
-                                        input.clear();
-                                    }
+                                if history_index.is_some() {
+                                    browse_input_history(
+                                        &input_history,
+                                        &mut history_index,
+                                        &mut history_draft,
+                                        &mut input,
+                                        false,
+                                    );
+                                    paste_preview = None;
                                     slash_selected = 0;
                                 } else if input.is_empty() {
                                     scroll = scroll.saturating_sub(1);
