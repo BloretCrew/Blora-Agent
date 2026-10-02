@@ -3137,7 +3137,7 @@ fn render_git_dialog(
     let Some(frame_area) = dialog_outer(area, 88, 20, dialog.fullscreen, dialog.minimized) else {
         return hits;
     };
-    let inner = paint_dialog_frame(frame, frame_area, "Git 状态", pointer, theme, &mut hits);
+    let inner = paint_dialog_frame(frame, frame_area, "Git", pointer, theme, &mut hits);
     let [_, tabs, body, hint_row] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
@@ -3148,10 +3148,10 @@ fn render_git_dialog(
     if dialog.minimized {
         return hits;
     }
-    let labels = ["状态", "Git 图", "操作"];
+    let labels = ["操作", "Git 图"];
     for (index, label) in labels.iter().enumerate() {
-        let start = tabs.x + tabs.width * index as u16 / 3;
-        let end = tabs.x + tabs.width * (index as u16 + 1) / 3;
+        let start = tabs.x + tabs.width * index as u16 / labels.len() as u16;
+        let end = tabs.x + tabs.width * (index as u16 + 1) / labels.len() as u16;
         let rect = Rect::new(start, tabs.y, end - start, 1);
         hits.git_tabs.push((rect, index));
         let selected = dialog.page == index;
@@ -3170,26 +3170,7 @@ fn render_git_dialog(
         );
     }
     match dialog.page {
-        0 => {
-            for (index, line) in dialog
-                .info
-                .raw
-                .lines()
-                .enumerate()
-                .take(body.height as usize)
-            {
-                let rect = Rect::new(body.x, body.y + index as u16, body.width, 1);
-                hits.git_rows.push((rect, index));
-                frame.render_widget(
-                    Paragraph::new(Line::from(Span::styled(
-                        line.to_owned(),
-                        theme.fg(theme.text),
-                    )))
-                    .style(theme.base()),
-                    rect,
-                );
-            }
-        }
+        0 => render_git_commit_page(frame, body, dialog, theme, &mut hits, tick),
         1 => {
             let lines = git_graph_lines(&dialog.info.log, theme);
             frame.render_widget(
@@ -3212,7 +3193,7 @@ fn render_git_dialog(
     }
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            if dialog.page == 2 {
+            if dialog.page == 0 {
                 "点击消息输入 · 点击文件切换勾选 · ↑/↓ 选择 · 空格切换 · Enter 提交 · Esc 关闭"
             } else if dialog.page == 1 {
                 "↑/↓ 或滚轮浏览 · ←/→ 分页 · 最近 100 次提交 · Esc 关闭"
@@ -4532,7 +4513,7 @@ mod tests {
                 diff: String::new(),
                 log: String::new(),
             },
-            page: 2,
+            page: 0,
             selected: 0,
             message: "修复界面".into(),
             editing_message: false,
@@ -4550,6 +4531,23 @@ mod tests {
                 hits = render_git_dialog(frame, area, &dialog, None, &Theme::current(), 0);
             })
             .unwrap();
+        assert_eq!(hits.git_tabs.len(), 2);
+        assert_eq!(
+            hits.git_tabs
+                .iter()
+                .map(|(_, page)| *page)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(rendered.contains("操作") || rendered.replace(' ', "").contains("操作"));
+        assert!(!rendered.replace(' ', "").contains("Git状态"));
         let message = hits.git_message.unwrap();
         let generate = hits.git_generate.unwrap();
         let primary = hits.git_primary.unwrap();
@@ -4626,7 +4624,7 @@ mod tests {
                 diff: String::new(),
                 log: String::new(),
             },
-            page: 2,
+            page: 0,
             selected: 0,
             message: String::new(),
             editing_message: false,

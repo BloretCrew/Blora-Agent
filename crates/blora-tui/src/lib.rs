@@ -995,7 +995,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             }
                             KeyCode::Right if git_dialog.is_some() => {
                                 if let Some(dialog) = git_dialog.as_mut() {
-                                    dialog.page = (dialog.page + 1).min(2);
+                                    dialog.page = (dialog.page + 1).min(1);
                                     dialog.scroll = 0;
                                     dialog.editing_message = false;
                                 }
@@ -1027,14 +1027,14 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             }
                             KeyCode::Char(' ') if git_dialog.is_some() => {
                                 if let Some(dialog) = git_dialog.as_mut()
-                                    && dialog.page == 2
+                                    && dialog.page == 0
                                 {
                                     toggle_git_file(dialog);
                                 }
                             }
                             KeyCode::Insert if git_dialog.is_some() => {
                                 if let Some(dialog) = git_dialog.as_mut()
-                                    && dialog.page == 2
+                                    && dialog.page == 0
                                 {
                                     if let Some(text) = read_clipboard_text() {
                                         dialog
@@ -1048,7 +1048,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 if let Some(dialog) = git_dialog.as_mut() {
                                     if dialog.minimized {
                                         dialog.minimized = false;
-                                    } else if dialog.page == 2 {
+                                    } else if dialog.page == 0 {
                                         match view::git_primary_action(
                                             &dialog.info,
                                             &dialog.excluded_files,
@@ -4354,7 +4354,7 @@ mod git_dialog_tests {
                 diff: String::new(),
                 log: String::new(),
             },
-            page: 2,
+            page: 0,
             selected: 1,
             message: String::new(),
             editing_message: false,
