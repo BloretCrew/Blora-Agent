@@ -13,6 +13,7 @@ use ratatui::{
     Frame,
     layout::Rect,
     style::{Modifier, Style},
+    text::{Line, Span},
     widgets::{Paragraph, Wrap},
 };
 
@@ -60,6 +61,10 @@ pub struct Onboarding {
     attempt: Option<Attempt>,
     hits: Vec<(Rect, Action)>,
     scroll: u16,
+    fullscreen: bool,
+    minimized: bool,
+    pointer: Option<(u16, u16)>,
+    controls: [Option<Rect>; 3],
 }
 
 #[derive(PartialEq, Eq, Debug)]
@@ -88,6 +93,10 @@ impl Onboarding {
             attempt: None,
             hits: Vec::new(),
             scroll: 0,
+            fullscreen: false,
+            minimized: false,
+            pointer: None,
+            controls: [None; 3],
         }
     }
 
@@ -230,6 +239,38 @@ impl Onboarding {
 
     pub fn event(&mut self, event: Event, logged_in: bool) -> Outcome {
         let actions = self.actions(logged_in);
+        if let Event::Mouse(mouse) = event {
+            self.pointer = Some((mouse.column, mouse.row));
+            if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                if let Some(index) = self.controls.iter().position(|rect| {
+                    rect.is_some_and(|rect| rect.contains((mouse.column, mouse.row).into()))
+                }) {
+                    match index {
+                        0 => return Outcome::Close,
+                        1 => self.minimized = !self.minimized,
+                        _ => {
+                            self.fullscreen = !self.fullscreen;
+                            self.minimized = false;
+                        }
+                    }
+                    return Outcome::Stay;
+                }
+            }
+        }
+        if self.minimized {
+            match event {
+                Event::Key(key) if key.code == KeyCode::Enter => self.minimized = false,
+                Event::Key(key) if key.code == KeyCode::Esc => return Outcome::Close,
+                Event::Key(key)
+                    if matches!(key.code, KeyCode::Char('c' | 'q'))
+                        && key.modifiers.contains(KeyModifiers::CONTROL) =>
+                {
+                    return Outcome::Quit;
+                }
+                _ => {}
+            }
+            return Outcome::Stay;
+        }
         match event {
             Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
                 KeyCode::Char('c' | 'q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -277,6 +318,11 @@ impl Onboarding {
             area,
         );
         self.hits.clear();
+        self.controls = [None; 3];
+        if area.width >= 50 && area.height >= 18 {
+            self.draw_dialog(frame, area, username, logged_in, &theme);
+            return;
+        }
         if area.width < 4 || area.height < 4 {
             frame.render_widget(Paragraph::new("请扩大终端；Esc 关闭"), area);
             return;
@@ -348,11 +394,311 @@ impl Onboarding {
             Rect::new(area.x, area.y + area.height - 1, area.width, 1),
         );
     }
+    fn draw_dialog(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        username: &str,
+        logged_in: bool,
+        theme: &super::theme::Theme,
+    ) {
+        let Some(modal) = super::view::dialog_outer(area, 82, 26, self.fullscreen, self.minimized)
+        else {
+            return;
+        };
+        let mut chrome = super::view::HitMap::default();
+        let inner = super::view::paint_dialog_frame(
+            frame,
+            modal,
+            "Blora · 首次使用",
+            self.pointer,
+            theme,
+            &mut chrome,
+        );
+        self.controls = chrome.traffic_lights;
+        if self.minimized {
+            return;
+        }
+        let content = Rect::new(
+            inner.x + 2,
+            inner.y + 2,
+            inner.width.saturating_sub(4),
+            inner.height.saturating_sub(3),
+        );
+        let steps = ["欢迎", "账号", "完成"];
+        let current = match self.step {
+            Step::Welcome => 0,
+            Step::Account => 1,
+            Step::Complete => 2,
+        };
+        let mut tabs = Vec::new();
+        for (index, label) in steps.iter().enumerate() {
+            tabs.push(Span::styled(
+                format!(" {} {} ", index + 1, label),
+                if index == current {
+                    theme.fg(theme.rose).add_modifier(Modifier::BOLD)
+                } else {
+                    theme.mute()
+                },
+            ));
+            if index < 2 {
+                tabs.push(Span::styled("  ·  ", theme.mute()));
+            }
+        }
+        frame.render_widget(
+            Paragraph::new(Line::from(tabs)).style(theme.base()),
+            Rect::new(content.x, content.y, content.width, 1),
+        );
+        let actions = self.actions(logged_in);
+        let action_height = actions.len() as u16;
+        let body = Rect::new(
+            content.x,
+            content.y + 2,
+            content.width,
+            content.height.saturating_sub(action_height + 4),
+        );
+        let mut lines = match self.step {
+            Step::Welcome => vec![
+                Line::from(Span::styled(
+                    "欢迎使用 Blora",
+                    theme.fg(theme.text).add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "选择工作方式，在当前项目中开始。",
+                    theme.fg(theme.text_dim),
+                )),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled("Code     ", theme.fg(theme.rose)),
+                    Span::raw("阅读项目、修改代码、运行测试"),
+                ]),
+                Line::from(vec![
+                    Span::styled("Work     ", theme.fg(theme.rose)),
+                    Span::raw("处理任务与后台工作"),
+                ]),
+                Line::from(vec![
+                    Span::styled("Agent    ", theme.fg(theme.rose)),
+                    Span::raw("分工执行与协作"),
+                ]),
+                Line::from(vec![
+                    Span::styled("Imagine  ", theme.fg(theme.rose)),
+                    Span::raw("描述画面，生成图像"),
+                ]),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "接下来设置账号。已有供应商配置会保留。",
+                    theme.mute(),
+                )),
+            ],
+            Step::Account => vec![
+                Line::from(Span::styled(
+                    "连接账号 · Bloret PassPort",
+                    theme.fg(theme.text).add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+                Line::from(if logged_in {
+                    format!("当前账号  {username}")
+                } else {
+                    "当前账号  尚未登录".to_owned()
+                }),
+                Line::from(Span::styled(
+                    "在浏览器确认授权后，这里会自动更新。",
+                    theme.mute(),
+                )),
+                Line::from(""),
+            ],
+            Step::Complete => vec![
+                Line::from(Span::styled(
+                    "设置完成",
+                    theme.fg(theme.text).add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+                Line::from(if logged_in {
+                    format!("账号      {username}")
+                } else {
+                    "账号      稍后设置".to_owned()
+                }),
+                Line::from("供应商    保留当前配置"),
+                Line::from("权限      沿用当前会话设置"),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "开始使用后保存引导记录，并返回原会话。",
+                    theme.mute(),
+                )),
+                Line::from(Span::styled(
+                    "/login 连接账号 · /onboarding 重开引导",
+                    theme.mute(),
+                )),
+            ],
+        };
+        if let Some(device) = &self.device {
+            lines.extend([
+                Line::from(vec![
+                    Span::styled("设备码    ", theme.mute()),
+                    Span::styled(
+                        device.user_code.clone(),
+                        theme.fg(theme.rose).add_modifier(Modifier::BOLD),
+                    ),
+                ]),
+                Line::from(device.verification_uri.clone()),
+                Line::from(Span::styled(
+                    format!("有效期 {} 秒 · 等待授权", device.expires_in),
+                    theme.mute(),
+                )),
+            ]);
+        }
+        if !self.feedback.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                self.feedback.clone(),
+                theme.fg(theme.amber),
+            )));
+        }
+        frame.render_widget(
+            Paragraph::new(lines)
+                .style(theme.base())
+                .wrap(Wrap { trim: false })
+                .scroll((self.scroll, 0)),
+            body,
+        );
+        let actions_y = content.y + content.height.saturating_sub(action_height + 1);
+        for (index, (action, label)) in actions.iter().enumerate() {
+            let rect = Rect::new(content.x, actions_y + index as u16, content.width, 1);
+            let selected = self.selected == index;
+            let style = if selected {
+                theme
+                    .fg(theme.rose)
+                    .bg(theme.bg_select)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                theme.fg(theme.text_dim)
+            };
+            frame.render_widget(
+                Paragraph::new(format!("{} {label}", if selected { "›" } else { " " }))
+                    .style(style),
+                rect,
+            );
+            self.hits.push((rect, *action));
+        }
+        frame.render_widget(
+            Paragraph::new("Tab/↑↓ 选择 · Enter 确认 · PgUp/Dn 滚动 · Esc 关闭")
+                .style(theme.mute()),
+            Rect::new(content.x, content.y + content.height - 1, content.width, 1),
+        );
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn rendered(guide: &mut Onboarding, width: u16, height: u16, logged_in: bool) -> String {
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| guide.draw(frame, "测试账号", logged_in))
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn dialog_uses_shared_chrome_and_step_content() {
+        let mut guide = Onboarding::new(false);
+        let welcome = rendered(&mut guide, 100, 32, false);
+        assert!(welcome.contains("● ● ●"));
+        assert!(welcome.replace(' ', "").contains("Blora·首次使用"));
+        assert!(welcome.contains("Code"));
+        assert!(welcome.contains("Imagine"));
+        assert!(guide.controls.iter().all(Option::is_some));
+        guide.step = Step::Complete;
+        let complete = rendered(&mut guide, 100, 32, true);
+        assert!(complete.replace(' ', "").contains("测试账号"));
+        assert!(complete.replace(' ', "").contains("保留当前配置"));
+    }
+
+    #[test]
+    fn authorization_details_and_errors_render_in_dialog() {
+        let mut guide = Onboarding::new(true);
+        guide.device = Some(DeviceCode::from_public(
+            "private",
+            "TEST-1234",
+            "https://passport.example/authorize",
+            600,
+            5,
+        ));
+        guide.feedback = "等待授权".to_owned();
+        let content = rendered(&mut guide, 100, 32, false);
+        assert!(content.contains("TEST-1234"));
+        assert!(content.contains("https://passport.example/authorize"));
+        assert!(!content.contains("private"));
+        guide.error("授权已过期，请重试".to_owned());
+        assert!(
+            rendered(&mut guide, 100, 32, false)
+                .replace(' ', "")
+                .contains("授权已过期")
+        );
+    }
+
+    #[test]
+    fn window_controls_minimize_restore_expand_and_close() {
+        use crossterm::event::MouseEvent;
+        let mut guide = Onboarding::new(false);
+        rendered(&mut guide, 100, 32, false);
+        let click = |rect: Rect| {
+            Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: rect.x,
+                row: rect.y,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        assert_eq!(
+            guide.event(click(guide.controls[1].unwrap()), false),
+            Outcome::Stay
+        );
+        assert!(guide.minimized);
+        rendered(&mut guide, 100, 32, false);
+        assert!(guide.hits.is_empty());
+        guide.event(
+            Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+            )),
+            false,
+        );
+        assert!(!guide.minimized);
+        rendered(&mut guide, 100, 32, false);
+        guide.event(click(guide.controls[2].unwrap()), false);
+        assert!(guide.fullscreen);
+        rendered(&mut guide, 100, 32, false);
+        assert_eq!(
+            guide.event(click(guide.controls[0].unwrap()), false),
+            Outcome::Close
+        );
+    }
+
+    #[test]
+    fn all_steps_fit_terminal_sizes_with_clickable_actions() {
+        for (width, height) in [(4, 4), (20, 6), (49, 17), (50, 18), (80, 24), (120, 40)] {
+            for step in [Step::Welcome, Step::Account, Step::Complete] {
+                let mut guide = Onboarding::new(false);
+                guide.step = step;
+                rendered(&mut guide, width, height, true);
+                assert!(!guide.hits.is_empty());
+                for (rect, _) in &guide.hits {
+                    assert!(rect.x + rect.width <= width);
+                    assert!(rect.y + rect.height <= height);
+                }
+            }
+        }
+    }
+
     #[test]
     fn startup_and_version_policy() {
         assert!(needs_onboarding(0, false));

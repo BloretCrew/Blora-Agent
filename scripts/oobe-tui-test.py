@@ -72,7 +72,7 @@ with tempfile.TemporaryDirectory(prefix='blora-oobe-tui-') as directory:
     output = exercise(home, [b'/onboarding\r'], 'PassPort')
     assert '欢迎使用Blora' in text(output).replace(' ', ''), text(output)[-2500:]
     output = exercise(home, [b'/login\r'], 'PassPort')
-    assert '连接账号' in text(output)
+    assert '连接账号' in text(output).replace(' ', '')
     output = exercise(home, [b'/onboarding\r'], '终端较小', size=(20, 6))
     assert '欢迎使用Blora' in text(output).replace(' ', ''), text(output)[-2500:]
     output = exercise(home, [b'/settings\r', b'\x1b[B', b'\x1b[B', b'\x1b[B', b'\x1b[B', b'\r'], 'PassPort')

@@ -1195,7 +1195,7 @@ fn inset(area: Rect) -> Rect {
 
 /// Centered dialog frame. Yellow minimizes to a title bar; green fills the
 /// terminal minus a one-cell margin.
-fn dialog_outer(
+pub(super) fn dialog_outer(
     area: Rect,
     compact_width: u16,
     compact_height: u16,
@@ -1249,7 +1249,7 @@ fn paint_dialog_chrome(frame: &mut Frame<'_>, area: Rect, theme: &Theme) -> Rect
 }
 
 /// Draw the common dialog border and title row, including clickable window controls.
-fn paint_dialog_frame(
+pub(super) fn paint_dialog_frame(
     frame: &mut Frame<'_>,
     area: Rect,
     title: &str,
