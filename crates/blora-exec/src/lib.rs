@@ -674,10 +674,32 @@ impl LocalBackend {
         if selected.is_empty() {
             return Err(BloraError::Exec("没有勾选要提交的文件".to_owned()));
         }
-        let mut args = vec!["add", "--"];
+        // Staged deletions are absent from the index and cannot be added again.
+        let mut args = vec![
+            "--literal-pathspecs",
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "-z",
+            "--",
+        ];
         args.extend(selected.iter().map(String::as_str));
-        self.git_mutate(&args)?;
-        let mut args = vec!["commit", "-m", message.trim(), "--only", "--"];
+        let files = self.git_mutate(&args)?;
+        let to_stage: Vec<&str> = files.split('\0').filter(|path| !path.is_empty()).collect();
+        if !to_stage.is_empty() {
+            let mut args = vec!["--literal-pathspecs", "add", "--"];
+            args.extend(to_stage);
+            self.git_mutate(&args)?;
+        }
+        let mut args = vec![
+            "--literal-pathspecs",
+            "commit",
+            "-m",
+            message.trim(),
+            "--only",
+            "--",
+        ];
         args.extend(selected.iter().map(String::as_str));
         self.git_mutate(&args)
     }
@@ -1134,6 +1156,115 @@ mod tests {
             output.status.success(),
             "{}",
             String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn repo_git_text(path: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    }
+
+    #[test]
+    fn git_commit_selected_handles_staged_deletion_with_missing_parent() {
+        let (dir, backend) = diff_repo();
+        let path = "node_modules/axios/dist/axios.js.map";
+        backend.write_file(path, "map\n").unwrap();
+        repo_git(dir.path(), &["add", "."]);
+        repo_git(dir.path(), &["commit", "-qm", "initial"]);
+        repo_git(dir.path(), &["rm", path]);
+        assert!(!dir.path().join("node_modules").exists());
+
+        backend
+            .git_commit_selected("remove map", &[path.to_owned()])
+            .unwrap();
+
+        assert_eq!(
+            repo_git_text(dir.path(), &["show", "--format=", "--name-status", "HEAD"]),
+            format!("D\t{path}\n")
+        );
+        assert!(repo_git_text(dir.path(), &["status", "--porcelain"]).is_empty());
+    }
+
+    #[test]
+    fn git_commit_selected_mixes_deletions_and_preserves_excluded_changes() {
+        let (dir, backend) = diff_repo();
+        for path in [
+            "staged-delete.txt",
+            "unstaged-delete.txt",
+            "edit.txt",
+            "other.txt",
+        ] {
+            backend.write_file(path, "original\n").unwrap();
+        }
+        repo_git(dir.path(), &["add", "."]);
+        repo_git(dir.path(), &["commit", "-qm", "initial"]);
+        repo_git(dir.path(), &["rm", "staged-delete.txt"]);
+        std::fs::remove_file(dir.path().join("unstaged-delete.txt")).unwrap();
+        backend.write_file("edit.txt", "updated\n").unwrap();
+        backend.write_file("new.txt", "new\n").unwrap();
+        backend.write_file("other.txt", "staged other\n").unwrap();
+        repo_git(dir.path(), &["add", "other.txt"]);
+        backend.write_file("other.txt", "working other\n").unwrap();
+
+        backend
+            .git_commit_selected(
+                "selected changes",
+                &[
+                    "staged-delete.txt",
+                    "unstaged-delete.txt",
+                    "edit.txt",
+                    "new.txt",
+                ]
+                .map(str::to_owned),
+            )
+            .unwrap();
+
+        assert_eq!(
+            repo_git_text(dir.path(), &["show", "--format=", "--name-status", "HEAD"]),
+            "M\tedit.txt\nA\tnew.txt\nD\tstaged-delete.txt\nD\tunstaged-delete.txt\n"
+        );
+        assert_eq!(
+            repo_git_text(dir.path(), &["status", "--porcelain"]),
+            "MM other.txt\n"
+        );
+        assert_eq!(
+            repo_git_text(dir.path(), &["show", "HEAD:other.txt"]),
+            "original\n"
+        );
+        assert_eq!(
+            repo_git_text(dir.path(), &["show", ":other.txt"]),
+            "staged other\n"
+        );
+        assert_eq!(backend.read_file("other.txt").unwrap(), "working other\n");
+    }
+
+    #[test]
+    fn git_commit_selected_treats_paths_literally_on_initial_commit() {
+        let (dir, backend) = diff_repo();
+        backend.write_file("new [file].txt", "selected\n").unwrap();
+        backend.write_file("new f.txt", "excluded\n").unwrap();
+        repo_git(dir.path(), &["add", "new f.txt"]);
+
+        backend
+            .git_commit_selected("initial", &["new [file].txt".to_owned()])
+            .unwrap();
+
+        assert_eq!(
+            repo_git_text(dir.path(), &["ls-tree", "--name-only", "HEAD"]),
+            "new [file].txt\n"
+        );
+        assert_eq!(
+            repo_git_text(dir.path(), &["status", "--porcelain"]),
+            "A  \"new f.txt\"\n"
         );
     }
 
