@@ -3,6 +3,7 @@
 
 //! Terminal UI. Renders session projections, never provider payloads.
 
+mod dialogs;
 mod i18n;
 mod markdown;
 mod onboarding;
@@ -10,6 +11,8 @@ mod selection;
 mod slash;
 mod theme;
 mod view;
+
+use dialogs::{DialogId, DialogStack};
 
 use std::io::{self, Write, stdout};
 use std::path::{Path, PathBuf};
@@ -141,6 +144,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let passport_url: Option<String> = None;
     let mut passport_browser_opened = false;
     // Legacy dialog chrome remains available to the shared dialog helpers.
+    let mut dialog_stack = DialogStack::default();
     let mut passport_dialog: Option<view::PassportDialog> = None;
     // Model-provider switch dialog opened via `/provider`.
     let mut provider_dialog: Option<view::ProviderDialog> = None;
@@ -199,6 +203,9 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut onboarding =
         onboarding::needs_onboarding(onboarding_version, passport_user_token.is_some())
             .then(|| onboarding::Onboarding::new(false));
+    if onboarding.is_some() {
+        dialog_stack.activate(DialogId::Onboarding);
+    }
     if let Some(guide) = onboarding.as_mut()
         && let Some(error) = passport_startup_error.as_ref()
     {
@@ -251,6 +258,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut tick = 0u64;
     let mut last_window_title = String::new();
     let mut last_routing_session: Option<SessionId> = None;
+    let mut dialog_session: Option<SessionId> = None;
     let mut pointer: Option<(u16, u16)> = None;
     let mut text_selection: Option<selection::Selection> = None;
     let mut selecting_text = false;
@@ -293,12 +301,27 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                         passport_needs_login = passport_user_token.is_none();
                         passport_username = user.display_name().to_owned();
                         status = format!("PassPort 登录成功：{}", user.display_name());
-                        if provider_dialog.is_some() {
-                            provider_dialog = Some(open_provider_dialog(
+                        if let Some(dialog) = provider_dialog.as_mut() {
+                            let mut updated = open_provider_dialog(
                                 &provider_override,
                                 &model_override,
                                 passport_user_token.is_some(),
-                            ));
+                            );
+                            if let Some(current) = dialog.current()
+                                && let Some(selected) = updated
+                                    .options
+                                    .iter()
+                                    .position(|option| option.id == current.id)
+                            {
+                                updated.selected = selected;
+                            }
+                            updated.pane = dialog.pane;
+                            updated.model_selected = dialog
+                                .model_selected
+                                .min(updated.current_models().len().saturating_sub(1));
+                            updated.fullscreen = dialog.fullscreen;
+                            updated.minimized = dialog.minimized;
+                            *dialog = updated;
                         }
                         if passport_needs_login {
                             guide.error("账号未返回可用令牌，请重新登录".to_owned());
@@ -307,11 +330,74 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                     Err(err) => guide.error(format!("保存账号失败：{err}，请重试")),
                 }
             }
+            let mut live_dialogs = Vec::new();
+            if project_picker.is_some() {
+                live_dialogs.push(DialogId::Project);
+            }
+            if folder_picker.is_some() {
+                live_dialogs.push(DialogId::Folder);
+            }
+            if session_picker.is_some() {
+                live_dialogs.push(DialogId::Session);
+            }
+            if mode_menu.is_some() {
+                live_dialogs.push(DialogId::Mode);
+            }
+            if git_dialog.is_some() {
+                live_dialogs.push(DialogId::Git);
+            }
+            if tool_detail_dialog.is_some() {
+                live_dialogs.push(DialogId::ToolDetail);
+            }
+            if tool_dialog.is_some() {
+                live_dialogs.push(DialogId::Tool);
+            }
+            if passport_dialog.is_some() {
+                live_dialogs.push(DialogId::Passport);
+            }
+            if add_provider_dialog.is_some() {
+                live_dialogs.push(DialogId::AddProvider);
+            }
+            if theme_dialog.is_some() {
+                live_dialogs.push(DialogId::Theme);
+            }
+            if provider_dialog.is_some() {
+                live_dialogs.push(DialogId::Provider);
+            }
+            if context_dialog.is_some() {
+                live_dialogs.push(DialogId::Context);
+            }
+            if settings_dialog.is_some() {
+                live_dialogs.push(DialogId::Settings);
+            }
+            if onboarding.is_some() {
+                live_dialogs.push(DialogId::Onboarding);
+            }
+            dialog_stack.sync(&live_dialogs);
             let active_workspace = sessions
                 .get(index)
                 .map(|session| PathBuf::from(&session.workspace_path))
                 .unwrap_or_else(|| workspace.to_path_buf());
             let session_id = sessions.get(index).map(|item| item.id.clone());
+            if dialog_session != session_id {
+                git_dialog = None;
+                tool_dialog = None;
+                tool_detail_dialog = None;
+                context_dialog = None;
+                git_file_click = None;
+                git_diff_requested = None;
+                git_diff_generation = git_diff_generation.wrapping_add(1);
+                git_generation_id = git_generation_id.wrapping_add(1);
+                git_sync_id = git_sync_id.wrapping_add(1);
+                dialog_session.clone_from(&session_id);
+                live_dialogs.retain(|id| {
+                    !matches!(
+                        id,
+                        DialogId::Git | DialogId::Tool | DialogId::ToolDetail | DialogId::Context
+                    )
+                });
+                dialog_stack.sync(&live_dialogs);
+            }
             // Keep one projection per selected session and apply only new events.
             if let Some(id) = session_id.as_ref() {
                 if cached.as_ref().map(|(cached_id, _)| cached_id) != Some(id) {
@@ -478,12 +564,15 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
             }
             terminal
                 .draw(|frame| {
-                    if let Some(guide) = onboarding.as_mut() {
-                        guide.draw(frame, &passport_username, passport_user_token.is_some());
-                        return;
-                    }
+                    let top_dialog = dialog_stack.top();
                     if frame.area().width < 30 || frame.area().height < 10 {
                         hits = view::HitMap::default();
+                        if top_dialog == Some(DialogId::Onboarding)
+                            && let Some(guide) = onboarding.as_mut()
+                        {
+                            guide.draw(frame, &passport_username, passport_user_token.is_some());
+                            return;
+                        }
                         frame.render_widget(
                             ratatui::widgets::Paragraph::new(
                                 "终端较小，请扩大窗口；/onboarding 打开引导",
@@ -496,6 +585,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                     hits = view::draw(
                         frame,
                         &view::FrameModel {
+                            dialog_stack: dialog_stack.as_slice(),
                             workspace: &active_workspace,
                             sessions: &sessions,
                             index,
@@ -535,6 +625,11 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                         },
                         &mut transcript_cache,
                     );
+                    if top_dialog == Some(DialogId::Onboarding)
+                        && let Some(guide) = onboarding.as_mut()
+                    {
+                        guide.draw(frame, &passport_username, passport_user_token.is_some());
+                    }
                 })
                 .map_err(blora_types::BloraError::exec)?;
             if let Some(handle) =
@@ -604,7 +699,10 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
             };
             if event::poll(Duration::from_millis(wait_ms)).map_err(blora_types::BloraError::exec)? {
                 let event = event::read().map_err(blora_types::BloraError::exec)?;
-                if let Some(guide) = onboarding.as_mut() {
+                let top_dialog = dialog_stack.top();
+                if top_dialog == Some(DialogId::Onboarding)
+                    && let Some(guide) = onboarding.as_mut()
+                {
                     match guide.event(event, passport_user_token.is_some()) {
                         onboarding::Outcome::Stay => {}
                         onboarding::Outcome::Close => {
@@ -628,22 +726,18 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                     continue;
                 }
                 match event {
-                    Event::Paste(text)
-                        if git_dialog
-                            .as_ref()
-                            .is_some_and(|dialog| dialog.editing_message) =>
-                    {
-                        if let Some(dialog) = git_dialog.as_mut() {
-                            dialog.message.push_str(text.trim_end_matches(['\r', '\n']));
-                        }
-                    }
                     Event::Paste(text) => {
-                        if text.is_empty() {
-                            paste_clipboard(&mut input, &mut paste_preview);
-                        } else {
-                            insert_pasted_text(&mut input, &mut paste_preview, &text);
+                        paste_into_dialog(
+                            top_dialog,
+                            &text,
+                            &mut add_provider_dialog,
+                            &mut git_dialog,
+                            &mut input,
+                            &mut paste_preview,
+                        );
+                        if top_dialog.is_none() {
+                            history_index = None;
                         }
-                        history_index = None;
                     }
                     Event::Key(key) if key.kind == KeyEventKind::Press => {
                         if key.modifiers.contains(KeyModifiers::CONTROL)
@@ -654,6 +748,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                         }
                         if key.modifiers.contains(KeyModifiers::CONTROL)
                             && key.code == KeyCode::Char('n')
+                            && top_dialog.is_none()
                         {
                             match create_session(
                                 runtime,
@@ -676,13 +771,130 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                         }
                         if key.modifiers.contains(KeyModifiers::CONTROL)
                             && key.code == KeyCode::Char('p')
+                            && top_dialog.is_none()
                             && input.is_empty()
                         {
                             input.push('/');
                             slash_selected = 0;
                             continue;
                         }
-                        if let Some(picker) = folder_picker.as_mut() {
+                        let minimized = match top_dialog {
+                            Some(DialogId::Project) => project_picker
+                                .as_ref()
+                                .is_some_and(|dialog| dialog.minimized),
+                            Some(DialogId::Folder) => folder_picker
+                                .as_ref()
+                                .is_some_and(|dialog| dialog.minimized),
+                            Some(DialogId::Session) => session_picker
+                                .as_ref()
+                                .is_some_and(|dialog| dialog.minimized),
+                            Some(DialogId::Mode) => {
+                                mode_menu.as_ref().is_some_and(|dialog| dialog.minimized)
+                            }
+                            Some(DialogId::Git) => {
+                                git_dialog.as_ref().is_some_and(|dialog| dialog.minimized)
+                            }
+                            Some(DialogId::ToolDetail) => tool_detail_dialog
+                                .as_ref()
+                                .is_some_and(|dialog| dialog.minimized),
+                            Some(DialogId::Tool) => {
+                                tool_dialog.as_ref().is_some_and(|dialog| dialog.minimized)
+                            }
+                            Some(DialogId::AddProvider) => add_provider_dialog
+                                .as_ref()
+                                .is_some_and(|dialog| dialog.minimized),
+                            Some(DialogId::Theme) => {
+                                theme_dialog.as_ref().is_some_and(|dialog| dialog.minimized)
+                            }
+                            Some(DialogId::Provider) => provider_dialog
+                                .as_ref()
+                                .is_some_and(|dialog| dialog.minimized),
+                            Some(DialogId::Context) => context_dialog
+                                .as_ref()
+                                .is_some_and(|dialog| dialog.minimized),
+                            Some(DialogId::Settings) => settings_dialog
+                                .as_ref()
+                                .is_some_and(|dialog| dialog.minimized),
+                            _ => false,
+                        };
+                        if minimized && key.code != KeyCode::Esc {
+                            if key.code == KeyCode::Enter {
+                                match top_dialog {
+                                    Some(DialogId::Project) => {
+                                        if let Some(dialog) = project_picker.as_mut() {
+                                            dialog.minimized = false;
+                                        }
+                                    }
+                                    Some(DialogId::Folder) => {
+                                        if let Some(dialog) = folder_picker.as_mut() {
+                                            dialog.minimized = false;
+                                        }
+                                    }
+                                    Some(DialogId::Session) => {
+                                        if let Some(dialog) = session_picker.as_mut() {
+                                            dialog.minimized = false;
+                                        }
+                                    }
+                                    Some(DialogId::Mode) => {
+                                        if let Some(dialog) = mode_menu.as_mut() {
+                                            dialog.minimized = false;
+                                        }
+                                    }
+                                    Some(DialogId::Git) => {
+                                        if let Some(dialog) = git_dialog.as_mut() {
+                                            dialog.minimized = false;
+                                        }
+                                    }
+                                    Some(DialogId::ToolDetail) => {
+                                        if let Some(dialog) = tool_detail_dialog.as_mut() {
+                                            dialog.minimized = false;
+                                        }
+                                    }
+                                    Some(DialogId::Tool) => {
+                                        if let Some(dialog) = tool_dialog.as_mut() {
+                                            dialog.minimized = false;
+                                        }
+                                    }
+                                    Some(DialogId::AddProvider) => {
+                                        if let Some(dialog) = add_provider_dialog.as_mut() {
+                                            dialog.minimized = false;
+                                        }
+                                    }
+                                    Some(DialogId::Theme) => {
+                                        if let Some(dialog) = theme_dialog.as_mut() {
+                                            dialog.minimized = false;
+                                        }
+                                    }
+                                    Some(DialogId::Provider) => {
+                                        if let Some(dialog) = provider_dialog.as_mut() {
+                                            dialog.minimized = false;
+                                        }
+                                    }
+                                    Some(DialogId::Context) => {
+                                        if let Some(dialog) = context_dialog.as_mut() {
+                                            dialog.minimized = false;
+                                        }
+                                    }
+                                    Some(DialogId::Settings) => {
+                                        if let Some(dialog) = settings_dialog.as_mut() {
+                                            dialog.minimized = false;
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            continue;
+                        }
+                        if top_dialog == Some(DialogId::Folder)
+                            && key
+                                .modifiers
+                                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                        {
+                            continue;
+                        }
+                        if top_dialog == Some(DialogId::Folder)
+                            && let Some(picker) = folder_picker.as_mut()
+                        {
                             match key.code {
                                 KeyCode::Esc => folder_picker = None,
                                 KeyCode::Up => {
@@ -713,16 +925,40 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             }
                             continue;
                         }
-                        match key.code {
-                            KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        if (key.code == KeyCode::Char('v')
+                            && key.modifiers.contains(KeyModifiers::CONTROL))
+                            || key.code == KeyCode::Insert
+                        {
+                            if top_dialog.is_none() {
                                 paste_clipboard(&mut input, &mut paste_preview);
                                 history_index = None;
+                            } else if let Some(text) = read_clipboard_text() {
+                                paste_into_dialog(
+                                    top_dialog,
+                                    &text,
+                                    &mut add_provider_dialog,
+                                    &mut git_dialog,
+                                    &mut input,
+                                    &mut paste_preview,
+                                );
                             }
-                            KeyCode::Esc if text_selection.is_some() => {
+                            continue;
+                        }
+                        if key
+                            .modifiers
+                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                        {
+                            continue;
+                        }
+                        match key.code {
+                            KeyCode::Esc if top_dialog.is_none() && text_selection.is_some() => {
                                 text_selection = None;
                                 selecting_text = false;
                             }
-                            KeyCode::Esc if add_provider_dialog.is_some() => {
+                            KeyCode::Esc
+                                if top_dialog == Some(DialogId::AddProvider)
+                                    && add_provider_dialog.is_some() =>
+                            {
                                 if let Some(dialog) = add_provider_dialog.as_mut() {
                                     dialog.error = None;
                                     match dialog.step {
@@ -752,14 +988,20 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     }
                                 }
                             }
-                            KeyCode::Up if add_provider_dialog.is_some() => {
+                            KeyCode::Up
+                                if top_dialog == Some(DialogId::AddProvider)
+                                    && add_provider_dialog.is_some() =>
+                            {
                                 if let Some(dialog) = add_provider_dialog.as_mut() {
                                     if dialog.step == view::AddProviderStep::Catalog {
                                         dialog.selected = dialog.selected.saturating_sub(1);
                                     }
                                 }
                             }
-                            KeyCode::Down if add_provider_dialog.is_some() => {
+                            KeyCode::Down
+                                if top_dialog == Some(DialogId::AddProvider)
+                                    && add_provider_dialog.is_some() =>
+                            {
                                 if let Some(dialog) = add_provider_dialog.as_mut() {
                                     if dialog.step == view::AddProviderStep::Catalog {
                                         let max = dialog.catalog_len().saturating_sub(1);
@@ -768,9 +1010,10 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 }
                             }
                             KeyCode::Left
-                                if add_provider_dialog.as_ref().is_some_and(|dialog| {
-                                    dialog.step == view::AddProviderStep::Review
-                                }) =>
+                                if top_dialog == Some(DialogId::AddProvider)
+                                    && (add_provider_dialog.as_ref().is_some_and(|dialog| {
+                                        dialog.step == view::AddProviderStep::Review
+                                    })) =>
                             {
                                 if let Some(dialog) = add_provider_dialog.as_mut() {
                                     dialog.format = cycle_format(dialog.format, -1);
@@ -778,16 +1021,20 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 }
                             }
                             KeyCode::Right
-                                if add_provider_dialog.as_ref().is_some_and(|dialog| {
-                                    dialog.step == view::AddProviderStep::Review
-                                }) =>
+                                if top_dialog == Some(DialogId::AddProvider)
+                                    && (add_provider_dialog.as_ref().is_some_and(|dialog| {
+                                        dialog.step == view::AddProviderStep::Review
+                                    })) =>
                             {
                                 if let Some(dialog) = add_provider_dialog.as_mut() {
                                     dialog.format = cycle_format(dialog.format, 1);
                                     refresh_add_preview(dialog);
                                 }
                             }
-                            KeyCode::Enter if add_provider_dialog.is_some() => {
+                            KeyCode::Enter
+                                if top_dialog == Some(DialogId::AddProvider)
+                                    && add_provider_dialog.is_some() =>
+                            {
                                 if let Some(dialog) = add_provider_dialog.as_mut() {
                                     match advance_add_provider(dialog) {
                                         AddAdvance::Stay => {}
@@ -810,15 +1057,16 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 }
                             }
                             KeyCode::Backspace
-                                if add_provider_dialog.as_ref().is_some_and(|dialog| {
-                                    matches!(
-                                        dialog.step,
-                                        view::AddProviderStep::Catalog
-                                            | view::AddProviderStep::CustomId
-                                            | view::AddProviderStep::CustomBase
-                                            | view::AddProviderStep::ApiKey
-                                    )
-                                }) =>
+                                if top_dialog == Some(DialogId::AddProvider)
+                                    && (add_provider_dialog.as_ref().is_some_and(|dialog| {
+                                        matches!(
+                                            dialog.step,
+                                            view::AddProviderStep::Catalog
+                                                | view::AddProviderStep::CustomId
+                                                | view::AddProviderStep::CustomBase
+                                                | view::AddProviderStep::ApiKey
+                                        )
+                                    })) =>
                             {
                                 if let Some(dialog) = add_provider_dialog.as_mut() {
                                     add_step_buffer(dialog).pop();
@@ -828,15 +1076,16 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 }
                             }
                             KeyCode::Char(ch)
-                                if add_provider_dialog.as_ref().is_some_and(|dialog| {
-                                    matches!(
-                                        dialog.step,
-                                        view::AddProviderStep::Catalog
-                                            | view::AddProviderStep::CustomId
-                                            | view::AddProviderStep::CustomBase
-                                            | view::AddProviderStep::ApiKey
-                                    )
-                                }) && !key.modifiers.contains(KeyModifiers::CONTROL) =>
+                                if top_dialog == Some(DialogId::AddProvider)
+                                    && (add_provider_dialog.as_ref().is_some_and(|dialog| {
+                                        matches!(
+                                            dialog.step,
+                                            view::AddProviderStep::Catalog
+                                                | view::AddProviderStep::CustomId
+                                                | view::AddProviderStep::CustomBase
+                                                | view::AddProviderStep::ApiKey
+                                        )
+                                    }) && !key.modifiers.contains(KeyModifiers::CONTROL)) =>
                             {
                                 if let Some(dialog) = add_provider_dialog.as_mut() {
                                     add_step_buffer(dialog).push(ch);
@@ -845,12 +1094,18 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     }
                                 }
                             }
-                            KeyCode::Left if provider_dialog.is_some() => {
+                            KeyCode::Left
+                                if top_dialog == Some(DialogId::Provider)
+                                    && provider_dialog.is_some() =>
+                            {
                                 if let Some(dialog) = provider_dialog.as_mut() {
                                     dialog.pane = view::ProviderPane::Providers;
                                 }
                             }
-                            KeyCode::Right if provider_dialog.is_some() => {
+                            KeyCode::Right
+                                if top_dialog == Some(DialogId::Provider)
+                                    && provider_dialog.is_some() =>
+                            {
                                 if let Some(dialog) = provider_dialog.as_mut()
                                     && !dialog.is_add()
                                     && !dialog.current_models().is_empty()
@@ -859,84 +1114,129 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 }
                             }
                             KeyCode::Left | KeyCode::Char('[')
-                                if input.is_empty() && git_dialog.is_none() =>
+                                if top_dialog.is_none()
+                                    && (input.is_empty() && git_dialog.is_none()) =>
                             {
                                 index = index.saturating_sub(1);
                             }
                             KeyCode::Right | KeyCode::Char(']')
-                                if input.is_empty() && git_dialog.is_none() =>
+                                if top_dialog.is_none()
+                                    && (input.is_empty() && git_dialog.is_none()) =>
                             {
                                 if index + 1 < sessions.len() {
                                     index += 1;
                                 }
                             }
-                            KeyCode::PageUp if input.is_empty() && git_dialog.is_none() => {
+                            KeyCode::PageUp
+                                if top_dialog.is_none()
+                                    && (input.is_empty() && git_dialog.is_none()) =>
+                            {
                                 scroll = scroll.saturating_add(8);
                             }
-                            KeyCode::PageDown if input.is_empty() && git_dialog.is_none() => {
+                            KeyCode::PageDown
+                                if top_dialog.is_none()
+                                    && (input.is_empty() && git_dialog.is_none()) =>
+                            {
                                 scroll = scroll.saturating_sub(8);
                             }
-                            KeyCode::Home if input.is_empty() => scroll = usize::MAX / 4,
-                            KeyCode::End if input.is_empty() => scroll = 0,
-                            KeyCode::Char('y') if input.is_empty() && !pending.is_empty() => {
+                            KeyCode::Home if top_dialog.is_none() && (input.is_empty()) => {
+                                scroll = usize::MAX / 4
+                            }
+                            KeyCode::End if top_dialog.is_none() && (input.is_empty()) => {
+                                scroll = 0
+                            }
+                            KeyCode::Char('y')
+                                if top_dialog.is_none()
+                                    && (input.is_empty() && !pending.is_empty()) =>
+                            {
                                 let _ = runtime.resolve_approval(&pending[0].id, true);
                             }
-                            KeyCode::Char('n') if input.is_empty() && !pending.is_empty() => {
+                            KeyCode::Char('n')
+                                if top_dialog.is_none()
+                                    && (input.is_empty() && !pending.is_empty()) =>
+                            {
                                 let _ = runtime.resolve_approval(&pending[0].id, false);
                             }
-                            KeyCode::Left if theme_dialog.is_some() => {
+                            KeyCode::Left
+                                if top_dialog == Some(DialogId::Theme)
+                                    && theme_dialog.is_some() =>
+                            {
                                 if let Some(dialog) = theme_dialog.as_mut() {
                                     dialog.scheme = cycle_scheme(dialog.scheme, -1);
                                     preview_theme_dialog(dialog);
                                 }
                             }
-                            KeyCode::Right if theme_dialog.is_some() => {
+                            KeyCode::Right
+                                if top_dialog == Some(DialogId::Theme)
+                                    && theme_dialog.is_some() =>
+                            {
                                 if let Some(dialog) = theme_dialog.as_mut() {
                                     dialog.scheme = cycle_scheme(dialog.scheme, 1);
                                     preview_theme_dialog(dialog);
                                 }
                             }
-                            KeyCode::Up if theme_dialog.is_some() => {
+                            KeyCode::Up
+                                if top_dialog == Some(DialogId::Theme)
+                                    && theme_dialog.is_some() =>
+                            {
                                 if let Some(dialog) = theme_dialog.as_mut() {
                                     dialog.selected = dialog.selected.saturating_sub(1);
                                     preview_theme_dialog(dialog);
                                 }
                             }
-                            KeyCode::Down if theme_dialog.is_some() => {
+                            KeyCode::Down
+                                if top_dialog == Some(DialogId::Theme)
+                                    && theme_dialog.is_some() =>
+                            {
                                 if let Some(dialog) = theme_dialog.as_mut() {
                                     dialog.selected =
                                         (dialog.selected + 1).min(dialog.options.len() - 1);
                                     preview_theme_dialog(dialog);
                                 }
                             }
-                            KeyCode::Enter if theme_dialog.is_some() => {
+                            KeyCode::Enter
+                                if top_dialog == Some(DialogId::Theme)
+                                    && theme_dialog.is_some() =>
+                            {
                                 if let Some(dialog) = theme_dialog.take() {
                                     status = commit_theme_dialog(&dialog);
                                 }
                             }
-                            KeyCode::Up if settings_dialog.is_some() => {
+                            KeyCode::Up
+                                if top_dialog == Some(DialogId::Settings)
+                                    && settings_dialog.is_some() =>
+                            {
                                 if let Some(dialog) = settings_dialog.as_mut() {
                                     dialog.selected = dialog.selected.saturating_sub(1);
                                 }
                             }
-                            KeyCode::Down if settings_dialog.is_some() => {
+                            KeyCode::Down
+                                if top_dialog == Some(DialogId::Settings)
+                                    && settings_dialog.is_some() =>
+                            {
                                 if let Some(dialog) = settings_dialog.as_mut() {
                                     dialog.selected = (dialog.selected + 1)
                                         .min(settings_page_len(dialog.page).saturating_sub(1));
                                 }
                             }
-                            KeyCode::Tab if settings_dialog.is_some() => {
+                            KeyCode::Tab
+                                if top_dialog == Some(DialogId::Settings)
+                                    && settings_dialog.is_some() =>
+                            {
                                 if let Some(dialog) = settings_dialog.as_mut() {
                                     dialog.page = (dialog.page + 1) % 3;
                                     dialog.selected = 0;
                                 }
                             }
-                            KeyCode::Left | KeyCode::Right if settings_dialog.is_some() => {
+                            KeyCode::Left | KeyCode::Right
+                                if top_dialog == Some(DialogId::Settings)
+                                    && settings_dialog.is_some() =>
+                            {
                                 if settings_dialog
                                     .as_ref()
                                     .is_some_and(|dialog| dialog.page == 0 && dialog.selected == 4)
                                 {
-                                    settings_dialog = None;
+                                    dialog_stack.activate(DialogId::Onboarding);
                                     onboarding = Some(onboarding::Onboarding::new(false));
                                     continue;
                                 }
@@ -954,18 +1254,25 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 }
                             }
                             KeyCode::Enter
-                                if settings_dialog.as_ref().is_some_and(|dialog| {
-                                    dialog.page == 0 && dialog.selected == 4
-                                }) =>
+                                if top_dialog == Some(DialogId::Settings)
+                                    && (settings_dialog.as_ref().is_some_and(|dialog| {
+                                        dialog.page == 0 && dialog.selected == 4
+                                    })) =>
                             {
-                                settings_dialog = None;
+                                dialog_stack.activate(DialogId::Onboarding);
                                 onboarding = Some(onboarding::Onboarding::new(false));
                             }
-                            KeyCode::Enter if settings_dialog.is_some() => {
+                            KeyCode::Enter
+                                if top_dialog == Some(DialogId::Settings)
+                                    && settings_dialog.is_some() =>
+                            {
                                 settings_dialog = None;
                                 status = "设置已保存".to_owned();
                             }
-                            KeyCode::Up if provider_dialog.is_some() => {
+                            KeyCode::Up
+                                if top_dialog == Some(DialogId::Provider)
+                                    && provider_dialog.is_some() =>
+                            {
                                 if let Some(dialog) = provider_dialog.as_mut() {
                                     match dialog.pane {
                                         view::ProviderPane::Providers => {
@@ -979,7 +1286,10 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     }
                                 }
                             }
-                            KeyCode::Down if provider_dialog.is_some() => {
+                            KeyCode::Down
+                                if top_dialog == Some(DialogId::Provider)
+                                    && provider_dialog.is_some() =>
+                            {
                                 if let Some(dialog) = provider_dialog.as_mut() {
                                     match dialog.pane {
                                         view::ProviderPane::Providers => {
@@ -996,14 +1306,19 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     }
                                 }
                             }
-                            KeyCode::Enter if provider_dialog.is_some() => {
+                            KeyCode::Enter
+                                if top_dialog == Some(DialogId::Provider)
+                                    && provider_dialog.is_some() =>
+                            {
                                 if let Some(dialog) = provider_dialog.as_mut() {
                                     if dialog.is_add() {
+                                        dialog_stack.activate(DialogId::AddProvider);
                                         add_provider_dialog = Some(open_add_provider_dialog());
                                     } else if dialog
                                         .current()
                                         .is_some_and(|option| !option.available)
                                     {
+                                        dialog_stack.activate(DialogId::Onboarding);
                                         onboarding = Some(onboarding::Onboarding::new(true));
                                     } else if dialog.pane == view::ProviderPane::Providers
                                         && !dialog.current_models().is_empty()
@@ -1021,62 +1336,57 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     }
                                 }
                             }
-                            KeyCode::Up if slash::is_open(&input) => {
+                            KeyCode::Up if top_dialog.is_none() && slash::is_open(&input) => {
                                 slash_selected = slash_selected.saturating_sub(1);
                             }
-                            KeyCode::Down if slash::is_open(&input) => {
+                            KeyCode::Down if top_dialog.is_none() && slash::is_open(&input) => {
                                 if !slash_hits.is_empty() {
                                     slash_selected = (slash_selected + 1).min(slash_hits.len() - 1);
                                 }
                             }
-                            KeyCode::Char('v')
-                                if key.modifiers.contains(KeyModifiers::CONTROL)
-                                    && git_dialog
-                                        .as_ref()
-                                        .is_some_and(|dialog| dialog.editing_message) =>
-                            {
-                                if let Some(text) = read_clipboard_text()
-                                    && let Some(dialog) = git_dialog.as_mut()
-                                {
-                                    dialog.message.push_str(text.trim_end_matches(['\r', '\n']));
-                                }
-                            }
                             KeyCode::Char(ch)
-                                if git_dialog
-                                    .as_ref()
-                                    .is_some_and(|dialog| dialog.editing_message)
-                                    && !key.modifiers.contains(KeyModifiers::CONTROL) =>
+                                if top_dialog == Some(DialogId::Git)
+                                    && (git_dialog
+                                        .as_ref()
+                                        .is_some_and(|dialog| dialog.editing_message)
+                                        && !key.modifiers.contains(KeyModifiers::CONTROL)) =>
                             {
                                 if let Some(dialog) = git_dialog.as_mut() {
                                     dialog.message.push(ch);
                                 }
                             }
                             KeyCode::Backspace
-                                if git_dialog
-                                    .as_ref()
-                                    .is_some_and(|dialog| dialog.editing_message) =>
+                                if top_dialog == Some(DialogId::Git)
+                                    && (git_dialog
+                                        .as_ref()
+                                        .is_some_and(|dialog| dialog.editing_message)) =>
                             {
                                 if let Some(dialog) = git_dialog.as_mut() {
                                     dialog.message.pop();
                                 }
                             }
                             KeyCode::Enter
-                                if git_dialog
-                                    .as_ref()
-                                    .is_some_and(|dialog| dialog.editing_message) =>
+                                if top_dialog == Some(DialogId::Git)
+                                    && (git_dialog
+                                        .as_ref()
+                                        .is_some_and(|dialog| dialog.editing_message)) =>
                             {
                                 if let Some(dialog) = git_dialog.as_mut() {
                                     dialog.editing_message = false;
                                 }
                             }
-                            KeyCode::Left if git_dialog.is_some() => {
+                            KeyCode::Left
+                                if top_dialog == Some(DialogId::Git) && git_dialog.is_some() =>
+                            {
                                 if let Some(dialog) = git_dialog.as_mut() {
                                     dialog.page = dialog.page.saturating_sub(1);
                                     dialog.scroll = 0;
                                     dialog.editing_message = false;
                                 }
                             }
-                            KeyCode::Esc if git_dialog.is_some() => {
+                            KeyCode::Esc
+                                if top_dialog == Some(DialogId::Git) && git_dialog.is_some() =>
+                            {
                                 if let Some(dialog) = git_dialog.as_mut() {
                                     if dialog.editing_message {
                                         dialog.editing_message = false;
@@ -1085,14 +1395,18 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     }
                                 }
                             }
-                            KeyCode::Right if git_dialog.is_some() => {
+                            KeyCode::Right
+                                if top_dialog == Some(DialogId::Git) && git_dialog.is_some() =>
+                            {
                                 if let Some(dialog) = git_dialog.as_mut() {
                                     dialog.page = (dialog.page + 1).min(2);
                                     dialog.scroll = 0;
                                     dialog.editing_message = false;
                                 }
                             }
-                            KeyCode::PageUp | KeyCode::PageDown if git_dialog.is_some() => {
+                            KeyCode::PageUp | KeyCode::PageDown
+                                if top_dialog == Some(DialogId::Git) && git_dialog.is_some() =>
+                            {
                                 if let Some(dialog) = git_dialog.as_mut() {
                                     if dialog.page > 0 {
                                         dialog.scroll = if key.code == KeyCode::PageUp {
@@ -1112,7 +1426,9 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     };
                                 }
                             }
-                            KeyCode::Up if git_dialog.is_some() => {
+                            KeyCode::Up
+                                if top_dialog == Some(DialogId::Git) && git_dialog.is_some() =>
+                            {
                                 git_file_click = None;
                                 if let Some(dialog) = git_dialog.as_mut() {
                                     if dialog.page > 0 {
@@ -1123,7 +1439,9 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     }
                                 }
                             }
-                            KeyCode::Down if git_dialog.is_some() => {
+                            KeyCode::Down
+                                if top_dialog == Some(DialogId::Git) && git_dialog.is_some() =>
+                            {
                                 git_file_click = None;
                                 if let Some(dialog) = git_dialog.as_mut() {
                                     if dialog.page > 0 {
@@ -1142,14 +1460,18 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     }
                                 }
                             }
-                            KeyCode::Char(' ') if git_dialog.is_some() => {
+                            KeyCode::Char(' ')
+                                if top_dialog == Some(DialogId::Git) && git_dialog.is_some() =>
+                            {
                                 if let Some(dialog) = git_dialog.as_mut()
                                     && dialog.page == 0
                                 {
                                     toggle_git_file(dialog);
                                 }
                             }
-                            KeyCode::Insert if git_dialog.is_some() => {
+                            KeyCode::Insert
+                                if top_dialog == Some(DialogId::Git) && git_dialog.is_some() =>
+                            {
                                 if let Some(dialog) = git_dialog.as_mut()
                                     && dialog.page == 0
                                 {
@@ -1161,7 +1483,9 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     }
                                 }
                             }
-                            KeyCode::Enter if git_dialog.is_some() => {
+                            KeyCode::Enter
+                                if top_dialog == Some(DialogId::Git) && git_dialog.is_some() =>
+                            {
                                 if let Some(dialog) = git_dialog.as_mut() {
                                     if dialog.minimized {
                                         dialog.minimized = false;
@@ -1212,19 +1536,9 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     }
                                 }
                             }
-                            KeyCode::Char(_) | KeyCode::Backspace if git_dialog.is_some() => {}
-                            KeyCode::Up
-                                if project_picker.is_none()
-                                    && session_picker.is_none()
-                                    && mode_menu.is_none()
-                                    && theme_dialog.is_none()
-                                    && add_provider_dialog.is_none()
-                                    && provider_dialog.is_none()
-                                    && context_dialog.is_none()
-                                    && tool_dialog.is_none()
-                                    && tool_detail_dialog.is_none()
-                                    && passport_dialog.is_none() =>
-                            {
+                            KeyCode::Char(_) | KeyCode::Backspace
+                                if top_dialog == Some(DialogId::Git) && git_dialog.is_some() => {}
+                            KeyCode::Up if top_dialog.is_none() => {
                                 if !input_history.is_empty() {
                                     browse_input_history(
                                         &input_history,
@@ -1239,18 +1553,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     scroll = scroll.saturating_add(1);
                                 }
                             }
-                            KeyCode::Down
-                                if project_picker.is_none()
-                                    && session_picker.is_none()
-                                    && mode_menu.is_none()
-                                    && theme_dialog.is_none()
-                                    && add_provider_dialog.is_none()
-                                    && provider_dialog.is_none()
-                                    && context_dialog.is_none()
-                                    && tool_dialog.is_none()
-                                    && tool_detail_dialog.is_none()
-                                    && passport_dialog.is_none() =>
-                            {
+                            KeyCode::Down if top_dialog.is_none() => {
                                 if history_index.is_some() {
                                     browse_input_history(
                                         &input_history,
@@ -1265,13 +1568,13 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     scroll = scroll.saturating_sub(1);
                                 }
                             }
-                            KeyCode::Tab if slash::is_open(&input) => {
+                            KeyCode::Tab if top_dialog.is_none() && slash::is_open(&input) => {
                                 if let Some(cmd) = slash_hits.get(slash_selected) {
                                     input = slash::complete(cmd);
                                     slash_selected = 0;
                                 }
                             }
-                            KeyCode::Enter if mode_menu.is_none() => {
+                            KeyCode::Enter if top_dialog.is_none() && mode_menu.is_none() => {
                                 if input.starts_with('/') {
                                     if slash::is_open(&input) {
                                         if let Some(cmd) = slash_hits.get(slash_selected) {
@@ -1325,16 +1628,17 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                                 notice = Some(body);
                                             }
                                             SlashOutcome::Login => {
+                                                dialog_stack.activate(DialogId::Onboarding);
                                                 onboarding =
                                                     Some(onboarding::Onboarding::new(true));
                                             }
                                             SlashOutcome::Onboarding => {
+                                                dialog_stack.activate(DialogId::Onboarding);
                                                 onboarding =
                                                     Some(onboarding::Onboarding::new(false));
                                             }
                                             SlashOutcome::ProviderDialog => {
-                                                theme_dialog = None;
-                                                add_provider_dialog = None;
+                                                dialog_stack.activate(DialogId::Provider);
                                                 provider_dialog = Some(open_provider_dialog(
                                                     &provider_override,
                                                     &model_override,
@@ -1342,12 +1646,11 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                                 ));
                                             }
                                             SlashOutcome::ThemeDialog => {
-                                                provider_dialog = None;
+                                                dialog_stack.activate(DialogId::Theme);
                                                 theme_dialog = Some(open_theme_dialog());
                                             }
                                             SlashOutcome::SettingsDialog => {
-                                                provider_dialog = None;
-                                                theme_dialog = None;
+                                                dialog_stack.activate(DialogId::Settings);
                                                 settings_dialog = Some(view::SettingsDialog {
                                                     page: 0,
                                                     selected: 0,
@@ -1398,53 +1701,42 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     }));
                                 }
                             }
-                            KeyCode::Backspace => {
+                            KeyCode::Backspace if top_dialog.is_none() => {
                                 input.pop();
                                 history_index = None;
                                 paste_preview = None;
                             }
-                            KeyCode::Char(ch) => {
+                            KeyCode::Char(ch) if top_dialog.is_none() => {
                                 input.push(ch);
                                 history_index = None;
                                 paste_preview = None;
                             }
-                            KeyCode::Insert => {
+                            KeyCode::Insert if top_dialog.is_none() => {
                                 if let Some(text) = read_clipboard_text() {
                                     insert_pasted_text(&mut input, &mut paste_preview, &text);
                                     history_index = None;
                                 }
                             }
-                            KeyCode::Esc if slash::is_open(&input) || input.starts_with('/') => {
+                            KeyCode::Esc
+                                if top_dialog.is_none()
+                                    && (slash::is_open(&input) || input.starts_with('/')) =>
+                            {
                                 input.clear();
                                 paste_preview = None;
                                 slash_selected = 0;
                             }
                             KeyCode::Enter
-                                if session_picker
-                                    .as_ref()
-                                    .is_some_and(|picker| picker.minimized) =>
+                                if top_dialog == Some(DialogId::Project)
+                                    && project_picker.is_some() =>
                             {
-                                if let Some(picker) = session_picker.as_mut() {
-                                    picker.minimized = false;
-                                }
-                            }
-                            KeyCode::Enter
-                                if project_picker
-                                    .as_ref()
-                                    .is_some_and(|picker| picker.minimized) =>
-                            {
-                                if let Some(picker) = project_picker.as_mut() {
-                                    picker.minimized = false;
-                                }
-                            }
-                            KeyCode::Enter if project_picker.is_some() => {
-                                if let Some(picker) = project_picker.take() {
+                                if let Some(picker) = project_picker.as_ref() {
                                     let projects = project_paths(&sessions);
                                     if picker.selected == projects.len() {
                                         let path = sessions
                                             .get(index)
                                             .map(|session| PathBuf::from(&session.workspace_path))
                                             .unwrap_or_else(|| workspace.to_path_buf());
+                                        dialog_stack.activate(DialogId::Folder);
                                         folder_picker = Some(open_folder_picker(&path));
                                     } else if let Some(path) = projects.get(picker.selected) {
                                         if let Some(found) = sessions
@@ -1454,24 +1746,37 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                             index = found;
                                             cached = None;
                                         }
+                                        project_picker = None;
                                     }
                                 }
                             }
-                            KeyCode::Up if project_picker.is_some() => {
+                            KeyCode::Up
+                                if top_dialog == Some(DialogId::Project)
+                                    && project_picker.is_some() =>
+                            {
                                 if let Some(picker) = project_picker.as_mut() {
                                     picker.selected = picker.selected.saturating_sub(1);
                                 }
                             }
-                            KeyCode::Down if project_picker.is_some() => {
+                            KeyCode::Down
+                                if top_dialog == Some(DialogId::Project)
+                                    && project_picker.is_some() =>
+                            {
                                 if let Some(picker) = project_picker.as_mut() {
                                     picker.selected =
                                         (picker.selected + 1).min(project_count(&sessions).min(11));
                                 }
                             }
-                            KeyCode::Esc if project_picker.is_some() => {
+                            KeyCode::Esc
+                                if top_dialog == Some(DialogId::Project)
+                                    && project_picker.is_some() =>
+                            {
                                 project_picker = None;
                             }
-                            KeyCode::Enter if session_picker.is_some() => {
+                            KeyCode::Enter
+                                if top_dialog == Some(DialogId::Session)
+                                    && session_picker.is_some() =>
+                            {
                                 if let Some(picker) = session_picker.take() {
                                     select_mode_session(
                                         runtime,
@@ -1482,31 +1787,38 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     );
                                 }
                             }
-                            KeyCode::Up if session_picker.is_some() => {
+                            KeyCode::Up
+                                if top_dialog == Some(DialogId::Session)
+                                    && session_picker.is_some() =>
+                            {
                                 if let Some(picker) = session_picker.as_mut() {
                                     picker.selected = picker.selected.saturating_sub(1);
                                 }
                             }
-                            KeyCode::Down if session_picker.is_some() => {
+                            KeyCode::Down
+                                if top_dialog == Some(DialogId::Session)
+                                    && session_picker.is_some() =>
+                            {
                                 if let Some(picker) = session_picker.as_mut() {
                                     picker.selected =
                                         (picker.selected + 1).min(sessions.len().saturating_sub(1));
                                 }
                             }
-                            KeyCode::Esc if session_picker.is_some() => {
+                            KeyCode::Esc
+                                if top_dialog == Some(DialogId::Session)
+                                    && session_picker.is_some() =>
+                            {
                                 session_picker = None;
                             }
-                            KeyCode::Esc if project_picker.is_some() => {
+                            KeyCode::Esc
+                                if top_dialog == Some(DialogId::Project)
+                                    && project_picker.is_some() =>
+                            {
                                 project_picker = None;
                             }
                             KeyCode::Enter
-                                if mode_menu.as_ref().is_some_and(|menu| menu.minimized) =>
+                                if top_dialog == Some(DialogId::Mode) && mode_menu.is_some() =>
                             {
-                                if let Some(menu) = mode_menu.as_mut() {
-                                    menu.minimized = false;
-                                }
-                            }
-                            KeyCode::Enter if mode_menu.is_some() => {
                                 if let Some(menu) = mode_menu.take()
                                     && let Some(id) = session_id.as_ref()
                                 {
@@ -1520,78 +1832,120 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     }
                                 }
                             }
-                            KeyCode::Up if mode_menu.is_some() => {
+                            KeyCode::Up
+                                if top_dialog == Some(DialogId::Mode) && mode_menu.is_some() =>
+                            {
                                 if let Some(menu) = mode_menu.as_mut() {
                                     menu.selected = menu.selected.saturating_sub(1);
                                 }
                             }
-                            KeyCode::Down if mode_menu.is_some() => {
+                            KeyCode::Down
+                                if top_dialog == Some(DialogId::Mode) && mode_menu.is_some() =>
+                            {
                                 if let Some(menu) = mode_menu.as_mut() {
                                     menu.selected =
                                         (menu.selected + 1).min(view::MODE_OPTIONS.len() - 1);
                                 }
                             }
-                            KeyCode::Esc if mode_menu.is_some() => {
+                            KeyCode::Esc
+                                if top_dialog == Some(DialogId::Mode) && mode_menu.is_some() =>
+                            {
                                 mode_menu = None;
                             }
-                            KeyCode::Esc if passport_dialog.is_some() => {
+                            KeyCode::Esc
+                                if top_dialog == Some(DialogId::Passport)
+                                    && passport_dialog.is_some() =>
+                            {
                                 passport_dialog = None;
                             }
-                            KeyCode::Esc if settings_dialog.is_some() => {
+                            KeyCode::Esc
+                                if top_dialog == Some(DialogId::Settings)
+                                    && settings_dialog.is_some() =>
+                            {
                                 settings_dialog = None;
                             }
-                            KeyCode::Esc if theme_dialog.is_some() => {
+                            KeyCode::Esc
+                                if top_dialog == Some(DialogId::Theme)
+                                    && theme_dialog.is_some() =>
+                            {
                                 if let Some(dialog) = theme_dialog.take() {
                                     cancel_theme_dialog(&dialog);
                                     status = "theme picker cancelled".to_owned();
                                 }
                             }
-                            KeyCode::Esc if provider_dialog.is_some() => {
+                            KeyCode::Esc
+                                if top_dialog == Some(DialogId::Provider)
+                                    && provider_dialog.is_some() =>
+                            {
                                 provider_dialog = None;
                             }
-                            KeyCode::Esc if context_dialog.is_some() => {
+                            KeyCode::Esc
+                                if top_dialog == Some(DialogId::Context)
+                                    && context_dialog.is_some() =>
+                            {
                                 context_dialog = None;
                             }
-                            KeyCode::Up if context_dialog.is_some() => {
+                            KeyCode::Up
+                                if top_dialog == Some(DialogId::Context)
+                                    && context_dialog.is_some() =>
+                            {
                                 if let Some(dialog) = context_dialog.as_mut() {
                                     dialog.scroll = dialog.scroll.saturating_sub(1);
                                 }
                             }
-                            KeyCode::Down if tool_detail_dialog.is_some() => {
+                            KeyCode::Down
+                                if top_dialog == Some(DialogId::ToolDetail)
+                                    && tool_detail_dialog.is_some() =>
+                            {
                                 if let Some(dialog) = tool_detail_dialog.as_mut() {
                                     dialog.scroll = dialog.scroll.saturating_add(1);
                                 }
                             }
-                            KeyCode::Up if tool_detail_dialog.is_some() => {
+                            KeyCode::Up
+                                if top_dialog == Some(DialogId::ToolDetail)
+                                    && tool_detail_dialog.is_some() =>
+                            {
                                 if let Some(dialog) = tool_detail_dialog.as_mut() {
                                     dialog.scroll = dialog.scroll.saturating_sub(1);
                                 }
                             }
-                            KeyCode::Esc if tool_detail_dialog.is_some() => {
+                            KeyCode::Esc
+                                if top_dialog == Some(DialogId::ToolDetail)
+                                    && tool_detail_dialog.is_some() =>
+                            {
                                 tool_detail_dialog = None;
                             }
-                            KeyCode::Down if tool_dialog.is_some() => {
+                            KeyCode::Down
+                                if top_dialog == Some(DialogId::Tool) && tool_dialog.is_some() =>
+                            {
                                 if let Some(dialog) = tool_dialog.as_mut() {
                                     dialog.scroll = dialog.scroll.saturating_add(1);
                                 }
                             }
-                            KeyCode::Up if tool_dialog.is_some() => {
+                            KeyCode::Up
+                                if top_dialog == Some(DialogId::Tool) && tool_dialog.is_some() =>
+                            {
                                 if let Some(dialog) = tool_dialog.as_mut() {
                                     dialog.scroll = dialog.scroll.saturating_sub(1);
                                 }
                             }
-                            KeyCode::Esc if tool_dialog.is_some() => {
+                            KeyCode::Esc
+                                if top_dialog == Some(DialogId::Tool) && tool_dialog.is_some() =>
+                            {
                                 tool_dialog = None;
                             }
-                            KeyCode::Down if context_dialog.is_some() => {
+                            KeyCode::Down
+                                if top_dialog == Some(DialogId::Context)
+                                    && context_dialog.is_some() =>
+                            {
                                 if let Some(dialog) = context_dialog.as_mut() {
                                     dialog.scroll = dialog.scroll.saturating_add(1);
                                 }
                             }
-                            KeyCode::Esc if notice.is_some() => {
+                            KeyCode::Esc if top_dialog.is_none() && notice.is_some() => {
                                 notice = None;
                             }
-                            KeyCode::Esc => {
+                            KeyCode::Esc if top_dialog.is_none() => {
                                 input.clear();
                                 notice = None;
                                 slash_selected = 0;
@@ -1602,92 +1956,104 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                     Event::Mouse(mouse) => {
                         pointer = Some((mouse.column, mouse.row));
                         match mouse.kind {
-                            MouseEventKind::ScrollUp => {
-                                if hits.git_diff.is_some_and(|rect| {
+                            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                                if top_dialog.is_some() =>
+                            {
+                                if !hits.modal_area.is_some_and(|rect| {
                                     rect.contains((mouse.column, mouse.row).into())
-                                }) && let Some(dialog) = git_dialog.as_mut()
-                                {
-                                    dialog.diff_scroll = dialog.diff_scroll.saturating_sub(3);
+                                }) {
                                     continue;
                                 }
-                                if let Some(picker) = folder_picker.as_mut() {
-                                    picker.scroll = picker.scroll.saturating_sub(1);
-                                    continue;
+                                let up = mouse.kind == MouseEventKind::ScrollUp;
+                                let shift = |value: &mut usize| {
+                                    *value = if up {
+                                        value.saturating_sub(3)
+                                    } else {
+                                        value.saturating_add(3)
+                                    };
+                                };
+                                match top_dialog {
+                                    Some(DialogId::Git) => {
+                                        if let Some(dialog) = git_dialog.as_mut()
+                                            && !dialog.minimized
+                                        {
+                                            if hits.git_diff.is_some_and(|rect| {
+                                                rect.contains((mouse.column, mouse.row).into())
+                                            }) {
+                                                shift(&mut dialog.diff_scroll);
+                                                dialog.diff_scroll = dialog.diff_scroll.min(
+                                                    dialog
+                                                        .diff_text
+                                                        .lines()
+                                                        .count()
+                                                        .saturating_sub(1),
+                                                );
+                                            } else {
+                                                shift(&mut dialog.scroll);
+                                            }
+                                        }
+                                    }
+                                    Some(DialogId::Folder) => {
+                                        if let Some(dialog) = folder_picker.as_mut()
+                                            && !dialog.minimized
+                                        {
+                                            shift(&mut dialog.scroll);
+                                            dialog.scroll = dialog
+                                                .scroll
+                                                .min(dialog.entries.len().saturating_sub(1));
+                                        }
+                                    }
+                                    Some(DialogId::Tool) => {
+                                        if let Some(dialog) = tool_dialog.as_mut()
+                                            && !dialog.minimized
+                                        {
+                                            shift(&mut dialog.scroll);
+                                        }
+                                    }
+                                    Some(DialogId::ToolDetail) => {
+                                        if let Some(dialog) = tool_detail_dialog.as_mut()
+                                            && !dialog.minimized
+                                        {
+                                            shift(&mut dialog.scroll);
+                                        }
+                                    }
+                                    Some(DialogId::Context) => {
+                                        if let Some(dialog) = context_dialog.as_mut()
+                                            && !dialog.minimized
+                                        {
+                                            shift(&mut dialog.scroll);
+                                        }
+                                    }
+                                    _ => {}
                                 }
-                                if git_dialog.is_some() {
-                                    if let Some(dialog) = git_dialog.as_mut() {
-                                        dialog.scroll = dialog.scroll.saturating_sub(3);
-                                    }
-                                    continue;
-                                }
-                                if tool_detail_dialog.is_some() {
-                                    if let Some(dialog) = tool_detail_dialog.as_mut() {
-                                        dialog.scroll = dialog.scroll.saturating_sub(3);
-                                    }
-                                } else if tool_dialog.is_some() {
-                                    if let Some(dialog) = tool_dialog.as_mut() {
-                                        dialog.scroll = dialog.scroll.saturating_sub(3);
-                                    }
-                                } else if hits.over_slash(mouse.column, mouse.row) {
+                            }
+                            MouseEventKind::ScrollUp => {
+                                if hits.over_slash(mouse.column, mouse.row) {
                                     slash_selected = slash_selected.saturating_sub(1);
                                 } else {
                                     scroll = scroll.saturating_add(3);
                                 }
                             }
                             MouseEventKind::ScrollDown => {
-                                if hits.git_diff.is_some_and(|rect| {
-                                    rect.contains((mouse.column, mouse.row).into())
-                                }) && let Some(dialog) = git_dialog.as_mut()
-                                {
-                                    dialog.diff_scroll = dialog
-                                        .diff_scroll
-                                        .saturating_add(3)
-                                        .min(dialog.diff_text.lines().count().saturating_sub(1));
-                                    continue;
-                                }
-                                if let Some(picker) = folder_picker.as_mut() {
-                                    picker.scroll = (picker.scroll + 1)
-                                        .min(picker.entries.len().saturating_sub(1));
-                                    continue;
-                                }
-                                if git_dialog.is_some() {
-                                    if let Some(dialog) = git_dialog.as_mut() {
-                                        let count = if dialog.page == 1 {
-                                            dialog.info.log.lines().count()
-                                        } else if dialog.page == 2 {
-                                            usize::MAX
-                                        } else {
-                                            view::git_changed_files(&dialog.info.raw).len()
-                                        };
-                                        dialog.scroll = dialog
-                                            .scroll
-                                            .saturating_add(3)
-                                            .min(count.saturating_sub(1));
-                                    }
-                                    continue;
-                                }
-                                if tool_detail_dialog.is_some() {
-                                    if let Some(dialog) = tool_detail_dialog.as_mut() {
-                                        dialog.scroll = dialog.scroll.saturating_add(3);
-                                    }
-                                } else if tool_dialog.is_some() {
-                                    if let Some(dialog) = tool_dialog.as_mut() {
-                                        dialog.scroll = dialog.scroll.saturating_add(3);
-                                    }
-                                } else if hits.over_slash(mouse.column, mouse.row) {
-                                    if !slash_hits.is_empty() {
-                                        slash_selected =
-                                            (slash_selected + 1).min(slash_hits.len() - 1);
-                                    }
+                                if hits.over_slash(mouse.column, mouse.row) {
+                                    slash_selected = (slash_selected + 1)
+                                        .min(slash_hits.len().saturating_sub(1));
                                 } else {
                                     scroll = scroll.saturating_sub(3);
                                 }
                             }
                             MouseEventKind::Moved | MouseEventKind::Drag(MouseButton::Left) => {
-                                if selecting_text && let Some(selection) = text_selection.as_mut() {
+                                if top_dialog.is_none()
+                                    && selecting_text
+                                    && let Some(selection) = text_selection.as_mut()
+                                {
                                     selection.end = (mouse.column, mouse.row);
                                 }
-                                match hits.hit(mouse.column, mouse.row) {
+                                let hit = hits.hit(mouse.column, mouse.row);
+                                if !dialog_accepts_hit(top_dialog, hit.as_ref()) {
+                                    continue;
+                                }
+                                match hit {
                                     Some(view::Hit::Slash(idx)) => {
                                         slash_selected = idx;
                                     }
@@ -1736,6 +2102,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             MouseEventKind::Up(MouseButton::Left) => {
                                 if let Some(selection) = text_selection
                                     && selecting_text
+                                    && top_dialog.is_none()
                                 {
                                     if let Some(projection) = projection {
                                         let text = selection::selected_text(
@@ -1754,6 +2121,9 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             }
                             MouseEventKind::Down(MouseButton::Left) => {
                                 let hit = hits.hit(mouse.column, mouse.row);
+                                if !dialog_accepts_hit(top_dialog, hit.as_ref()) {
+                                    continue;
+                                }
                                 let open_tool_summary =
                                     if tool_dialog.is_none() && tool_detail_dialog.is_none() {
                                         tool_summary_click.register(hit.as_ref(), Instant::now())
@@ -1761,7 +2131,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                         tool_summary_click.register(None, Instant::now());
                                         false
                                     };
-                                if folder_picker.is_some() {
+                                if top_dialog == Some(DialogId::Folder) {
                                     match hit {
                                         Some(view::Hit::TrafficClose) => folder_picker = None,
                                         Some(view::Hit::TrafficMinimize) => {
@@ -1809,7 +2179,10 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     )
                                 ) {
                                     handle_traffic_light(
+                                        top_dialog,
                                         hit,
+                                        &mut folder_picker,
+                                        &mut settings_dialog,
                                         &mut project_picker,
                                         &mut session_picker,
                                         &mut mode_menu,
@@ -1828,13 +2201,14 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     );
                                     continue;
                                 }
-                                if tool_detail_dialog.is_some() {
+                                if top_dialog == Some(DialogId::ToolDetail) {
                                     continue;
                                 }
                                 if let Some(view::Hit::ToolDetailRow(index)) = hit.clone()
                                     && let Some(dialog) = tool_dialog.as_ref()
                                     && let Some(tool) = dialog.tools.get(index).cloned()
                                 {
+                                    dialog_stack.activate(DialogId::ToolDetail);
                                     tool_detail_dialog = Some(view::ToolDetailDialog {
                                         tool,
                                         scroll: 0,
@@ -1843,7 +2217,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     });
                                     continue;
                                 }
-                                if tool_dialog.is_some() {
+                                if top_dialog == Some(DialogId::Tool) {
                                     continue;
                                 }
                                 if let Some(view::Hit::ToolSummary(indices)) = hit.clone() {
@@ -1879,6 +2253,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                                 .collect()
                                         })
                                         .unwrap_or_default();
+                                    dialog_stack.activate(DialogId::Tool);
                                     tool_dialog = Some(view::ToolDialog {
                                         tools,
                                         scroll: 0,
@@ -1894,6 +2269,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                             git_status = Some(parsed.clone());
                                             git_generation_id = git_generation_id.wrapping_add(1);
                                             git_sync_id = git_sync_id.wrapping_add(1);
+                                            dialog_stack.activate(DialogId::Git);
                                             git_dialog = Some(view::GitDialog {
                                                 info: parsed,
                                                 page: 0,
@@ -1916,7 +2292,9 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     }
                                     continue;
                                 }
-                                if let Some(dialog) = git_dialog.as_mut() {
+                                if top_dialog == Some(DialogId::Git)
+                                    && let Some(dialog) = git_dialog.as_mut()
+                                {
                                     if !matches!(hit, Some(view::Hit::GitFile(_))) {
                                         git_file_click = None;
                                     }
@@ -2055,6 +2433,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     || git_dialog.is_some()
                                     || passport_dialog.is_some();
                                 if matches!(hit, Some(view::Hit::ContextUsage)) {
+                                    dialog_stack.activate(DialogId::Context);
                                     context_dialog = Some(view::ContextDialog {
                                         scroll: 0,
                                         fullscreen: false,
@@ -2063,6 +2442,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     continue;
                                 }
                                 if matches!(hit, Some(view::Hit::ProviderTarget)) {
+                                    dialog_stack.activate(DialogId::Provider);
                                     provider_dialog = Some(open_provider_dialog(
                                         &provider_override,
                                         &model_override,
@@ -2086,9 +2466,12 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                             .get(index)
                                             .map(|session| PathBuf::from(&session.workspace_path))
                                             .unwrap_or_else(|| workspace.to_path_buf());
+                                        dialog_stack.activate(DialogId::Folder);
                                         folder_picker = Some(open_folder_picker(&path));
                                     }
-                                    project_picker = None;
+                                    if project_index < projects.len() {
+                                        project_picker = None;
+                                    }
                                     continue;
                                 }
                                 if !modal_open
@@ -2102,6 +2485,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     continue;
                                 }
                                 if matches!(hit, Some(view::Hit::ProjectPicker)) {
+                                    dialog_stack.activate(DialogId::Project);
                                     project_picker = Some(view::ProjectPicker {
                                         selected: 0,
                                         fullscreen: false,
@@ -2117,6 +2501,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 }
                                 if matches!(hit, Some(view::Hit::SessionPicker)) {
                                     let selected = index;
+                                    dialog_stack.activate(DialogId::Session);
                                     session_picker = Some(view::SessionPicker {
                                         selected,
                                         fullscreen: false,
@@ -2147,6 +2532,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                         .iter()
                                         .position(|option| option.mode == current)
                                         .unwrap_or(0);
+                                    dialog_stack.activate(DialogId::Mode);
                                     mode_menu = Some(view::ModeMenu {
                                         selected,
                                         fullscreen: false,
@@ -2167,7 +2553,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                             .as_ref()
                                             .is_some_and(|dialog| dialog.page == 0)
                                     {
-                                        settings_dialog = None;
+                                        dialog_stack.activate(DialogId::Onboarding);
                                         onboarding = Some(onboarding::Onboarding::new(false));
                                         continue;
                                     }
@@ -2207,11 +2593,13 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                         dialog.selected = idx;
                                         dialog.model_selected = 0;
                                         if dialog.is_add() {
+                                            dialog_stack.activate(DialogId::AddProvider);
                                             add_provider_dialog = Some(open_add_provider_dialog());
                                         } else if dialog
                                             .current()
                                             .is_some_and(|option| !option.available)
                                         {
+                                            dialog_stack.activate(DialogId::Onboarding);
                                             onboarding = Some(onboarding::Onboarding::new(true));
                                         } else {
                                             dialog.pane = view::ProviderPane::Models;
@@ -2280,6 +2668,8 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                             input.clear();
                                             slash_selected = 0;
                                             if apply_slash(
+                                                &mut dialog_stack,
+                                                &mut settings_dialog,
                                                 slash(
                                                     runtime,
                                                     &command,
@@ -2344,73 +2734,6 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 } else if hit == Some(view::Hit::ToggleApprove) {
                                     auto_approve = !auto_approve;
                                     status = format!("auto-approve={auto_approve}");
-                                } else if hit == Some(view::Hit::TrafficClose) {
-                                    // Red closes the front dialog.
-                                    if let Some(dialog) = theme_dialog.take() {
-                                        cancel_theme_dialog(&dialog);
-                                        status = "theme picker closed".to_owned();
-                                    } else if add_provider_dialog.take().is_some() {
-                                        status = "add provider cancelled".to_owned();
-                                    } else if provider_dialog.take().is_some() {
-                                        status = "provider picker closed".to_owned();
-                                    } else if context_dialog.take().is_some() {
-                                        status = "context dialog closed".to_owned();
-                                    } else if settings_dialog.take().is_some() {
-                                        status = "settings dialog closed".to_owned();
-                                    } else {
-                                        cancel.cancel();
-                                        break Ok(());
-                                    }
-                                } else if hit == Some(view::Hit::TrafficMinimize) {
-                                    // Yellow collapses pickers to a title bar.
-                                    if let Some(dialog) = theme_dialog.as_mut() {
-                                        dialog.minimized = true;
-                                        dialog.fullscreen = false;
-                                    } else if let Some(dialog) = add_provider_dialog.as_mut() {
-                                        dialog.minimized = true;
-                                        dialog.fullscreen = false;
-                                    } else if let Some(dialog) = provider_dialog.as_mut() {
-                                        dialog.minimized = true;
-                                        dialog.fullscreen = false;
-                                    } else if let Some(dialog) = context_dialog.as_mut() {
-                                        dialog.minimized = true;
-                                        dialog.fullscreen = false;
-                                    } else {
-                                        passport_dialog = None;
-                                    }
-                                } else if hit == Some(view::Hit::TrafficOpenBrowser) {
-                                    // Green toggles fullscreen or restores the picker.
-                                    if let Some(dialog) = theme_dialog.as_mut() {
-                                        if dialog.minimized {
-                                            dialog.minimized = false;
-                                        } else {
-                                            dialog.fullscreen = !dialog.fullscreen;
-                                        }
-                                    } else if let Some(dialog) = add_provider_dialog.as_mut() {
-                                        if dialog.minimized {
-                                            dialog.minimized = false;
-                                        } else {
-                                            dialog.fullscreen = !dialog.fullscreen;
-                                        }
-                                    } else if let Some(dialog) = provider_dialog.as_mut() {
-                                        if dialog.minimized {
-                                            dialog.minimized = false;
-                                        } else {
-                                            dialog.fullscreen = !dialog.fullscreen;
-                                        }
-                                    } else if let Some(dialog) = context_dialog.as_mut() {
-                                        if dialog.minimized {
-                                            dialog.minimized = false;
-                                        } else {
-                                            dialog.fullscreen = !dialog.fullscreen;
-                                        }
-                                    } else if let Some(url) = passport_url.as_deref() {
-                                        blora_runtime::open_url(url);
-                                        if let Some(dialog) = passport_dialog.as_mut() {
-                                            dialog.opened_browser = true;
-                                        }
-                                        status = format!("已打开 {url}");
-                                    }
                                 } else if hit == Some(view::Hit::Notice)
                                     || hit == Some(view::Hit::Hint(view::HintAction::Close))
                                 {
@@ -2472,6 +2795,8 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                         slash_selected = 0;
                                         if let Some(id) = session_id.as_ref() {
                                             if apply_slash(
+                                                &mut dialog_stack,
+                                                &mut settings_dialog,
                                                 slash(
                                                     runtime,
                                                     &command,
@@ -2630,6 +2955,8 @@ enum SlashOutcome {
 }
 
 fn apply_slash(
+    dialog_stack: &mut DialogStack,
+    settings_dialog: &mut Option<view::SettingsDialog>,
     outcome: SlashOutcome,
     cancel: &CancelToken,
     notice: &mut Option<String>,
@@ -2659,15 +2986,17 @@ fn apply_slash(
             false
         }
         SlashOutcome::Login => {
+            dialog_stack.activate(DialogId::Onboarding);
             *onboarding = Some(onboarding::Onboarding::new(true));
             false
         }
         SlashOutcome::Onboarding => {
+            dialog_stack.activate(DialogId::Onboarding);
             *onboarding = Some(onboarding::Onboarding::new(false));
             false
         }
         SlashOutcome::ProviderDialog => {
-            *theme_dialog = None;
+            dialog_stack.activate(DialogId::Provider);
             *provider_dialog = Some(open_provider_dialog(
                 provider_override,
                 model_override,
@@ -2676,11 +3005,20 @@ fn apply_slash(
             false
         }
         SlashOutcome::ThemeDialog => {
-            *provider_dialog = None;
+            dialog_stack.activate(DialogId::Theme);
             *theme_dialog = Some(open_theme_dialog());
             false
         }
-        SlashOutcome::SettingsDialog => false,
+        SlashOutcome::SettingsDialog => {
+            dialog_stack.activate(DialogId::Settings);
+            *settings_dialog = Some(view::SettingsDialog {
+                page: 0,
+                selected: 0,
+                fullscreen: false,
+                minimized: false,
+            });
+            false
+        }
         SlashOutcome::LoggedOut(text) => {
             *notice = None;
             *status = text;
@@ -3193,11 +3531,15 @@ fn accept_saved_provider(
             model_override.clone(),
         );
     }
-    *provider_dialog = Some(open_provider_dialog(
-        provider_override,
-        model_override,
-        logged_in,
-    ));
+    let chrome = provider_dialog
+        .as_ref()
+        .map(|dialog| (dialog.fullscreen, dialog.minimized));
+    let mut updated = open_provider_dialog(provider_override, model_override, logged_in);
+    if let Some((fullscreen, minimized)) = chrome {
+        updated.fullscreen = fullscreen;
+        updated.minimized = minimized;
+    }
+    *provider_dialog = Some(updated);
     format!(
         "已添加供应商 {}（{} 个模型）",
         saved.name,
@@ -4794,8 +5136,255 @@ mod git_status_tests {
     }
 }
 
+fn dialog_accepts_hit(top: Option<DialogId>, hit: Option<&view::Hit>) -> bool {
+    use view::Hit;
+    if top.is_none() {
+        return true;
+    }
+    if matches!(
+        hit,
+        Some(Hit::TrafficClose | Hit::TrafficMinimize | Hit::TrafficOpenBrowser)
+    ) {
+        return true;
+    }
+    matches!(
+        (top, hit),
+        (Some(DialogId::Project), Some(Hit::ProjectPickerRow(_)))
+            | (
+                Some(DialogId::Folder),
+                Some(Hit::FolderPickerRow(_) | Hit::FolderPickerOpen)
+            )
+            | (Some(DialogId::Session), Some(Hit::SessionPickerRow(_)))
+            | (Some(DialogId::Mode), Some(Hit::ModeRow(_)))
+            | (
+                Some(DialogId::Git),
+                Some(
+                    Hit::GitTab(_)
+                        | Hit::GitMessage
+                        | Hit::GitGenerate
+                        | Hit::GitPrimary
+                        | Hit::GitFile(_)
+                        | Hit::GitRow(_)
+                        | Hit::GitAction(_)
+                )
+            )
+            | (Some(DialogId::Tool), Some(Hit::ToolDetailRow(_)))
+            | (
+                Some(DialogId::Provider),
+                Some(Hit::ProviderRow(_) | Hit::ProviderModelRow(_))
+            )
+            | (
+                Some(DialogId::AddProvider),
+                Some(Hit::AddProviderRow(_) | Hit::AddProviderFormat)
+            )
+            | (
+                Some(DialogId::Theme),
+                Some(Hit::ThemeRow(_) | Hit::ThemeTab(_))
+            )
+            | (
+                Some(DialogId::Settings),
+                Some(Hit::SettingsRow(_) | Hit::SettingsTab(_))
+            )
+    )
+}
+
+fn paste_into_dialog(
+    top: Option<DialogId>,
+    text: &str,
+    add_provider: &mut Option<view::AddProviderDialog>,
+    git: &mut Option<view::GitDialog>,
+    input: &mut String,
+    preview: &mut Option<String>,
+) {
+    match top {
+        None => {
+            if text.is_empty() {
+                paste_clipboard(input, preview);
+            } else {
+                insert_pasted_text(input, preview, text);
+            }
+        }
+        Some(DialogId::Git) => {
+            if let Some(dialog) = git.as_mut()
+                && !dialog.minimized
+                && dialog.editing_message
+            {
+                dialog.message.push_str(text.trim_end_matches(['\r', '\n']));
+            }
+        }
+        Some(DialogId::AddProvider) => {
+            if let Some(dialog) = add_provider.as_mut()
+                && !dialog.minimized
+                && matches!(
+                    dialog.step,
+                    view::AddProviderStep::Catalog
+                        | view::AddProviderStep::CustomId
+                        | view::AddProviderStep::CustomBase
+                        | view::AddProviderStep::ApiKey
+                )
+            {
+                add_step_buffer(dialog).push_str(text.trim_end_matches(['\r', '\n']));
+                if dialog.step == view::AddProviderStep::Catalog {
+                    dialog.clamp_catalog_selected();
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+mod dialog_input_tests {
+    use super::*;
+
+    #[test]
+    fn modal_hits_do_not_reach_background_or_other_dialogs() {
+        for id in [
+            DialogId::Project,
+            DialogId::Folder,
+            DialogId::Session,
+            DialogId::Mode,
+            DialogId::Git,
+            DialogId::ToolDetail,
+            DialogId::Tool,
+            DialogId::Passport,
+            DialogId::AddProvider,
+            DialogId::Theme,
+            DialogId::Provider,
+            DialogId::Context,
+            DialogId::Settings,
+            DialogId::Onboarding,
+        ] {
+            assert!(!dialog_accepts_hit(Some(id), Some(&view::Hit::Composer)));
+            assert!(!dialog_accepts_hit(Some(id), Some(&view::Hit::Allow)));
+            assert!(!dialog_accepts_hit(Some(id), None));
+            assert!(dialog_accepts_hit(Some(id), Some(&view::Hit::TrafficClose)));
+        }
+        assert!(dialog_accepts_hit(
+            Some(DialogId::Provider),
+            Some(&view::Hit::ProviderRow(0))
+        ));
+        assert!(!dialog_accepts_hit(
+            Some(DialogId::Theme),
+            Some(&view::Hit::ProviderRow(0))
+        ));
+    }
+
+    #[test]
+    fn traffic_controls_only_mutate_top_and_preserve_parent() {
+        let mut folder = None;
+        let mut settings = Some(view::SettingsDialog {
+            page: 2,
+            selected: 3,
+            fullscreen: false,
+            minimized: false,
+        });
+        let mut project = Some(view::ProjectPicker {
+            selected: 4,
+            fullscreen: false,
+            minimized: false,
+        });
+        let mut session = None;
+        let mut mode = None;
+        let mut tool = None;
+        let mut detail = None;
+        let mut git = None;
+        let mut theme = None;
+        let mut add_provider = None;
+        let mut provider = None;
+        let mut context = None;
+        let mut passport = None;
+        let mut browser = false;
+        let mut cancel = CancelToken::new();
+        let mut status = String::new();
+        for hit in [
+            view::Hit::TrafficMinimize,
+            view::Hit::TrafficOpenBrowser,
+            view::Hit::TrafficOpenBrowser,
+            view::Hit::TrafficClose,
+        ] {
+            handle_traffic_light(
+                Some(DialogId::Settings),
+                Some(hit.clone()),
+                &mut folder,
+                &mut settings,
+                &mut project,
+                &mut session,
+                &mut mode,
+                &mut tool,
+                &mut detail,
+                &mut git,
+                &mut theme,
+                &mut add_provider,
+                &mut provider,
+                &mut context,
+                &mut passport,
+                &mut browser,
+                None,
+                &mut cancel,
+                &mut status,
+            );
+            let parent = project.as_ref().unwrap();
+            assert_eq!(parent.selected, 4);
+            assert!(!parent.minimized && !parent.fullscreen);
+            match hit {
+                view::Hit::TrafficMinimize => assert!(settings.as_ref().unwrap().minimized),
+                view::Hit::TrafficOpenBrowser => {
+                    let child = settings.as_ref().unwrap();
+                    assert!(!child.minimized);
+                    assert_eq!((child.page, child.selected), (2, 3));
+                }
+                view::Hit::TrafficClose => assert!(settings.is_none()),
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn paste_is_isolated_and_targets_only_active_editable_field() {
+        let mut input = "draft".to_owned();
+        let mut preview = None;
+        let mut provider = Some(open_add_provider_dialog());
+        provider.as_mut().unwrap().step = view::AddProviderStep::ApiKey;
+        let mut git = None;
+        paste_into_dialog(
+            Some(DialogId::Theme),
+            "secret",
+            &mut provider,
+            &mut git,
+            &mut input,
+            &mut preview,
+        );
+        assert_eq!(input, "draft");
+        assert!(provider.as_ref().unwrap().api_key.is_empty());
+        paste_into_dialog(
+            Some(DialogId::AddProvider),
+            "secret\r\n",
+            &mut provider,
+            &mut git,
+            &mut input,
+            &mut preview,
+        );
+        assert_eq!(provider.as_ref().unwrap().api_key, "secret");
+        assert_eq!(input, "draft");
+        provider.as_mut().unwrap().minimized = true;
+        paste_into_dialog(
+            Some(DialogId::AddProvider),
+            "ignored",
+            &mut provider,
+            &mut git,
+            &mut input,
+            &mut preview,
+        );
+        assert_eq!(provider.as_ref().unwrap().api_key, "secret");
+    }
+}
+
 fn handle_traffic_light(
+    top: Option<DialogId>,
     hit: Option<view::Hit>,
+    folder_picker: &mut Option<view::FolderPicker>,
+    settings_dialog: &mut Option<view::SettingsDialog>,
     project_picker: &mut Option<view::ProjectPicker>,
     session_picker: &mut Option<view::SessionPicker>,
     mode_menu: &mut Option<view::ModeMenu>,
@@ -4812,131 +5401,69 @@ fn handle_traffic_light(
     cancel: &mut CancelToken,
     status: &mut String,
 ) {
-    match hit {
-        Some(view::Hit::TrafficClose) => {
-            if project_picker.take().is_some() {
-                *status = "项目选择器已关闭".to_owned();
-            } else if session_picker.take().is_some() {
-                *status = "会话选择器已关闭".to_owned();
-            } else if mode_menu.take().is_some() {
-                *status = "运行模式选择器已关闭".to_owned();
-            } else if git_dialog.take().is_some() {
-                *status = "Git 状态已关闭".to_owned();
-            } else if tool_detail_dialog.take().is_some() {
-                *status = "工具详细信息已关闭".to_owned();
-            } else if tool_dialog.take().is_some() {
-                *status = "工具调用列表已关闭".to_owned();
-            } else if let Some(dialog) = theme_dialog.take() {
-                cancel_theme_dialog(&dialog);
-                *status = "theme picker closed".to_owned();
-            } else if add_provider_dialog.take().is_some() {
-                *status = "add provider cancelled".to_owned();
-            } else if provider_dialog.take().is_some() {
-                *status = "provider picker closed".to_owned();
-            } else if context_dialog.take().is_some() {
-                *status = "context dialog closed".to_owned();
-            } else if passport_dialog.take().is_some() {
-                *status = "login dialog closed".to_owned();
+    macro_rules! control {
+        ($dialog:expr) => {
+            match hit {
+                Some(view::Hit::TrafficClose) => {
+                    *$dialog = None;
+                }
+                Some(view::Hit::TrafficMinimize) => {
+                    if let Some(dialog) = $dialog.as_mut() {
+                        dialog.minimized = true;
+                        dialog.fullscreen = false;
+                    }
+                }
+                Some(view::Hit::TrafficOpenBrowser) => {
+                    if let Some(dialog) = $dialog.as_mut() {
+                        if dialog.minimized {
+                            dialog.minimized = false;
+                        } else {
+                            dialog.fullscreen = !dialog.fullscreen;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        };
+    }
+    match top {
+        Some(DialogId::Project) => control!(project_picker),
+        Some(DialogId::Folder) => control!(folder_picker),
+        Some(DialogId::Session) => control!(session_picker),
+        Some(DialogId::Mode) => control!(mode_menu),
+        Some(DialogId::Git) => control!(git_dialog),
+        Some(DialogId::ToolDetail) => control!(tool_detail_dialog),
+        Some(DialogId::Tool) => control!(tool_dialog),
+        Some(DialogId::AddProvider) => control!(add_provider_dialog),
+        Some(DialogId::Provider) => control!(provider_dialog),
+        Some(DialogId::Context) => control!(context_dialog),
+        Some(DialogId::Settings) => control!(settings_dialog),
+        Some(DialogId::Theme) => {
+            if matches!(hit, Some(view::Hit::TrafficClose)) {
+                if let Some(dialog) = theme_dialog.take() {
+                    cancel_theme_dialog(&dialog);
+                }
             } else {
-                cancel.cancel();
+                control!(theme_dialog);
             }
         }
-        Some(view::Hit::TrafficMinimize) => {
-            if let Some(dialog) = project_picker.as_mut() {
-                dialog.minimized = true;
-                dialog.fullscreen = false;
-            } else if let Some(dialog) = session_picker.as_mut() {
-                dialog.minimized = true;
-                dialog.fullscreen = false;
-            } else if let Some(dialog) = mode_menu.as_mut() {
-                dialog.minimized = true;
-                dialog.fullscreen = false;
-            } else if let Some(dialog) = tool_detail_dialog.as_mut() {
-                dialog.minimized = true;
-                dialog.fullscreen = false;
-            } else if let Some(dialog) = tool_dialog.as_mut() {
-                dialog.minimized = true;
-                dialog.fullscreen = false;
-            } else if let Some(dialog) = theme_dialog.as_mut() {
-                dialog.minimized = true;
-                dialog.fullscreen = false;
-            } else if let Some(dialog) = add_provider_dialog.as_mut() {
-                dialog.minimized = true;
-                dialog.fullscreen = false;
-            } else if let Some(dialog) = provider_dialog.as_mut() {
-                dialog.minimized = true;
-                dialog.fullscreen = false;
-            } else if let Some(dialog) = context_dialog.as_mut() {
-                dialog.minimized = true;
-                dialog.fullscreen = false;
-            } else if passport_dialog.is_some() {
+        Some(DialogId::Passport) => match hit {
+            Some(view::Hit::TrafficClose) => {
                 *passport_dialog = None;
             }
-        }
-        Some(view::Hit::TrafficOpenBrowser) => {
-            if let Some(dialog) = project_picker.as_mut() {
-                if dialog.minimized {
-                    dialog.minimized = false;
-                } else {
-                    dialog.fullscreen = !dialog.fullscreen;
+            Some(view::Hit::TrafficOpenBrowser) => {
+                if let Some(url) = passport_url {
+                    blora_runtime::open_url(url);
+                    *passport_browser_opened = true;
+                    if let Some(dialog) = passport_dialog.as_mut() {
+                        dialog.opened_browser = true;
+                    }
+                    *status = format!("已打开 {url}");
                 }
-            } else if let Some(dialog) = session_picker.as_mut() {
-                if dialog.minimized {
-                    dialog.minimized = false;
-                } else {
-                    dialog.fullscreen = !dialog.fullscreen;
-                }
-            } else if let Some(dialog) = mode_menu.as_mut() {
-                if dialog.minimized {
-                    dialog.minimized = false;
-                } else {
-                    dialog.fullscreen = !dialog.fullscreen;
-                }
-            } else if let Some(dialog) = tool_detail_dialog.as_mut() {
-                if dialog.minimized {
-                    dialog.minimized = false;
-                } else {
-                    dialog.fullscreen = !dialog.fullscreen;
-                }
-            } else if let Some(dialog) = tool_dialog.as_mut() {
-                if dialog.minimized {
-                    dialog.minimized = false;
-                } else {
-                    dialog.fullscreen = !dialog.fullscreen;
-                }
-            } else if let Some(dialog) = theme_dialog.as_mut() {
-                if dialog.minimized {
-                    dialog.minimized = false;
-                } else {
-                    dialog.fullscreen = !dialog.fullscreen;
-                }
-            } else if let Some(dialog) = add_provider_dialog.as_mut() {
-                if dialog.minimized {
-                    dialog.minimized = false;
-                } else {
-                    dialog.fullscreen = !dialog.fullscreen;
-                }
-            } else if let Some(dialog) = provider_dialog.as_mut() {
-                if dialog.minimized {
-                    dialog.minimized = false;
-                } else {
-                    dialog.fullscreen = !dialog.fullscreen;
-                }
-            } else if let Some(dialog) = context_dialog.as_mut() {
-                if dialog.minimized {
-                    dialog.minimized = false;
-                } else {
-                    dialog.fullscreen = !dialog.fullscreen;
-                }
-            } else if let Some(url) = passport_url {
-                blora_runtime::open_url(url);
-                *passport_browser_opened = true;
-                if let Some(dialog) = passport_dialog.as_mut() {
-                    dialog.opened_browser = true;
-                }
-                *status = format!("已打开 {url}");
             }
-        }
+            _ => {}
+        },
+        None if matches!(hit, Some(view::Hit::TrafficClose)) => cancel.cancel(),
         _ => {}
     }
 }

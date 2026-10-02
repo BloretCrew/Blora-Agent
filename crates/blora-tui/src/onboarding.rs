@@ -313,16 +313,16 @@ impl Onboarding {
     pub fn draw(&mut self, frame: &mut Frame, username: &str, logged_in: bool) {
         let area = frame.area();
         let theme = super::theme::Theme::current();
-        frame.render_widget(
-            Paragraph::new("").style(Style::default().bg(theme.bg).fg(theme.text)),
-            area,
-        );
         self.hits.clear();
         self.controls = [None; 3];
         if area.width >= 50 && area.height >= 18 {
             self.draw_dialog(frame, area, username, logged_in, &theme);
             return;
         }
+        frame.render_widget(
+            Paragraph::new("").style(Style::default().bg(theme.bg).fg(theme.text)),
+            area,
+        );
         if area.width < 4 || area.height < 4 {
             frame.render_widget(Paragraph::new("请扩大终端；Esc 关闭"), area);
             return;

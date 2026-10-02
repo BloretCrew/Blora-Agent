@@ -15,6 +15,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use crate::dialogs::DialogId;
 use crate::i18n;
 use crate::selection::Selection;
 use crate::slash::{self, SlashCommand};
@@ -352,7 +353,9 @@ pub struct SettingsDialog {
     pub minimized: bool,
 }
 
+#[derive(Clone)]
 pub struct FrameModel<'a> {
+    pub dialog_stack: &'a [DialogId],
     pub workspace: &'a Path,
     pub sessions: &'a [SessionSummary],
     pub index: usize,
@@ -465,6 +468,8 @@ pub enum HintAction {
 
 #[derive(Clone, Debug, Default)]
 pub struct HitMap {
+    pub modal: bool,
+    pub modal_area: Option<Rect>,
     pub transcript: Rect,
     pub tool_summary_rows: Vec<(Rect, Vec<usize>)>,
     pub composer: Rect,
@@ -518,6 +523,9 @@ pub struct HitMap {
 impl HitMap {
     #[must_use]
     pub fn hit(&self, col: u16, row: u16) -> Option<Hit> {
+        if self.modal && !self.modal_area.is_some_and(|rect| contains(rect, col, row)) {
+            return None;
+        }
         for (index, rect) in self.traffic_lights.iter().enumerate() {
             if let Some(rect) = rect
                 && contains(*rect, col, row)
@@ -830,7 +838,47 @@ pub fn draw(
     render_composer(frame, composer, model, &theme, &mut hits);
     render_status(frame, status, model, &theme);
     render_hints(frame, hints, model, &theme, &mut hits);
-    if let Some(picker) = model.project_picker {
+    dim_region(frame.buffer_mut(), area, model.dialog_stack.len(), &theme);
+    for (index, id) in model.dialog_stack.iter().copied().enumerate() {
+        if id == DialogId::Onboarding {
+            hits = HitMap {
+                modal: true,
+                ..HitMap::default()
+            };
+            continue;
+        }
+        let mut layer_model = model.clone();
+        if index + 1 < model.dialog_stack.len() {
+            layer_model.pointer = None;
+        }
+        let dialog_hits = render_layer(frame, area, &layer_model, id, &theme);
+        if let Some(rect) = dialog_hits.modal_area {
+            dim_region(
+                frame.buffer_mut(),
+                rect,
+                model.dialog_stack.len() - index - 1,
+                &theme,
+            );
+        }
+        hits = dialog_hits;
+    }
+    hits
+}
+
+fn render_layer(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    model: &FrameModel<'_>,
+    id: DialogId,
+    theme: &Theme,
+) -> HitMap {
+    let mut hits = HitMap {
+        modal: true,
+        ..HitMap::default()
+    };
+    if id == DialogId::Project
+        && let Some(picker) = model.project_picker
+    {
         let mut projects: Vec<String> = model
             .sessions
             .iter()
@@ -867,6 +915,7 @@ pub fn draw(
         ])
         .areas(inner);
         hits.traffic_lights = dialog_hits.traffic_lights;
+        hits.modal_area = dialog_hits.modal_area;
         if picker.minimized {
             return hits;
         }
@@ -925,7 +974,9 @@ pub fn draw(
             hint_row,
         );
     }
-    if let Some(picker) = model.folder_picker {
+    if id == DialogId::Folder
+        && let Some(picker) = model.folder_picker
+    {
         let Some(modal) = dialog_outer(area, 76, 18, picker.fullscreen, picker.minimized) else {
             return hits;
         };
@@ -948,6 +999,7 @@ pub fn draw(
         ])
         .areas(inner);
         hits.traffic_lights = dialog_hits.traffic_lights;
+        hits.modal_area = dialog_hits.modal_area;
         if picker.minimized {
             return hits;
         }
@@ -999,7 +1051,9 @@ pub fn draw(
             hint,
         );
     }
-    if let Some(picker) = model.session_picker {
+    if id == DialogId::Session
+        && let Some(picker) = model.session_picker
+    {
         let matching: Vec<(usize, &SessionSummary)> = model.sessions.iter().enumerate().collect();
         let visible = matching.len().clamp(1, 12) as u16;
         let menu_width = 64u16.min(area.width.saturating_sub(4));
@@ -1029,6 +1083,7 @@ pub fn draw(
         ])
         .areas(inner);
         hits.traffic_lights = dialog_hits.traffic_lights;
+        hits.modal_area = dialog_hits.modal_area;
         if picker.minimized {
             return hits;
         }
@@ -1073,7 +1128,9 @@ pub fn draw(
             hint_row,
         );
     }
-    if let Some(menu) = model.mode_menu {
+    if id == DialogId::Mode
+        && let Some(menu) = model.mode_menu
+    {
         let menu_width = 58u16.min(area.width.saturating_sub(4));
         let menu_height = (MODE_OPTIONS.len() as u16 * 3 + 4).min(area.height.saturating_sub(4));
         let Some(menu_area) = dialog_outer(
@@ -1101,6 +1158,7 @@ pub fn draw(
         ])
         .areas(inner);
         hits.traffic_lights = dialog_hits.traffic_lights;
+        hits.modal_area = dialog_hits.modal_area;
         if menu.minimized {
             return hits;
         }
@@ -1140,9 +1198,12 @@ pub fn draw(
             hint_row,
         );
     }
-    if let Some(dialog) = model.git_dialog {
+    if id == DialogId::Git
+        && let Some(dialog) = model.git_dialog
+    {
         let dialog_hits = render_git_dialog(frame, area, dialog, model.pointer, &theme, model.tick);
         hits.traffic_lights = dialog_hits.traffic_lights;
+        hits.modal_area = dialog_hits.modal_area;
         hits.git_tabs = dialog_hits.git_tabs;
         hits.git_message = dialog_hits.git_message;
         hits.git_generate = dialog_hits.git_generate;
@@ -1151,41 +1212,162 @@ pub fn draw(
         hits.git_diff = dialog_hits.git_diff;
         hits.git_rows = dialog_hits.git_rows;
         hits.git_actions = dialog_hits.git_actions;
-    } else if let Some(dialog) = model.tool_detail_dialog {
+    } else if id == DialogId::ToolDetail
+        && let Some(dialog) = model.tool_detail_dialog
+    {
         let dialog_hits = render_tool_detail_dialog(frame, area, dialog, model.pointer, &theme);
         hits.traffic_lights = dialog_hits.traffic_lights;
-    } else if let Some(dialog) = model.tool_dialog {
+        hits.modal_area = dialog_hits.modal_area;
+    } else if id == DialogId::Tool
+        && let Some(dialog) = model.tool_dialog
+    {
         let dialog_hits = render_tool_dialog(frame, area, dialog, model.pointer, &theme);
         hits.traffic_lights = dialog_hits.traffic_lights;
+        hits.modal_area = dialog_hits.modal_area;
         hits.tool_detail_rows = dialog_hits.tool_detail_rows;
-    } else if let Some(dialog) = model.passport_dialog {
+    } else if id == DialogId::Passport
+        && let Some(dialog) = model.passport_dialog
+    {
         let dialog_hits = render_passport_dialog(frame, area, dialog, model.pointer, &theme);
         hits.traffic_lights = dialog_hits.traffic_lights;
-    } else if let Some(dialog) = model.add_provider_dialog {
+        hits.modal_area = dialog_hits.modal_area;
+    } else if id == DialogId::AddProvider
+        && let Some(dialog) = model.add_provider_dialog
+    {
         let dialog_hits = render_add_provider_dialog(frame, area, dialog, model.pointer, &theme);
         hits.add_provider_rows = dialog_hits.add_provider_rows;
         hits.traffic_lights = dialog_hits.traffic_lights;
-    } else if let Some(dialog) = model.theme_dialog {
+        hits.modal_area = dialog_hits.modal_area;
+    } else if id == DialogId::Theme
+        && let Some(dialog) = model.theme_dialog
+    {
         let dialog_hits = render_theme_dialog(frame, area, dialog, model.pointer, &theme);
         hits.theme_rows = dialog_hits.theme_rows;
         hits.theme_tabs = dialog_hits.theme_tabs;
         hits.traffic_lights = dialog_hits.traffic_lights;
-    } else if let Some(dialog) = model.provider_dialog {
+        hits.modal_area = dialog_hits.modal_area;
+    } else if id == DialogId::Provider
+        && let Some(dialog) = model.provider_dialog
+    {
         let dialog_hits = render_provider_dialog(frame, area, dialog, model.pointer, &theme);
         hits.provider_rows = dialog_hits.provider_rows;
         hits.provider_model_rows = dialog_hits.provider_model_rows;
         hits.traffic_lights = dialog_hits.traffic_lights;
-    } else if let Some(dialog) = model.context_dialog {
+        hits.modal_area = dialog_hits.modal_area;
+    } else if id == DialogId::Context
+        && let Some(dialog) = model.context_dialog
+    {
         let dialog_hits =
             render_context_dialog(frame, area, model.projection, dialog, model.pointer, &theme);
         hits.traffic_lights = dialog_hits.traffic_lights;
-    } else if let Some(dialog) = model.settings_dialog {
+        hits.modal_area = dialog_hits.modal_area;
+    } else if id == DialogId::Settings
+        && let Some(dialog) = model.settings_dialog
+    {
         let dialog_hits = render_settings_dialog(frame, area, model, dialog, &theme);
         hits.settings_rows = dialog_hits.settings_rows;
         hits.settings_tabs = dialog_hits.settings_tabs;
         hits.traffic_lights = dialog_hits.traffic_lights;
+        hits.modal_area = dialog_hits.modal_area;
     }
     hits
+}
+
+fn color_rgb(color: Color, fallback: Color) -> (u8, u8, u8) {
+    match color {
+        Color::Rgb(r, g, b) => (r, g, b),
+        Color::Reset => {
+            if fallback == Color::Reset {
+                (128, 128, 128)
+            } else {
+                color_rgb(fallback, Color::Reset)
+            }
+        }
+        Color::Indexed(index) if index >= 232 => {
+            let value = 8 + (index - 232) * 10;
+            (value, value, value)
+        }
+        Color::Indexed(index) if index >= 16 => {
+            let index = index - 16;
+            let channel = |n: u8| if n == 0 { 0 } else { 55 + n * 40 };
+            (
+                channel(index / 36),
+                channel(index / 6 % 6),
+                channel(index % 6),
+            )
+        }
+        _ => {
+            let index = match color {
+                Color::Black => 0,
+                Color::Red => 1,
+                Color::Green => 2,
+                Color::Yellow => 3,
+                Color::Blue => 4,
+                Color::Magenta => 5,
+                Color::Cyan => 6,
+                Color::Gray => 7,
+                Color::DarkGray => 8,
+                Color::LightRed => 9,
+                Color::LightGreen => 10,
+                Color::LightYellow => 11,
+                Color::LightBlue => 12,
+                Color::LightMagenta => 13,
+                Color::LightCyan => 14,
+                Color::White => 15,
+                Color::Indexed(n) => usize::from(n),
+                _ => unreachable!(),
+            };
+            const ANSI: [(u8, u8, u8); 16] = [
+                (0, 0, 0),
+                (128, 0, 0),
+                (0, 128, 0),
+                (128, 128, 0),
+                (0, 0, 128),
+                (128, 0, 128),
+                (0, 128, 128),
+                (192, 192, 192),
+                (128, 128, 128),
+                (255, 0, 0),
+                (0, 255, 0),
+                (255, 255, 0),
+                (0, 0, 255),
+                (255, 0, 255),
+                (0, 255, 255),
+                (255, 255, 255),
+            ];
+            ANSI[index]
+        }
+    }
+}
+
+fn dim_region(buffer: &mut ratatui::buffer::Buffer, area: Rect, depth: usize, theme: &Theme) {
+    if depth == 0 {
+        return;
+    }
+    // Compute from the freshly rendered layer to keep redraws and closing reversible.
+    let retain = 0.72_f64.powi(depth.min(16) as i32).max(0.35);
+    for y in area.y..area.bottom() {
+        for x in area.x..area.right() {
+            let Some(cell) = buffer.cell_mut((x, y)) else {
+                continue;
+            };
+            if cell.modifier.contains(Modifier::REVERSED) {
+                let fg = cell.fg;
+                cell.fg = cell.bg;
+                cell.bg = fg;
+                cell.modifier.remove(Modifier::REVERSED);
+            }
+            let fg = color_rgb(cell.fg, theme.text);
+            let bg = color_rgb(cell.bg, theme.bg);
+            let blend = |f: u8, b: u8| {
+                (f64::from(b) + (f64::from(f) - f64::from(b)) * retain).round() as u8
+            };
+            cell.fg = Color::Rgb(blend(fg.0, bg.0), blend(fg.1, bg.1), blend(fg.2, bg.2));
+            cell.modifier.remove(
+                Modifier::BOLD | Modifier::DIM | Modifier::SLOW_BLINK | Modifier::RAPID_BLINK,
+            );
+        }
+    }
 }
 
 fn inset(area: Rect) -> Rect {
@@ -1262,6 +1444,7 @@ pub(super) fn paint_dialog_frame(
     theme: &Theme,
     hits: &mut HitMap,
 ) -> Rect {
+    hits.modal_area = Some(area);
     let inner = paint_dialog_chrome(frame, area, theme);
     let title_row = Rect::new(inner.x, inner.y, inner.width, inner.height.min(1));
     paint_traffic_title(frame, title_row, title, pointer, theme, hits);
@@ -1509,7 +1692,10 @@ fn render_settings_dialog(
         return hits;
     };
     let inner = paint_dialog_frame(frame, modal, "设置", model.pointer, theme, &mut hits);
-    let [tabs, _, body, hint] = Layout::vertical([
+    if dialog.minimized {
+        return hits;
+    }
+    let [_, tabs, body, hint] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Min(4),
@@ -2744,17 +2930,8 @@ fn render_provider_dialog(
     theme: &Theme,
 ) -> HitMap {
     let mut hits = HitMap::default();
-    if dialog.options.is_empty() {
-        return hits;
-    }
     let left_count = dialog.options.len().clamp(1, 12) as u16;
     let compact_height = left_count.saturating_add(6);
-    if !dialog.fullscreen
-        && !dialog.minimized
-        && (area.width < 48 || area.height < compact_height.min(12))
-    {
-        return hits;
-    }
     let compact_width = area.width.saturating_sub(4).clamp(56, 88);
     let Some(frame_y) = dialog_outer(
         area,
@@ -3710,9 +3887,6 @@ fn render_add_provider_dialog(
 ) -> HitMap {
     let mut hits = HitMap::default();
     let compact_height = 18;
-    if !dialog.fullscreen && !dialog.minimized && (area.width < 40 || area.height < 10) {
-        return hits;
-    }
     let Some(frame_y) = dialog_outer(
         area,
         64,
@@ -4024,12 +4198,6 @@ fn render_theme_dialog(
     let row_count = palette_count + 1;
     let compact_height = row_count + 5;
     if dialog.options.is_empty() {
-        return hits;
-    }
-    if !dialog.fullscreen
-        && !dialog.minimized
-        && (area.width < 30 || area.height < compact_height + 2)
-    {
         return hits;
     }
     let content_width = dialog
@@ -5738,11 +5906,11 @@ mod tests {
     }
 
     #[test]
-    fn provider_dialog_skips_tiny_screens() {
+    fn provider_dialog_retains_controls_on_compact_screens() {
         let dialog = sample_provider_dialog();
         let (lines, hits) = render_provider_with_hits(Rect::new(0, 0, 20, 4), &dialog, None);
-        assert!(lines.iter().all(|line| line.trim().is_empty()));
-        assert!(hits.provider_rows.is_empty());
+        assert!(lines.iter().any(|line| !line.trim().is_empty()));
+        assert!(hits.traffic_lights[0].is_some());
     }
 
     fn sample_theme_dialog() -> ThemeDialog {
@@ -5874,11 +6042,11 @@ mod tests {
     }
 
     #[test]
-    fn theme_dialog_skips_tiny_screens() {
+    fn theme_dialog_retains_controls_on_compact_screens() {
         let dialog = sample_theme_dialog();
         let (lines, hits) = render_theme_with_hits(Rect::new(0, 0, 20, 4), &dialog, None);
-        assert!(lines.iter().all(|line| line.trim().is_empty()));
-        assert!(hits.theme_rows.is_empty());
+        assert!(lines.iter().any(|line| !line.trim().is_empty()));
+        assert!(hits.traffic_lights[0].is_some());
     }
 
     #[test]
@@ -5989,5 +6157,184 @@ mod tests {
         let mut hits = HitMap::default();
         hits.project_picker_rows.push((Rect::new(4, 5, 20, 1), 0));
         assert_eq!(hits.hit(5, 5), Some(Hit::ProjectPickerRow(0)));
+    }
+}
+
+#[cfg(test)]
+mod dialog_layer_tests {
+    use super::*;
+
+    #[test]
+    fn dimming_tracks_depth_and_preserves_background_for_both_schemes() {
+        for dark in [true, false] {
+            let theme = Theme::of(theme::Palette::Coral, dark);
+            let area = Rect::new(0, 0, 2, 1);
+            let mut original = ratatui::buffer::Buffer::empty(area);
+            original[(0, 0)]
+                .set_symbol("字")
+                .set_fg(theme.rose)
+                .set_bg(theme.bg)
+                .set_style(Style::default().add_modifier(Modifier::BOLD));
+            let mut one = original.clone();
+            let mut two = original.clone();
+            dim_region(&mut one, area, 1, &theme);
+            dim_region(&mut two, area, 2, &theme);
+            assert_ne!(one[(0, 0)].fg, original[(0, 0)].fg);
+            assert_ne!(one[(0, 0)].fg, two[(0, 0)].fg);
+            assert_eq!(two[(0, 0)].bg, theme.bg);
+            assert_eq!(two[(0, 0)].symbol(), "字");
+            assert!(!two[(0, 0)].modifier.contains(Modifier::BOLD));
+            let mut next_frame = original.clone();
+            dim_region(&mut next_frame, area, 2, &theme);
+            assert_eq!(two, next_frame);
+            let mut closed = original.clone();
+            dim_region(&mut closed, area, 0, &theme);
+            assert_eq!(closed, original);
+            dim_region(&mut next_frame, area, 0, &theme);
+            let mut deepest = original.clone();
+            let mut deeper = original.clone();
+            dim_region(&mut deepest, area, 16, &theme);
+            dim_region(&mut deeper, area, 32, &theme);
+            assert_eq!(deepest, deeper);
+        }
+    }
+
+    #[test]
+    fn dimming_only_changes_requested_layer_and_handles_terminal_colors() {
+        let theme = Theme::of(theme::Palette::Coral, true);
+        let area = Rect::new(0, 0, 4, 1);
+        let mut buffer = ratatui::buffer::Buffer::empty(area);
+        for (x, color) in [
+            Color::Reset,
+            Color::Indexed(200),
+            Color::Indexed(240),
+            Color::LightBlue,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            buffer[(x as u16, 0)].set_fg(color);
+        }
+        let top = buffer[(3, 0)].clone();
+        dim_region(&mut buffer, Rect::new(0, 0, 3, 1), 2, &theme);
+        assert_eq!(buffer[(3, 0)], top);
+        for x in 0..3 {
+            assert!(matches!(buffer[(x, 0)].fg, Color::Rgb(..)));
+        }
+    }
+
+    #[test]
+    fn stacked_windows_draw_in_order_and_only_top_has_hits() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let provider = ProviderDialog {
+            options: vec![],
+            selected: 0,
+            pane: ProviderPane::Providers,
+            model_selected: 0,
+            fullscreen: false,
+            minimized: false,
+        };
+        let settings = SettingsDialog {
+            page: 0,
+            selected: 0,
+            fullscreen: false,
+            minimized: false,
+        };
+        let mut model = FrameModel {
+            dialog_stack: &[],
+            workspace: Path::new("/tmp"),
+            sessions: &[],
+            index: 0,
+            projection: None,
+            pending: &[],
+            input: "draft",
+            status: "ready",
+            notice: None,
+            paste_preview: None,
+            passport_dialog: None,
+            provider_dialog: Some(&provider),
+            add_provider_dialog: None,
+            theme_dialog: None,
+            context_dialog: None,
+            settings_dialog: Some(&settings),
+            tool_dialog: None,
+            tool_detail_dialog: None,
+            slash_hits: &[],
+            slash_selected: 0,
+            search: None,
+            hide_tools: false,
+            scroll: 0,
+            auto_approve: false,
+            model: "model",
+            provider: "provider",
+            mode_menu: None,
+            project_picker: None,
+            folder_picker: None,
+            session_picker: None,
+            git_dialog: None,
+            git_status: None,
+            user_label: "you",
+            running: false,
+            tick: 0,
+            pointer: None,
+            text_selection: None,
+        };
+        for (width, height) in [(120, 40), (40, 12)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            let mut cache = TranscriptCache::default();
+            let mut hits = HitMap::default();
+            terminal
+                .draw(|f| {
+                    hits = draw(f, &model, &mut cache);
+                })
+                .unwrap();
+            let base = terminal.backend().buffer().clone();
+            model.dialog_stack = &[DialogId::Provider, DialogId::Settings];
+            terminal
+                .draw(|f| {
+                    hits = draw(f, &model, &mut cache);
+                })
+                .unwrap();
+            let stacked = terminal.backend().buffer().clone();
+            assert!(hits.modal);
+            assert!(!hits.settings_rows.is_empty());
+            let close = hits.traffic_lights[0].expect("settings close control");
+            assert_eq!(stacked[(close.x, close.y)].symbol(), "●");
+            assert!(hits.settings_tabs.iter().all(|(rect, _)| rect.y > close.y));
+            assert!(hits.provider_rows.is_empty());
+            assert_eq!(hits.hit(0, 0), None);
+            assert_ne!(base[(0, 0)].fg, stacked[(0, 0)].fg);
+            terminal
+                .draw(|f| {
+                    hits = draw(f, &model, &mut cache);
+                })
+                .unwrap();
+            assert_eq!(terminal.backend().buffer(), &stacked);
+            model.dialog_stack = &[DialogId::Settings, DialogId::Provider];
+            terminal
+                .draw(|f| {
+                    hits = draw(f, &model, &mut cache);
+                })
+                .unwrap();
+            assert!(hits.settings_rows.is_empty());
+            assert!(hits.traffic_lights[0].is_some());
+            model.dialog_stack = &[];
+            terminal
+                .draw(|f| {
+                    hits = draw(f, &model, &mut cache);
+                })
+                .unwrap();
+            assert_eq!(terminal.backend().buffer(), &base);
+        }
+    }
+
+    #[test]
+    fn isolated_dialog_map_has_no_page_targets() {
+        let map = HitMap {
+            modal: true,
+            ..HitMap::default()
+        };
+        assert_eq!(map.hit(20, 10), None);
+        assert!(!map.over_slash(20, 10));
     }
 }
