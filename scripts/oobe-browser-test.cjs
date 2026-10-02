@@ -89,7 +89,7 @@ const { chromium } = require('playwright');
       await page.waitForTimeout(150);
       assert.equal(starts, beforeRetry + 1);
       await page.locator('#onboarding-back').click();
-      await page.waitForFunction(() => document.querySelector('#onboarding-title').textContent.includes('让工作'));
+      await page.waitForFunction(() => document.querySelector('#onboarding-title').textContent.includes('欢迎使用'));
       await page.waitForTimeout(200);
       assert.ok(cancels > 0);
       assert.equal(loggedIn, false);

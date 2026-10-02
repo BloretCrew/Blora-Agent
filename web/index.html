@@ -33,34 +33,18 @@
   <body class="blora-page blora-scope">
     <section id="view-onboarding" class="ba-onboarding" hidden aria-labelledby="onboarding-title">
       <div class="ba-onboarding__shell">
-        <aside class="ba-onboarding__story" aria-label="认识 Blora">
-          <header class="ba-onboarding__brand"><span class="blora-avatar" data-size="lg" data-variant="primary">B</span><strong>Blora</strong><span class="ba-onboarding__eyebrow">YOUR WORKSPACE, CONNECTED</span></header>
-          <div class="ba-onboarding__intro"><span class="ba-onboarding__eyebrow">从一个想法，到一次完成</span><h2>把想做的事，<br />交给 Blora。</h2><p>代码、任务、协作与创作。<br />在熟悉的工作区里，自然开始。</p></div>
-          <div class="ba-onboarding__preview" aria-label="能力预览">
-            <div class="ba-onboarding__preview-head"><span>BLORA / WORKSPACE</span><span>✦ 就绪</span></div>
-            <div class="ba-onboarding__sample"><span class="ba-onboarding__eyebrow">你</span><p>从这个项目开始，把想法变成可以运行的作品。</p></div>
-            <div class="ba-onboarding__sample ba-onboarding__sample--assistant"><span>✦ Blora</span><p>一起完成下一步。</p><div class="ba-onboarding__preview-lines"><i></i><i></i><i></i></div></div>
-            <div class="ba-onboarding__modes"><span>Code <small>写代码</small></span><span>Work <small>处理任务</small></span><span>Agent <small>协作执行</small></span><span>Imagine <small>图像创作</small></span></div>
-          </div>
-          <p class="ba-onboarding__story-footer">你的工作区，你的节奏。<span>Blora Agent</span></p>
-        </aside>
         <div class="ba-onboarding__card">
-          <p class="ba-onboarding__eyebrow" id="onboarding-kicker">首次使用 · 大约一分钟</p>
+          <header class="ba-onboarding__header"><strong>Blora</strong><span id="onboarding-kicker">首次设置</span></header>
           <ol class="ba-onboarding__steps" aria-label="首次使用步骤">
-            <li data-step="welcome"><span>01</span> 欢迎</li><li data-step="account"><span>02</span> 账号</li><li data-step="complete"><span>03</span> 完成</li>
+            <li data-step="welcome">欢迎</li><li data-step="account">账号</li><li data-step="complete">完成</li>
           </ol>
           <h1 id="onboarding-title" tabindex="-1"></h1>
           <p id="onboarding-description" class="ba-onboarding__lede"></p>
-          <div id="onboarding-welcome" class="ba-onboarding__benefits">
-            <div><span>01 / 连接</span><strong>连接你的账号</strong><p>通过 Bloret PassPort 授权，接入 Blora 服务。</p></div>
-            <div><span>02 / 开始</span><strong>带着已有配置继续</strong><p>自定义供应商与环境凭据保持原样，账号也可以稍后连接。</p></div>
-          </div>
           <div id="onboarding-account" class="ba-onboarding__account" hidden>
-            <div class="ba-onboarding__provider"><span class="blora-avatar" data-size="lg" data-variant="primary">P</span><div><strong>Bloret PassPort</strong><p>一个账号，连接 Blora 服务</p></div><span id="onboarding-account-badge" class="ba-onboarding__badge">待连接</span></div>
+            <p id="onboarding-account-badge" class="ba-onboarding__muted">待连接</p>
             <p id="onboarding-account-name"></p>
-            <p class="ba-onboarding__privacy">在 PassPort 页面确认授权。登录凭据由服务端保存。</p>
             <div id="onboarding-device" hidden>
-              <p class="ba-onboarding__eyebrow">你的设备码</p><p>打开授权页面，输入下方代码并确认。</p>
+              <p>在授权页面输入设备码：</p>
               <input id="onboarding-code" class="blora-input" readonly aria-label="设备码" />
               <div class="ba-onboarding__actions">
                 <a id="onboarding-link" class="blora-button" data-variant="secondary" target="_blank" rel="noopener noreferrer">打开授权页面</a>
@@ -73,9 +57,7 @@
             <button id="onboarding-check" class="blora-button" data-variant="ghost" type="button">重新检查账号与服务</button>
           </div>
           <div id="onboarding-complete" class="ba-onboarding__summary" hidden>
-            <span class="ba-onboarding__success" aria-hidden="true">✓</span><h2>下一步，从你的工作区开始。</h2>
             <dl><div><dt>账号</dt><dd id="onboarding-summary-account"></dd></div><div><dt>供应商</dt><dd id="onboarding-summary-provider"></dd></div><div><dt>工作区</dt><dd id="onboarding-summary-workspace"></dd></div></dl>
-            <p>进入后，可以先让 Blora 阅读 README，或直接描述你想完成的任务。</p>
           </div>
           <p id="onboarding-status" role="status" aria-live="polite"></p>
           <div class="ba-onboarding__actions ba-onboarding__navigation">
@@ -84,7 +66,7 @@
             <button id="onboarding-back" class="blora-button" data-variant="ghost" type="button" hidden>上一步</button>
             <button id="onboarding-cancel" class="blora-button" data-variant="ghost" type="button">返回工作台</button>
           </div>
-          <p class="ba-brand__meta">引导进度保存在当前浏览器 · 随时可从设置重新打开</p>
+          <p class="ba-brand__meta">可从设置重新打开引导。</p>
         </div>
       </div>
     </section>

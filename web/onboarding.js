@@ -88,9 +88,9 @@ function renderOnboarding(focus = false) {
   const step = onboarding.step;
   const valid = onboarding.user?.credentials_valid === true;
   const content = {
-    welcome: ["让工作从这里开始", "Blora 在你的工作区中读、改、跑。先连接账号，或保留现有供应商配置，稍后再设置。"],
-    account: ["连接你的账号", onboarding.gateway === true ? "此服务启用了网关认证。连接 PassPort 不会替代网关访问凭据。" : "连接 Bloret PassPort 使用 Blora 服务；已有自定义供应商配置不会被更改。"],
-    complete: ["准备好了", valid ? `已连接 ${onboarding.user.name || onboarding.user.username}，现在可以开始使用。` : "账号可以稍后连接。使用前仍需配置可用的供应商与凭据。"],
+    welcome: ["欢迎使用 Blora", "先设置账号。已有供应商配置可以继续使用。"],
+    account: ["登录账号", onboarding.gateway === true ? "此服务启用了网关认证。连接 PassPort 不会替代网关访问凭据。" : "登录 Bloret PassPort，或选择稍后设置。"],
+    complete: ["设置完成", valid ? `已连接 ${onboarding.user.name || onboarding.user.username}，现在可以开始使用。` : "账号可以稍后连接。使用前仍需配置可用的供应商与凭据。"],
   };
   ob("title").textContent = content[step][0];
   ob("description").textContent = content[step][1];
@@ -99,9 +99,8 @@ function renderOnboarding(focus = false) {
     else el.removeAttribute("aria-current");
   });
   document.querySelector("#view-onboarding").dataset.stage = step;
-  ob("welcome").hidden = step !== "welcome";
   ob("complete").hidden = step !== "complete";
-  ob("kicker").textContent = step === "welcome" ? "首次使用 · 大约一分钟" : step === "account" ? "账号连接 · 安全授权" : "设置完成 · 开始探索";
+  ob("kicker").textContent = `${["welcome", "account", "complete"].indexOf(step) + 1} / 3`;
   ob("summary-account").textContent = valid ? onboarding.user.name || onboarding.user.username : "稍后连接";
   ob("summary-provider").textContent = stored("blora-provider") || (valid ? "Bloret PassPort" : onboarding.service?.provider_display) || "使用当前配置";
   ob("summary-workspace").textContent = onboarding.workspace || pathEl.textContent || "当前服务工作区";

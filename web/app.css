@@ -468,391 +468,119 @@ blora-sidebar-layout {
   }
 }
 
-/* First-run experience uses the published Blora semantic tokens. */
+/* First-use setup shares the app's published Blora tokens. */
 .ba-onboarding {
   height: 100dvh;
   overflow: auto;
   padding: var(--blora-space-6);
   color: var(--blora-color-text-primary);
   background: var(--blora-color-surface-default);
-  display: grid;
-  align-items: center;
 }
-.ba-onboarding[hidden], blora-sidebar-layout[hidden], .ba-onboarding [hidden] {
+.ba-onboarding[hidden],
+blora-sidebar-layout[hidden],
+.ba-onboarding [hidden] {
   display: none !important;
 }
 .ba-onboarding__shell {
-  width: min(100%, 1160px);
-  margin: auto;
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  min-height: 700px;
-  border: 1px solid var(--blora-color-border-subtle);
-  border-radius: var(--blora-radius-lg);
-  overflow: clip;
-}
-.ba-onboarding__story {
-  padding: clamp(28px, 4vw, 52px);
-  display: flex;
-  flex-direction: column;
-  gap: var(--blora-space-6);
-  background: var(--blora-color-surface-sunken, var(--blora-color-surface-default));
-  border-right: 1px solid var(--blora-color-border-subtle);
-}
-.ba-onboarding__brand, .ba-onboarding__actions {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--blora-space-3);
-}
-.ba-onboarding__brand strong {
-  font-size: 24px;
-  letter-spacing: -.04em;
-}
-.ba-onboarding__brand .ba-onboarding__eyebrow {
-  margin-left: auto;
-  font-size: 9px;
-}
-.ba-onboarding__eyebrow {
-  color: var(--blora-color-text-muted);
-  font-size: var(--blora-text-xs, 12px);
-  letter-spacing: .1em;
-  line-height: 1.5;
-}
-.ba-onboarding h1, .ba-onboarding h2, .ba-onboarding p {
-  margin: 0;
-  overflow-wrap: anywhere;
-}
-.ba-onboarding__intro h2 {
-  font-size: clamp(32px, 3.3vw, 46px);
-  line-height: 1.25;
-  letter-spacing: -.04em;
-  margin: var(--blora-space-4) 0;
-}
-.ba-onboarding__intro p, .ba-onboarding__lede {
-  color: var(--blora-color-text-muted);
-  line-height: 1.8;
-}
-.ba-onboarding__preview {
-  border: 1px solid var(--blora-color-border-subtle);
-  border-radius: var(--blora-radius-lg);
-  background: var(--blora-color-surface-default);
-  padding: var(--blora-space-5);
-}
-.ba-onboarding__preview-head {
-  display: flex;
-  justify-content: space-between;
-  font-size: 10px;
-  letter-spacing: .08em;
-  color: var(--blora-color-text-muted);
-  border-bottom: 1px solid var(--blora-color-border-subtle);
-  padding-bottom: var(--blora-space-4);
-}
-.ba-onboarding__sample {
-  padding: var(--blora-space-4) 0;
-  font-size: var(--blora-text-sm);
-  line-height: 1.7;
-}
-.ba-onboarding__sample p {
-  margin-top: var(--blora-space-2);
-}
-.ba-onboarding__sample--assistant {
-  border-left: 2px solid var(--blora-color-action-primary-default);
-  padding-left: var(--blora-space-4);
-}
-.ba-onboarding__preview-lines {
-  display: grid;
-  gap: var(--blora-space-2);
-  margin-top: var(--blora-space-3);
-}
-.ba-onboarding__preview-lines i {
-  display: block;
-  width: 90%;
-  height: 4px;
-  border-radius: var(--blora-radius-sm);
-  background: var(--blora-color-border-subtle);
-}
-.ba-onboarding__preview-lines i:nth-child(2) {
-  width: 72%;
-}
-
-.ba-onboarding__preview-lines i:nth-child(3) {
-  width: 45%;
-}
-.ba-onboarding__modes {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: var(--blora-space-2);
-  margin-top: var(--blora-space-5);
-  border-top: 1px solid var(--blora-color-border-subtle);
-  padding-top: var(--blora-space-4);
-  font-size: var(--blora-text-sm);
-}
-.ba-onboarding__modes small {
-  display: block;
-  margin-top: var(--blora-space-1);
-  color: var(--blora-color-text-muted);
-  font-size: 10px;
-}
-.ba-onboarding__story-footer {
-  display: flex;
-  justify-content: space-between;
-  margin-top: auto !important;
-  color: var(--blora-color-text-muted);
-  font-size: var(--blora-text-xs, 12px);
+  width: min(100%, 440px);
+  margin: clamp(24px, 12vh, 120px) auto;
 }
 .ba-onboarding__card {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
+  display: grid;
   gap: var(--blora-space-5);
-  padding: clamp(28px, 4vw, 52px);
-  background: var(--blora-color-surface-default);
+  min-width: 0;
+}
+.ba-onboarding__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.ba-onboarding__header strong {
+  font-size: 20px;
+}
+.ba-onboarding__header span,
+.ba-onboarding__muted,
+.ba-onboarding__lede {
+  color: var(--blora-color-text-muted);
 }
 .ba-onboarding__steps {
   display: flex;
-  justify-content: space-between;
-  gap: var(--blora-space-3);
-  list-style: none;
-  padding: 0 0 var(--blora-space-5);
+  gap: var(--blora-space-5);
+  padding: 0 0 var(--blora-space-3);
   margin: 0;
+  list-style: none;
+  border-bottom: 1px solid var(--blora-color-border-subtle);
   color: var(--blora-color-text-muted);
   font-size: var(--blora-text-sm);
-  border-bottom: 1px solid var(--blora-color-border-subtle);
-}
-.ba-onboarding__steps span {
-  display: inline-grid;
-  place-items: center;
-  width: 28px;
-  height: 28px;
-  margin-right: var(--blora-space-1);
-  border: 1px solid var(--blora-color-border-subtle);
-  border-radius: 50%;
-  font-size: 10px;
 }
 .ba-onboarding__steps [aria-current="step"] {
   color: var(--blora-color-text-primary);
   font-weight: 600;
 }
-
-.ba-onboarding__steps [aria-current="step"] span {
-  background: var(--blora-color-text-primary);
-  color: var(--blora-color-surface-default);
-}
 .ba-onboarding h1 {
-  font-size: clamp(28px, 2.5vw, 34px);
-  line-height: 1.3;
-  letter-spacing: -.03em;
+  margin: var(--blora-space-3) 0 0;
+  font-size: 26px;
+  line-height: 1.4;
   outline: none;
 }
-.ba-onboarding__benefits {
-  display: grid;
-  gap: var(--blora-space-5);
-  margin: var(--blora-space-3) 0;
-}
-
-.ba-onboarding__benefits > div {
-  border-left: 2px solid var(--blora-color-border-subtle);
-  padding-left: var(--blora-space-4);
-}
-.ba-onboarding__benefits span {
-  display: block;
-  font-size: 10px;
-  color: var(--blora-color-text-muted);
-  margin-bottom: var(--blora-space-2);
-}
-
-.ba-onboarding__benefits strong {
-  font-size: var(--blora-text-sm);
-}
-
-.ba-onboarding__benefits p {
-  margin-top: var(--blora-space-2);
-  font-size: var(--blora-text-sm);
+.ba-onboarding p {
+  margin: 0;
   line-height: 1.7;
-  color: var(--blora-color-text-muted);
+  overflow-wrap: anywhere;
 }
-.ba-onboarding__account {
-  padding: var(--blora-space-5);
-  border: 1px solid var(--blora-color-border-subtle);
-  border-radius: var(--blora-radius-lg);
-  display: grid;
-  gap: var(--blora-space-4);
-}
-.ba-onboarding__provider {
-  display: flex;
-  gap: var(--blora-space-3);
-  align-items: center;
-  flex-wrap: wrap;
-}
-
-.ba-onboarding__provider p {
-  font-size: var(--blora-text-xs, 12px);
-  color: var(--blora-color-text-muted);
-  margin-top: var(--blora-space-1);
-}
-.ba-onboarding__badge {
-  font-size: 10px;
-  margin-left: auto;
-  border: 1px solid var(--blora-color-border-subtle);
-  border-radius: var(--blora-radius-sm);
-  padding: var(--blora-space-1) var(--blora-space-2);
-  color: var(--blora-color-text-muted);
-}
-
-.ba-onboarding__badge[data-connected="true"] {
-  color: var(--blora-color-text-primary);
-}
-.ba-onboarding__privacy, #onboarding-account-name {
-  font-size: var(--blora-text-sm);
-  line-height: 1.6;
-  color: var(--blora-color-text-muted);
-}
+.ba-onboarding__account,
 #onboarding-device {
   display: grid;
   gap: var(--blora-space-3);
-  border-top: 1px solid var(--blora-color-border-subtle);
-  padding-top: var(--blora-space-4);
-  font-size: var(--blora-text-sm);
+}
+#onboarding-device {
+  padding-top: var(--blora-space-3);
 }
 #onboarding-code {
   width: 100%;
   box-sizing: border-box;
-  font-size: 24px;
-  letter-spacing: .14em;
-  text-align: center;
-  min-height: 56px;
+  min-height: 48px;
+  font-family: var(--blora-font-mono);
+  font-size: 22px;
+  letter-spacing: .08em;
 }
-#onboarding-status {
-  padding: var(--blora-space-3) var(--blora-space-4);
-  border-left: 2px solid var(--blora-color-border-subtle);
-  background: var(--blora-color-surface-sunken, var(--blora-color-surface-default));
-  font-size: var(--blora-text-sm);
-  line-height: 1.7;
+.ba-onboarding__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--blora-space-2);
+}
+.ba-onboarding__account > button {
+  justify-self: start;
 }
 .ba-onboarding__navigation {
-  margin-top: auto;
-  padding-top: var(--blora-space-4);
+  padding-top: var(--blora-space-3);
 }
-
-.ba-onboarding__navigation #onboarding-cancel {
-  width: 100%;
-  justify-content: flex-start;
-  color: var(--blora-color-text-muted);
-}
-.ba-onboarding__summary {
-  display: grid;
-  gap: var(--blora-space-4);
-}
-
-.ba-onboarding__success {
-  width: 48px;
-  height: 48px;
-  display: grid;
-  place-items: center;
-  border: 1px solid var(--blora-color-border-subtle);
-  border-radius: 50%;
-  font-size: 24px;
-}
-
-.ba-onboarding__summary h2 {
-  font-size: 18px;
-}
-
-.ba-onboarding__summary p {
-  color: var(--blora-color-text-muted);
+#onboarding-status {
   font-size: var(--blora-text-sm);
-  line-height: 1.8;
 }
 .ba-onboarding__summary dl {
   margin: 0;
 }
-
 .ba-onboarding__summary dl > div {
   display: grid;
-  grid-template-columns: 72px 1fr;
+  grid-template-columns: 72px minmax(0, 1fr);
   gap: var(--blora-space-3);
   padding: var(--blora-space-3) 0;
   border-bottom: 1px solid var(--blora-color-border-subtle);
   font-size: var(--blora-text-sm);
 }
-
 .ba-onboarding__summary dt {
   color: var(--blora-color-text-muted);
 }
-
 .ba-onboarding__summary dd {
   margin: 0;
   overflow-wrap: anywhere;
 }
-.ba-onboarding[data-stage] .ba-onboarding__card {
-  animation: ba-onboarding-reveal .35s ease-out;
-}
-
-@keyframes ba-onboarding-reveal {
-  from {
-    opacity: .6;
-    transform: translateY(8px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-@media (max-width: 850px) {
+@media (max-width: 600px) {
   .ba-onboarding {
-    padding: var(--blora-space-4);
-    align-items: start;
+    padding: var(--blora-space-5);
   }
-
   .ba-onboarding__shell {
-    grid-template-columns: 1fr;
-    min-height: 0;
-  }
-
-  .ba-onboarding__story {
-    border-right: 0;
-    border-bottom: 1px solid var(--blora-color-border-subtle);
-    gap: var(--blora-space-4);
-    padding: var(--blora-space-5);
-  }
-
-  .ba-onboarding__intro h2 {
-    font-size: 30px;
-  }
-
-  .ba-onboarding__intro p, .ba-onboarding__preview, .ba-onboarding__story-footer {
-    display: none;
-  }
-
-  .ba-onboarding[data-stage="account"] .ba-onboarding__intro, .ba-onboarding[data-stage="complete"] .ba-onboarding__intro {
-    display: none;
-  }
-
-  .ba-onboarding__card {
-    padding: var(--blora-space-5);
-    gap: var(--blora-space-4);
-  }
-
-  .ba-onboarding__brand .ba-onboarding__eyebrow {
-    display: none;
-  }
-
-  .ba-onboarding__actions > * {
-    flex: 1 1 10rem;
-  }
-
-  .ba-onboarding__account {
-    padding: var(--blora-space-4);
-  }
-
-  .ba-onboarding__steps {
-    font-size: 12px;
-  }
-
-  .ba-onboarding__steps span {
-    width: 24px;
-    height: 24px;
+    margin: var(--blora-space-6) auto;
   }
 }
