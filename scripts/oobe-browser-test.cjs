@@ -10,6 +10,12 @@ const { chromium } = require('playwright');
     for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
       const context = await browser.newContext({ viewport });
       const page = await context.newPage();
+      if (process.env.BLORA_TEST_SOURCE === "1") {
+        const fs = require('node:fs');
+        for (const [path, file, contentType] of [['/', 'web/index.html', 'text/html'], ['/app.css', 'web/app.css', 'text/css'], ['/onboarding.js', 'web/onboarding.js', 'text/javascript']]) {
+          await context.route(`${url}${path}`, route => route.fulfill({ body: fs.readFileSync(file), contentType }));
+        }
+      }
       let loggedIn = false, starts = 0, cancels = 0, polls = 0, failure = null, gateway = false;
       const errors = [];
       page.on('pageerror', error => errors.push(error.message));
@@ -42,6 +48,9 @@ const { chromium } = require('playwright');
       await page.locator('#onboarding-skip').waitFor({ state: 'visible' });
       assert.equal(starts, 0, 'startup must not start authorization');
       await page.locator('#onboarding-skip').click();
+      assert.equal(await page.locator('#onboarding-complete').isVisible(), true);
+      assert.equal(await page.locator('#onboarding-summary-account').textContent(), '稍后连接');
+      assert.ok(await page.locator('#onboarding-summary-workspace').textContent());
       await page.locator('#onboarding-next').click();
       await page.locator('#view-tasks').waitFor({ state: 'visible' });
       await page.reload();
@@ -73,6 +82,12 @@ const { chromium } = require('playwright');
       await page.locator('#onboarding-next').click();
       await page.locator('#onboarding-login').click();
       await page.locator('#onboarding-code').waitFor({ state: 'visible' });
+      assert.equal(await page.locator('#onboarding-account-badge').textContent(), '等待授权');
+      const beforeRetry = starts;
+      await page.locator('#onboarding-retry').click();
+      await page.waitForFunction(() => document.querySelector('#onboarding-code').offsetParent !== null);
+      await page.waitForTimeout(150);
+      assert.equal(starts, beforeRetry + 1);
       await page.locator('#onboarding-back').click();
       await page.waitForFunction(() => document.querySelector('#onboarding-title').textContent.includes('让工作'));
       await page.waitForTimeout(200);

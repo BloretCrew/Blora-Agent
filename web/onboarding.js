@@ -5,7 +5,7 @@ const ONBOARDING_KEY = "blora-web-onboarding-version";
 const onboarding = {
   active: false, step: "welcome", returnHash: "#/session", lastHash: "#/session",
   user: null, accountError: "", gateway: null, message: "", busy: false,
-  attempt: null, generation: 0, timer: null, expiryTimer: null, accountGeneration: 0,
+  attempt: null, generation: 0, timer: null, expiryTimer: null, accountGeneration: 0, service: null, workspace: null,
 };
 const ob = (name) => document.querySelector(`#onboarding-${name}`);
 
@@ -48,6 +48,11 @@ async function checkOnboardingService() {
     const info = await api("/api/settings", { silent: true });
     if (typeof info.gateway !== "boolean") throw new Error("服务未返回 gateway 策略");
     onboarding.gateway = info.gateway;
+    onboarding.service = info;
+    if (!info.gateway || stored("blora-token")) {
+      try { onboarding.workspace = (await api("/api/workspace", { silent: true })).path; }
+      catch (_) { onboarding.workspace = null; }
+    }
   } catch (error) {
     onboarding.message = `无法确认服务策略：${error.message}。请重试检查；暂不提供跳过。`;
   }
@@ -93,6 +98,17 @@ function renderOnboarding(focus = false) {
     if (el.dataset.step === step) el.setAttribute("aria-current", "step");
     else el.removeAttribute("aria-current");
   });
+  document.querySelector("#view-onboarding").dataset.stage = step;
+  ob("welcome").hidden = step !== "welcome";
+  ob("complete").hidden = step !== "complete";
+  ob("kicker").textContent = step === "welcome" ? "首次使用 · 大约一分钟" : step === "account" ? "账号连接 · 安全授权" : "设置完成 · 开始探索";
+  ob("summary-account").textContent = valid ? onboarding.user.name || onboarding.user.username : "稍后连接";
+  ob("summary-provider").textContent = stored("blora-provider") || (valid ? "Bloret PassPort" : onboarding.service?.provider_display) || "使用当前配置";
+  ob("summary-workspace").textContent = onboarding.workspace || pathEl.textContent || "当前服务工作区";
+  ob("account-badge").textContent = valid ? "已连接" : onboarding.attempt ? "等待授权" : onboarding.busy ? "连接中" : "待连接";
+  ob("account-badge").dataset.connected = String(valid);
+  ob("retry").hidden = !onboarding.attempt;
+  ob("status").hidden = !onboarding.message;
   ob("account").hidden = step !== "account";
   ob("account-name").textContent = onboarding.accountError || (onboarding.user ?
     `${onboarding.user.name || onboarding.user.username} · ${valid ? "账号可用" : "凭据已失效，请重新登录"}` : "尚未连接账号");
@@ -234,6 +250,7 @@ passportLogin.addEventListener("click", (event) => {
 document.querySelector("#settings-login").addEventListener("click", () => enterOnboarding("account"));
 document.querySelector("#settings-onboarding").addEventListener("click", () => enterOnboarding());
 ob("login").addEventListener("click", startDeviceAttempt);
+ob("retry").addEventListener("click", startDeviceAttempt);
 ob("check").addEventListener("click", async () => {
   onboarding.message = "";
   await Promise.all([refreshPassport(), checkOnboardingService()]);
