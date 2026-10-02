@@ -980,6 +980,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             KeyCode::Left if git_dialog.is_some() => {
                                 if let Some(dialog) = git_dialog.as_mut() {
                                     dialog.page = dialog.page.saturating_sub(1);
+                                    dialog.scroll = 0;
                                     dialog.editing_message = false;
                                 }
                             }
@@ -995,21 +996,33 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             KeyCode::Right if git_dialog.is_some() => {
                                 if let Some(dialog) = git_dialog.as_mut() {
                                     dialog.page = (dialog.page + 1).min(2);
+                                    dialog.scroll = 0;
                                     dialog.editing_message = false;
                                 }
                             }
                             KeyCode::Up if git_dialog.is_some() => {
                                 if let Some(dialog) = git_dialog.as_mut() {
-                                    dialog.selected = dialog.selected.saturating_sub(1);
-                                    dialog.scroll = dialog.scroll.min(dialog.selected);
+                                    if dialog.page == 1 {
+                                        dialog.scroll = dialog.scroll.saturating_sub(1);
+                                    } else {
+                                        dialog.selected = dialog.selected.saturating_sub(1);
+                                        dialog.scroll = dialog.scroll.min(dialog.selected);
+                                    }
                                 }
                             }
                             KeyCode::Down if git_dialog.is_some() => {
                                 if let Some(dialog) = git_dialog.as_mut() {
-                                    let count = view::git_changed_files(&dialog.info.raw).len();
-                                    dialog.selected =
-                                        (dialog.selected + 1).min(count.saturating_sub(1));
-                                    dialog.scroll = dialog.selected.saturating_sub(6);
+                                    if dialog.page == 1 {
+                                        dialog.scroll = dialog
+                                            .scroll
+                                            .saturating_add(1)
+                                            .min(dialog.info.log.lines().count().saturating_sub(1));
+                                    } else {
+                                        let count = view::git_changed_files(&dialog.info.raw).len();
+                                        dialog.selected =
+                                            (dialog.selected + 1).min(count.saturating_sub(1));
+                                        dialog.scroll = dialog.selected.saturating_sub(6);
+                                    }
                                 }
                             }
                             KeyCode::Char(' ') if git_dialog.is_some() => {
@@ -1505,7 +1518,11 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 }
                                 if git_dialog.is_some() {
                                     if let Some(dialog) = git_dialog.as_mut() {
-                                        let count = view::git_changed_files(&dialog.info.raw).len();
+                                        let count = if dialog.page == 1 {
+                                            dialog.info.log.lines().count()
+                                        } else {
+                                            view::git_changed_files(&dialog.info.raw).len()
+                                        };
                                         dialog.scroll = dialog
                                             .scroll
                                             .saturating_add(3)
@@ -1764,6 +1781,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     match hit {
                                         Some(view::Hit::GitTab(page)) => {
                                             dialog.page = page;
+                                            dialog.scroll = 0;
                                             dialog.selected = 0;
                                             dialog.editing_message = false;
                                         }

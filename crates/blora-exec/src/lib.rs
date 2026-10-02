@@ -440,7 +440,16 @@ impl LocalBackend {
 
     pub fn git_log(&self) -> Result<String> {
         self.policy.require(self.policy.file_read(), "git_log")?;
-        self.git(&["log", "-8", "--oneline"])
+        self.git(&[
+            "log",
+            "--graph",
+            "--all",
+            "--topo-order",
+            "--decorate=short",
+            "--color=never",
+            "-100",
+            "--oneline",
+        ])
     }
 
     pub fn git_branch(&self) -> Result<String> {
@@ -1143,6 +1152,42 @@ mod tests {
         let parsed = parse_git_indicator(&text, "", "");
         assert!(!parsed.clean);
         assert_eq!(parsed.branch, info.branch);
+    }
+
+    #[test]
+    fn git_log_preserves_merge_topology_and_other_branch_refs() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(dir.path())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.name", "Test"]);
+        git(&["config", "user.email", "test@example.invalid"]);
+        git(&["commit", "--allow-empty", "-m", "root"]);
+        git(&["checkout", "-b", "feature"]);
+        git(&["commit", "--allow-empty", "-m", "feature commit"]);
+        git(&["checkout", "main"]);
+        git(&["commit", "--allow-empty", "-m", "main commit"]);
+        git(&["merge", "--no-ff", "feature", "-m", "merge feature"]);
+        git(&["checkout", "-b", "unmerged"]);
+        git(&["commit", "--allow-empty", "-m", "unmerged commit"]);
+        git(&["checkout", "main"]);
+        let backend = LocalBackend::new(Policy::new(dir.path(), true).unwrap());
+        let log = backend.git_log().unwrap();
+        assert!(log.contains("|\\"), "{log}");
+        assert!(log.contains("HEAD -> main"), "{log}");
+        assert!(log.contains("unmerged"), "{log}");
+        assert!(log.contains("feature commit"), "{log}");
+        assert!(!log.contains('\x1b'));
     }
 
     fn chinese_locale_available() -> bool {

@@ -3191,11 +3191,16 @@ fn render_git_dialog(
             }
         }
         1 => {
-            let lines = git_graph_lines(&dialog.info.log);
+            let lines = git_graph_lines(&dialog.info.log, theme);
             frame.render_widget(
                 Paragraph::new(
                     lines
                         .into_iter()
+                        .skip(
+                            dialog
+                                .scroll
+                                .min(dialog.info.log.lines().count().saturating_sub(1)),
+                        )
                         .take(body.height as usize)
                         .collect::<Vec<_>>(),
                 )
@@ -3209,6 +3214,8 @@ fn render_git_dialog(
         Paragraph::new(Line::from(Span::styled(
             if dialog.page == 2 {
                 "点击消息输入 · 点击文件切换勾选 · ↑/↓ 选择 · 空格切换 · Enter 提交 · Esc 关闭"
+            } else if dialog.page == 1 {
+                "↑/↓ 或滚轮浏览 · ←/→ 分页 · 最近 100 次提交 · Esc 关闭"
             } else {
                 "←/→ 分页 · Esc 关闭"
             },
@@ -3433,13 +3440,54 @@ fn render_git_commit_page(
     }
 }
 
-fn git_graph_lines(log: &str) -> Vec<Line<'static>> {
+fn git_graph_lines(log: &str, theme: &Theme) -> Vec<Line<'static>> {
     log.lines()
         .map(|line| {
-            Line::from(vec![
-                Span::styled("●─ ", Style::default()),
-                Span::styled(line.to_owned(), Style::default()),
-            ])
+            let prefix_end = line
+                .char_indices()
+                .find(|(_, ch)| !matches!(ch, ' ' | '*' | '|' | '/' | '\\' | '_' | '-' | '.'))
+                .map_or(line.len(), |(offset, _)| offset);
+            let (graph, text) = line.split_at(prefix_end);
+            let colors = [theme.rose, theme.sage, theme.amber, theme.text_dim];
+            let mut spans: Vec<Span<'static>> = graph
+                .chars()
+                .enumerate()
+                .map(|(column, ch)| {
+                    let glyph = match ch {
+                        '*' => '●',
+                        '|' => '│',
+                        '_' | '-' => '─',
+                        '/' => '╱',
+                        '\\' => '╲',
+                        ch => ch,
+                    };
+                    Span::styled(
+                        glyph.to_string(),
+                        theme.fg(colors[(column / 2) % colors.len()]),
+                    )
+                })
+                .collect();
+            if let Some((hash, subject)) = text.split_once(' ') {
+                spans.push(Span::styled(hash.to_owned(), theme.mute()));
+                spans.push(Span::raw(" "));
+                if subject.starts_with('(')
+                    && let Some(end) = subject.find(") ")
+                {
+                    spans.push(Span::styled(
+                        subject[..end + 1].to_owned(),
+                        theme.fg(theme.sage),
+                    ));
+                    spans.push(Span::styled(
+                        subject[end + 1..].to_owned(),
+                        theme.fg(theme.text),
+                    ));
+                } else {
+                    spans.push(Span::styled(subject.to_owned(), theme.fg(theme.text)));
+                }
+            } else {
+                spans.push(Span::styled(text.to_owned(), theme.fg(theme.text)));
+            }
+            Line::from(spans)
         })
         .collect()
 }
@@ -4383,6 +4431,33 @@ mod tests {
     use crate::theme::Palette;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+
+    #[test]
+    fn git_graph_keeps_connectors_and_does_not_invent_nodes() {
+        let theme = Theme::dark();
+        let log = "*   abc123 (HEAD -> main) merge\n|\\  \n| * def456 (feature) change\n|/  \n* fed321 root";
+        let lines = git_graph_lines(log, &theme);
+        let text: Vec<String> = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(text[0], "●   abc123 (HEAD -> main) merge");
+        assert_eq!(text[1], "│╲  ");
+        assert_eq!(text[2], "│ ● def456 (feature) change");
+        assert_eq!(text[3], "│╱  ");
+        assert_eq!(text[4], "● fed321 root");
+        assert_eq!(
+            text.iter()
+                .map(|line| line.matches('●').count())
+                .sum::<usize>(),
+            3
+        );
+    }
 
     #[test]
     fn idle_context_bar_fills_by_usage() {
