@@ -3441,6 +3441,29 @@ fn render_git_commit_page(
     }
 }
 
+fn git_diff_style(line: &str, theme: &Theme) -> Style {
+    let accent = if line.starts_with("+++") || line.starts_with("---") || line.starts_with("diff ")
+    {
+        return theme.fg(theme.text_dim);
+    } else if line.starts_with('+') {
+        theme.sage
+    } else if line.starts_with('-') {
+        theme.rust
+    } else if line.starts_with("@@") {
+        theme.rose
+    } else {
+        return theme.base();
+    };
+    let background = match (theme.bg, accent) {
+        (Color::Rgb(r, g, b), Color::Rgb(ar, ag, ab)) => {
+            let blend = |base: u8, tint: u8| ((u16::from(base) * 3 + u16::from(tint)) / 4) as u8;
+            Color::Rgb(blend(r, ar), blend(g, ag), blend(b, ab))
+        }
+        _ => theme.bg_select,
+    };
+    theme.fg(accent).bg(background)
+}
+
 fn render_git_diff(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -3481,21 +3504,8 @@ fn render_git_diff(
         .lines()
         .skip(dialog.diff_scroll)
         .map(|line| {
-            let color = if line.starts_with("+++")
-                || line.starts_with("---")
-                || line.starts_with("diff ")
-            {
-                theme.text_dim
-            } else if line.starts_with('+') {
-                theme.sage
-            } else if line.starts_with('-') {
-                theme.rust
-            } else if line.starts_with("@@") {
-                theme.rose
-            } else {
-                theme.text
-            };
-            Line::from(Span::styled(line.to_owned(), theme.fg(color)))
+            let style = git_diff_style(line, theme);
+            Line::from(Span::styled(line.to_owned(), style)).style(style)
         })
         .collect();
     frame.render_widget(
@@ -4501,6 +4511,22 @@ mod tests {
     use crate::theme::Palette;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+
+    #[test]
+    fn diff_backgrounds_distinguish_added_removed_and_context() {
+        for theme in [Theme::dark(), Theme::light()] {
+            let added = git_diff_style("+new", &theme);
+            let removed = git_diff_style("-old", &theme);
+            assert_ne!(added.bg, removed.bg);
+            assert_ne!(added.bg, Some(theme.bg));
+            assert_ne!(removed.bg, Some(theme.bg));
+            assert_eq!(git_diff_style(" context", &theme), theme.base());
+            assert_eq!(
+                git_diff_style("+++ b/file", &theme),
+                theme.fg(theme.text_dim)
+            );
+        }
+    }
 
     #[test]
     fn git_graph_keeps_connectors_and_does_not_invent_nodes() {
