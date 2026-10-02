@@ -4230,14 +4230,12 @@ fn slash(
             Err(err) => SlashOutcome::Status(err.to_string()),
         },
         "model" => {
-            if !args.is_empty() {
-                *model = args.to_owned();
-            }
-            SlashOutcome::Status(if model.is_empty() {
-                env_flag("BLORA_MODEL", "mock or gpt-4o-mini")
+            if args.is_empty() {
+                SlashOutcome::ProviderDialog
             } else {
-                model.clone()
-            })
+                *model = args.to_owned();
+                SlashOutcome::Status(model.clone())
+            }
         }
         "provider" => {
             if args.is_empty() {
@@ -5298,6 +5296,37 @@ fn paste_into_dialog(
 #[cfg(test)]
 mod dialog_input_tests {
     use super::*;
+
+    #[test]
+    fn model_commands_open_picker_and_preserve_explicit_override() {
+        let runtime = Runtime::new(blora_storage::SqliteStore::open_in_memory().unwrap());
+        let mut model = "existing-model".to_owned();
+        let mut provider = "existing-provider".to_owned();
+        for command in ["/model", "/m", "/provider", "/model chosen-model"] {
+            let result = slash(
+                &runtime,
+                command,
+                &SessionId::generate(),
+                &mut false,
+                &mut Vec::new(),
+                &mut 0,
+                Path::new("."),
+                &CancelToken::new(),
+                &mut None,
+                &mut false,
+                &mut model,
+                &mut provider,
+            );
+            if command == "/model chosen-model" {
+                assert!(matches!(result, SlashOutcome::Status(ref text) if text == "chosen-model"));
+                assert_eq!(model, "chosen-model");
+            } else {
+                assert!(matches!(result, SlashOutcome::ProviderDialog));
+                assert_eq!(model, "existing-model");
+            }
+            assert_eq!(provider, "existing-provider");
+        }
+    }
 
     #[test]
     fn modal_hits_do_not_reach_background_or_other_dialogs() {

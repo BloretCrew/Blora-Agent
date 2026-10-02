@@ -60,6 +60,8 @@ Git 窗口默认打开“操作”页。单击文件行选中并查看差异，�
 
 运行：`/compact` `/checkpoint` `/cancel` `/steer` `/yes` `/no` `/permissions` `/approvals` `/model` `/provider` `/exec` `/worktree`
 
+`/model`（别名 `/m`）和 `/provider` 打开供应商与模型选择框。使用 ↑/↓ 选择、←/→ 切换栏、Enter 确认、Esc 关闭；`/model <name>` 继续支持直接设置模型。
+
 工作：`/tasks` `/task` `/cron` `/loop` `/pause` `/unpause` `/cancel-task` `/pump` `/agents` `/search` `/find` `/clear` `/tools` `/copy`
 
 记忆：`/memory` `/remember` `/recall` `/forget` `/distill`

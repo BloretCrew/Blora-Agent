@@ -138,7 +138,7 @@ pub const COMMANDS: &[SlashCommand] = &[
         "model",
         &["m"],
         "[name]",
-        "Show or set the session model override",
+        "Open provider/model picker or set the session model override",
         "run",
     ),
     cmd(

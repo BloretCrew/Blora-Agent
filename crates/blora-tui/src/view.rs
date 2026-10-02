@@ -3067,162 +3067,178 @@ fn render_provider_dialog(
     theme: &Theme,
 ) -> HitMap {
     let mut hits = HitMap::default();
-    let left_count = dialog.options.len().clamp(1, 12) as u16;
-    let compact_height = left_count.saturating_add(6);
-    let compact_width = area.width.saturating_sub(4).clamp(56, 88);
-    let Some(frame_y) = dialog_outer(
+    let models = dialog.current_models();
+    let row_count = dialog.options.len().max(models.len()).clamp(1, 8) as u16;
+    let Some(frame_area) = dialog_outer(
         area,
-        compact_width,
-        compact_height.max(12),
+        96,
+        (row_count * 2 + 6).max(12),
         dialog.fullscreen,
         dialog.minimized,
     ) else {
         return hits;
     };
-
     let inner = paint_dialog_frame(
         frame,
-        frame_y,
+        frame_area,
         &i18n::tr("dialog.provider_model", "选择供应商与模型"),
         pointer,
         theme,
         &mut hits,
     );
-    if inner.height == 0 {
+    if dialog.minimized || inner.height == 0 {
         return hits;
     }
-
-    let [_, body, hint_row] = Layout::vertical([
+    let [headings, body, hint_row] = Layout::vertical([
         Constraint::Length(1),
-        Constraint::Min(3),
+        Constraint::Min(0),
         Constraint::Length(1),
     ])
     .areas(inner);
-
-    if dialog.minimized {
-        return hits;
+    let columns = [
+        Constraint::Percentage(42),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ];
+    let [left_title, _, right_title] = Layout::horizontal(columns).areas(headings);
+    let [left, divider, right] = Layout::horizontal(columns).areas(body);
+    for (rect, label, active) in [
+        (left_title, "供应商", dialog.pane == ProviderPane::Providers),
+        (right_title, "模型", dialog.pane == ProviderPane::Models),
+    ] {
+        frame.render_widget(
+            Paragraph::new(format!(" {label}")).style(if active {
+                theme.rose_bold()
+            } else {
+                theme.dim()
+            }),
+            rect,
+        );
     }
-
-    let [left, right] =
-        Layout::horizontal([Constraint::Percentage(42), Constraint::Percentage(58)]).areas(body);
-    let left_rows = split_n_rows(left, left_count.max(1));
-    for (index, option) in dialog.options.iter().enumerate() {
-        let rect = left_rows
-            .get(index)
-            .copied()
-            .unwrap_or(Rect::new(left.x, left.y, 0, 0));
-        if rect.height == 0 {
-            continue;
+    frame.render_widget(
+        Paragraph::new(vec![Line::from("│"); divider.height as usize]).style(theme.mute()),
+        divider,
+    );
+    // Keep the keyboard selection visible in lists taller than the dialog.
+    let capacity = usize::from(body.height / 2).max(1);
+    let provider_start = dialog.selected.saturating_sub(capacity - 1);
+    for (index, option) in dialog
+        .options
+        .iter()
+        .enumerate()
+        .skip(provider_start)
+        .take(capacity)
+    {
+        let y = left.y + ((index - provider_start) * 2) as u16;
+        if y >= left.bottom() {
+            break;
         }
+        let rect = Rect::new(left.x, y, left.width, 2.min(left.bottom() - y));
         hits.provider_rows.push((rect, index));
-        let hovered = pointer
-            .map(|(col, row)| contains(rect, col, row))
-            .unwrap_or(false);
-        let is_selected = index == dialog.selected;
-        if is_selected || hovered {
-            frame.render_widget(
-                Block::default().style(Style::default().bg(theme.bg_select)),
-                rect,
-            );
-        }
-        let marker = if (is_selected && dialog.pane == ProviderPane::Providers) || hovered {
+        let hovered = pointer.is_some_and(|(col, row)| contains(rect, col, row));
+        let selected = index == dialog.selected;
+        let marker = if hovered || (selected && dialog.pane == ProviderPane::Providers) {
             "❯"
-        } else if is_selected {
+        } else if selected {
             "•"
         } else {
             " "
         };
-        let name_style = if is_selected {
-            theme.fg(theme.text)
-        } else {
-            theme.fg(theme.text_dim)
-        };
-        let hint = if option.id == blora_catalog::ADD_PROVIDER_ID {
-            option.hint.clone()
-        } else if option.available {
+        let hint = if option.available {
             option.hint.clone()
         } else {
             format!("不可用 · {}", option.hint)
         };
-        let line = Line::from(vec![
-            Span::styled(format!(" {marker} "), theme.fg(theme.rose)),
-            Span::styled(option.display.clone(), name_style),
-            Span::styled("  ", theme.mute()),
-            Span::styled(hint, theme.mute()),
-        ]);
-        frame.render_widget(Paragraph::new(line).style(theme.base()), rect);
-    }
-
-    let models = dialog.current_models();
-    if dialog.is_add() {
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                "  回车打开添加供应商向导",
+        let width = usize::from(rect.width.saturating_sub(3));
+        let lines = vec![
+            Line::from(vec![
+                Span::styled(format!(" {marker} "), theme.fg(theme.rose)),
+                Span::styled(
+                    ellipsize(&option.display, width),
+                    if selected {
+                        theme.fg(theme.text)
+                    } else {
+                        theme.dim()
+                    },
+                ),
+            ]),
+            Line::from(Span::styled(
+                format!("   {}", ellipsize(&hint, width)),
                 theme.mute(),
-            )))
-            .style(theme.base()),
-            right,
+            )),
+        ];
+        frame.render_widget(
+            Paragraph::new(lines).style(if selected || hovered {
+                theme.base().bg(theme.bg_select)
+            } else {
+                theme.base()
+            }),
+            rect,
         );
-    } else if models.is_empty() {
+    }
+    if dialog.is_add() || models.is_empty() {
+        let text = if dialog.is_add() {
+            "回车打开添加供应商向导".to_owned()
+        } else {
+            i18n::tr("provider.no_models", "没有可列出的模型")
+        };
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                format!("  {}", i18n::tr("provider.no_models", "没有可列出的模型")),
-                theme.mute(),
-            )))
-            .style(theme.base()),
+            Paragraph::new(ellipsize(&text, right.width as usize)).style(theme.mute()),
             right,
         );
     } else {
-        let right_rows = split_n_rows(right, models.len().clamp(1, 16) as u16);
-        for (index, option) in models.iter().enumerate() {
-            let rect = right_rows
-                .get(index)
-                .copied()
-                .unwrap_or(Rect::new(right.x, right.y, 0, 0));
-            if rect.height == 0 {
-                continue;
+        let start = dialog.model_selected.saturating_sub(capacity - 1);
+        for (index, option) in models.iter().enumerate().skip(start).take(capacity) {
+            let y = right.y + ((index - start) * 2) as u16;
+            if y >= right.bottom() {
+                break;
             }
+            let rect = Rect::new(right.x, y, right.width, 2.min(right.bottom() - y));
             hits.provider_model_rows.push((rect, index));
-            let hovered = pointer
-                .map(|(col, row)| contains(rect, col, row))
-                .unwrap_or(false);
-            let is_selected = index == dialog.model_selected;
-            if is_selected || hovered {
-                frame.render_widget(
-                    Block::default().style(Style::default().bg(theme.bg_select)),
-                    rect,
-                );
-            }
-            let marker = if (is_selected && dialog.pane == ProviderPane::Models) || hovered {
+            let hovered = pointer.is_some_and(|(col, row)| contains(rect, col, row));
+            let selected = index == dialog.model_selected;
+            let marker = if hovered || (selected && dialog.pane == ProviderPane::Models) {
                 "❯"
+            } else if selected {
+                "•"
             } else {
                 " "
             };
-            let name_style = if is_selected {
-                theme.fg(theme.text)
-            } else {
-                theme.fg(theme.text_dim)
-            };
-            let line = Line::from(vec![
-                Span::styled(format!(" {marker} "), theme.fg(theme.rose)),
-                Span::styled(option.display.clone(), name_style),
-                Span::styled("  ", theme.mute()),
-                Span::styled(option.hint.clone(), theme.mute()),
-            ]);
-            frame.render_widget(Paragraph::new(line).style(theme.base()), rect);
+            let width = usize::from(rect.width.saturating_sub(3));
+            let lines = vec![
+                Line::from(vec![
+                    Span::styled(format!(" {marker} "), theme.fg(theme.rose)),
+                    Span::styled(
+                        ellipsize(&option.display, width),
+                        if selected {
+                            theme.fg(theme.text)
+                        } else {
+                            theme.dim()
+                        },
+                    ),
+                ]),
+                Line::from(Span::styled(
+                    format!("   {}", ellipsize(&option.hint, width)),
+                    theme.mute(),
+                )),
+            ];
+            frame.render_widget(
+                Paragraph::new(lines).style(if selected || hovered {
+                    theme.base().bg(theme.bg_select)
+                } else {
+                    theme.base()
+                }),
+                rect,
+            );
         }
     }
-
+    let hint = if hint_row.width >= 58 {
+        " ↑/↓ 选择 · ←/→ 切换栏 · Enter 确认 · Esc 关闭"
+    } else {
+        " ↑↓ 选择 · ←→ 切换 · Enter 确认 · Esc"
+    };
     frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            &format!(
-                " ←/→ {} · {}",
-                i18n::tr("provider.switch_hint", "切换栏 · enter 确认 · esc 关闭"),
-                i18n::tr("action.close", "关闭")
-            ),
-            theme.mute(),
-        )))
-        .style(theme.base()),
+        Paragraph::new(ellipsize(hint, hint_row.width as usize)).style(theme.mute()),
         hint_row,
     );
     hits
@@ -5861,13 +5877,36 @@ mod tests {
             lines.iter().all(|line| !flatten(line).contains("默认（")),
             "no synthetic default row"
         );
-        let unavailable_row = &lines[openai_row];
+        let unavailable_row = &lines[openai_row + 1];
         assert!(
             flatten(unavailable_row).contains("不可用"),
             "unavailable provider is labeled, got {unavailable_row}"
         );
         for (rect, index) in &hits.provider_rows {
             assert_eq!(hits.hit(rect.x, rect.y), Some(Hit::ProviderRow(*index)));
+        }
+    }
+
+    #[test]
+    fn provider_dialog_keeps_long_list_selection_visible() {
+        let mut dialog = sample_provider_dialog();
+        dialog.options[0].models = (0..30)
+            .map(|index| ModelOption {
+                id: format!("model-{index}"),
+                display: format!("model-{index}"),
+                hint: "很长的模型说明".repeat(20),
+            })
+            .collect();
+        dialog.pane = ProviderPane::Models;
+        dialog.model_selected = 29;
+        for (width, height) in [(100, 30), (60, 16), (40, 12)] {
+            let (lines, hits) =
+                render_provider_with_hits(Rect::new(0, 0, width, height), &dialog, None);
+            assert!(lines.iter().any(|line| flatten(line).contains("model-29")));
+            let (rect, index) = hits.provider_model_rows.last().unwrap();
+            assert_eq!(*index, 29);
+            assert_eq!(hits.hit(rect.x, rect.y), Some(Hit::ProviderModelRow(29)));
+            assert!(lines.iter().any(|line| line.contains('…')));
         }
     }
 
