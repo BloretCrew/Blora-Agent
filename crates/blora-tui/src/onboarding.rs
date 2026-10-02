@@ -310,6 +310,15 @@ impl Onboarding {
         Outcome::Stay
     }
 
+    pub(super) fn render_area(&self, area: Rect) -> Rect {
+        if area.width >= 50 && area.height >= 18 {
+            super::view::dialog_outer(area, 82, 26, self.fullscreen, self.minimized)
+                .unwrap_or_default()
+        } else {
+            area
+        }
+    }
+
     pub fn draw(&mut self, frame: &mut Frame, username: &str, logged_in: bool) {
         let area = frame.area();
         let theme = super::theme::Theme::current();
@@ -319,6 +328,7 @@ impl Onboarding {
             self.draw_dialog(frame, area, username, logged_in, &theme);
             return;
         }
+        frame.render_widget(ratatui::widgets::Clear, area);
         frame.render_widget(
             Paragraph::new("").style(Style::default().bg(theme.bg).fg(theme.text)),
             area,

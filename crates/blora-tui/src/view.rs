@@ -838,7 +838,12 @@ pub fn draw(
     render_composer(frame, composer, model, &theme, &mut hits);
     render_status(frame, status, model, &theme);
     render_hints(frame, hints, model, &theme, &mut hits);
-    dim_region(frame.buffer_mut(), area, model.dialog_stack.len(), &theme);
+    dim_region(
+        frame.buffer_mut(),
+        area,
+        model.dialog_stack.len() as f64,
+        &theme,
+    );
     for (index, id) in model.dialog_stack.iter().copied().enumerate() {
         if id == DialogId::Onboarding {
             hits = HitMap {
@@ -856,13 +861,128 @@ pub fn draw(
             dim_region(
                 frame.buffer_mut(),
                 rect,
-                model.dialog_stack.len() - index - 1,
+                (model.dialog_stack.len() - index - 1) as f64,
                 &theme,
             );
         }
         hits = dialog_hits;
     }
     hits
+}
+
+/// Render each live window before caching only its uncomposited rectangle.
+pub fn draw_animated(
+    frame: &mut Frame<'_>,
+    model: Option<&FrameModel<'_>>,
+    transcript_cache: &mut TranscriptCache,
+    visuals: &mut crate::dialogs::DialogVisuals,
+    now: std::time::Instant,
+    mut guide: Option<&mut crate::onboarding::Onboarding>,
+    username: &str,
+    logged_in: bool,
+) -> HitMap {
+    let theme = Theme::current();
+    let area = frame.area();
+    let mut hits = if let Some(model) = model {
+        let mut base = model.clone();
+        base.dialog_stack = &[];
+        draw(frame, &base, transcript_cache)
+    } else {
+        frame.render_widget(Block::default().style(theme.base()), area);
+        frame.render_widget(
+            Paragraph::new("终端较小，请扩大窗口；/onboarding 打开引导"),
+            area,
+        );
+        HitMap::default()
+    };
+    let depth: f64 = visuals.layers.iter().map(|layer| layer.weight(now)).sum();
+    dim_region(frame.buffer_mut(), area, depth, &theme);
+    let count = visuals.layers.len();
+    for index in 0..count {
+        let above: f64 = visuals.layers[index + 1..]
+            .iter()
+            .map(|layer| layer.weight(now))
+            .sum();
+        let visual = &mut visuals.layers[index];
+        let mut layer_hits = HitMap {
+            modal: true,
+            ..HitMap::default()
+        };
+        if visual.live() {
+            let rect = if visual.id == DialogId::Onboarding {
+                guide.as_deref_mut().map(|guide| {
+                    guide.draw(frame, username, logged_in);
+                    guide.render_area(area)
+                })
+            } else if let Some(model) = model {
+                let mut layer_model = model.clone();
+                if index + 1 != count {
+                    layer_model.pointer = None;
+                }
+                layer_hits = render_layer(frame, area, &layer_model, visual.id, &theme);
+                layer_hits.modal_area
+            } else {
+                None
+            };
+            visual.layer = rect.map(|rect| snapshot_region(frame.buffer_mut(), rect));
+            visual.theme = Some(theme);
+        }
+        if let Some(raw) = &visual.layer {
+            let mut layer = raw.clone();
+            if let Some(old) = visual.theme {
+                retheme_layer(&mut layer, old, theme);
+            }
+            let rect = layer.area;
+            let retain = (0.72_f64.powf(above) * (0.35 + 0.65 * visual.weight(now))).max(0.35);
+            blend_region(&mut layer, rect, retain, &theme);
+            copy_region(&layer, frame.buffer_mut());
+        }
+        hits = layer_hits;
+    }
+    hits
+}
+
+fn snapshot_region(source: &ratatui::buffer::Buffer, rect: Rect) -> ratatui::buffer::Buffer {
+    let mut layer = ratatui::buffer::Buffer::empty(rect.intersection(source.area));
+    copy_region(source, &mut layer);
+    layer
+}
+
+fn copy_region(source: &ratatui::buffer::Buffer, target: &mut ratatui::buffer::Buffer) {
+    let area = source.area.intersection(target.area);
+    for y in area.y..area.bottom() {
+        for x in area.x..area.right() {
+            target[(x, y)] = source[(x, y)].clone();
+        }
+    }
+}
+
+fn retheme_layer(buffer: &mut ratatui::buffer::Buffer, old: Theme, new: Theme) {
+    let colors = |t: Theme| {
+        [
+            t.bg,
+            t.bg_raised,
+            t.bg_select,
+            t.text,
+            t.text_dim,
+            t.text_mute,
+            t.rose,
+            t.sage,
+            t.amber,
+            t.rust,
+            t.hairline,
+        ]
+    };
+    let before = colors(old);
+    let after = colors(new);
+    for cell in &mut buffer.content {
+        if let Some(i) = before.iter().position(|color| *color == cell.fg) {
+            cell.fg = after[i];
+        }
+        if let Some(i) = before.iter().position(|color| *color == cell.bg) {
+            cell.bg = after[i];
+        }
+    }
 }
 
 fn render_layer(
@@ -1340,12 +1460,19 @@ fn color_rgb(color: Color, fallback: Color) -> (u8, u8, u8) {
     }
 }
 
-fn dim_region(buffer: &mut ratatui::buffer::Buffer, area: Rect, depth: usize, theme: &Theme) {
-    if depth == 0 {
+fn dim_region(buffer: &mut ratatui::buffer::Buffer, area: Rect, depth: f64, theme: &Theme) {
+    if depth == 0.0 {
         return;
     }
     // Compute from the freshly rendered layer to keep redraws and closing reversible.
-    let retain = 0.72_f64.powi(depth.min(16) as i32).max(0.35);
+    let retain = 0.72_f64.powf(depth.max(0.0)).max(0.35);
+    blend_region(buffer, area, retain, theme);
+}
+
+fn blend_region(buffer: &mut ratatui::buffer::Buffer, area: Rect, retain: f64, theme: &Theme) {
+    if retain == 1.0 {
+        return;
+    }
     for y in area.y..area.bottom() {
         for x in area.x..area.right() {
             let Some(cell) = buffer.cell_mut((x, y)) else {
@@ -1357,8 +1484,18 @@ fn dim_region(buffer: &mut ratatui::buffer::Buffer, area: Rect, depth: usize, th
                 cell.bg = fg;
                 cell.modifier.remove(Modifier::REVERSED);
             }
-            let fg = color_rgb(cell.fg, theme.text);
-            let bg = color_rgb(cell.bg, theme.bg);
+            let default_fg = if theme.text == Color::Reset {
+                Color::Rgb(32, 32, 32)
+            } else {
+                theme.text
+            };
+            let default_bg = if theme.bg == Color::Reset {
+                Color::Rgb(250, 250, 250)
+            } else {
+                theme.bg
+            };
+            let fg = color_rgb(cell.fg, default_fg);
+            let bg = color_rgb(cell.bg, default_bg);
             let blend = |f: u8, b: u8| {
                 (f64::from(b) + (f64::from(f) - f64::from(b)) * retain).round() as u8
             };
@@ -6165,6 +6302,120 @@ mod dialog_layer_tests {
     use super::*;
 
     #[test]
+    fn fractional_depth_and_window_visibility_are_continuous_and_clipped() {
+        for dark in [true, false] {
+            let theme = Theme::of(theme::Palette::Coral, dark);
+            let rect = Rect::new(5, 4, 4, 2);
+            let mut raw = ratatui::buffer::Buffer::empty(rect);
+            raw[(5, 4)]
+                .set_symbol("标题")
+                .set_fg(theme.rose)
+                .set_bg(theme.bg);
+            let mut previous = None;
+            for weight in [0.0, 0.25, 0.5, 0.75, 1.0] {
+                let mut layer = raw.clone();
+                blend_region(&mut layer, rect, 0.35 + 0.65 * weight, &theme);
+                if let Some(previous) = previous {
+                    assert_ne!(layer[(5, 4)].fg, previous);
+                }
+                previous = Some(layer[(5, 4)].fg);
+                assert_eq!(layer[(5, 4)].bg, theme.bg);
+                assert_eq!(layer[(5, 4)].symbol(), "标题");
+                let mut redraw = raw.clone();
+                blend_region(&mut redraw, rect, 0.35 + 0.65 * weight, &theme);
+                assert_eq!(layer, redraw);
+                let mut clipped = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 6, 5));
+                copy_region(&layer, &mut clipped);
+                assert_eq!(clipped[(5, 4)], layer[(5, 4)]);
+            }
+            let mut half = raw.clone();
+            let mut full = raw.clone();
+            dim_region(&mut half, rect, 0.5, &theme);
+            dim_region(&mut full, rect, 1.0, &theme);
+            assert_ne!(half[(5, 4)].fg, full[(5, 4)].fg);
+            assert_ne!(half[(5, 4)].fg, raw[(5, 4)].fg);
+        }
+    }
+
+    #[test]
+    fn cached_layers_retheme_without_mutating_original_colors() {
+        let old = Theme::of(theme::Palette::Coral, true);
+        let new = Theme::of(theme::Palette::Indigo, false);
+        let rect = Rect::new(0, 0, 1, 1);
+        let mut raw = ratatui::buffer::Buffer::empty(rect);
+        raw[(0, 0)].set_fg(old.rose).set_bg(old.bg);
+        let mut layer = raw.clone();
+        retheme_layer(&mut layer, old, new);
+        assert_eq!(layer[(0, 0)].fg, new.rose);
+        assert_eq!(layer[(0, 0)].bg, new.bg);
+        assert_eq!(raw[(0, 0)].fg, old.rose);
+    }
+
+    #[test]
+    fn independent_onboarding_keeps_original_layer_after_business_drop() {
+        use crate::dialogs::{DialogVisuals, TRANSITION_DURATION};
+        use ratatui::{Terminal, backend::TestBackend};
+        use std::time::{Duration, Instant};
+        for (width, height) in [(100, 32), (24, 8), (3, 2)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            let mut guide = crate::onboarding::Onboarding::new(false);
+            let mut visuals = DialogVisuals::default();
+            let mut cache = TranscriptCache::default();
+            let start = Instant::now();
+            visuals.sync(&[DialogId::Onboarding], start);
+            let mut frames = Vec::new();
+            for elapsed in [0, 90, 180] {
+                terminal
+                    .draw(|frame| {
+                        draw_animated(
+                            frame,
+                            None,
+                            &mut cache,
+                            &mut visuals,
+                            start + Duration::from_millis(elapsed),
+                            Some(&mut guide),
+                            "测试账号",
+                            false,
+                        );
+                    })
+                    .unwrap();
+                frames.push(terminal.backend().buffer().clone());
+            }
+            assert_ne!(frames[0], frames[1]);
+            assert_ne!(frames[1], frames[2]);
+            let raw = visuals.layers[0].layer.clone().unwrap();
+            let close = start + TRANSITION_DURATION;
+            visuals.sync(&[], close);
+            drop(guide);
+            for elapsed in [0, 90] {
+                terminal
+                    .draw(|frame| {
+                        let hits = draw_animated(
+                            frame,
+                            None,
+                            &mut cache,
+                            &mut visuals,
+                            close + Duration::from_millis(elapsed),
+                            None,
+                            "测试账号",
+                            false,
+                        );
+                        assert!(hits.modal);
+                        assert!(hits.modal_area.is_none());
+                    })
+                    .unwrap();
+                assert_eq!(visuals.layers[0].layer.as_ref(), Some(&raw));
+                if elapsed == 0 {
+                    assert_eq!(terminal.backend().buffer(), &frames[2]);
+                }
+            }
+            assert_eq!(terminal.backend().buffer(), &frames[1]);
+            visuals.sync(&[], close + TRANSITION_DURATION);
+            assert!(visuals.layers.is_empty());
+        }
+    }
+
+    #[test]
     fn dimming_tracks_depth_and_preserves_background_for_both_schemes() {
         for dark in [true, false] {
             let theme = Theme::of(theme::Palette::Coral, dark);
@@ -6177,24 +6428,24 @@ mod dialog_layer_tests {
                 .set_style(Style::default().add_modifier(Modifier::BOLD));
             let mut one = original.clone();
             let mut two = original.clone();
-            dim_region(&mut one, area, 1, &theme);
-            dim_region(&mut two, area, 2, &theme);
+            dim_region(&mut one, area, 1.0, &theme);
+            dim_region(&mut two, area, 2.0, &theme);
             assert_ne!(one[(0, 0)].fg, original[(0, 0)].fg);
             assert_ne!(one[(0, 0)].fg, two[(0, 0)].fg);
             assert_eq!(two[(0, 0)].bg, theme.bg);
             assert_eq!(two[(0, 0)].symbol(), "字");
             assert!(!two[(0, 0)].modifier.contains(Modifier::BOLD));
             let mut next_frame = original.clone();
-            dim_region(&mut next_frame, area, 2, &theme);
+            dim_region(&mut next_frame, area, 2.0, &theme);
             assert_eq!(two, next_frame);
             let mut closed = original.clone();
-            dim_region(&mut closed, area, 0, &theme);
+            dim_region(&mut closed, area, 0.0, &theme);
             assert_eq!(closed, original);
-            dim_region(&mut next_frame, area, 0, &theme);
+            dim_region(&mut next_frame, area, 0.0, &theme);
             let mut deepest = original.clone();
             let mut deeper = original.clone();
-            dim_region(&mut deepest, area, 16, &theme);
-            dim_region(&mut deeper, area, 32, &theme);
+            dim_region(&mut deepest, area, 16.0, &theme);
+            dim_region(&mut deeper, area, 32.0, &theme);
             assert_eq!(deepest, deeper);
         }
     }
@@ -6216,7 +6467,7 @@ mod dialog_layer_tests {
             buffer[(x as u16, 0)].set_fg(color);
         }
         let top = buffer[(3, 0)].clone();
-        dim_region(&mut buffer, Rect::new(0, 0, 3, 1), 2, &theme);
+        dim_region(&mut buffer, Rect::new(0, 0, 3, 1), 2.0, &theme);
         assert_eq!(buffer[(3, 0)], top);
         for x in 0..3 {
             assert!(matches!(buffer[(x, 0)].fg, Color::Rgb(..)));
@@ -6310,6 +6561,89 @@ mod dialog_layer_tests {
                 })
                 .unwrap();
             assert_eq!(terminal.backend().buffer(), &stacked);
+            let start = std::time::Instant::now();
+            let mut visuals = crate::dialogs::DialogVisuals::default();
+            visuals.sync(model.dialog_stack, start);
+            let settled = start + crate::dialogs::TRANSITION_DURATION;
+            terminal
+                .draw(|frame| {
+                    hits = draw_animated(
+                        frame,
+                        Some(&model),
+                        &mut cache,
+                        &mut visuals,
+                        settled,
+                        None,
+                        "you",
+                        false,
+                    );
+                })
+                .unwrap();
+            assert_eq!(terminal.backend().buffer(), &stacked);
+            assert!(!hits.settings_rows.is_empty());
+            let parent_raw = visuals.layers[0].layer.clone().unwrap();
+            let child_raw = visuals.layers[1].layer.clone().unwrap();
+            // Removing the business Option must not remove the closing visual layer.
+            model.settings_dialog = None;
+            visuals.sync(&[DialogId::Provider], settled);
+            terminal
+                .draw(|frame| {
+                    hits = draw_animated(
+                        frame,
+                        Some(&model),
+                        &mut cache,
+                        &mut visuals,
+                        settled,
+                        None,
+                        "you",
+                        false,
+                    );
+                })
+                .unwrap();
+            assert_eq!(terminal.backend().buffer(), &stacked);
+            assert!(hits.settings_rows.is_empty());
+            assert!(hits.provider_rows.is_empty());
+            assert!(hits.modal);
+            let mid = settled + std::time::Duration::from_millis(90);
+            terminal
+                .draw(|frame| {
+                    draw_animated(
+                        frame,
+                        Some(&model),
+                        &mut cache,
+                        &mut visuals,
+                        mid,
+                        None,
+                        "you",
+                        false,
+                    );
+                })
+                .unwrap();
+            assert_ne!(terminal.backend().buffer(), &stacked);
+            assert_eq!(visuals.layers[0].layer.as_ref(), Some(&parent_raw));
+            assert_eq!(visuals.layers[1].layer.as_ref(), Some(&child_raw));
+            visuals.sync(
+                &[DialogId::Provider],
+                settled + crate::dialogs::TRANSITION_DURATION,
+            );
+            terminal
+                .draw(|frame| {
+                    hits = draw_animated(
+                        frame,
+                        Some(&model),
+                        &mut cache,
+                        &mut visuals,
+                        settled + crate::dialogs::TRANSITION_DURATION,
+                        None,
+                        "you",
+                        false,
+                    );
+                })
+                .unwrap();
+            assert_eq!(visuals.layers.len(), 1);
+            assert_eq!(visuals.layers[0].layer.as_ref(), Some(&parent_raw));
+            assert!(hits.settings_rows.is_empty());
+            model.settings_dialog = Some(&settings);
             model.dialog_stack = &[DialogId::Settings, DialogId::Provider];
             terminal
                 .draw(|f| {

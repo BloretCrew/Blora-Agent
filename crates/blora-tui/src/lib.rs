@@ -75,6 +75,17 @@ fn git_file_double_click(
     }
 }
 
+fn global_quit(event: &Event) -> bool {
+    matches!(event, Event::Key(key)
+        if key.kind == KeyEventKind::Press
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('c' | 'q')))
+}
+
+fn closing_consumes_input(visuals: &dialogs::DialogVisuals, event: &Event) -> bool {
+    visuals.closing_barrier() && !global_quit(event)
+}
+
 fn browse_input_history(
     history: &[String],
     index: &mut Option<usize>,
@@ -105,7 +116,50 @@ fn browse_input_history(
 
 #[cfg(test)]
 mod input_history_tests {
-    use super::browse_input_history;
+    use super::{
+        DialogId, Instant, browse_input_history, closing_consumes_input, dialogs, global_quit,
+    };
+    use crossterm::event::{Event, KeyCode, KeyModifiers, MouseButton};
+    #[test]
+    fn closing_animation_consumes_keyboard_mouse_scroll_and_paste_but_not_quit() {
+        use crossterm::event::{KeyEvent, MouseEvent, MouseEventKind};
+        let start = Instant::now();
+        let mut visuals = dialogs::DialogVisuals::default();
+        visuals.sync(&[DialogId::Settings], start);
+        visuals.sync(&[], start + dialogs::TRANSITION_DURATION);
+        for event in [
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL)),
+            Event::Paste("should not reach draft".into()),
+            Event::Mouse(MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: 1,
+                row: 1,
+                modifiers: KeyModifiers::NONE,
+            }),
+            Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 1,
+                row: 1,
+                modifiers: KeyModifiers::NONE,
+            }),
+        ] {
+            assert!(closing_consumes_input(&visuals, &event));
+            assert!(!global_quit(&event));
+        }
+        for code in ['c', 'q'] {
+            let event = Event::Key(KeyEvent::new(KeyCode::Char(code), KeyModifiers::CONTROL));
+            assert!(!closing_consumes_input(&visuals, &event));
+            assert!(global_quit(&event));
+        }
+        visuals.sync(&[], start + dialogs::TRANSITION_DURATION * 2);
+        assert!(!closing_consumes_input(
+            &visuals,
+            &Event::Paste("draft".into())
+        ));
+    }
+
     #[test]
     fn arrows_browse_history_and_restore_unsubmitted_draft() {
         let history = vec!["first".into(), "second".into()];
@@ -145,6 +199,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut passport_browser_opened = false;
     // Legacy dialog chrome remains available to the shared dialog helpers.
     let mut dialog_stack = DialogStack::default();
+    let mut dialog_visuals = dialogs::DialogVisuals::default();
     let mut passport_dialog: Option<view::PassportDialog> = None;
     // Model-provider switch dialog opened via `/provider`.
     let mut provider_dialog: Option<view::ProviderDialog> = None;
@@ -390,6 +445,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                 git_generation_id = git_generation_id.wrapping_add(1);
                 git_sync_id = git_sync_id.wrapping_add(1);
                 dialog_session.clone_from(&session_id);
+                dialog_visuals.clear();
                 live_dialogs.retain(|id| {
                     !matches!(
                         id,
@@ -562,29 +618,26 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                 let _ = write!(io::stdout(), "{}", theme::title_osc(&title));
                 let _ = execute!(io::stdout(), Hide);
             }
+            let animation_now = Instant::now();
+            dialog_visuals.sync(dialog_stack.as_slice(), animation_now);
             terminal
                 .draw(|frame| {
-                    let top_dialog = dialog_stack.top();
                     if frame.area().width < 30 || frame.area().height < 10 {
-                        hits = view::HitMap::default();
-                        if top_dialog == Some(DialogId::Onboarding)
-                            && let Some(guide) = onboarding.as_mut()
-                        {
-                            guide.draw(frame, &passport_username, passport_user_token.is_some());
-                            return;
-                        }
-                        frame.render_widget(
-                            ratatui::widgets::Paragraph::new(
-                                "终端较小，请扩大窗口；/onboarding 打开引导",
-                            )
-                            .wrap(ratatui::widgets::Wrap { trim: false }),
-                            frame.area(),
+                        hits = view::draw_animated(
+                            frame,
+                            None,
+                            &mut transcript_cache,
+                            &mut dialog_visuals,
+                            animation_now,
+                            onboarding.as_mut(),
+                            &passport_username,
+                            passport_user_token.is_some(),
                         );
                         return;
                     }
-                    hits = view::draw(
+                    hits = view::draw_animated(
                         frame,
-                        &view::FrameModel {
+                        Some(&view::FrameModel {
                             dialog_stack: dialog_stack.as_slice(),
                             workspace: &active_workspace,
                             sessions: &sessions,
@@ -622,14 +675,14 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             tick,
                             pointer,
                             text_selection,
-                        },
+                        }),
                         &mut transcript_cache,
+                        &mut dialog_visuals,
+                        animation_now,
+                        onboarding.as_mut(),
+                        &passport_username,
+                        passport_user_token.is_some(),
                     );
-                    if top_dialog == Some(DialogId::Onboarding)
-                        && let Some(guide) = onboarding.as_mut()
-                    {
-                        guide.draw(frame, &passport_username, passport_user_token.is_some());
-                    }
                 })
                 .map_err(blora_types::BloraError::exec)?;
             if let Some(handle) =
@@ -692,13 +745,22 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                     let _ = handle.join();
                 }
             }
-            let wait_ms = if job.is_some() || git_generation.is_some() || git_sync.is_some() {
+            let wait_ms = if dialog_visuals.active(animation_now) {
+                dialogs::ANIMATION_FRAME.as_millis() as u64
+            } else if job.is_some() || git_generation.is_some() || git_sync.is_some() {
                 50
             } else {
                 200
             };
             if event::poll(Duration::from_millis(wait_ms)).map_err(blora_types::BloraError::exec)? {
                 let event = event::read().map_err(blora_types::BloraError::exec)?;
+                if closing_consumes_input(&dialog_visuals, &event) {
+                    continue;
+                }
+                if dialog_visuals.closing_barrier() && global_quit(&event) {
+                    cancel.cancel();
+                    break Ok(());
+                }
                 let top_dialog = dialog_stack.top();
                 if top_dialog == Some(DialogId::Onboarding)
                     && let Some(guide) = onboarding.as_mut()
