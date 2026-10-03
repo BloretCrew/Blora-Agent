@@ -622,7 +622,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
             dialog_visuals.sync(dialog_stack.as_slice(), animation_now);
             terminal
                 .draw(|frame| {
-                    if frame.area().width < 30 || frame.area().height < 10 {
+                    if frame.area().width < 20 || frame.area().height < 10 {
                         hits = view::draw_animated(
                             frame,
                             None,

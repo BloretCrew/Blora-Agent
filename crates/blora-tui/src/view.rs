@@ -761,11 +761,17 @@ pub fn draw(
         0
     };
     let show_approval = !model.pending.is_empty();
+    let compact = area.height < 14;
+    let chrome_height = if compact { 5 } else { 6 };
+    let extra = extra.min(
+        area.height
+            .saturating_sub(chrome_height + u16::from(show_approval) + 3),
+    );
 
     let mut constraints = vec![
         Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Min(3),
+        Constraint::Length(u16::from(!compact)),
+        Constraint::Min(1),
     ];
     if show_approval {
         constraints.push(Constraint::Length(1));
@@ -1508,7 +1514,11 @@ fn blend_region(buffer: &mut ratatui::buffer::Buffer, area: Rect, retain: f64, t
 }
 
 fn inset(area: Rect) -> Rect {
-    let pad = if area.width > PAD * 2 + 8 { PAD } else { 1 };
+    let pad = if area.width >= 60 {
+        PAD
+    } else {
+        area.width.min(2) / 2
+    };
     Rect {
         x: area.x.saturating_add(pad),
         y: area.y,
@@ -2860,10 +2870,12 @@ fn render_slash(
     hits: &mut HitMap,
 ) {
     let inner = inset(area);
-    let start = model
-        .slash_selected
-        .saturating_sub(slash::MAX_VISIBLE.saturating_sub(1));
-    let end = model.slash_hits.len().min(start + slash::MAX_VISIBLE);
+    let capacity = usize::from(inner.height).min(slash::MAX_VISIBLE);
+    if capacity == 0 {
+        return;
+    }
+    let start = model.slash_selected.saturating_sub(capacity - 1);
+    let end = model.slash_hits.len().min(start + capacity);
     let visible = if model.slash_hits.is_empty() {
         &[][..]
     } else {
@@ -3089,19 +3101,39 @@ fn render_provider_dialog(
     if dialog.minimized || inner.height == 0 {
         return hits;
     }
-    let [headings, body, hint_row] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Min(0),
-        Constraint::Length(1),
-    ])
-    .areas(inner);
-    let columns = [
-        Constraint::Percentage(42),
-        Constraint::Length(1),
-        Constraint::Min(0),
-    ];
-    let [left_title, _, right_title] = Layout::horizontal(columns).areas(headings);
-    let [left, divider, right] = Layout::horizontal(columns).areas(body);
+    let (left_title, right_title, left, divider, right, hint_row) = if inner.width < 60 {
+        let [left_title, left, right_title, right, hint_row] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .areas(inner);
+        (
+            left_title,
+            right_title,
+            left,
+            Rect::default(),
+            right,
+            hint_row,
+        )
+    } else {
+        let [headings, body, hint_row] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
+        .areas(inner);
+        let columns = [
+            Constraint::Percentage(42),
+            Constraint::Length(1),
+            Constraint::Min(0),
+        ];
+        let [left_title, _, right_title] = Layout::horizontal(columns).areas(headings);
+        let [left, divider, right] = Layout::horizontal(columns).areas(body);
+        (left_title, right_title, left, divider, right, hint_row)
+    };
     for (rect, label, active) in [
         (left_title, "供应商", dialog.pane == ProviderPane::Providers),
         (right_title, "模型", dialog.pane == ProviderPane::Models),
@@ -3120,7 +3152,7 @@ fn render_provider_dialog(
         divider,
     );
     // Keep the keyboard selection visible in lists taller than the dialog.
-    let capacity = usize::from(body.height / 2).max(1);
+    let capacity = usize::from(left.height / 2).max(1);
     let provider_start = dialog.selected.saturating_sub(capacity - 1);
     for (index, option) in dialog
         .options
@@ -3187,6 +3219,7 @@ fn render_provider_dialog(
             right,
         );
     } else {
+        let capacity = usize::from(right.height / 2).max(1);
         let start = dialog.model_selected.saturating_sub(capacity - 1);
         for (index, option) in models.iter().enumerate().skip(start).take(capacity) {
             let y = right.y + ((index - start) * 2) as u16;
@@ -4512,6 +4545,30 @@ fn split_dialog_rows(inner: Rect, count: u16) -> [Rect; 5] {
     rows
 }
 
+fn chrome_item(
+    line: &mut Line<'static>,
+    area: Rect,
+    separator: &str,
+    text: &str,
+    style: Style,
+    truncate: bool,
+) -> Option<Rect> {
+    if area.height == 0 || text.is_empty() {
+        return None;
+    }
+    let separator = if line.width() == 0 { "" } else { separator };
+    let offset = line.width() + separator.width();
+    let available = usize::from(area.width).saturating_sub(offset);
+    if available == 0 || (!truncate && text.width() > available) {
+        return None;
+    }
+    let text = ellipsize(text, available);
+    let rect = Rect::new(area.x + offset as u16, area.y, text.width() as u16, 1);
+    line.spans.push(Span::styled(separator.to_owned(), style));
+    line.spans.push(Span::styled(text, style));
+    Some(rect)
+}
+
 fn render_composer(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -4524,15 +4581,18 @@ fn render_composer(
         x: inner.x,
         y: inner.y,
         width: inner.width,
-        height: 1,
+        height: u16::from(inner.height > 0),
     };
     let info = Rect {
         x: inner.x,
         y: inner.y.saturating_add(1),
         width: inner.width,
-        height: 1,
+        height: u16::from(inner.height > 1),
     };
-    let available = prompt.width.saturating_sub(2) as usize;
+    if prompt.height == 0 {
+        return;
+    }
+    let available = prompt.width.saturating_sub(3) as usize;
     let (visible, cursor_col) = visible_input(model.input, available);
     let imagine = model
         .projection
@@ -4565,38 +4625,40 @@ fn render_composer(
     } else {
         model.provider
     };
-    let model_x = inner.x + 2;
-    let model_width = u16::try_from(model_name.width()).unwrap_or(0);
-    let provider_width = u16::try_from(provider.width()).unwrap_or(1).max(1);
-    hits.provider_target = Some(Rect {
-        x: model_x,
-        y: info.y,
-        width: model_width
-            .saturating_add("  ·  ".width() as u16)
-            .saturating_add(u16::try_from(perm.width()).unwrap_or(0))
-            .saturating_add("  ·  ".width() as u16)
-            .saturating_add(provider_width),
-        height: 1,
-    });
-    let perm_x = inner.x + u16::try_from(2 + model_name.width() + "  ·  ".width()).unwrap_or(8);
-    hits.toggle_approve = Some(Rect {
-        x: perm_x,
-        y: info.y,
-        width: u16::try_from(perm.width()).unwrap_or(4),
-        height: 1,
-    });
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("  ", theme.base()),
-            Span::styled(model_name, theme.fg(theme.sage)),
-            Span::styled("  ·  ", theme.mute()),
-            Span::styled(perm, theme.dim()),
-            Span::styled("  ·  ", theme.mute()),
-            Span::styled(provider, theme.mute()),
-        ]))
-        .style(theme.base()),
-        info,
-    );
+    let mut line = Line::default();
+    if inner.width < 60 {
+        hits.toggle_approve = chrome_item(&mut line, info, "", perm, theme.dim(), false);
+        let model_hit = chrome_item(
+            &mut line,
+            info,
+            " · ",
+            model_name,
+            theme.fg(theme.sage),
+            true,
+        );
+        hits.provider_target = model_hit;
+    } else {
+        let model_area = Rect::new(info.x, info.y, info.width.saturating_sub(12), info.height);
+        hits.provider_target = chrome_item(
+            &mut line,
+            model_area,
+            "",
+            model_name,
+            theme.fg(theme.sage),
+            true,
+        );
+        hits.toggle_approve = chrome_item(&mut line, info, " · ", perm, theme.dim(), false);
+        if let Some(provider_hit) =
+            chrome_item(&mut line, info, " · ", provider, theme.mute(), true)
+        {
+            if let Some(target) = hits.provider_target.as_mut() {
+                target.width = provider_hit.right().saturating_sub(target.x);
+            } else {
+                hits.provider_target = Some(provider_hit);
+            }
+        }
+    }
+    frame.render_widget(Paragraph::new(line).style(theme.base()), info);
 
     let cursor_x = prompt.x.saturating_add(2).saturating_add(cursor_col);
     if cursor_x < prompt.x.saturating_add(prompt.width) {
@@ -4649,30 +4711,31 @@ fn render_hints(
             ("^c", "quit", HintAction::Quit),
         ]
     };
-    let mut spans = Vec::new();
-    let mut x = inner.x;
-    for (i, (key, label, action)) in items.iter().enumerate() {
-        if i > 0 {
-            spans.push(Span::styled("   ", theme.mute()));
-            x = x.saturating_add(3);
+    let mut line = Line::default();
+    for (key, label, action) in items {
+        let text = if inner.width < 60 {
+            match action {
+                HintAction::Send => "⏎ 发送",
+                HintAction::Commands => "/ 命令",
+                HintAction::SessionNext => "› 会话",
+                HintAction::New => "+ 新建",
+                HintAction::Complete => "Tab 补全",
+                HintAction::Run if *key == "↑↓" => continue,
+                HintAction::Run => "⏎ 执行",
+                HintAction::Close => "Esc 关闭",
+                HintAction::Allow => "y 允许",
+                HintAction::Deny => "n 拒绝",
+                HintAction::Quit => "退出",
+            }
+            .to_owned()
+        } else {
+            format!("{key} {label}")
+        };
+        if let Some(rect) = chrome_item(&mut line, inner, "  ", &text, theme.dim(), false) {
+            hits.hints.push((rect, *action));
         }
-        let text = format!("{key} {label}");
-        let width = u16::try_from(text.width()).unwrap_or(1);
-        hits.hints.push((
-            Rect {
-                x,
-                y: inner.y,
-                width,
-                height: 1,
-            },
-            *action,
-        ));
-        spans.push(Span::styled((*key).to_owned(), theme.dim()));
-        spans.push(Span::raw(" "));
-        spans.push(Span::styled((*label).to_owned(), theme.mute()));
-        x = x.saturating_add(width);
     }
-    frame.render_widget(Paragraph::new(Line::from(spans)).style(theme.base()), inner);
+    frame.render_widget(Paragraph::new(line).style(theme.base()), inner);
 }
 
 fn visible_input(input: &str, width: usize) -> (String, u16) {
@@ -4684,13 +4747,14 @@ fn visible_input(input: &str, width: usize) -> (String, u16) {
         return (input.to_owned(), u16::try_from(full).unwrap_or(0));
     }
     let mut acc = 0usize;
-    let mut start = 0;
+    let mut start = input.len();
     for (idx, ch) in input.char_indices().rev() {
-        acc += ch.width().unwrap_or(0);
-        start = idx;
-        if acc >= width {
+        let char_width = ch.width().unwrap_or(0);
+        if acc + char_width > width {
             break;
         }
+        acc += char_width;
+        start = idx;
     }
     let slice = &input[start..];
     (
@@ -6290,6 +6354,137 @@ mod tests {
         assert_eq!(fmt_tokens(1200), "1.2K");
         assert_eq!(fmt_tokens(12_000), "12K");
         assert_eq!(fmt_tokens(1_200_000), "1.2M");
+    }
+
+    #[test]
+    fn mobile_canvas_keeps_controls_visible_and_slash_hits_aligned() {
+        let mut model = FrameModel {
+            dialog_stack: &[],
+            workspace: Path::new("/tmp"),
+            sessions: &[],
+            index: 0,
+            projection: None,
+            pending: &[],
+            input: "手机终端输入一段很长的中文消息用于验证光标",
+            status: "ready",
+            notice: None,
+            paste_preview: None,
+            passport_dialog: None,
+            provider_dialog: None,
+            add_provider_dialog: None,
+            theme_dialog: None,
+            context_dialog: None,
+            settings_dialog: None,
+            tool_dialog: None,
+            tool_detail_dialog: None,
+            slash_hits: &[],
+            slash_selected: 0,
+            search: None,
+            hide_tools: false,
+            scroll: 0,
+            auto_approve: false,
+            model: "a-very-long-model-name-that-exceeds-the-phone-width",
+            provider: "provider",
+            mode_menu: None,
+            project_picker: None,
+            folder_picker: None,
+            session_picker: None,
+            git_dialog: None,
+            git_status: None,
+            user_label: "you",
+            running: false,
+            tick: 0,
+            pointer: None,
+            text_selection: None,
+        };
+        let commands = slash::matches("/");
+        for (width, height) in [(24, 10), (36, 12), (40, 20), (60, 16), (120, 30)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            let mut cache = TranscriptCache::default();
+            for show_menu in [false, true] {
+                model.input = if show_menu {
+                    "/"
+                } else {
+                    "手机终端输入一段很长的中文消息用于验证光标"
+                };
+                model.slash_hits = if show_menu { &commands } else { &[] };
+                model.slash_selected = commands.len().saturating_sub(1);
+                let mut hits = HitMap::default();
+                terminal
+                    .draw(|frame| {
+                        hits = draw(frame, &model, &mut cache);
+                    })
+                    .unwrap();
+                assert!(hits.composer.height >= 2);
+                assert!(hits.transcript.height >= 3);
+                for rect in hits
+                    .hints
+                    .iter()
+                    .map(|(rect, _)| *rect)
+                    .chain(hits.provider_target)
+                    .chain(hits.toggle_approve)
+                {
+                    assert!(rect.width > 0 && rect.height > 0);
+                    assert!(rect.right() <= width && rect.bottom() <= height);
+                }
+                assert!(hits.toggle_approve.is_some());
+                assert!(hits.provider_target.is_some());
+                if show_menu {
+                    let overlay = hits.overlay.unwrap();
+                    assert!(
+                        hits.slash_rows
+                            .iter()
+                            .any(|(_, index)| *index == model.slash_selected)
+                    );
+                    for (rect, index) in &hits.slash_rows {
+                        assert!(rect.bottom() <= overlay.bottom());
+                        let text: String = (rect.x..rect.right())
+                            .map(|x| terminal.backend().buffer()[(x, rect.y)].symbol())
+                            .collect();
+                        assert!(text.contains(commands[*index].name), "{text}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mobile_provider_lists_stack_and_follow_selection() {
+        let mut dialog = sample_provider_dialog();
+        for index in 0..12 {
+            let mut option = dialog.options[0].clone();
+            option.display = format!("provider-{index}");
+            dialog.options.push(option);
+        }
+        dialog.selected = dialog.options.len() - 1;
+        dialog.model_selected = dialog.current_models().len().saturating_sub(1);
+        for size in [(24, 10), (36, 12), (40, 24), (60, 16)] {
+            let (_, hits) =
+                render_provider_with_hits(Rect::new(0, 0, size.0, size.1), &dialog, None);
+            let provider = hits
+                .provider_rows
+                .iter()
+                .find(|(_, i)| *i == dialog.selected)
+                .unwrap()
+                .0;
+            let model = hits
+                .provider_model_rows
+                .iter()
+                .find(|(_, i)| *i == dialog.model_selected)
+                .unwrap()
+                .0;
+            assert_eq!(provider.x, model.x);
+            assert_eq!(provider.width, model.width);
+            assert!(provider.bottom() < model.y);
+            assert!(model.right() <= size.0 && model.bottom() <= size.1);
+        }
+    }
+
+    #[test]
+    fn chinese_input_tail_fits_without_splitting_wide_characters() {
+        assert_eq!(visible_input("你好手机", 3), ("机".into(), 2));
+        assert_eq!(visible_input("手机", 1), (String::new(), 0));
+        assert_eq!(visible_input("手机a", 3), ("机a".into(), 3));
     }
 
     #[test]
