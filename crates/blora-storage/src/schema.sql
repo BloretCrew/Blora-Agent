@@ -185,3 +185,8 @@ CREATE TABLE IF NOT EXISTS onboarding (
     surface TEXT PRIMARY KEY,
     version INTEGER NOT NULL CHECK (version >= 0)
 );
+
+CREATE TABLE IF NOT EXISTS tui_preferences (
+    key TEXT PRIMARY KEY,
+    value INTEGER NOT NULL
+);

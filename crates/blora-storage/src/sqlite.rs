@@ -165,6 +165,11 @@ impl SqliteStore {
             params![now],
         )
         .map_err(BloraError::storage)?;
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (12, ?1)",
+            params![now],
+        )
+        .map_err(BloraError::storage)?;
         Ok(Self {
             conn: Mutex::new(conn),
             clock: SystemClock,
@@ -172,7 +177,7 @@ impl SqliteStore {
     }
 
     /// Current storage schema version written by this build.
-    pub const STORE_VERSION: u32 = 11;
+    pub const STORE_VERSION: u32 = 12;
 
     pub fn queue_steer(&self, session_id: &SessionId, message: &str) -> Result<()> {
         let conn = self.lock();

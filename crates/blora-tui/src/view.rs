@@ -381,6 +381,7 @@ pub struct FrameModel<'a> {
     pub slash_selected: usize,
     pub search: Option<&'a str>,
     pub hide_tools: bool,
+    pub message_roles: bool,
     pub scroll: usize,
     pub auto_approve: bool,
     pub model: &'a str,
@@ -1903,6 +1904,14 @@ fn render_settings_dialog(
             ("配色模式", theme::scheme().as_str()),
             ("动画效果", "启用"),
             ("界面语言", "简体中文"),
+            (
+                "消息角色标记",
+                if model.message_roles {
+                    "开启"
+                } else {
+                    "关闭"
+                },
+            ),
         ],
         _ => &[
             (
@@ -2173,6 +2182,7 @@ fn render_transcript(
             &session_id,
             model.search,
             model.hide_tools,
+            model.message_roles,
             width,
             model.user_label,
             theme,
@@ -2212,6 +2222,7 @@ struct TranscriptCacheKey {
     width: usize,
     search: String,
     hide_tools: bool,
+    message_roles: bool,
     user_label: String,
     theme: Theme,
 }
@@ -2251,6 +2262,7 @@ impl TranscriptCache {
         session_id: &str,
         search: Option<&str>,
         hide_tools: bool,
+        message_roles: bool,
         width: usize,
         user_label: &str,
         theme: &Theme,
@@ -2262,13 +2274,22 @@ impl TranscriptCache {
             width,
             search: search.unwrap_or("").to_owned(),
             hide_tools,
+            message_roles,
             user_label: user_label.to_owned(),
             theme: *theme,
         };
         if self.key.as_ref() == Some(&key) {
             return;
         }
-        let rendered = transcript_lines(projection, search, hide_tools, width, user_label, theme);
+        let rendered = transcript_lines(
+            projection,
+            search,
+            hide_tools,
+            message_roles,
+            width,
+            user_label,
+            theme,
+        );
         self.lines = rendered.lines;
         self.marks = rendered.marks;
         self.live_visible = rendered.live_visible;
@@ -2416,6 +2437,7 @@ fn transcript_lines(
     projection: &SessionProjection,
     search: Option<&str>,
     hide_tools: bool,
+    message_roles: bool,
     width: usize,
     user_label: &str,
     theme: &Theme,
@@ -2492,6 +2514,7 @@ fn transcript_lines(
                     text,
                     width,
                     needle.as_deref(),
+                    message_roles,
                     theme,
                 );
             }
@@ -2503,6 +2526,7 @@ fn transcript_lines(
                     text,
                     width,
                     needle.as_deref(),
+                    message_roles,
                     theme,
                 );
             }
@@ -2597,6 +2621,7 @@ fn transcript_lines(
                 live,
                 width,
                 needle.as_deref(),
+                message_roles,
                 theme,
             );
         }
@@ -2777,15 +2802,18 @@ fn push_block(
     text: &str,
     width: usize,
     needle: Option<&str>,
+    message_roles: bool,
     theme: &Theme,
 ) {
-    out.push(Line::from(vec![
-        Span::styled("┃ ", theme.fg(accent)),
-        Span::styled(
-            role.to_owned(),
-            theme.fg(accent).add_modifier(Modifier::BOLD),
-        ),
-    ]));
+    if message_roles {
+        out.push(Line::from(vec![
+            Span::styled("┃ ", theme.fg(accent)),
+            Span::styled(
+                role.to_owned(),
+                theme.fg(accent).add_modifier(Modifier::BOLD),
+            ),
+        ]));
+    }
     let body_width = width.saturating_sub(2).max(8);
     out.extend(crate::markdown::render(text, body_width, needle, theme));
 }
@@ -5683,7 +5711,8 @@ mod tests {
             output: Some("image API HTTP 401".to_owned()),
             call_id: None,
         });
-        let rendered = transcript_lines(&projection, None, false, 78, "you", &Theme::current());
+        let rendered =
+            transcript_lines(&projection, None, false, true, 78, "you", &Theme::current());
         let text = rendered
             .lines
             .iter()
@@ -5695,6 +5724,91 @@ mod tests {
         assert!(text.contains(".blora/images/sess/"));
         assert!(text.contains("HTTP 401"));
         assert!(!text.contains("you"));
+    }
+
+    #[test]
+    fn message_role_toggle_updates_cached_history_and_streaming() {
+        let mut projection = SessionProjection::new();
+        projection.transcript.push(TranscriptItem::User {
+            text: "用户正文".to_owned(),
+            event_id: blora_types::EventId::generate(),
+        });
+        projection.transcript.push(TranscriptItem::Assistant {
+            text: "**助手正文**".to_owned(),
+            event_id: blora_types::EventId::generate(),
+        });
+        let event = blora_events::EventEnvelope::stamped(
+            blora_events::NewEvent::new(
+                blora_types::SessionId::generate(),
+                blora_events::KnownPayload::AssistantDelta(blora_events::AssistantDelta {
+                    text: "流式正文".to_owned(),
+                }),
+            ),
+            1,
+        )
+        .unwrap();
+        projection.apply(&event).unwrap();
+        for width in [20, 80] {
+            let theme = Theme::current();
+            let mut cache = TranscriptCache::default();
+            cache.ensure(
+                &projection,
+                "session",
+                None,
+                false,
+                true,
+                width,
+                "you",
+                &theme,
+            );
+            assert!(
+                cache
+                    .lines
+                    .iter()
+                    .any(|line| line.to_string().contains("┃ you"))
+            );
+            cache.ensure(
+                &projection,
+                "session",
+                None,
+                false,
+                false,
+                width,
+                "you",
+                &theme,
+            );
+            assert_eq!(cache.rebuilds(), 2);
+            let text = cache
+                .lines
+                .iter()
+                .map(|line| line.to_string())
+                .collect::<Vec<_>>()
+                .join("\n");
+            for body in ["用户正文", "助手正文", "流式正文"] {
+                assert!(text.contains(body), "{text}");
+            }
+            for label in ["┃", "you", "Blora", "blora"] {
+                assert!(!text.contains(label), "{text}");
+            }
+            assert!(cache.live_visible);
+            cache.ensure(
+                &projection,
+                "session",
+                None,
+                false,
+                true,
+                width,
+                "you",
+                &theme,
+            );
+            assert_eq!(cache.rebuilds(), 3);
+            assert!(
+                cache
+                    .lines
+                    .iter()
+                    .any(|line| line.to_string().contains("┃ Blora"))
+            );
+        }
     }
 
     #[test]
@@ -5711,7 +5825,8 @@ mod tests {
             });
         }
         let area = Rect::new(4, 5, 80, 8);
-        let rendered = transcript_lines(&projection, None, false, 78, "you", &Theme::current());
+        let rendered =
+            transcript_lines(&projection, None, false, true, 78, "you", &Theme::current());
         let rows = tool_summary_hit_rows(&rendered.marks, rendered.lines.len(), area, 0);
         assert_eq!(rows.len(), 1);
         let (target, indices) = &rows[0];
@@ -5753,11 +5868,11 @@ mod tests {
         });
         let theme = Theme::current();
         let mut cache = TranscriptCache::default();
-        cache.ensure(&projection, "ses_a", None, false, 40, "you", &theme);
+        cache.ensure(&projection, "ses_a", None, false, true, 40, "you", &theme);
         assert_eq!(cache.rebuilds(), 1);
-        cache.ensure(&projection, "ses_a", None, false, 40, "you", &theme);
+        cache.ensure(&projection, "ses_a", None, false, true, 40, "you", &theme);
         assert_eq!(cache.rebuilds(), 1);
-        cache.ensure(&projection, "ses_a", None, false, 80, "you", &theme);
+        cache.ensure(&projection, "ses_a", None, false, true, 80, "you", &theme);
         assert_eq!(cache.rebuilds(), 2);
 
         let session = blora_types::SessionId::generate();
@@ -5772,10 +5887,10 @@ mod tests {
         )
         .unwrap();
         projection.apply(&event).unwrap();
-        cache.ensure(&projection, "ses_a", None, false, 80, "you", &theme);
+        cache.ensure(&projection, "ses_a", None, false, true, 80, "you", &theme);
         assert_eq!(cache.rebuilds(), 3);
         assert!(cache.live_visible);
-        cache.ensure(&projection, "ses_a", None, false, 80, "you", &theme);
+        cache.ensure(&projection, "ses_a", None, false, true, 80, "you", &theme);
         assert_eq!(cache.rebuilds(), 3);
     }
 
@@ -6381,6 +6496,7 @@ mod tests {
             slash_selected: 0,
             search: None,
             hide_tools: false,
+            message_roles: true,
             scroll: 0,
             auto_approve: false,
             model: "a-very-long-model-name-that-exceeds-the-phone-width",
@@ -6748,6 +6864,7 @@ mod dialog_layer_tests {
             slash_selected: 0,
             search: None,
             hide_tools: false,
+            message_roles: true,
             scroll: 0,
             auto_approve: false,
             model: "model",

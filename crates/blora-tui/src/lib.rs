@@ -662,6 +662,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             slash_selected,
                             search: search.as_deref(),
                             hide_tools,
+                            message_roles: runtime.tui_message_roles().unwrap_or(true),
                             scroll,
                             auto_approve,
                             model,
@@ -1304,7 +1305,8 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 }
                                 if let Some(dialog) = settings_dialog.as_mut() {
                                     let increase = key.code == KeyCode::Right;
-                                    apply_settings_row(
+                                    if let Err(err) = apply_settings_row(
+                                        runtime,
                                         dialog.page,
                                         dialog.selected,
                                         increase,
@@ -1312,7 +1314,9 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                         &mut hide_tools,
                                         &mut model_override,
                                         &mut provider_override,
-                                    );
+                                    ) {
+                                        status = format!("保存设置失败：{err}");
+                                    }
                                 }
                             }
                             KeyCode::Enter
@@ -2622,7 +2626,8 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     if let Some(dialog) = settings_dialog.as_mut() {
                                         dialog.selected = idx
                                             .min(settings_page_len(dialog.page).saturating_sub(1));
-                                        apply_settings_row(
+                                        if let Err(err) = apply_settings_row(
+                                            runtime,
                                             dialog.page,
                                             dialog.selected,
                                             true,
@@ -2630,7 +2635,9 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                             &mut hide_tools,
                                             &mut model_override,
                                             &mut provider_override,
-                                        );
+                                        ) {
+                                            status = format!("保存设置失败：{err}");
+                                        }
                                     }
                                     continue;
                                 }
@@ -3799,10 +3806,11 @@ fn workspace_key(workspace: &Path) -> String {
 }
 
 fn settings_page_len(page: usize) -> usize {
-    if page == 0 { 5 } else { 4 }
+    if page <= 1 { 5 } else { 4 }
 }
 
 fn apply_settings_row(
+    runtime: &Runtime,
     page: usize,
     selected: usize,
     increase: bool,
@@ -3810,7 +3818,7 @@ fn apply_settings_row(
     hide_tools: &mut bool,
     model: &mut String,
     provider: &mut String,
-) {
+) -> Result<()> {
     match (page, selected) {
         (1, 0) => {
             let palettes = theme::Palette::ALL;
@@ -3849,15 +3857,21 @@ fn apply_settings_row(
                 scheme: schemes[next],
             });
         }
+        (1, 4) => {
+            let enabled = runtime.tui_message_roles()?;
+            runtime.set_tui_message_roles(!enabled)?;
+        }
         (0, 0) => *auto_approve = if increase { true } else { !*auto_approve },
         (0, 1) => *hide_tools = if increase { true } else { !*hide_tools },
         (2, 0) => provider.clear(),
         (2, 1) => model.clear(),
         _ => {}
     }
+    Ok(())
 }
 
 fn apply_settings(
+    runtime: &Runtime,
     args: &str,
     auto_approve: &mut bool,
     hide_tools: &mut bool,
@@ -3868,11 +3882,17 @@ fn apply_settings(
     if args.is_empty() {
         return panel(
             "settings",
-            settings_text(*auto_approve, *hide_tools, model, provider),
+            settings_text(
+                runtime.tui_message_roles().unwrap_or(true),
+                *auto_approve,
+                *hide_tools,
+                model,
+                provider,
+            ),
         );
     }
     let Some((key, value)) = args.split_once('=') else {
-        return SlashOutcome::Status("用法：/settings [theme=珊瑚|scheme=dark|auto-approve=on|hide-tools=on|provider=名称|model=名称]".to_owned());
+        return SlashOutcome::Status("用法：/settings [theme=珊瑚|scheme=dark|auto-approve=on|hide-tools=on|message-roles=off|provider=名称|model=名称]".to_owned());
     };
     let key = key.trim().to_ascii_lowercase();
     let value = value.trim();
@@ -3910,6 +3930,13 @@ fn apply_settings(
             }
             None => SlashOutcome::Status("布尔设置使用 on 或 off".to_owned()),
         },
+        "message-roles" => match parse_setting_bool(value) {
+            Some(enabled) => match runtime.set_tui_message_roles(enabled) {
+                Ok(()) => SlashOutcome::Status(format!("message-roles={enabled}")),
+                Err(err) => SlashOutcome::Status(format!("保存消息角色标记失败：{err}")),
+            },
+            None => SlashOutcome::Status("布尔设置使用 on 或 off".to_owned()),
+        },
         "provider" => {
             *provider = value.to_owned();
             SlashOutcome::Status(format!("provider={provider}"))
@@ -3930,9 +3957,15 @@ fn parse_setting_bool(value: &str) -> Option<bool> {
     }
 }
 
-fn settings_text(auto_approve: bool, hide_tools: bool, model: &str, provider: &str) -> String {
+fn settings_text(
+    message_roles: bool,
+    auto_approve: bool,
+    hide_tools: bool,
+    model: &str,
+    provider: &str,
+) -> String {
     format!(
-        "当前设置\ntheme={}\nscheme={}\nauto-approve={auto_approve}\nhide-tools={hide_tools}\nprovider={}\nmodel={}\n\n修改示例：/settings theme=indigo、/settings auto-approve=on",
+        "当前设置\ntheme={}\nscheme={}\nauto-approve={auto_approve}\nhide-tools={hide_tools}\nmessage-roles={message_roles}\nprovider={}\nmodel={}\n\n修改示例：/settings theme=indigo、/settings auto-approve=on",
         theme::palette().as_str(),
         theme::scheme().as_str(),
         if provider.is_empty() {
@@ -4110,7 +4143,7 @@ fn slash(
         "keymap" => panel("keymap", slash::keymap_text()),
         "theme" => apply_theme(args),
         "settings" if args.is_empty() => SlashOutcome::SettingsDialog,
-        "settings" => apply_settings(args, auto_approve, hide_tools, model, provider),
+        "settings" => apply_settings(runtime, args, auto_approve, hide_tools, model, provider),
         "new" => open_session(runtime, workspace, sessions, index, Mode::Code, "tui"),
         "sessions" => panel("sessions", list_session_lines(sessions)),
         "goto" => goto_session(sessions, index, args),

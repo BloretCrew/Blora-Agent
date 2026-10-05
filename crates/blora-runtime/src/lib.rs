@@ -14,6 +14,7 @@ mod mcp;
 mod memory;
 mod onboarding;
 mod plugins;
+mod preferences;
 mod work;
 
 pub use agents::{MAX_RUNNING_CHILDREN, MAX_SUBAGENT_DEPTH, SUBAGENT_TURNS};

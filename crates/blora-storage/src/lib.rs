@@ -5,6 +5,7 @@
 
 mod approvals;
 mod onboarding;
+mod preferences;
 mod sqlite;
 mod tasks;
 mod users;

@@ -83,3 +83,9 @@ Git 窗口默认打开“操作”页。单击文件行选中并查看差异，�
 仓库：`/git` `/diff` `/log` `/files` `/read` `/artifacts`
 
 系统：`/help` `/keymap` `/doctor` `/users` `/web` `/usage`
+
+## 消息角色标记
+
+在 `/settings` →「外观」中选择「消息角色标记」，按 ←/→ 或点击该项切换。默认开启；关闭后隐藏用户与助手消息上方的名字和左侧彩色竖线，保留正文、Markdown、消息间距和工具摘要。设置立即生效，并保存在当前 Blora 数据库中，重启后继续使用。
+
+也可以执行 `/settings message-roles=off` 关闭，或 `/settings message-roles=on` 恢复。
