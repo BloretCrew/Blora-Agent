@@ -352,7 +352,11 @@ impl SqliteStore {
         let conn = self.lock();
         let mut stmt = conn
             .prepare(
-                "SELECT s.id, s.title, s.workspace_path, s.mode, s.status, s.updated_at,
+                "SELECT s.id,
+                        COALESCE((SELECT json_extract(e.payload, '$.title') FROM events e
+                                  WHERE e.session_id = s.id AND e.event_type = 'session.title.changed'
+                                  ORDER BY e.sequence DESC LIMIT 1), s.title),
+                        s.workspace_path, s.mode, s.status, s.updated_at,
                         COALESCE((SELECT MAX(sequence) FROM events e WHERE e.session_id = s.id), 0)
                  FROM sessions s
                  ORDER BY s.updated_at DESC",
@@ -1070,6 +1074,13 @@ fn apply_denormalized(tx: &rusqlite::Transaction<'_>, event: &EventEnvelope) -> 
 
     if let Some(payload) = event.decode_payload()? {
         match payload {
+            KnownPayload::SessionTitleChanged(changed) => {
+                tx.execute(
+                    "UPDATE sessions SET title = ?1 WHERE id = ?2",
+                    params![changed.title, event.session_id.as_str()],
+                )
+                .map_err(BloraError::storage)?;
+            }
             KnownPayload::SessionArchived(_) => {
                 tx.execute(
                     "UPDATE sessions SET status = 'archived', updated_at = ?1 WHERE id = ?2",
@@ -1208,6 +1219,67 @@ mod tests {
     use super::*;
     use blora_events::UserInput;
     use blora_session::TranscriptItem;
+
+    #[test]
+    fn session_list_uses_latest_title_event_even_with_stale_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.sqlite");
+        let id = {
+            let store = SqliteStore::open(&path).unwrap();
+            let id = store
+                .create_session(CreateSession {
+                    title: Some("tui".to_owned()),
+                    workspace_path: "/tmp/ws".to_owned(),
+                    mode: Mode::Code,
+                    parent_session_id: None,
+                })
+                .unwrap();
+            for title in ["自动标题", "手动标题"] {
+                store
+                    .append(NewEvent::new(
+                        id.clone(),
+                        KnownPayload::SessionTitleChanged(blora_events::SessionTitleChanged {
+                            title: title.to_owned(),
+                            generated: title == "自动标题",
+                        }),
+                    ))
+                    .unwrap();
+            }
+            let saved: String = store
+                .lock()
+                .query_row(
+                    "SELECT title FROM sessions WHERE id = ?1",
+                    params![id.as_str()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(saved, "手动标题");
+            // Simulate metadata left stale by an older build.
+            store
+                .lock()
+                .execute(
+                    "UPDATE sessions SET title = 'tui' WHERE id = ?1",
+                    params![id.as_str()],
+                )
+                .unwrap();
+            id
+        };
+        let store = SqliteStore::open(&path).unwrap();
+        assert_eq!(
+            store.list_sessions().unwrap()[0].title.as_deref(),
+            Some("手动标题")
+        );
+        assert_eq!(
+            store
+                .load_projection(&id)
+                .unwrap()
+                .session
+                .unwrap()
+                .title
+                .as_deref(),
+            Some("手动标题")
+        );
+    }
 
     #[test]
     fn persist_reopen_and_rebuild() {

@@ -242,11 +242,7 @@ impl Runtime {
         }
         if generated {
             let projection = self.store.load_projection(session_id)?;
-            if projection
-                .session
-                .and_then(|session| session.title)
-                .is_some()
-            {
+            if !self.session_needs_title(session_id, &projection)? {
                 return Ok(());
             }
         }
@@ -259,6 +255,32 @@ impl Runtime {
                 generated,
             }),
         )
+    }
+
+    fn session_needs_title(
+        &self,
+        session_id: &SessionId,
+        projection: &SessionProjection,
+    ) -> Result<bool> {
+        let Some(session) = projection.session.as_ref() else {
+            return Ok(false);
+        };
+        if session.parent_session_id.is_some() {
+            return Ok(false);
+        }
+        match session.title.as_deref().map(str::trim) {
+            None | Some("") => Ok(true),
+            Some("tui" | "web") => {
+                // Old clients stored their interface name as the initial title.
+                // A later title event represents an intentional or generated name.
+                Ok(!self
+                    .store
+                    .load_events(session_id)?
+                    .iter()
+                    .any(|event| event.event_type == "session.title.changed"))
+            }
+            Some(_) => Ok(false),
+        }
     }
 
     /// Record a provider/model switch on the session. Later runs use this
@@ -696,9 +718,7 @@ impl Runtime {
             .as_ref()
             .ok_or_else(|| BloraError::SessionNotFound(session_id.to_string()))?;
         let workspace = session.workspace_path.clone();
-        let should_generate_title = session.title.is_none()
-            && projection.transcript.is_empty()
-            && session.parent_session_id.is_none();
+        let should_generate_title = self.session_needs_title(session_id, &projection)?;
         let mode = session.mode;
         let worktree = if options.worktree || env_flag("BLORA_WORKTREE") {
             WorktreeHandle::create(&workspace, session_id.as_str()).ok()
@@ -745,7 +765,17 @@ impl Runtime {
         };
 
         // Prompt-submit hook may block or enrich the prompt before anything is logged.
-        let title_prompt = prompt.to_owned();
+        let title_prompt = projection
+            .transcript
+            .iter()
+            .find_map(|item| match item {
+                blora_session::TranscriptItem::User { text, .. } if !text.trim().is_empty() => {
+                    Some(text.as_str())
+                }
+                _ => None,
+            })
+            .unwrap_or(prompt)
+            .to_owned();
         let mut prompt = prompt.to_owned();
         let submit = hooks::run(
             hooks::USER_PROMPT_SUBMIT,
@@ -2052,6 +2082,128 @@ mod tests {
         );
     }
 
+    #[test]
+    fn run_titles_sessions_with_existing_transcript_and_legacy_names() {
+        for initial_title in [None, Some(""), Some("tui"), Some("web")] {
+            let runtime = Runtime::new(SqliteStore::open_in_memory().unwrap());
+            let id = runtime
+                .create_session(CreateSession {
+                    title: initial_title.map(str::to_owned),
+                    workspace_path: ".".to_owned(),
+                    mode: Mode::Code,
+                    parent_session_id: None,
+                })
+                .unwrap();
+            runtime
+                .emit(
+                    &id,
+                    None,
+                    None,
+                    KnownPayload::AssistantMessageCompleted(AssistantMessageCompleted {
+                        text: "欢迎使用 Blora".to_owned(),
+                    }),
+                )
+                .unwrap();
+            runtime
+                .checkpoint(&id, None, Some("before first prompt"))
+                .unwrap();
+            runtime
+                .emit(
+                    &id,
+                    None,
+                    None,
+                    KnownPayload::UserInput(UserInput {
+                        text: "整理 README".to_owned(),
+                    }),
+                )
+                .unwrap();
+            for prompt in ["继续整理", "再检查一下"] {
+                runtime
+                    .run(
+                        &id,
+                        prompt,
+                        &CancelToken::new(),
+                        &RunOptions {
+                            mock: true,
+                            auto_approve: true,
+                            ..RunOptions::default()
+                        },
+                    )
+                    .unwrap();
+            }
+            assert_eq!(
+                runtime
+                    .show_session(&id)
+                    .unwrap()
+                    .session
+                    .unwrap()
+                    .title
+                    .as_deref(),
+                Some("整理 README")
+            );
+            assert_eq!(
+                runtime.list_sessions().unwrap()[0].title.as_deref(),
+                Some("整理 README")
+            );
+            assert_eq!(
+                runtime
+                    .events(&id)
+                    .unwrap()
+                    .iter()
+                    .filter(|event| event.event_type == "session.title.changed")
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn generated_titles_preserve_explicit_names_and_child_sessions() {
+        let runtime = Runtime::new(SqliteStore::open_in_memory().unwrap());
+        let parent = session(&runtime, Mode::Code, ".");
+        for (initial_title, explicit_title, child) in [
+            (Some("自定义标题"), None, false),
+            (None, Some("tui"), false),
+            (Some("web"), Some("web"), false),
+            (None, None, true),
+        ] {
+            let id = runtime
+                .create_session(CreateSession {
+                    title: initial_title.map(str::to_owned),
+                    workspace_path: ".".to_owned(),
+                    mode: Mode::Code,
+                    parent_session_id: child.then(|| parent.clone()),
+                })
+                .unwrap();
+            if let Some(title) = explicit_title {
+                runtime.set_session_title(&id, title, false).unwrap();
+            }
+            runtime
+                .run(
+                    &id,
+                    "整理 README",
+                    &CancelToken::new(),
+                    &RunOptions {
+                        mock: true,
+                        auto_approve: true,
+                        ..RunOptions::default()
+                    },
+                )
+                .unwrap();
+            runtime.set_session_title(&id, "自动标题", true).unwrap();
+            assert_eq!(
+                runtime
+                    .show_session(&id)
+                    .unwrap()
+                    .session
+                    .unwrap()
+                    .title
+                    .as_deref(),
+                explicit_title.or(initial_title)
+            );
+        }
+    }
+
     fn session(runtime: &Runtime, mode: Mode, workspace: &str) -> SessionId {
         runtime
             .create_session(CreateSession {
@@ -2412,6 +2564,7 @@ mod tests {
                 &call,
                 &RunOptions::default(),
                 &CancelToken::new(),
+                Mode::Code,
                 None,
                 &[],
                 dir.path().to_str().unwrap(),
@@ -2469,6 +2622,7 @@ mod tests {
                 },
                 &options,
                 &cancel,
+                Mode::Code,
                 None,
                 &[],
                 dir.path().to_str().unwrap(),
@@ -2493,6 +2647,7 @@ mod tests {
                 },
                 &options,
                 &cancel,
+                Mode::Code,
                 None,
                 &[],
                 dir.path().to_str().unwrap(),
@@ -2546,6 +2701,7 @@ mod tests {
                 &call,
                 &RunOptions::default(),
                 &CancelToken::new(),
+                Mode::Code,
                 None,
                 &[],
                 dir.path().to_str().unwrap(),
