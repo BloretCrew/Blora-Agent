@@ -3535,9 +3535,10 @@ fn render_provider_dialog(
         theme,
         &mut hits,
     );
-    if dialog.minimized || inner.height == 0 {
+    if dialog.minimized || inner.height <= 1 {
         return hits;
     }
+    let inner = Rect::new(inner.x, inner.y + 1, inner.width, inner.height - 1);
     let (left_title, right_title, left, divider, right, hint_row) = if inner.width < 60 {
         let [left_title, left, right_title, right, hint_row] = Layout::vertical([
             Constraint::Length(1),
@@ -6785,6 +6786,42 @@ mod tests {
         );
         for (rect, index) in &hits.provider_rows {
             assert_eq!(hits.hit(rect.x, rect.y), Some(Hit::ProviderRow(*index)));
+        }
+    }
+
+    #[test]
+    fn provider_headings_and_rows_stay_below_title_bar() {
+        let dialog = sample_provider_dialog();
+        for (width, height) in [(100, 30), (80, 24), (60, 16), (40, 24), (24, 10)] {
+            let (lines, hits) =
+                render_provider_with_hits(Rect::new(0, 0, width, height), &dialog, None);
+            let title_y = hits.traffic_lights[0].unwrap().y;
+            for (rect, index) in &hits.provider_rows {
+                assert!(rect.y > title_y);
+                assert_eq!(hits.hit(rect.x, rect.y), Some(Hit::ProviderRow(*index)));
+            }
+            for (rect, index) in &hits.provider_model_rows {
+                assert!(rect.y > title_y);
+                assert_eq!(
+                    hits.hit(rect.x, rect.y),
+                    Some(Hit::ProviderModelRow(*index))
+                );
+            }
+            let title = flatten(&lines[usize::from(title_y)]);
+            assert!(
+                !title.contains("供应商选择"),
+                "heading overlaps title: {title}"
+            );
+            assert!(
+                !title.ends_with("模型模型"),
+                "model heading overlaps title: {title}"
+            );
+            if width >= 80 {
+                assert!(title.contains("选择供应商与模型·Blora原生设置"));
+                let headings = flatten(&lines[usize::from(title_y + 1)]);
+                assert!(headings.contains("供应商"));
+                assert!(headings.contains("模型"));
+            }
         }
     }
 
