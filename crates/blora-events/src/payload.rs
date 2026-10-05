@@ -2,7 +2,8 @@
 // Copyright (C) 2026 Blora Agent contributors
 
 use blora_types::{
-    Actor, AgentId, ApprovalId, ArtifactId, BloraError, Mode, Result, SessionId, TaskId,
+    Actor, AgentId, ApprovalId, ArtifactId, BloraError, HarnessKind, Mode, Result, SessionId,
+    TaskId,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -26,6 +27,20 @@ pub struct SessionTitleChanged {
     pub title: String,
     #[serde(default)]
     pub generated: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct HarnessChanged {
+    pub harness: HarnessKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ExternalSessionBound {
+    pub harness: HarnessKind,
+    /// Empty IDs invalidate a binding after an interrupted or failed run.
+    pub external_session_id: String,
+    pub cwd: String,
+    pub synced_sequence: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -376,6 +391,8 @@ pub enum KnownPayload {
     SessionCreated(SessionCreated),
     SessionResumed(SessionResumed),
     SessionTitleChanged(SessionTitleChanged),
+    HarnessChanged(HarnessChanged),
+    ExternalSessionBound(ExternalSessionBound),
     ModeChanged(ModeChanged),
     SessionForked(SessionForked),
     SessionArchived(SessionArchived),
@@ -433,6 +450,8 @@ impl KnownPayload {
             Self::SessionCreated(_) => "session.created",
             Self::SessionResumed(_) => "session.resumed",
             Self::SessionTitleChanged(_) => "session.title.changed",
+            Self::HarnessChanged(_) => "session.harness.changed",
+            Self::ExternalSessionBound(_) => "session.external.bound",
             Self::ModeChanged(_) => "mode.changed",
             Self::SessionForked(_) => "session.forked",
             Self::SessionArchived(_) => "session.archived",
@@ -516,6 +535,8 @@ impl KnownPayload {
             Self::SessionCreated(v) => serde_json::to_value(v),
             Self::SessionResumed(v) => serde_json::to_value(v),
             Self::SessionTitleChanged(v) => serde_json::to_value(v),
+            Self::HarnessChanged(v) => serde_json::to_value(v),
+            Self::ExternalSessionBound(v) => serde_json::to_value(v),
             Self::ModeChanged(v) => serde_json::to_value(v),
             Self::SessionForked(v) => serde_json::to_value(v),
             Self::SessionArchived(v) => serde_json::to_value(v),
@@ -574,6 +595,8 @@ impl KnownPayload {
             "session.created" => Self::SessionCreated(from_value(value)?),
             "session.resumed" => Self::SessionResumed(from_value(value)?),
             "session.title.changed" => Self::SessionTitleChanged(from_value(value)?),
+            "session.harness.changed" => Self::HarnessChanged(from_value(value)?),
+            "session.external.bound" => Self::ExternalSessionBound(from_value(value)?),
             "mode.changed" => Self::ModeChanged(from_value(value)?),
             "session.forked" => Self::SessionForked(from_value(value)?),
             "session.archived" => Self::SessionArchived(from_value(value)?),
@@ -630,4 +653,36 @@ impl KnownPayload {
 
 fn from_value<T: for<'de> Deserialize<'de>>(value: Value) -> Result<T> {
     serde_json::from_value(value).map_err(|err| BloraError::event(err.to_string()))
+}
+
+#[cfg(test)]
+mod harness_tests {
+    use super::*;
+
+    #[test]
+    fn harness_events_roundtrip_and_unknown_remains_unknown() {
+        let payloads = [
+            KnownPayload::HarnessChanged(HarnessChanged {
+                harness: HarnessKind::Codex,
+            }),
+            KnownPayload::ExternalSessionBound(ExternalSessionBound {
+                harness: HarnessKind::Codex,
+                external_session_id: "thread-1".into(),
+                cwd: "/workspace".into(),
+                synced_sequence: 42,
+            }),
+        ];
+        for payload in payloads {
+            assert_eq!(
+                KnownPayload::from_type(payload.event_type(), &payload.to_value().unwrap())
+                    .unwrap(),
+                Some(payload)
+            );
+        }
+        assert!(
+            KnownPayload::from_type("future.harness.event", &serde_json::json!({}))
+                .unwrap()
+                .is_none()
+        );
+    }
 }

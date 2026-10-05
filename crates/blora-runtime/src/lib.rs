@@ -8,6 +8,7 @@ mod approvals;
 mod compact;
 mod coordinator;
 mod cron;
+mod external;
 pub mod hooks;
 mod market;
 mod mcp;

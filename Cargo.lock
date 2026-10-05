@@ -268,6 +268,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "blora-harness"
+version = "0.1.0-beta.3"
+dependencies = [
+ "blora-policy",
+ "blora-types",
+ "rustix 1.1.4",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "blora-imagine"
 version = "0.1.0-beta.3"
 dependencies = [
@@ -304,6 +316,7 @@ dependencies = [
  "blora-context",
  "blora-events",
  "blora-exec",
+ "blora-harness",
  "blora-imagine",
  "blora-model",
  "blora-policy",
@@ -386,6 +399,7 @@ dependencies = [
  "blora-catalog",
  "blora-context",
  "blora-events",
+ "blora-harness",
  "blora-model",
  "blora-policy",
  "blora-runtime",

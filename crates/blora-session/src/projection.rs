@@ -3,8 +3,8 @@
 
 use blora_events::{EventEnvelope, KnownPayload};
 use blora_types::{
-    AgentId, ApprovalId, BloraError, EventId, Mode, Result, RunId, RunStatus, SessionId,
-    SessionStatus, TaskId, TaskStatus, TurnId,
+    AgentId, ApprovalId, BloraError, EventId, HarnessKind, Mode, Result, RunId, RunStatus,
+    SessionId, SessionStatus, TaskId, TaskStatus, TurnId,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -96,6 +96,12 @@ pub struct ApprovalView {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SessionProjection {
+    #[serde(default)]
+    pub harness: HarnessKind,
+    #[serde(default)]
+    pub external_model: Option<String>,
+    #[serde(default)]
+    pub external_sessions: Vec<ExternalSessionBinding>,
     pub session: Option<SessionRecord>,
     pub runs: Vec<RunRecord>,
     pub transcript: Vec<TranscriptItem>,
@@ -123,6 +129,15 @@ pub struct SessionProjection {
     pub shell_cwd: Option<String>,
     #[serde(skip)]
     open_assistant: String,
+}
+
+/// An explicit external continuation scoped to this session and working directory.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ExternalSessionBinding {
+    pub harness: HarnessKind,
+    pub external_session_id: String,
+    pub cwd: String,
+    pub synced_sequence: u64,
 }
 
 /// One row of the agent's working checklist.
@@ -250,12 +265,32 @@ pub fn apply_event(projection: &mut SessionProjection, event: &EventEnvelope) ->
             session.title = Some(changed.title);
             session.updated_at = event.timestamp;
         }
+        KnownPayload::HarnessChanged(changed) => {
+            projection.harness = changed.harness;
+            projection.external_model = None;
+            touch_session(projection, event.timestamp)?;
+        }
+        KnownPayload::ExternalSessionBound(bound) => {
+            projection
+                .external_sessions
+                .retain(|binding| binding.harness != bound.harness);
+            if !bound.external_session_id.is_empty() {
+                projection.external_sessions.push(ExternalSessionBinding {
+                    harness: bound.harness,
+                    external_session_id: bound.external_session_id,
+                    cwd: bound.cwd,
+                    synced_sequence: bound.synced_sequence,
+                });
+            }
+            touch_session(projection, event.timestamp)?;
+        }
         KnownPayload::ModeChanged(changed) => {
             let session = session_mut(projection)?;
             session.mode = changed.to;
             session.updated_at = event.timestamp;
         }
         KnownPayload::SessionForked(forked) => {
+            projection.external_sessions.clear();
             if let Some(session) = projection.session.as_mut() {
                 session.parent_session_id = Some(forked.source_session_id);
                 session.updated_at = event.timestamp;
@@ -348,9 +383,14 @@ pub fn apply_event(projection: &mut SessionProjection, event: &EventEnvelope) ->
             touch_run(projection, event)?;
         }
         KnownPayload::ToolStarted(tool) => {
-            if let Some(TranscriptItem::Tool { status, .. }) =
-                find_tool_mut(projection, Some(&tool.tool), None)
-            {
+            if let Some(TranscriptItem::Tool { status, .. }) = find_tool_mut(
+                projection,
+                Some(&tool.tool),
+                event
+                    .metadata
+                    .get("external_call_id")
+                    .and_then(|value| value.as_str()),
+            ) {
                 *status = "running".to_owned();
             }
             touch_run(projection, event)?;
@@ -384,8 +424,14 @@ pub fn apply_event(projection: &mut SessionProjection, event: &EventEnvelope) ->
                 status: slot,
                 event_id,
                 ..
-            }) = find_tool_mut(projection, Some(&tool.tool), None)
-            {
+            }) = find_tool_mut(
+                projection,
+                Some(&tool.tool),
+                event
+                    .metadata
+                    .get("external_call_id")
+                    .and_then(|value| value.as_str()),
+            ) {
                 *slot = status.to_owned();
                 *event_id = event.event_id.clone();
             } else {
@@ -539,8 +585,15 @@ pub fn apply_event(projection: &mut SessionProjection, event: &EventEnvelope) ->
             });
         }
         KnownPayload::ModelRequested(requested) => {
-            projection.provider = Some(requested.provider);
-            projection.model = Some(requested.model);
+            if HarnessKind::all()
+                .into_iter()
+                .any(|kind| kind != HarnessKind::Blora && kind.as_str() == requested.provider)
+            {
+                projection.external_model = Some(requested.model);
+            } else {
+                projection.provider = Some(requested.provider);
+                projection.model = Some(requested.model);
+            }
             touch_run(projection, event)?;
         }
         KnownPayload::RoutingChanged(changed) => {
@@ -581,6 +634,9 @@ pub fn apply_event(projection: &mut SessionProjection, event: &EventEnvelope) ->
             });
         }
         KnownPayload::SessionCwdChanged(changed) => {
+            if projection.shell_cwd.as_deref().unwrap_or(".") != changed.cwd {
+                projection.external_sessions.clear();
+            }
             projection.shell_cwd = Some(changed.cwd);
             if event.run_id.is_some() {
                 let run = run_mut(projection, event)?;

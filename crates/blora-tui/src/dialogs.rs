@@ -17,6 +17,7 @@ pub enum DialogId {
     Context,
     Settings,
     Permission,
+    Harness,
     Onboarding,
 }
 

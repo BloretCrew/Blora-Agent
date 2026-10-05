@@ -66,5 +66,18 @@
   "permission.select_hint": "↑↓ 选择 · Enter 确认 · Esc 取消",
   "permission.bypass.warning": "风险：跳过权限确认可能删除文件、泄露密钥或执行危险命令。\n仅在可信工作区使用；网络禁用与沙盒约束仍有效。\n\ny 明确启用 · n / Esc 取消（Enter 不会启用）",
   "permission.bypass.confirm_hint": "y 启用 · n/Esc 取消",
-  "permission.changed": "权限模式：{mode}"
+  "permission.changed": "权限模式：{mode}",
+  "harness.title": "执行内核",
+  "harness.current": "当前",
+  "harness.installed": "已安装",
+  "harness.missing": "未安装",
+  "harness.running": "前台运行中不能切换执行内核，请先取消或等待完成",
+  "harness.no_session": "请先创建会话",
+  "harness.native_queue": "已排队插话，将在下一轮送达",
+  "harness.external_queue": "已排队，将在当前外部请求结束后发送；不支持即时插话",
+  "harness.cli_settings": "CLI 自身模型/权限",
+  "harness.native_settings": "Blora 原生设置",
+  "harness.boundary": "仅前台会话使用所选内核。外部 CLI 使用自身登录、模型、规则、插件和权限/沙盒；不受 Blora 原生配置控制。后台任务、Git 辅助和 Imagine 保持 Blora 原生执行。运行中禁止切换；未安装项不可选。",
+  "harness.permission_scope": "外部内核使用自身权限和沙盒。此选择仅映射到 CLI 支持的模式；不支持的组合会被拒绝，Blora 原生边界不覆盖外部工具。",
+  "harness.bypass_warning": "风险：跳过外部 CLI 权限确认可能删除文件、泄露密钥或执行危险命令。Blora 原生网络、路径和沙盒约束不覆盖外部 CLI。仅在可信工作区启用。\n\ny 明确启用 · n / Esc 取消（Enter 不会启用）"
 }

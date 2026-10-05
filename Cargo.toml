@@ -14,6 +14,7 @@ members = [
     "crates/blora-catalog",
     "crates/blora-model",
     "crates/blora-runtime",
+    "crates/blora-harness",
     "crates/blora-tui",
     "crates/blora-server",
     "crates/blora-cli",
@@ -45,6 +46,7 @@ blora-imagine = { path = "crates/blora-imagine" }
 blora-catalog = { path = "crates/blora-catalog" }
 blora-model = { path = "crates/blora-model" }
 blora-runtime = { path = "crates/blora-runtime" }
+blora-harness = { path = "crates/blora-harness" }
 blora-tui = { path = "crates/blora-tui" }
 blora-github = { path = "crates/blora-github" }
 axum = { version = "0.8", features = ["json", "ws"] }

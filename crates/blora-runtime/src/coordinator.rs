@@ -118,6 +118,7 @@ impl Default for RunOptions {
 
 pub struct Runtime {
     pub(crate) store: SqliteStore,
+    pub(crate) foreground_sessions: Mutex<std::collections::HashSet<SessionId>>,
     /// Live event subscribers (SSE, TUI). Lossy: a slow subscriber drops events
     /// and must resynchronise from the store, which it can always do.
     subscribers: Mutex<Vec<SyncSender<EventEnvelope>>>,
@@ -128,6 +129,7 @@ impl Runtime {
     pub fn new(store: SqliteStore) -> Self {
         Self {
             store,
+            foreground_sessions: Mutex::new(std::collections::HashSet::new()),
             subscribers: Mutex::new(Vec::new()),
         }
     }
@@ -143,7 +145,7 @@ impl Runtime {
         rx
     }
 
-    fn notify(&self, event: &EventEnvelope) {
+    pub(crate) fn notify(&self, event: &EventEnvelope) {
         let mut subscribers = self
             .subscribers
             .lock()
@@ -257,7 +259,7 @@ impl Runtime {
         )
     }
 
-    fn session_needs_title(
+    pub(crate) fn session_needs_title(
         &self,
         session_id: &SessionId,
         projection: &SessionProjection,
@@ -626,6 +628,16 @@ impl Runtime {
                 source_session_id: source.clone(),
             }),
         )?;
+        if projection.harness != blora_types::HarnessKind::Blora {
+            self.emit(
+                &child,
+                None,
+                None,
+                KnownPayload::HarnessChanged(blora_events::HarnessChanged {
+                    harness: projection.harness,
+                }),
+            )?;
+        }
         Ok(child)
     }
 
@@ -1732,7 +1744,7 @@ impl Runtime {
         )
     }
 
-    fn cancel_run(
+    pub(crate) fn cancel_run(
         &self,
         session_id: &SessionId,
         run_id: &RunId,
@@ -1973,7 +1985,7 @@ fn clean_generated_title(raw: &str) -> String {
     truncate_title(&title, 50)
 }
 
-fn derive_session_title(prompt: &str) -> String {
+pub(crate) fn derive_session_title(prompt: &str) -> String {
     let title = prompt
         .lines()
         .map(str::trim)

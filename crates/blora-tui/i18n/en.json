@@ -66,5 +66,18 @@
   "permission.select_hint": "↑↓ Select · Enter Confirm · Esc Cancel",
   "permission.bypass.warning": "Warning: bypassing permissions can delete files, expose secrets, or run dangerous commands.\nUse only in trusted workspaces; network and sandbox limits remain.\n\ny Enable explicitly · n / Esc Cancel (Enter does not enable)",
   "permission.bypass.confirm_hint": "y Enable · n/Esc Cancel",
-  "permission.changed": "Permission mode: {mode}"
+  "permission.changed": "Permission mode: {mode}",
+  "harness.title": "Execution harness",
+  "harness.current": "Current",
+  "harness.installed": "Installed",
+  "harness.missing": "Not installed",
+  "harness.running": "Cannot switch harness during a foreground run; cancel or wait for completion",
+  "harness.no_session": "Create a session first",
+  "harness.native_queue": "Message queued for the next turn",
+  "harness.external_queue": "Queued until the external request ends; immediate steering is not supported",
+  "harness.cli_settings": "CLI model/permissions",
+  "harness.native_settings": "Blora native settings",
+  "harness.boundary": "Only foreground chat uses the selected harness. External CLIs use their own login, models, rules, plugins, permissions and sandbox, not Blora native configuration. Background tasks, Git helpers and Imagine remain native. Switching is disabled while running; missing CLIs cannot be selected.",
+  "harness.permission_scope": "External harnesses use their own permissions and sandbox. This selection maps only to supported CLI modes; unsupported combinations are rejected. Blora native boundaries do not cover external tools.",
+  "harness.bypass_warning": "Risk: bypassing external CLI approvals can delete files, expose secrets or run dangerous commands. Blora native network, path and sandbox constraints do not cover external CLIs. Enable only in trusted workspaces.\n\ny Enable explicitly · n / Esc Cancel (Enter does not enable)"
 }

@@ -6,6 +6,7 @@
 mod actor;
 mod cancel;
 mod error;
+mod harness;
 mod id;
 mod mode;
 mod status;
@@ -15,6 +16,7 @@ mod visibility;
 pub use actor::Actor;
 pub use cancel::CancelToken;
 pub use error::{BloraError, Result};
+pub use harness::HarnessKind;
 pub use id::{
     AgentId, ApprovalId, ArtifactId, CheckpointId, EventId, RunId, SessionId, TaskId, TurnId,
     WorkspaceId,

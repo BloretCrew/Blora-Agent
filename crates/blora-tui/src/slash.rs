@@ -55,6 +55,13 @@ pub const COMMANDS: &[SlashCommand] = &[
         "Show or change TUI settings",
         "system",
     ),
+    cmd(
+        "harness",
+        &[],
+        "",
+        "Select the foreground execution harness",
+        "session",
+    ),
     cmd("new", &[], "", "Create a new session", "session"),
     cmd("sessions", &["ls-sessions"], "", "List sessions", "session"),
     cmd(

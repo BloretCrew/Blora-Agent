@@ -26,6 +26,26 @@
 
 `/help`、`/git`、`/files` 等较长输出显示在 prompt 上方的结果面板，`Esc` 或点击关闭。
 
+## 执行内核（Harness）
+
+单击左上角当前内核名称（默认 `Blora`），或输入 `/harness` 打开执行内核选择窗口。首批提供 Blora、Claude Code、Codex、Grok Build；每次打开根据 PATH 刷新安装状态，不以参考源码目录判断，也不会自动安装或验证登录。未安装项灰色显示，点击或 Enter 均不能启用。
+
+使用 ↑/↓ 选择、Enter 确认、Esc 关闭；单击可用项立即确认。窗口复用共享栈、动画和红/黄/绿关闭、最小化、全屏控件，最小化后 Enter 只恢复，键盘和粘贴不会穿透后台。24×10 等窄屏仍保留左上入口，长名称截断，选项随选择滚动；也可随时用 `/harness` 从主界面打开。
+
+选择保存在当前 Blora 会话，切换会话和重启恢复。前台运行期间不能切换，必须先取消或等待完成。键盘和鼠标发送使用同一路由；外部运行中输入与 `/steer` 只排队，在当前请求结束后送达，不表示即时插话成功。
+
+外部 CLI 使用自身登录、模型、配置、规则、插件与权限/沙盒，绕过 Blora 的 PassPort 登录检查；Blora 原生模型、供应商设置不会改变外部 CLI。底栏显示外部内核与 CLI 返回的实际模型（未知时为 `—`），并明确标注 CLI 自身模型/权限。供应商/模型窗口和设置页标注「Blora 原生设置」。安装并不意味着已经登录，登录或协议错误会作为运行失败显示，绝不静默切回 Blora。
+
+权限选择仅映射到 CLI 支持的能力，不支持的组合由运行层拒绝；Blora 原生网络、路径及沙盒约束不覆盖外部 CLI。跳过确认仍需显式风险确认。仅前台会话请求走外部内核；后台任务、Git 辅助生成和 Imagine 保持 Blora 原生边界，外部内核与 Imagine 的不支持组合会被拒绝。本次不改变 Web 路由。
+
+| 内核 | 默认确认 | 自动接受编辑 | 计划 | 跳过权限确认 |
+|---|---|---|---|---|
+| Claude Code | `dontAsk`，拒绝未预批准操作 | `acceptEdits`，需要额外确认的操作由 CLI 拒绝 | 暂不支持可靠只读约束 | 显式 `bypassPermissions` |
+| Codex | 只读沙盒，审批策略 `never` | 暂无安全等价映射 | 只读沙盒，审批策略 `never` | 显式绕过审批及沙盒 |
+| Grok Build | `default`，无头接口拒绝无法审批的操作 | `acceptEdits` | 暂不支持已验证的只读沙盒映射 | 显式 `bypassPermissions` |
+
+外部 CLI 自身已有的允许/拒绝规则仍适用，单向无头接口目前不提供 Blora 内的逐工具交互审批。外部执行当前支持 Unix 平台；取消清理同进程组的后代，主动脱离进程组的进程需要另行管理。每条输入最多 32 KiB，跨内核历史同步保留最多 64 KiB 的 UTF-8 安全尾部，并标注省略；同一外部会话的连续请求使用明确会话 ID 续接。
+
 ## 权限模式选择器
 
 点击底栏当前权限名称打开「权限模式」窗口，使用 `↑` / `↓` 选择，`Enter` 确认，`Esc` 取消；鼠标单击可见普通选项立即确认，悬停或窗口内滚轮只移动选择。选项旁标记「当前」，未确认前不会改变权限。
@@ -89,7 +109,7 @@ Git 窗口默认打开“操作”页。单击文件行选中并查看差异，�
 
 ## 斜杠命令
 
-会话：`/new` `/sessions` `/goto` `/status` `/context` `/id` `/pwd` `/fork` `/resume` `/archive` `/export` `/timeline` `/code` `/work` `/agent` `/plan` `/mode` `/next` `/prev` `/reload` `/quit`
+会话：`/harness` `/new` `/sessions` `/goto` `/status` `/context` `/id` `/pwd` `/fork` `/resume` `/archive` `/export` `/timeline` `/code` `/work` `/agent` `/plan` `/mode` `/next` `/prev` `/reload` `/quit`
 
 运行：`/compact` `/checkpoint` `/cancel` `/steer` `/yes` `/no` `/permissions` `/approvals` `/model` `/provider` `/exec` `/worktree`
 

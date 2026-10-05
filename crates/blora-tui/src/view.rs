@@ -355,6 +355,51 @@ pub struct SettingsDialog {
 }
 
 #[derive(Clone, Debug)]
+pub struct HarnessDialog {
+    pub selected: usize,
+    pub available: [bool; 4],
+    pub fullscreen: bool,
+    pub minimized: bool,
+}
+
+impl HarnessDialog {
+    pub fn new(current: blora_types::HarnessKind) -> Self {
+        let kinds = blora_types::HarnessKind::all();
+        Self {
+            selected: kinds.iter().position(|kind| *kind == current).unwrap_or(0),
+            available: kinds.map(|kind| blora_harness::detect(kind).is_some()),
+            fullscreen: false,
+            minimized: false,
+        }
+    }
+
+    pub fn select(&mut self, index: usize) -> Option<blora_types::HarnessKind> {
+        if self.minimized || !self.available.get(index).copied().unwrap_or(false) {
+            return None;
+        }
+        self.selected = index;
+        Some(blora_types::HarnessKind::all()[index])
+    }
+
+    pub fn key(&mut self, key: crossterm::event::KeyCode) -> Option<blora_types::HarnessKind> {
+        use crossterm::event::KeyCode;
+        if self.minimized {
+            if key == KeyCode::Enter {
+                self.minimized = false;
+            }
+            return None;
+        }
+        match key {
+            KeyCode::Up => self.selected = self.selected.saturating_sub(1),
+            KeyCode::Down => self.selected = (self.selected + 1).min(3),
+            KeyCode::Enter => return self.select(self.selected),
+            _ => {}
+        }
+        None
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct PermissionDialog {
     pub selected: usize,
     pub confirm_bypass: bool,
@@ -473,6 +518,7 @@ pub struct FrameModel<'a> {
     /// Color-scheme picker; renders as a centered modal dialog.
     pub theme_dialog: Option<&'a ThemeDialog>,
     pub context_dialog: Option<&'a ContextDialog>,
+    pub harness_dialog: Option<&'a HarnessDialog>,
     pub permission_dialog: Option<&'a PermissionDialog>,
     pub settings_dialog: Option<&'a SettingsDialog>,
     pub tool_dialog: Option<&'a ToolDialog>,
@@ -530,6 +576,8 @@ pub enum Hit {
     CancelRun,
     ToggleApprove,
     PermissionRow(usize),
+    Harness,
+    HarnessRow(usize),
     ContextUsage,
     ProviderTarget,
     Hint(HintAction),
@@ -618,6 +666,8 @@ pub struct HitMap {
     pub theme_rows: Vec<(Rect, usize)>,
     /// Auto / light / dark section tabs.
     pub theme_tabs: Vec<(Rect, usize)>,
+    pub harness: Option<Rect>,
+    pub harness_rows: Vec<(Rect, usize)>,
     pub permission_rows: Vec<(Rect, usize)>,
     pub settings_rows: Vec<(Rect, usize)>,
     pub settings_tabs: Vec<(Rect, usize)>,
@@ -719,6 +769,14 @@ impl HitMap {
         for (rect, idx) in &self.settings_tabs {
             if contains(*rect, col, row) {
                 return Some(Hit::SettingsTab(*idx));
+            }
+        }
+        if self.harness.is_some_and(|rect| contains(rect, col, row)) {
+            return Some(Hit::Harness);
+        }
+        for (rect, idx) in &self.harness_rows {
+            if contains(*rect, col, row) {
+                return Some(Hit::HarnessRow(*idx));
             }
         }
         for (rect, idx) in &self.permission_rows {
@@ -1495,6 +1553,13 @@ fn render_layer(
             render_context_dialog(frame, area, model.projection, dialog, model.pointer, &theme);
         hits.traffic_lights = dialog_hits.traffic_lights;
         hits.modal_area = dialog_hits.modal_area;
+    } else if id == DialogId::Harness
+        && let Some(dialog) = model.harness_dialog
+    {
+        let dialog_hits = render_harness_dialog(frame, area, model, dialog, &theme);
+        hits.harness_rows = dialog_hits.harness_rows;
+        hits.traffic_lights = dialog_hits.traffic_lights;
+        hits.modal_area = dialog_hits.modal_area;
     } else if id == DialogId::Permission
         && let Some(dialog) = model.permission_dialog
     {
@@ -1786,6 +1851,34 @@ fn git_header_rect(inner: Rect, context: Rect, text_width: usize) -> Option<Rect
     })
 }
 
+/// Add a header item only inside its allocated columns, including its hit area.
+fn header_item(
+    line: &mut Line<'static>,
+    area: Rect,
+    separator: &str,
+    text: &str,
+    style: Style,
+    truncate: bool,
+) -> Option<Rect> {
+    let offset = line.width();
+    let remaining = usize::from(area.width).saturating_sub(offset);
+    let separator = if offset == 0 { "" } else { separator };
+    let available = remaining.saturating_sub(separator.width());
+    if available == 0 || text.is_empty() || (!truncate && text.width() > available) {
+        return None;
+    }
+    let text = ellipsize(text, available);
+    line.spans.push(Span::styled(separator.to_owned(), style));
+    let rect = Rect::new(
+        area.x + (offset + separator.width()) as u16,
+        area.y,
+        text.width() as u16,
+        1,
+    );
+    line.spans.push(Span::styled(text, style));
+    Some(rect)
+}
+
 fn render_header(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -1827,80 +1920,15 @@ fn render_header(
     let mode_count = mode_session_indices.len().max(1);
     let counter = format!("{mode_position}/{mode_count}");
     let mode_title = mode_label(mode);
-    let git_text = model.git_status.map(git_indicator_text);
-    let left = Line::from(vec![
-        Span::styled("Blora", theme.rose_bold()),
-        Span::styled("  ·  ", theme.mute()),
-        Span::styled(&mode_title, theme.fg(theme.sage)),
-        Span::styled("  ·  ", theme.mute()),
-        Span::styled("‹ ", theme.dim()),
-        Span::styled(counter.clone(), theme.dim()),
-        Span::styled(" ›", theme.dim()),
-        Span::styled("  ·  ", theme.mute()),
-        Span::styled(project_name, theme.fg(theme.sage)),
-        Span::styled("  ·  ", theme.mute()),
-        Span::styled(ellipsize(display_title, 28), theme.fg(theme.text_dim)),
-    ]);
-    let project_start = inner.x
-        + u16::try_from(
-            "Blora".width()
-                + "  ·  ".width()
-                + mode_title.width()
-                + "  ·  ".width()
-                + counter.width()
-                + 5,
-        )
-        .unwrap_or(0);
-    let project_width = u16::try_from(project_name.width()).unwrap_or(4);
-    hits.project_picker = Some(Rect {
-        x: project_start,
-        y: inner.y,
-        width: project_width,
-        height: 1,
-    });
-    let title_start = project_start
-        .saturating_add(project_width)
-        .saturating_add(6);
-    hits.session_picker = Some(Rect {
-        x: title_start,
-        y: inner.y,
-        width: u16::try_from(ellipsize(display_title, 28).width()).unwrap_or(0),
-        height: 1,
-    });
-    let mut x = inner.x
-        + u16::try_from("Blora".width() + "  ·  ".width() + mode_title.width() + "  ·  ".width())
-            .unwrap_or(0);
-    hits.mode = Some(Rect {
-        x: inner.x + u16::try_from("Blora".width() + "  ·  ".width()).unwrap_or(0),
-        y: inner.y,
-        width: u16::try_from(mode_title.width()).unwrap_or(4),
-        height: 1,
-    });
-    hits.prev_session = Some(Rect {
-        x,
-        y: inner.y,
-        width: 1,
-        height: 1,
-    });
-    x = x.saturating_add(2);
-    x = x.saturating_add(
-        u16::try_from(counter.width())
-            .unwrap_or(0)
-            .saturating_add(1),
-    );
-    hits.next_session = Some(Rect {
-        x,
-        y: inner.y,
-        width: 1,
-        height: 1,
-    });
-    frame.render_widget(Paragraph::new(left).style(theme.base()), inner);
-    if inner.width <= 24 {
-        return;
-    }
+    let compact = inner.width < 80;
+    let separator = if compact { " · " } else { "  ·  " };
     let right = if model.running {
         Line::from(Span::styled(
-            format!("{}  running", spinner(model.tick)),
+            if compact {
+                spinner(model.tick).to_string()
+            } else {
+                format!("{}  running", spinner(model.tick))
+            },
             theme.fg(theme.sage),
         ))
     } else {
@@ -1912,34 +1940,186 @@ fn render_header(
                     .saturating_add(projection.output_tokens)
             })
             .unwrap_or(0);
-        context_usage_line(used, blora_context::context_window(), theme)
+        let usage = context_usage_line(used, blora_context::context_window(), theme);
+        if compact {
+            Line::from(Span::styled(
+                usage.spans.last().unwrap().content.trim().to_owned(),
+                theme.mute(),
+            ))
+        } else {
+            usage
+        }
     };
-    let width = right.width().min(inner.width as usize) as u16;
-    if width == 0 {
-        return;
-    }
+    // Keep the harness entry reachable before allocating status columns.
+    let width = if inner.width >= 20 {
+        right.width() as u16
+    } else {
+        0
+    };
     let rect = Rect {
         x: inner.x + inner.width.saturating_sub(width),
         y: inner.y,
         width,
         height: 1,
     };
-    if model.running {
-        hits.cancel_run = Some(rect);
-    } else {
-        hits.context_usage = Some(rect);
+    let left_area = Rect::new(
+        inner.x,
+        inner.y,
+        inner.width.saturating_sub(width + u16::from(width > 0)),
+        1,
+    );
+    let mut left = Line::default();
+    let harness = model.projection.map(|p| p.harness).unwrap_or_default();
+    hits.harness = header_item(
+        &mut left,
+        left_area,
+        separator,
+        harness.display_name(),
+        theme.rose_bold(),
+        true,
+    );
+    hits.mode = header_item(
+        &mut left,
+        left_area,
+        separator,
+        &mode_title,
+        theme.fg(theme.sage),
+        true,
+    );
+    let navigation = format!("‹ {counter} ›");
+    if let Some(nav) = header_item(
+        &mut left,
+        left_area,
+        separator,
+        &navigation,
+        theme.dim(),
+        false,
+    ) {
+        hits.prev_session = Some(Rect::new(nav.x, nav.y, 1, 1));
+        hits.next_session = Some(Rect::new(nav.right() - 1, nav.y, 1, 1));
     }
-    frame.render_widget(Paragraph::new(right).style(theme.base()), rect);
-    if let Some(git_text) = git_text {
-        if let Some(git_rect) = git_header_rect(inner, rect, git_text.width()) {
-            hits.git_status = Some(git_rect);
-            frame.render_widget(
-                Paragraph::new(Line::from(Span::styled(git_text, theme.fg(theme.sage))))
-                    .style(theme.base()),
-                git_rect,
-            );
+    hits.project_picker = header_item(
+        &mut left,
+        left_area,
+        separator,
+        project_name,
+        theme.fg(theme.sage),
+        true,
+    );
+    hits.session_picker = header_item(
+        &mut left,
+        left_area,
+        separator,
+        &ellipsize(display_title, 28),
+        theme.fg(theme.text_dim),
+        true,
+    );
+    frame.render_widget(Paragraph::new(left.clone()).style(theme.base()), left_area);
+    if width > 0 {
+        if model.running {
+            hits.cancel_run = Some(rect);
+        } else {
+            hits.context_usage = Some(rect);
+        }
+        frame.render_widget(Paragraph::new(right).style(theme.base()), rect);
+    }
+    if !compact {
+        if let Some(git_text) = model.git_status.map(git_indicator_text) {
+            if let Some(git_rect) = git_header_rect(inner, rect, git_text.width()) {
+                if usize::from(git_rect.x - inner.x) >= left.width() + 2 {
+                    hits.git_status = Some(git_rect);
+                    frame.render_widget(
+                        Paragraph::new(Line::from(Span::styled(git_text, theme.fg(theme.sage))))
+                            .style(theme.base()),
+                        git_rect,
+                    );
+                }
+            }
         }
     }
+}
+
+fn render_harness_dialog(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    model: &FrameModel<'_>,
+    dialog: &HarnessDialog,
+    theme: &Theme,
+) -> HitMap {
+    let mut hits = HitMap::default();
+    let Some(modal) = dialog_outer(area, 80, 18, dialog.fullscreen, dialog.minimized) else {
+        return hits;
+    };
+    let inner = paint_dialog_frame(
+        frame,
+        modal,
+        &i18n::tr("harness.title", "执行内核"),
+        model.pointer,
+        theme,
+        &mut hits,
+    );
+    let inner = Rect::new(
+        inner.x,
+        inner.y.saturating_add(1),
+        inner.width,
+        inner.height.saturating_sub(1),
+    );
+    if dialog.minimized || inner.height == 0 {
+        return hits;
+    }
+    let capacity = inner.height.min(4) as usize;
+    let start = dialog.selected.saturating_sub(capacity.saturating_sub(1));
+    let current = model.projection.map(|p| p.harness).unwrap_or_default();
+    for (index, kind) in blora_types::HarnessKind::all()
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(capacity)
+    {
+        let row = Rect::new(inner.x, inner.y + (index - start) as u16, inner.width, 1);
+        let available = dialog.available[index];
+        let state = if !available {
+            i18n::tr("harness.missing", "未安装")
+        } else if *kind == current {
+            i18n::tr("harness.current", "当前")
+        } else {
+            i18n::tr("harness.installed", "已安装")
+        };
+        let text = format!(
+            "{}{} · {}",
+            if index == dialog.selected {
+                "› "
+            } else {
+                "  "
+            },
+            kind.display_name(),
+            state
+        );
+        let style = if !available {
+            theme.mute()
+        } else if index == dialog.selected {
+            theme.rose_bold().bg(theme.bg_select)
+        } else {
+            theme.base()
+        };
+        frame.render_widget(
+            Paragraph::new(ellipsize(&text, row.width as usize)).style(style),
+            row,
+        );
+        hits.harness_rows.push((row, index));
+    }
+    if inner.height > 4 {
+        frame.render_widget(Paragraph::new(i18n::tr("harness.boundary", "仅前台会话使用所选内核。外部 CLI 使用自身登录、模型、规则、插件和权限/沙盒；不受 Blora 原生配置控制。后台任务、Git 辅助和 Imagine 保持 Blora 原生执行。运行中禁止切换；未安装项不可选。" )).wrap(ratatui::widgets::Wrap { trim: false }).style(theme.dim()), Rect::new(inner.x, inner.y + 4, inner.width, inner.height.saturating_sub(5)));
+        frame.render_widget(
+            Paragraph::new(i18n::tr(
+                "hint.select_confirm_close",
+                "↑/↓ 选择 · Enter 确认 · Esc 关闭",
+            ))
+            .style(theme.mute()),
+            Rect::new(inner.x, inner.bottom() - 1, inner.width, 1),
+        );
+    }
+    hits
 }
 
 fn render_permission_dialog(
@@ -1972,7 +2152,9 @@ fn render_permission_dialog(
     }
     if dialog.confirm_bypass {
         frame.render_widget(
-            Paragraph::new(i18n::tr("permission.bypass.warning", "风险：跳过权限确认可能删除文件、泄露密钥或执行危险命令。\n仅在可信工作区使用；网络禁用与沙盒约束仍有效。\n\ny 明确启用 · n / Esc 取消（Enter 不会启用）"))
+            Paragraph::new(if model.projection.is_some_and(|p| p.harness != blora_types::HarnessKind::Blora) { i18n::tr("harness.bypass_warning", "风险：跳过外部 CLI 权限确认可能删除文件、泄露密钥或执行危险命令。Blora 原生网络、路径和沙盒约束不覆盖外部 CLI。仅在可信工作区启用。
+
+y 明确启用 · n / Esc 取消（Enter 不会启用）") } else { i18n::tr("permission.bypass.warning", "风险：跳过权限确认可能删除文件、泄露密钥或执行危险命令。\n仅在可信工作区使用；网络禁用与沙盒约束仍有效。\n\ny 明确启用 · n / Esc 取消（Enter 不会启用）") })
                 .wrap(ratatui::widgets::Wrap { trim: false })
                 .style(theme.fg(theme.rust)),
             Rect::new(inner.x, inner.y, inner.width, inner.height.saturating_sub(1)),
@@ -2038,7 +2220,7 @@ fn render_permission_dialog(
     if inner.height >= 2 {
         let detail = Rect::new(inner.x, inner.bottom() - 2, inner.width, 1);
         frame.render_widget(
-            Paragraph::new(permission_description(PermissionMode::ALL[dialog.selected]))
+            Paragraph::new(if model.projection.is_some_and(|p| p.harness != blora_types::HarnessKind::Blora) { i18n::tr("harness.permission_scope", "外部内核使用自身权限和沙盒。此选择仅映射到 CLI 支持的模式；不支持的组合会被拒绝，Blora 原生边界不覆盖外部工具。") } else { permission_description(PermissionMode::ALL[dialog.selected]) })
                 .style(theme.mute()),
             detail,
         );
@@ -2077,7 +2259,8 @@ fn render_settings_dialog(
         Constraint::Length(1),
     ])
     .areas(inner);
-    let pages = ["常规", "外观", "模型"];
+    let native_settings = i18n::tr("harness.native_settings", "Blora 原生设置");
+    let pages = ["常规", "外观", native_settings.as_str()];
     let tab_width = (tabs.width / pages.len() as u16).max(1);
     for (index, label) in pages.iter().enumerate() {
         let rect = Rect {
@@ -3343,7 +3526,11 @@ fn render_provider_dialog(
     let inner = paint_dialog_frame(
         frame,
         frame_area,
-        &i18n::tr("dialog.provider_model", "选择供应商与模型"),
+        &format!(
+            "{} · {}",
+            i18n::tr("dialog.provider_model", "选择供应商与模型"),
+            i18n::tr("harness.native_settings", "Blora 原生设置")
+        ),
         pointer,
         theme,
         &mut hits,
@@ -4868,9 +5055,23 @@ fn render_composer(
     };
     frame.render_widget(Paragraph::new(prompt_line).style(theme.base()), prompt);
 
-    let model_name = display_model_name(model.model, model.provider);
+    let harness = model.projection.map(|p| p.harness).unwrap_or_default();
+    let external_model = model.projection.and_then(|p| p.external_model.as_deref());
+    let external_label = format!(
+        "{} · {} · {}",
+        harness.display_name(),
+        external_model.unwrap_or("—"),
+        i18n::tr("harness.cli_settings", "CLI 自身模型/权限")
+    );
+    let model_name = if harness == blora_types::HarnessKind::Blora {
+        display_model_name(model.model, model.provider)
+    } else {
+        &external_label
+    };
     let perm = i18n::permission_name(model.permission_mode);
-    let provider = if model.provider.is_empty() {
+    let provider = if harness != blora_types::HarnessKind::Blora {
+        ""
+    } else if model.provider.is_empty() {
         "—"
     } else {
         model.provider
@@ -5241,6 +5442,129 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     #[test]
+    fn harness_disabled_keys_and_minimize() {
+        use crossterm::event::KeyCode;
+        let mut dialog = HarnessDialog {
+            selected: 0,
+            available: [true, false, true, false],
+            fullscreen: false,
+            minimized: false,
+        };
+        assert_eq!(dialog.select(1), None);
+        assert_eq!(dialog.select(4), None);
+        dialog.key(KeyCode::Down);
+        assert_eq!(dialog.key(KeyCode::Enter), None);
+        dialog.key(KeyCode::Down);
+        assert_eq!(
+            dialog.key(KeyCode::Enter),
+            Some(blora_types::HarnessKind::Codex)
+        );
+        dialog.minimized = true;
+        assert_eq!(dialog.key(KeyCode::Enter), None);
+        assert!(!dialog.minimized);
+        assert_eq!(dialog.selected, 2);
+    }
+
+    #[test]
+    fn harness_mobile_hits_disabled_gray_and_controls() {
+        let mut model = FrameModel {
+            dialog_stack: &[],
+            workspace: Path::new("/tmp"),
+            sessions: &[],
+            index: 0,
+            projection: None,
+            pending: &[],
+            input: "手机终端输入一段很长的中文消息用于验证光标",
+            status: "ready",
+            notice: None,
+            paste_preview: None,
+            passport_dialog: None,
+            provider_dialog: None,
+            add_provider_dialog: None,
+            theme_dialog: None,
+            context_dialog: None,
+            settings_dialog: None,
+            harness_dialog: None,
+            permission_dialog: None,
+            tool_dialog: None,
+            tool_detail_dialog: None,
+            slash_hits: &[],
+            slash_selected: 0,
+            search: None,
+            hide_tools: false,
+            message_roles: true,
+            scroll: 0,
+            permission_mode: PermissionMode::Ask,
+            model: "a-very-long-model-name-that-exceeds-the-phone-width",
+            provider: "provider",
+            mode_menu: None,
+            project_picker: None,
+            folder_picker: None,
+            session_picker: None,
+            git_dialog: None,
+            git_status: None,
+            user_label: "you",
+            running: false,
+            tick: 0,
+            pointer: None,
+            text_selection: None,
+        };
+        let mut projection = SessionProjection::new();
+        projection.harness = blora_types::HarnessKind::ClaudeCode;
+        model.projection = Some(&projection);
+        for (width, height) in [(20, 6), (24, 10), (40, 24), (100, 30)] {
+            model.dialog_stack = &[];
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            let mut cache = TranscriptCache::default();
+            let mut hits = HitMap::default();
+            terminal
+                .draw(|frame| hits = draw(frame, &model, &mut cache))
+                .unwrap();
+            let rect = hits.harness.expect("visible harness entry");
+            assert!(rect.width > 0);
+            assert_eq!(hits.hit(rect.x, rect.y), Some(Hit::Harness));
+            for selected in 0..4 {
+                for (minimized, fullscreen) in [(false, false), (true, false), (false, true)] {
+                    let mut dialog = HarnessDialog {
+                        selected,
+                        available: [true, false, true, false],
+                        fullscreen,
+                        minimized,
+                    };
+                    let mut local = model.clone();
+                    local.dialog_stack = &[DialogId::Settings, DialogId::Harness];
+                    local.harness_dialog = Some(&dialog);
+                    terminal
+                        .draw(|frame| hits = draw(frame, &local, &mut cache))
+                        .unwrap();
+                    assert!(hits.modal);
+                    assert!(hits.traffic_lights.iter().all(Option::is_some));
+                    if minimized {
+                        assert!(hits.harness_rows.is_empty());
+                    } else {
+                        assert!(
+                            hits.harness_rows
+                                .iter()
+                                .any(|(_, index)| *index == selected)
+                        );
+                        for (rect, index) in &hits.harness_rows {
+                            assert_eq!(hits.hit(rect.x, rect.y), Some(Hit::HarnessRow(*index)));
+                            if !dialog.available[*index] {
+                                assert_eq!(
+                                    terminal.backend().buffer()[(rect.x, rect.y)].fg,
+                                    Theme::current().mute().fg.unwrap()
+                                );
+                            }
+                        }
+                    }
+                    let disabled = dialog.select(1);
+                    assert!(disabled.is_none());
+                }
+            }
+        }
+    }
+
+    #[test]
     fn permission_keyboard_confirm_cancel_and_minimize() {
         use crossterm::event::KeyCode;
         for (index, mode) in PermissionMode::ALL.iter().enumerate() {
@@ -5293,6 +5617,7 @@ mod tests {
             theme_dialog: None,
             context_dialog: None,
             settings_dialog: None,
+            harness_dialog: None,
             permission_dialog: None,
             tool_dialog: None,
             tool_detail_dialog: None,
@@ -6887,6 +7212,7 @@ mod tests {
             theme_dialog: None,
             context_dialog: None,
             settings_dialog: None,
+            harness_dialog: None,
             permission_dialog: None,
             tool_dialog: None,
             tool_detail_dialog: None,
@@ -7256,6 +7582,7 @@ mod dialog_layer_tests {
             theme_dialog: None,
             context_dialog: None,
             settings_dialog: Some(&settings),
+            harness_dialog: None,
             permission_dialog: None,
             tool_dialog: None,
             tool_detail_dialog: None,

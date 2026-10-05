@@ -207,6 +207,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut add_provider_dialog: Option<view::AddProviderDialog> = None;
     let mut theme_dialog: Option<view::ThemeDialog> = None;
     let mut settings_dialog: Option<view::SettingsDialog> = None;
+    let mut harness_dialog: Option<view::HarnessDialog> = None;
     let mut permission_dialog: Option<view::PermissionDialog> = None;
     let mut context_dialog: Option<view::ContextDialog> = None;
     let mut tool_dialog: Option<view::ToolDialog> = None;
@@ -431,6 +432,9 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
             if context_dialog.is_some() {
                 live_dialogs.push(DialogId::Context);
             }
+            if harness_dialog.is_some() {
+                live_dialogs.push(DialogId::Harness);
+            }
             if permission_dialog.is_some() {
                 live_dialogs.push(DialogId::Permission);
             }
@@ -451,6 +455,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                 tool_dialog = None;
                 tool_detail_dialog = None;
                 context_dialog = None;
+                harness_dialog = None;
                 git_file_click = None;
                 git_diff_requested = None;
                 git_diff_generation = git_diff_generation.wrapping_add(1);
@@ -461,7 +466,11 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                 live_dialogs.retain(|id| {
                     !matches!(
                         id,
-                        DialogId::Git | DialogId::Tool | DialogId::ToolDetail | DialogId::Context
+                        DialogId::Git
+                            | DialogId::Tool
+                            | DialogId::ToolDetail
+                            | DialogId::Context
+                            | DialogId::Harness
                     )
                 });
                 dialog_stack.sync(&live_dialogs);
@@ -480,6 +489,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                 cached = None;
             }
             let projection = cached.as_ref().map(|(_, projection)| projection);
+            let current_harness = projection.map(|p| p.harness).unwrap_or_default();
             if session_id.as_ref() != last_routing_session.as_ref() {
                 last_routing_session = session_id.clone();
                 if let Some(projection) = projection {
@@ -665,6 +675,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             add_provider_dialog: add_provider_dialog.as_ref(),
                             theme_dialog: theme_dialog.as_ref(),
                             settings_dialog: settings_dialog.as_ref(),
+                            harness_dialog: harness_dialog.as_ref(),
                             permission_dialog: permission_dialog.as_ref(),
                             context_dialog: context_dialog.as_ref(),
                             tool_dialog: tool_dialog.as_ref(),
@@ -857,6 +868,22 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                         if top_dialog.is_none() && key.code == KeyCode::BackTab {
                             permission_mode = permission_mode.cycle();
                             status = i18n::permission_changed(permission_mode);
+                            continue;
+                        }
+                        if top_dialog == Some(DialogId::Harness) {
+                            if key.code == KeyCode::Esc {
+                                harness_dialog = None;
+                            } else if let Some(dialog) = harness_dialog.as_mut() {
+                                if let Some(kind) = dialog.key(key.code) {
+                                    status = change_harness(
+                                        runtime,
+                                        session_id.as_ref(),
+                                        kind,
+                                        job.is_some(),
+                                    );
+                                    harness_dialog = None;
+                                }
+                            }
                             continue;
                         }
                         if top_dialog == Some(DialogId::Permission) {
@@ -1690,6 +1717,21 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                             command = format!("/{}", cmd.name);
                                         }
                                     }
+                                    if command.trim() == "/harness" {
+                                        input.clear();
+                                        slash_selected = 0;
+                                        if job.is_some() {
+                                            status = i18n::tr(
+                                                "harness.running",
+                                                "前台运行中不能切换执行内核，请先取消或等待完成",
+                                            );
+                                        } else {
+                                            harness_dialog =
+                                                Some(view::HarnessDialog::new(current_harness));
+                                            dialog_stack.activate(DialogId::Harness);
+                                        }
+                                        continue;
+                                    }
                                     input.clear();
                                     slash_selected = 0;
                                     if let Some(id) = session_id.as_ref() {
@@ -1767,15 +1809,17 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                         let text = input.clone();
                                         input.clear();
                                         status = match runtime.queue_steer(&id, &text) {
-                                            Ok(()) => "已排队插话，将在下一轮送达".to_owned(),
+                                            Ok(()) => steer_queued(current_harness),
                                             Err(err) => err.to_string(),
                                         };
                                         continue;
                                     }
-                                    if passport_login_required(
-                                        &provider_override,
-                                        passport_user_token.as_deref(),
-                                    ) {
+                                    if current_harness == blora_types::HarnessKind::Blora
+                                        && passport_login_required(
+                                            &provider_override,
+                                            passport_user_token.as_deref(),
+                                        )
+                                    {
                                         status =
                                             "PassPort 未登录或令牌已过期，请执行 /login".to_owned();
                                         continue;
@@ -1796,7 +1840,12 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     );
                                     let cancel_clone = cancel.clone();
                                     job = Some(scope.spawn(move || {
-                                        runtime.run(&id, &prompt, &cancel_clone, &options)
+                                        runtime.run_foreground(
+                                            &id,
+                                            &prompt,
+                                            &cancel_clone,
+                                            &options,
+                                        )
                                     }));
                                 }
                             }
@@ -2072,6 +2121,15 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     };
                                 };
                                 match top_dialog {
+                                    Some(DialogId::Harness) => {
+                                        if let Some(dialog) = harness_dialog.as_mut() {
+                                            dialog.key(if up {
+                                                KeyCode::Up
+                                            } else {
+                                                KeyCode::Down
+                                            });
+                                        }
+                                    }
                                     Some(DialogId::Permission) => {
                                         if let Some(dialog) = permission_dialog.as_mut() {
                                             dialog.key(if up {
@@ -2282,6 +2340,50 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                             }
                                         }
                                         _ => {}
+                                    }
+                                    continue;
+                                }
+                                if top_dialog == Some(DialogId::Harness) {
+                                    if let Some(dialog) = harness_dialog.as_mut() {
+                                        match hit {
+                                            Some(view::Hit::TrafficClose) => harness_dialog = None,
+                                            Some(view::Hit::TrafficMinimize) => {
+                                                dialog.minimized = true;
+                                                dialog.fullscreen = false;
+                                            }
+                                            Some(view::Hit::TrafficOpenBrowser) => {
+                                                if dialog.minimized {
+                                                    dialog.minimized = false;
+                                                } else {
+                                                    dialog.fullscreen = !dialog.fullscreen;
+                                                }
+                                            }
+                                            Some(view::Hit::HarnessRow(index)) => {
+                                                if let Some(kind) = dialog.select(index) {
+                                                    status = change_harness(
+                                                        runtime,
+                                                        session_id.as_ref(),
+                                                        kind,
+                                                        job.is_some(),
+                                                    );
+                                                    harness_dialog = None;
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                    continue;
+                                }
+                                if matches!(hit, Some(view::Hit::Harness)) {
+                                    if job.is_some() {
+                                        status = i18n::tr(
+                                            "harness.running",
+                                            "前台运行中不能切换执行内核，请先取消或等待完成",
+                                        );
+                                    } else {
+                                        harness_dialog =
+                                            Some(view::HarnessDialog::new(current_harness));
+                                        dialog_stack.activate(DialogId::Harness);
                                     }
                                     continue;
                                 }
@@ -2816,6 +2918,22 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                             slash_selected = 0;
                                         } else if let Some(id) = session_id.as_ref() {
                                             let command = format!("/{}", cmd.name);
+                                            if cmd.name == "harness" {
+                                                input.clear();
+                                                slash_selected = 0;
+                                                if job.is_some() {
+                                                    status = i18n::tr(
+                                                        "harness.running",
+                                                        "前台运行中不能切换执行内核，请先取消或等待完成",
+                                                    );
+                                                } else {
+                                                    harness_dialog = Some(
+                                                        view::HarnessDialog::new(current_harness),
+                                                    );
+                                                    dialog_stack.activate(DialogId::Harness);
+                                                }
+                                                continue;
+                                            }
                                             input.clear();
                                             slash_selected = 0;
                                             if apply_slash(
@@ -2943,6 +3061,21 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                                 command = format!("/{}", cmd.name);
                                             }
                                         }
+                                        if command.trim() == "/harness" {
+                                            input.clear();
+                                            slash_selected = 0;
+                                            if job.is_some() {
+                                                status = i18n::tr(
+                                                    "harness.running",
+                                                    "前台运行中不能切换执行内核，请先取消或等待完成",
+                                                );
+                                            } else {
+                                                harness_dialog =
+                                                    Some(view::HarnessDialog::new(current_harness));
+                                                dialog_stack.activate(DialogId::Harness);
+                                            }
+                                            continue;
+                                        }
                                         input.clear();
                                         slash_selected = 0;
                                         if let Some(id) = session_id.as_ref() {
@@ -2986,15 +3119,17 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                             let text = input.clone();
                                             input.clear();
                                             status = match runtime.queue_steer(&id, &text) {
-                                                Ok(()) => "已排队插话，将在下一轮送达".to_owned(),
+                                                Ok(()) => steer_queued(current_harness),
                                                 Err(err) => err.to_string(),
                                             };
                                             continue;
                                         }
-                                        if passport_login_required(
-                                            &provider_override,
-                                            passport_user_token.as_deref(),
-                                        ) {
+                                        if current_harness == blora_types::HarnessKind::Blora
+                                            && passport_login_required(
+                                                &provider_override,
+                                                passport_user_token.as_deref(),
+                                            )
+                                        {
                                             status = "PassPort 未登录或令牌已过期，请执行 /login"
                                                 .to_owned();
                                             continue;
@@ -3011,7 +3146,12 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                         );
                                         let cancel_clone = cancel.clone();
                                         job = Some(scope.spawn(move || {
-                                            runtime.run(&id, &prompt, &cancel_clone, &options)
+                                            runtime.run_foreground(
+                                                &id,
+                                                &prompt,
+                                                &cancel_clone,
+                                                &options,
+                                            )
                                         }));
                                     }
                                 } else if hit == Some(view::Hit::Hint(view::HintAction::Quit)) {
@@ -3537,6 +3677,45 @@ fn passport_display_name(user: &blora_storage::UserRecord) -> Option<String> {
         .filter(|name| !name.is_empty())
         .or(user.passport_username.as_deref())
         .map(ToOwned::to_owned)
+}
+
+fn change_harness(
+    runtime: &Runtime,
+    session: Option<&SessionId>,
+    kind: blora_types::HarnessKind,
+    running: bool,
+) -> String {
+    if running {
+        return i18n::tr(
+            "harness.running",
+            "前台运行中不能切换执行内核，请先取消或等待完成",
+        );
+    }
+    if blora_harness::detect(kind).is_none() {
+        return i18n::tr("harness.missing", "未安装");
+    }
+    let Some(session) = session else {
+        return i18n::tr("harness.no_session", "请先创建会话");
+    };
+    match runtime.set_session_harness(session, kind) {
+        Ok(()) => format!(
+            "{}: {}",
+            i18n::tr("harness.title", "执行内核"),
+            kind.display_name()
+        ),
+        Err(err) => err.to_string(),
+    }
+}
+
+fn steer_queued(kind: blora_types::HarnessKind) -> String {
+    if kind == blora_types::HarnessKind::Blora {
+        i18n::tr("harness.native_queue", "已排队插话，将在下一轮送达")
+    } else {
+        i18n::tr(
+            "harness.external_queue",
+            "已排队，将在当前外部请求结束后发送；不支持即时插话",
+        )
+    }
 }
 
 fn passport_login_required(provider: &str, user_token: Option<&str>) -> bool {
@@ -4347,7 +4526,14 @@ fn slash(
                 SlashOutcome::Status(
                     runtime
                         .queue_steer(session_id, args)
-                        .map(|()| "steer queued for the next turn".to_owned())
+                        .map(|()| {
+                            steer_queued(
+                                runtime
+                                    .show_session(session_id)
+                                    .map(|p| p.harness)
+                                    .unwrap_or_default(),
+                            )
+                        })
                         .unwrap_or_else(|err| err.to_string()),
                 )
             }
@@ -4387,7 +4573,11 @@ fn slash(
                 SlashOutcome::ProviderDialog
             } else {
                 *model = args.to_owned();
-                SlashOutcome::Status(model.clone())
+                SlashOutcome::Status(format!(
+                    "{}: {}",
+                    i18n::tr("harness.native_settings", "Blora 原生设置"),
+                    model
+                ))
             }
         }
         "provider" => {
@@ -4395,7 +4585,11 @@ fn slash(
                 SlashOutcome::ProviderDialog
             } else {
                 *provider = args.to_owned();
-                SlashOutcome::Status(format!("provider={}", provider.clone()))
+                SlashOutcome::Status(format!(
+                    "{}: provider={}",
+                    i18n::tr("harness.native_settings", "Blora 原生设置"),
+                    provider
+                ))
             }
         }
         "mode" => {
@@ -5375,6 +5569,7 @@ fn dialog_accepts_hit(top: Option<DialogId>, hit: Option<&view::Hit>) -> bool {
             | (Some(DialogId::Session), Some(Hit::SessionPickerRow(_)))
             | (Some(DialogId::Mode), Some(Hit::ModeRow(_)))
             | (Some(DialogId::Permission), Some(Hit::PermissionRow(_)))
+            | (Some(DialogId::Harness), Some(Hit::HarnessRow(_)))
             | (
                 Some(DialogId::Git),
                 Some(
@@ -5477,7 +5672,9 @@ mod dialog_input_tests {
                 &mut provider,
             );
             if command == "/model chosen-model" {
-                assert!(matches!(result, SlashOutcome::Status(ref text) if text == "chosen-model"));
+                assert!(
+                    matches!(result, SlashOutcome::Status(ref text) if text.contains("chosen-model") && text.contains(&i18n::tr("harness.native_settings", "Blora 原生设置")))
+                );
                 assert_eq!(model, "chosen-model");
             } else {
                 assert!(matches!(result, SlashOutcome::ProviderDialog));
@@ -5966,6 +6163,49 @@ fn write_clipboard(text: &str) -> bool {
 #[cfg(test)]
 mod permission_tests {
     use super::*;
+
+    #[test]
+    fn harness_window_isolates_hits_and_switches_while_idle_only() {
+        let top = Some(DialogId::Harness);
+        assert!(dialog_accepts_hit(top, Some(&view::Hit::HarnessRow(1))));
+        for hit in [
+            view::Hit::Composer,
+            view::Hit::Harness,
+            view::Hit::ProviderTarget,
+            view::Hit::ToggleApprove,
+            view::Hit::Hint(view::HintAction::Send),
+        ] {
+            assert!(!dialog_accepts_hit(top, Some(&hit)));
+        }
+        let mut input = "draft".to_owned();
+        let mut preview = None;
+        paste_into_dialog(
+            top,
+            "ignored",
+            &mut None,
+            &mut None,
+            &mut input,
+            &mut preview,
+        );
+        assert_eq!(input, "draft");
+        assert!(preview.is_none());
+        let runtime = Runtime::new(blora_storage::SqliteStore::open_in_memory().unwrap());
+        let status = change_harness(&runtime, None, blora_types::HarnessKind::Blora, true);
+        assert_eq!(
+            status,
+            i18n::tr(
+                "harness.running",
+                "前台运行中不能切换执行内核，请先取消或等待完成"
+            )
+        );
+        let mut stack = DialogStack::default();
+        stack.activate(DialogId::Settings);
+        stack.activate(DialogId::Harness);
+        stack.sync(&[DialogId::Settings, DialogId::Harness]);
+        assert_eq!(stack.top(), top);
+        stack.sync(&[DialogId::Settings]);
+        assert_eq!(stack.top(), Some(DialogId::Settings));
+    }
 
     #[test]
     fn legacy_commands_and_settings_update_the_canonical_mode() {
