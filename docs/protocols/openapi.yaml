@@ -47,9 +47,9 @@ paths:
                 prompt: { type: string }
                 permission_mode:
                   type: string
-                  enum: [plan, ask, auto-edit, yolo]
+                  enum: [default, acceptEdits, plan, bypassPermissions, ask, auto-edit, yolo]
                   description: Overrides auto_approve when present.
-                auto_approve: { type: boolean, description: Legacy; true means yolo. }
+                auto_approve: { type: boolean, description: Legacy; true means bypassPermissions. }
                 provider: { type: string }
                 model: { type: string }
                 worktree: { type: boolean }

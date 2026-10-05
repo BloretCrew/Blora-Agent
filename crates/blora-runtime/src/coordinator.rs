@@ -1445,7 +1445,8 @@ impl Runtime {
                 ),
             );
         }
-        if before.decision == HookDecision::Ask {
+        if before.decision == HookDecision::Ask && options.permission_mode() != PermissionMode::Yolo
+        {
             let summary = format!("hook requested confirmation for {}", call.name);
             let allowed = options.interactive
                 && self
@@ -1683,7 +1684,7 @@ impl Runtime {
             }
             Err(BloraError::ApprovalRequired(summary)) => {
                 let message = format!(
-                    "approval required for {summary}. Rerun with --permission yolo or auto-edit, or approve interactively."
+                    "approval required for {summary}. Rerun with --permission bypassPermissions or acceptEdits, or approve interactively."
                 );
                 self.record_tool_failure(session_id, run_id, turn_id, call, message)?;
                 if !options.interactive {
@@ -2482,6 +2483,35 @@ mod tests {
         );
         let events = runtime.events(&session).unwrap();
         assert!(events.iter().any(|e| e.event_type == "usage.recorded"));
+    }
+
+    #[test]
+    fn foreground_runs_record_canonical_permission_names() {
+        for mode in PermissionMode::ALL {
+            let dir = tempfile::tempdir().unwrap();
+            let runtime = Runtime::new(SqliteStore::open_in_memory().unwrap());
+            let session = session(&runtime, Mode::Code, dir.path().to_str().unwrap());
+            runtime
+                .run(
+                    &session,
+                    "hello",
+                    &CancelToken::new(),
+                    &RunOptions {
+                        mock: true,
+                        permission: Some(mode),
+                        ..RunOptions::default()
+                    },
+                )
+                .unwrap();
+            let projection = runtime.show_session(&session).unwrap();
+            assert_eq!(projection.permission_mode.as_deref(), Some(mode.as_str()));
+            let events = runtime.events(&session).unwrap();
+            let created = events
+                .iter()
+                .find(|event| event.event_type == "run.created")
+                .unwrap();
+            assert_eq!(created.payload["permission_mode"], mode.as_str());
+        }
     }
 
     #[test]

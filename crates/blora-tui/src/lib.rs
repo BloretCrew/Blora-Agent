@@ -302,6 +302,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
         String::new()
     };
     let mut permission_mode = PermissionMode::Ask;
+    let mut confirmed_permission = permission_mode;
     let mut scroll = 0usize;
     let mut search: Option<String> = None;
     let mut hide_tools = false;
@@ -334,6 +335,12 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
         > = None;
         let mut git_header_after = Instant::now() - Duration::from_secs(1);
         loop {
+            if guard_bypass_transition(&mut permission_mode, confirmed_permission) {
+                permission_dialog = Some(view::PermissionDialog::bypass_warning());
+                dialog_stack.activate(DialogId::Permission);
+            } else {
+                confirmed_permission = permission_mode;
+            }
             refresh_sessions(runtime, &mut sessions, &mut index);
             if let Some(guide) = onboarding.as_mut()
                 && let Some(user) = guide.poll()
@@ -847,11 +854,17 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             slash_selected = 0;
                             continue;
                         }
+                        if top_dialog.is_none() && key.code == KeyCode::BackTab {
+                            permission_mode = permission_mode.cycle();
+                            status = format!("permission={permission_mode}");
+                            continue;
+                        }
                         if top_dialog == Some(DialogId::Permission) {
                             if let Some(dialog) = permission_dialog.as_mut() {
                                 match dialog.key(key.code) {
                                     view::PermissionAction::Apply(mode) => {
                                         permission_mode = mode;
+                                        confirmed_permission = mode;
                                         status = format!("permission={mode}");
                                         permission_dialog = None;
                                     }
@@ -2291,8 +2304,11 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                             Some(view::Hit::PermissionRow(index))
                                                 if !dialog.minimized =>
                                             {
-                                                if let Some(mode) = PermissionMode::ALL.get(index) {
-                                                    permission_mode = *mode;
+                                                if let view::PermissionAction::Apply(mode) =
+                                                    dialog.select(index)
+                                                {
+                                                    permission_mode = mode;
+                                                    confirmed_permission = mode;
                                                     status = format!("permission={mode}");
                                                     permission_dialog = None;
                                                 }
@@ -3585,6 +3601,15 @@ mod passport_login_tests {
     }
 }
 
+fn guard_bypass_transition(mode: &mut PermissionMode, confirmed: PermissionMode) -> bool {
+    if *mode == PermissionMode::Yolo && confirmed != PermissionMode::Yolo {
+        *mode = confirmed;
+        true
+    } else {
+        false
+    }
+}
+
 fn legacy_permission(enabled: bool) -> PermissionMode {
     if enabled {
         PermissionMode::Yolo
@@ -3938,11 +3963,15 @@ fn apply_settings_row(
             runtime.set_tui_message_roles(!enabled)?;
         }
         (0, 0) => {
-            *permission_mode = legacy_permission(if increase {
-                true
+            *permission_mode = if increase {
+                permission_mode.cycle()
             } else {
-                !permission_mode.auto_approve()
-            })
+                match permission_mode {
+                    PermissionMode::Ask => PermissionMode::Plan,
+                    PermissionMode::AutoEdit => PermissionMode::Ask,
+                    _ => PermissionMode::AutoEdit,
+                }
+            };
         }
         (0, 1) => *hide_tools = if increase { true } else { !*hide_tools },
         (2, 0) => provider.clear(),
@@ -3974,7 +4003,7 @@ fn apply_settings(
         );
     }
     let Some((key, value)) = args.split_once('=') else {
-        return SlashOutcome::Status("用法：/settings [theme=珊瑚|scheme=dark|auto-approve=on|hide-tools=on|message-roles=off|provider=名称|model=名称]".to_owned());
+        return SlashOutcome::Status("用法：/settings [theme=珊瑚|scheme=dark|permission=default|auto-approve=on|hide-tools=on|message-roles=off|provider=名称|model=名称]".to_owned());
     };
     let key = key.trim().to_ascii_lowercase();
     let value = value.trim();
@@ -3997,6 +4026,15 @@ fn apply_settings(
                 SlashOutcome::Status(apply_theme_pref(theme::ThemePref { palette, scheme }))
             }
             None => SlashOutcome::Status("可用配色模式：auto、dark、light、plain".to_owned()),
+        },
+        "permission" | "permission-mode" => match PermissionMode::parse(value) {
+            Some(mode) => {
+                *permission_mode = mode;
+                SlashOutcome::Status(format!("permission={mode}"))
+            }
+            None => SlashOutcome::Status(
+                "权限模式：default、acceptEdits、plan、bypassPermissions".to_owned(),
+            ),
         },
         "auto-approve" | "auto" => match parse_setting_bool(value) {
             Some(enabled) => {
@@ -4047,7 +4085,7 @@ fn settings_text(
     provider: &str,
 ) -> String {
     format!(
-        "当前设置\ntheme={}\nscheme={}\npermission={permission_mode}\nhide-tools={hide_tools}\nmessage-roles={message_roles}\nprovider={}\nmodel={}\n\n修改示例：/settings theme=indigo、/settings auto-approve=on",
+        "当前设置\ntheme={}\nscheme={}\npermission={permission_mode}\nhide-tools={hide_tools}\nmessage-roles={message_roles}\nprovider={}\nmodel={}\n\n修改示例：/settings theme=indigo、/settings permission=acceptEdits",
         theme::palette().as_str(),
         theme::scheme().as_str(),
         if provider.is_empty() {
@@ -4324,7 +4362,7 @@ fn slash(
         }
         "no" => {
             *permission_mode = PermissionMode::Ask;
-            SlashOutcome::Status("permission=ask".to_owned())
+            SlashOutcome::Status("permission=default".to_owned())
         }
         "permissions" => SlashOutcome::Status(format!(
             "permission={permission_mode}  network={}  exec={}  pty={}  worktree={}",
@@ -5939,6 +5977,12 @@ mod permission_tests {
             ("/no", PermissionMode::Ask),
             ("/settings auto-approve=on", PermissionMode::Yolo),
             ("/settings auto-approve=off", PermissionMode::Ask),
+            ("/settings permission=acceptEdits", PermissionMode::AutoEdit),
+            ("/settings permission=plan", PermissionMode::Plan),
+            (
+                "/settings permission=bypassPermissions",
+                PermissionMode::Yolo,
+            ),
         ] {
             let mut mode = PermissionMode::AutoEdit;
             let outcome = slash(
@@ -5957,6 +6001,16 @@ mod permission_tests {
             );
             assert!(matches!(outcome, SlashOutcome::Status(_)));
             assert_eq!(mode, expected, "{command}");
+            let requires_confirmation =
+                guard_bypass_transition(&mut mode, PermissionMode::AutoEdit);
+            assert_eq!(
+                requires_confirmation,
+                expected == PermissionMode::Yolo,
+                "{command}"
+            );
+            if requires_confirmation {
+                assert_eq!(mode, PermissionMode::AutoEdit, "{command}");
+            }
         }
         for initial in PermissionMode::ALL {
             let mut mode = initial;
@@ -5971,8 +6025,33 @@ mod permission_tests {
                 &mut String::new(),
             )
             .unwrap();
-            assert_eq!(mode, legacy_permission(!initial.auto_approve()));
+            assert_eq!(
+                mode,
+                match initial {
+                    PermissionMode::Ask => PermissionMode::Plan,
+                    PermissionMode::AutoEdit => PermissionMode::Ask,
+                    _ => PermissionMode::AutoEdit,
+                }
+            );
         }
+    }
+
+    #[test]
+    fn bypass_requests_restore_previous_mode_until_confirmed() {
+        for initial in [
+            PermissionMode::Ask,
+            PermissionMode::AutoEdit,
+            PermissionMode::Plan,
+        ] {
+            let mut requested = PermissionMode::Yolo;
+            assert!(guard_bypass_transition(&mut requested, initial));
+            assert_eq!(requested, initial);
+        }
+        let mut confirmed = PermissionMode::Yolo;
+        assert!(!guard_bypass_transition(
+            &mut confirmed,
+            PermissionMode::Yolo
+        ));
     }
 
     #[test]

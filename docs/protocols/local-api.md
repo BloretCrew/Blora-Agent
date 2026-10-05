@@ -7,7 +7,7 @@ GET    /api/sessions          session summaries: id, title, workspace_path, mode
 GET    /api/sessions?q=       same summary shape; full transcript stays on GET /api/sessions/:id
 POST   /api/sessions
 GET    /api/sessions/:id
-POST   /api/sessions/:id/run         {"prompt", "permission_mode": "plan|ask|auto-edit|yolo", ...}
+POST   /api/sessions/:id/run         {"prompt", "permission_mode": "plan|default|acceptEdits|bypassPermissions", ...}
 GET    /api/sessions/:id/events
 POST   /api/sessions/:id/fork
 GET    /api/sessions/:id/export

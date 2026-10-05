@@ -357,6 +357,7 @@ pub struct SettingsDialog {
 #[derive(Clone, Debug)]
 pub struct PermissionDialog {
     pub selected: usize,
+    pub confirm_bypass: bool,
     pub fullscreen: bool,
     pub minimized: bool,
 }
@@ -369,8 +370,29 @@ pub enum PermissionAction {
 }
 
 impl PermissionDialog {
+    pub fn bypass_warning() -> Self {
+        let mut dialog = Self::new(PermissionMode::Yolo);
+        dialog.confirm_bypass = true;
+        dialog
+    }
+
+    pub fn select(&mut self, index: usize) -> PermissionAction {
+        if self.confirm_bypass || index >= PermissionMode::ALL.len() {
+            return PermissionAction::None;
+        }
+        self.selected = index;
+        let mode = PermissionMode::ALL[index];
+        if mode == PermissionMode::Yolo {
+            self.confirm_bypass = true;
+            PermissionAction::None
+        } else {
+            PermissionAction::Apply(mode)
+        }
+    }
+
     pub fn new(current: PermissionMode) -> Self {
         Self {
+            confirm_bypass: false,
             selected: PermissionMode::ALL
                 .iter()
                 .position(|mode| *mode == current)
@@ -391,10 +413,17 @@ impl PermissionDialog {
             }
             return PermissionAction::None;
         }
+        if self.confirm_bypass {
+            return match key {
+                KeyCode::Char('y') => PermissionAction::Apply(PermissionMode::Yolo),
+                KeyCode::Char('n') => PermissionAction::Close,
+                _ => PermissionAction::None,
+            };
+        }
         match key {
             KeyCode::Up => self.selected = self.selected.saturating_sub(1),
             KeyCode::Down => self.selected = (self.selected + 1).min(PermissionMode::ALL.len() - 1),
-            KeyCode::Enter => return PermissionAction::Apply(PermissionMode::ALL[self.selected]),
+            KeyCode::Enter => return self.select(self.selected),
             _ => {}
         }
         PermissionAction::None
@@ -406,7 +435,7 @@ fn permission_description(mode: PermissionMode) -> &'static str {
         PermissionMode::Plan => "只读探索；仅可写 .blora/plan.md，禁止修改命令",
         PermissionMode::Ask => "文件写入与修改命令均需确认",
         PermissionMode::AutoEdit => "工作区文件编辑免确认；修改命令仍需确认",
-        PermissionMode::Yolo => "普通操作免确认；危险命令与网络仍受限制",
+        PermissionMode::Yolo => "跳过所有审批（含危险命令）；硬性网络与沙盒限制保留",
     }
 }
 
@@ -1921,6 +1950,19 @@ fn render_permission_dialog(
     if dialog.minimized || inner.height == 0 {
         return hits;
     }
+    if dialog.confirm_bypass {
+        frame.render_widget(
+            Paragraph::new("风险：跳过权限确认可能删除文件、泄露密钥或执行危险命令。\n仅在可信工作区使用；网络禁用与沙盒约束仍有效。\n\ny 明确启用 · n / Esc 取消（Enter 不会启用）")
+                .wrap(ratatui::widgets::Wrap { trim: false })
+                .style(theme.fg(theme.rust)),
+            Rect::new(inner.x, inner.y, inner.width, inner.height.saturating_sub(1)),
+        );
+        frame.render_widget(
+            Paragraph::new("y 启用 · n/Esc 取消").style(theme.fg(theme.rust)),
+            Rect::new(inner.x, inner.bottom() - 1, inner.width, 1),
+        );
+        return hits;
+    }
     let compact = inner.height < 10;
     let row_height = if compact { 1 } else { 2 };
     let capacity = (inner.height.saturating_sub(2) / row_height).max(1) as usize;
@@ -1945,12 +1987,16 @@ fn render_permission_dialog(
         } else {
             ""
         };
-        let title = format!(
-            "{} {}{}",
-            if index == dialog.selected { "›" } else { " " },
-            mode.as_str(),
-            current
-        );
+        let title = if inner.width < mode.as_str().len() as u16 + 2 {
+            mode.as_str().to_owned()
+        } else {
+            format!(
+                "{} {}{}",
+                if index == dialog.selected { "›" } else { " " },
+                mode.as_str(),
+                current
+            )
+        };
         let text = if compact {
             title
         } else {
@@ -2035,14 +2081,7 @@ fn render_settings_dialog(
     }
     let rows: &[(&str, &str)] = match dialog.page {
         0 => &[
-            (
-                "自动批准",
-                if model.permission_mode.auto_approve() {
-                    "开启"
-                } else {
-                    "关闭"
-                },
-            ),
+            ("权限模式", model.permission_mode.as_str()),
             (
                 "隐藏工具调用",
                 if model.hide_tools { "开启" } else { "关闭" },
@@ -4818,7 +4857,12 @@ fn render_composer(
         );
         hits.provider_target = model_hit;
     } else {
-        let model_area = Rect::new(info.x, info.y, info.width.saturating_sub(12), info.height);
+        let model_area = Rect::new(
+            info.x,
+            info.y,
+            info.width.saturating_sub(perm.len() as u16 + 3),
+            info.height,
+        );
         hits.provider_target = chrome_item(
             &mut line,
             model_area,
@@ -5171,7 +5215,18 @@ mod tests {
         for (index, mode) in PermissionMode::ALL.iter().enumerate() {
             let mut dialog = PermissionDialog::new(*mode);
             assert_eq!(dialog.selected, index);
-            assert_eq!(dialog.key(KeyCode::Enter), PermissionAction::Apply(*mode));
+            if *mode == PermissionMode::Yolo {
+                assert_eq!(dialog.key(KeyCode::Enter), PermissionAction::None);
+                assert!(dialog.confirm_bypass);
+                assert_eq!(dialog.key(KeyCode::Enter), PermissionAction::None);
+                assert_eq!(dialog.select(index), PermissionAction::None);
+                assert_eq!(
+                    dialog.key(KeyCode::Char('y')),
+                    PermissionAction::Apply(*mode)
+                );
+            } else {
+                assert_eq!(dialog.key(KeyCode::Enter), PermissionAction::Apply(*mode));
+            }
             assert_eq!(dialog.key(KeyCode::Esc), PermissionAction::Close);
             dialog.minimized = true;
             assert_eq!(dialog.key(KeyCode::Down), PermissionAction::None);
@@ -5179,7 +5234,7 @@ mod tests {
             assert_eq!(dialog.key(KeyCode::Enter), PermissionAction::None);
             assert!(!dialog.minimized);
         }
-        let mut dialog = PermissionDialog::new(PermissionMode::Plan);
+        let mut dialog = PermissionDialog::new(PermissionMode::Ask);
         dialog.key(KeyCode::Up);
         assert_eq!(dialog.selected, 0);
         for _ in 0..10 {
@@ -5288,7 +5343,9 @@ mod tests {
                             .map(|x| terminal.backend().buffer()[(x, rect.y)].symbol())
                             .collect();
                         assert!(row.contains(mode.as_str()), "{row}");
-                        assert!(row.contains("当"), "current marker missing: {row}");
+                        if rect.width >= mode.as_str().len() as u16 + 7 {
+                            assert!(row.contains("当"), "current marker missing: {row}");
+                        }
                         for (rect, _) in &hits.permission_rows {
                             assert!(rect.right() <= width && rect.bottom() <= height);
                         }
@@ -5298,6 +5355,20 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn bypass_warning_rejects_enter_and_mouse_selection() {
+        let mut dialog = PermissionDialog::bypass_warning();
+        assert_eq!(
+            dialog.key(crossterm::event::KeyCode::Enter),
+            PermissionAction::None
+        );
+        assert_eq!(
+            dialog.key(crossterm::event::KeyCode::Char('n')),
+            PermissionAction::Close
+        );
+        assert_eq!(dialog.select(0), PermissionAction::None);
     }
 
     #[test]

@@ -5,10 +5,10 @@
 //!
 //! A [`PermissionMode`] decides how much the agent may do without asking. Shell
 //! commands are additionally classified by [`classify_shell`] so that read-only
-//! inspection never nags and dangerous commands always confirm, whatever the mode.
+//! inspection never nags and dangerous commands confirm unless permissions are explicitly bypassed.
 
 /// Increment when capability defaults change. Recorded on approval events.
-pub const POLICY_VERSION: u32 = 2;
+pub const POLICY_VERSION: u32 = 3;
 
 use std::path::{Path, PathBuf};
 
@@ -23,8 +23,7 @@ pub enum Decision {
 
 /// How much the agent may do without a human in the loop.
 ///
-/// Ordered from least to most permissive; `Shift+Tab` in the TUI cycles through
-/// them in this order.
+/// `Shift+Tab` cycles default, acceptEdits, and plan; bypass requires opt-in.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum PermissionMode {
     /// Read-only exploration. The only writable path is `.blora/plan.md`;
@@ -37,20 +36,20 @@ pub enum PermissionMode {
     /// Workspace file edits are allowed without asking; shell commands that
     /// mutate anything still confirm.
     AutoEdit,
-    /// Everything is allowed except dangerous commands and network access.
+    /// Skip approvals, including dangerous commands; hard restrictions still apply.
     Yolo,
 }
 
 impl PermissionMode {
-    pub const ALL: [Self; 4] = [Self::Plan, Self::Ask, Self::AutoEdit, Self::Yolo];
+    pub const ALL: [Self; 4] = [Self::Ask, Self::AutoEdit, Self::Plan, Self::Yolo];
 
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Plan => "plan",
-            Self::Ask => "ask",
-            Self::AutoEdit => "auto-edit",
-            Self::Yolo => "yolo",
+            Self::Ask => "default",
+            Self::AutoEdit => "acceptEdits",
+            Self::Yolo => "bypassPermissions",
         }
     }
 
@@ -60,8 +59,12 @@ impl PermissionMode {
         match text.trim().to_ascii_lowercase().as_str() {
             "plan" | "read-only" | "readonly" | "ro" => Some(Self::Plan),
             "ask" | "default" | "normal" | "confirm" => Some(Self::Ask),
-            "auto-edit" | "autoedit" | "edit" | "accept-edits" | "edits" => Some(Self::AutoEdit),
-            "yolo" | "auto" | "always-approve" | "bypass" | "yes" => Some(Self::Yolo),
+            "acceptedits" | "auto-edit" | "autoedit" | "edit" | "accept-edits" | "edits" => {
+                Some(Self::AutoEdit)
+            }
+            "bypasspermissions" | "yolo" | "auto" | "always-approve" | "bypass" | "yes" => {
+                Some(Self::Yolo)
+            }
             _ => None,
         }
     }
@@ -72,8 +75,8 @@ impl PermissionMode {
         match self {
             Self::Plan => Self::Ask,
             Self::Ask => Self::AutoEdit,
-            Self::AutoEdit => Self::Yolo,
-            Self::Yolo => Self::Plan,
+            Self::AutoEdit => Self::Plan,
+            Self::Yolo => Self::Ask,
         }
     }
 
@@ -91,7 +94,7 @@ impl PermissionMode {
             Self::Plan => "read-only; only .blora/plan.md is writable",
             Self::Ask => "confirm writes and mutating commands",
             Self::AutoEdit => "edits allowed; mutating commands confirm",
-            Self::Yolo => "allow all except dangerous commands and network",
+            Self::Yolo => "skip approvals; network and sandbox restrictions remain",
         }
     }
 }
@@ -173,7 +176,7 @@ impl Policy {
 
     /// A copy that treats one approved action as granted. Used after the user
     /// says yes so the retried call does not ask again (even for dangerous
-    /// commands, which keep asking under every mode).
+    /// commands in modes that require confirmation).
     #[must_use]
     pub fn granting(&self) -> Self {
         Self {
@@ -270,6 +273,7 @@ impl Policy {
         match classify_shell(command) {
             ShellClass::Dangerous => match self.mode {
                 PermissionMode::Plan => Decision::Deny,
+                PermissionMode::Yolo => Decision::Allow,
                 _ => Decision::Ask,
             },
             ShellClass::ReadOnly => match self.mode {
@@ -806,9 +810,15 @@ mod tests {
         let (_d, yolo) = policy(PermissionMode::Yolo);
         assert_eq!(yolo.shell_command("mkdir x"), Decision::Allow);
         assert_eq!(yolo.shell_command("git push"), Decision::Allow);
-        assert_eq!(yolo.shell_command("rm -rf x"), Decision::Ask);
-        assert_eq!(yolo.shell_command("git push --force"), Decision::Ask);
+        assert_eq!(yolo.shell_command("rm -rf x"), Decision::Allow);
+        assert_eq!(yolo.shell_command("git push --force"), Decision::Allow);
         assert_eq!(yolo.shell_command("curl x"), Decision::Deny);
+        assert!(yolo.resolve("../outside").is_err());
+        assert!(
+            yolo.granting()
+                .require(Decision::Deny, "hard restriction")
+                .is_err()
+        );
     }
 
     #[test]
@@ -837,9 +847,21 @@ mod tests {
             PermissionMode::parse("edits"),
             Some(PermissionMode::AutoEdit)
         );
+        for (name, mode) in [
+            ("default", PermissionMode::Ask),
+            ("ask", PermissionMode::Ask),
+            ("acceptEdits", PermissionMode::AutoEdit),
+            ("auto-edit", PermissionMode::AutoEdit),
+            ("bypassPermissions", PermissionMode::Yolo),
+            ("yolo", PermissionMode::Yolo),
+        ] {
+            assert_eq!(PermissionMode::parse(name), Some(mode));
+        }
+        assert_eq!(PermissionMode::Ask.cycle(), PermissionMode::AutoEdit);
+        assert_eq!(PermissionMode::AutoEdit.cycle(), PermissionMode::Plan);
         assert_eq!(PermissionMode::parse("nope"), None);
         assert_eq!(PermissionMode::Plan.cycle(), PermissionMode::Ask);
-        assert_eq!(PermissionMode::Yolo.cycle(), PermissionMode::Plan);
+        assert_eq!(PermissionMode::Yolo.cycle(), PermissionMode::Ask);
         assert!(
             Policy::new(std::env::temp_dir(), true)
                 .unwrap()
@@ -853,7 +875,7 @@ mod tests {
 
     #[test]
     fn granting_turns_ask_into_allow_but_keeps_deny() {
-        let (_d, yolo) = policy(PermissionMode::Yolo);
+        let (_d, yolo) = policy(PermissionMode::Ask);
         assert_eq!(yolo.shell_command("rm -rf build"), Decision::Ask);
         let granted = yolo.granting();
         assert!(

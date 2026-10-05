@@ -22,35 +22,37 @@
 | 滚轮 | 滚动 transcript；在斜杠列表上则移动选中项 |
 | 单击 | 执行斜杠命令、审批、切换会话、底栏动作 |
 
-鼠标（终端需支持 SGR 鼠标）：滚轮滚动对话；斜杠列表悬停高亮、单击执行（需要参数则补全）；点 `y allow` / `n deny` 审批；顶栏 `‹ ›` 切换会话；点 `running` 取消当前 run；点当前权限名称（如 `ask` / `yolo`）打开独立权限模式选择器；底栏快捷键可点。点斜杠菜单或结果面板以外的区域会关闭它们。
+鼠标（终端需支持 SGR 鼠标）：滚轮滚动对话；斜杠列表悬停高亮、单击执行（需要参数则补全）；点 `y allow` / `n deny` 审批；顶栏 `‹ ›` 切换会话；点 `running` 取消当前 run；点当前权限名称（如 `default` / `bypassPermissions`）打开独立权限模式选择器；底栏快捷键可点。点斜杠菜单或结果面板以外的区域会关闭它们。
 
 `/help`、`/git`、`/files` 等较长输出显示在 prompt 上方的结果面板，`Esc` 或点击关闭。
 
 ## 权限模式选择器
 
-点击底栏当前权限名称打开「权限模式」窗口，使用 `↑` / `↓` 选择，`Enter` 确认，`Esc` 取消；鼠标单击可见选项立即确认，悬停或窗口内滚轮只移动选择。选项旁标记「当前」，未确认前不会改变权限。
+点击底栏当前权限名称打开「权限模式」窗口，使用 `↑` / `↓` 选择，`Enter` 确认，`Esc` 取消；鼠标单击可见普通选项立即确认，悬停或窗口内滚轮只移动选择。选项旁标记「当前」，未确认前不会改变权限。
 
 | 模式 | 说明 |
 |---|---|
 | `plan` | 只读探索；仅允许写入 `.blora/plan.md`，禁止修改性 shell 命令 |
-| `ask` | 文件写入和修改性 shell 命令需要确认 |
-| `auto-edit` | 工作区文件编辑免确认；修改性 shell 命令仍需确认 |
-| `yolo` | 普通操作免确认；危险命令及网络访问仍受策略限制 |
+| `default` | 文件写入和修改性 shell 命令需要确认 |
+| `acceptEdits` | 工作区文件编辑免确认；修改性 shell 命令仍需确认 |
+| `bypassPermissions` | 跳过普通及危险操作审批；硬性网络禁用、工作区边界与沙盒限制仍有效 |
+
+主界面 `Shift+Tab` 按 `default → acceptEdits → plan → default` 循环，不进入 `bypassPermissions`；从绕过模式切换则回到 `default`。选择 `bypassPermissions` 或使用 `/yes on`、`/settings auto-approve=on`、`/settings permission=bypassPermissions` 时，必须先阅读风险提示并按 `y` 明确确认；`Enter` 和重复鼠标点击不会确认，`n` / `Esc` 取消且保留原模式。
 
 此窗口复用共享窗口栈、亮度动画和红/黄/绿标题栏控件，支持关闭、最小化、展开；最小化后 `Enter` 只恢复，不确认。窄屏使用紧凑单行选项，说明显示在下方，选择会自动保持可见。弹窗输入不会穿透后台。
 
 当前权限以完整模式传给后续前台运行（包括键盘/鼠标发送及插话后续运行），Git 提交说明生成的 RunOptions 也携带当前模式。切换不会改变已经启动的运行；此权限不是会话工作模式，`/plan` 仍用于切换工作模式。Git 手动提交/同步等显式 UI 操作不是模型工具审批。
 
-兼容入口 `/yes` 保留自动批准开关的切换语义（`/yes on` 为 `yolo`，`/yes off` 为 `ask`），`/no` 设置 `ask`；设置中的「自动批准」及 `/settings auto-approve=on/off` 同样映射为 `yolo` / `ask`，不会留下另一份独立布尔状态。`/permissions` 显示完整当前模式。权限选择仅对当前 TUI 进程有效，重启默认为 `ask`。
+兼容入口 `/yes` 保留自动批准开关的切换语义（`/yes on` 为 `bypassPermissions`，`/yes off` 为 `default`），`/no` 设置 `default`；设置中的「权限模式」在三个普通模式间循环； `/settings auto-approve=on/off` 兼容开关映射为 `bypassPermissions` / `default`，不会留下另一份独立布尔状态。`/permissions` 显示完整当前模式。权限选择仅对当前 TUI 进程有效，重启默认为 `default`。
 
-后台 `/task`、`/cron`、`/loop` 保留已有任务语义：只保存自动批准布尔开关，`yolo` 对应开启，其他模式对应关闭，不保存或继承 `plan` / `auto-edit`。排队成功状态会明确显示这一差异；`/pump` 仍按任务中已保存的设置运行，不使用之后切换的前台权限。
+后台 `/task`、`/cron`、`/loop` 保留已有任务语义：只保存自动批准布尔开关，`bypassPermissions` 对应开启，其他模式对应关闭，不保存或继承 `plan` / `acceptEdits`。排队成功状态会明确显示这一差异；`/pump` 仍按任务中已保存的设置运行，不使用之后切换的前台权限。
 
 ## 手机与窄屏终端
 
 通过手机终端或 SSH 使用时，界面会根据终端列数和行数自动调整，无需开启额外选项：
 
 - 小于 60 列时减少左右留白，底栏使用紧凑中文操作按钮；支持 SGR 鼠标的终端可以直接点按。
-- 模型信息优先显示 当前权限模式名称（`plan` / `ask` / `auto-edit` / `yolo`），长模型名按可用宽度省略，点击可见模型名称打开选择器。
+- 模型信息优先显示 当前权限模式名称（`plan` / `default` / `acceptEdits` / `bypassPermissions`），长模型名按可用宽度省略，点击可见模型名称打开选择器。
 - 供应商与模型窗口在内容宽度不足 60 列时改为上下排列，方向键和点按保留原有行为，选中项自动保持可见。
 - 少于 14 行时省去顶栏分隔行；软键盘打开或终端缩小时，命令菜单缩短，并保留输入区与对话空间。
 - 长中文输入显示完整字符的末尾，并为输入光标保留一列。
@@ -108,3 +110,5 @@ Git 窗口默认打开“操作”页。单击文件行选中并查看差异，�
 在 `/settings` →「外观」中选择「消息角色标记」，按 ←/→ 或点击该项切换。默认开启；关闭后隐藏用户与助手消息上方的名字和左侧彩色竖线，保留正文、Markdown、消息间距和工具摘要。设置立即生效，并保存在当前 Blora 数据库中，重启后继续使用。
 
 也可以执行 `/settings message-roles=off` 关闭，或 `/settings message-roles=on` 恢复。
+
+`/settings permission=default|acceptEdits|plan|bypassPermissions` 设置完整模式。CLI/API 支持旧别名 `ask`、`auto-edit`、`yolo`；CLI 显式 `--permission bypassPermissions` 或 `--yes` 视为非交互式风险授权，不另弹 TUI 确认。

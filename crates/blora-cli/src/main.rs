@@ -57,10 +57,10 @@ struct Cli {
     /// Existing session for `--print` (`ses_…`). Omit to create one.
     #[arg(long)]
     session: Option<String>,
-    /// Permission mode for `--print`: plan, ask, auto-edit, or yolo.
+    /// Permission mode for `--print`: default, acceptEdits, plan, or bypassPermissions.
     #[arg(long, value_parser = parse_permission)]
     permission: Option<PermissionMode>,
-    /// Same as `--permission yolo` for `--print`.
+    /// Same as `--permission bypassPermissions` for `--print`.
     #[arg(long)]
     yes: bool,
     /// Force the mock provider for `--print`.
@@ -98,10 +98,10 @@ enum Commands {
         /// Force the mock provider.
         #[arg(long)]
         mock: bool,
-        /// Auto-approve write_file and shell (same as `--permission yolo`).
+        /// Auto-approve write_file and shell (same as `--permission bypassPermissions`).
         #[arg(long)]
         yes: bool,
-        /// Permission mode: plan, ask, auto-edit, or yolo. Overrides --yes.
+        /// Permission mode: default, acceptEdits, plan, or bypassPermissions. Overrides --yes.
         #[arg(long, value_parser = parse_permission)]
         permission: Option<PermissionMode>,
         /// Model name override.
@@ -877,8 +877,9 @@ fn last_assistant(
 }
 
 fn parse_permission(text: &str) -> Result<PermissionMode, String> {
-    PermissionMode::parse(text)
-        .ok_or_else(|| format!("expected plan, ask, auto-edit, or yolo (got {text})"))
+    PermissionMode::parse(text).ok_or_else(|| {
+        format!("expected default, acceptEdits, plan, or bypassPermissions (got {text})")
+    })
 }
 
 fn serve_web(
@@ -994,6 +995,23 @@ fn open_store(home: Option<&std::path::Path>) -> Result<SqliteStore, Box<dyn std
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn permission_parser_accepts_canonical_names_and_legacy_aliases() {
+        for (name, expected) in [
+            ("default", PermissionMode::Ask),
+            ("ask", PermissionMode::Ask),
+            ("acceptEdits", PermissionMode::AutoEdit),
+            ("auto-edit", PermissionMode::AutoEdit),
+            ("plan", PermissionMode::Plan),
+            ("bypassPermissions", PermissionMode::Yolo),
+            ("yolo", PermissionMode::Yolo),
+        ] {
+            let cli =
+                Cli::try_parse_from(["blora", "--print", "--permission", name, "hello"]).unwrap();
+            assert_eq!(cli.permission, Some(expected));
+        }
+    }
 
     #[test]
     fn run_accepts_permission_mode() {

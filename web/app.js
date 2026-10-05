@@ -1297,6 +1297,8 @@ function applyRunMode(mode, persist = true) {
 }
 
 function applyPermission(mode, persist = true) {
+  const aliases = { default: "ask", acceptEdits: "auto-edit", bypassPermissions: "yolo" };
+  mode = aliases[mode] || mode;
   const allowed = ["ask", "plan", "auto-edit", "yolo"];
   const next = allowed.includes(mode) ? mode : "ask";
   const select = document.querySelector("#permission-mode");

@@ -29,11 +29,11 @@
 | 模式 | 文件写入 | 只读命令 | 改动状态的命令 | 危险命令 | 网络 |
 |---|---|---|---|---|---|
 | `plan` | 只允许 `.blora/plan.md`，其余 Deny | Allow | Deny | Deny | Deny |
-| `ask`（默认） | Ask | Ask | Ask | Ask | `BLORA_NETWORK=1` 时 Ask |
-| `auto-edit` | Allow（密钥文件仍 Ask） | Allow | Ask | Ask | `BLORA_NETWORK=1` 时 Ask |
-| `yolo` | Allow | Allow | Allow | **Ask** | `BLORA_NETWORK=1` 时 Allow |
+| `default`（默认） | Ask | Ask | Ask | Ask | `BLORA_NETWORK=1` 时 Ask |
+| `acceptEdits` | Allow（密钥文件仍 Ask） | Allow | Ask | Ask | `BLORA_NETWORK=1` 时 Ask |
+| `bypassPermissions` | Allow | Allow | Allow | Allow | `BLORA_NETWORK=1` 时 Allow |
 
-`--yes` 等价于 `--permission yolo`；`--permission` 显式指定时覆盖 `--yes`。Web API 通过请求体 `permission_mode` 指定。只读角色的子代理固定为 `plan`。运行时把模式写进 `run.created.permission_mode`、投影的 `permission_mode` 和 `<environment_context>`，让模型知道当前能做什么。用户批准一次后，重试用的 `Policy::granting()` 只把 Ask 变 Allow，Deny 仍是 Deny。
+`--yes` 等价于 `--permission bypassPermissions`；`--permission` 显式指定时覆盖 `--yes`。Web API 通过请求体 `permission_mode` 指定。只读角色的子代理固定为 `plan`。运行时把模式写进 `run.created.permission_mode`、投影的 `permission_mode` 和 `<environment_context>`，让模型知道当前能做什么。用户批准一次后，重试用的 `Policy::granting()` 只把 Ask 变 Allow，Deny 仍是 Deny。
 
 ### shell 命令分级
 
@@ -43,10 +43,12 @@
 - **危险**：`rm -r`、`sudo` / `su` / `doas`、`dd` / `mkfs` / `shred`、`kill` / `pkill`、`chmod -R`、`git push --force|-d`、`git reset --hard`、`git clean`、`git branch -d`、`find -delete|-exec`、`xargs rm`、`eval` / `exec`、`crontab`（非 `-l`）、`| sh` / `| bash`、`> /dev/sd*`、fork bomb、含 `rm` 的命令替换。任一段危险即整条危险。
 - **其余**为改动状态的命令。
 
-危险命令在任何模式下都不会静默放行（yolo 也 Ask，plan 直接 Deny）。网络命令（curl / wget / ssh / scp / nc / rsync…）单独走 `network()` 判定。
+危险命令除 bypassPermissions 外都不会静默放行（bypassPermissions 静默放行，plan 直接 Deny）。网络命令（curl / wget / ssh / scp / nc / rsync…）单独走 `network()` 判定。
 
 ## 审批
 
-结果只有 `allow`、`deny`、`ask`。默认 fail-closed。`tool-before` hook 返回 `ask` 时同样进入审批，返回 `block` 直接拒绝。
+结果只有 `allow`、`deny`、`ask`。默认 fail-closed。`tool-before` hook 返回 `ask` 时同样进入审批（bypassPermissions 跳过），返回 `block` 直接拒绝。
 
-能力：文件读取默认允许，`.env` / 密钥文件名需审批；网络默认拒绝（`BLORA_NETWORK=1` 后才 Ask/Allow）；Git commit/push/reset/clean/rebase/merge 为破坏性操作，按上表处理。审批事件记录 capability、摘要、决定和 `policy_version`（当前 2，权限模式引入时递增）。单次 run 还受 turn 上限、`BLORA_MAX_TOKENS`、`BLORA_MAX_WALL_SECS`（默认 900）约束；后台任务另有 180 秒硬上限。
+能力：文件读取默认允许，`.env` / 密钥文件名需审批；网络默认拒绝（`BLORA_NETWORK=1` 后才 Ask/Allow）；Git commit/push/reset/clean/rebase/merge 为破坏性操作，按上表处理。审批事件记录 capability、摘要、决定和 `policy_version`（当前 3，跳过危险操作审批时递增）。单次 run 还受 turn 上限、`BLORA_MAX_TOKENS`、`BLORA_MAX_WALL_SECS`（默认 900）约束；后台任务另有 180 秒硬上限。
+
+标准名称为 `default`、`acceptEdits`、`plan`、`bypassPermissions`；旧别名 `ask`、`auto-edit`、`yolo` 继续兼容。bypassPermissions 只跳过审批，不改变硬性 Deny、网络默认禁用、路径边界、沙盒或 hook block。TUI 进入绕过模式需要风险提示后的显式 `y` 确认；CLI/API 显式参数本身视为授权。
