@@ -5,6 +5,7 @@
 
 use std::path::Path;
 
+use blora_policy::PermissionMode;
 use blora_session::{SessionProjection, TranscriptItem};
 use blora_storage::{ApprovalRecord, SessionSummary};
 use blora_types::Mode;
@@ -353,6 +354,62 @@ pub struct SettingsDialog {
     pub minimized: bool,
 }
 
+#[derive(Clone, Debug)]
+pub struct PermissionDialog {
+    pub selected: usize,
+    pub fullscreen: bool,
+    pub minimized: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum PermissionAction {
+    None,
+    Close,
+    Apply(PermissionMode),
+}
+
+impl PermissionDialog {
+    pub fn new(current: PermissionMode) -> Self {
+        Self {
+            selected: PermissionMode::ALL
+                .iter()
+                .position(|mode| *mode == current)
+                .unwrap_or(0),
+            fullscreen: false,
+            minimized: false,
+        }
+    }
+
+    pub fn key(&mut self, key: crossterm::event::KeyCode) -> PermissionAction {
+        use crossterm::event::KeyCode;
+        if key == KeyCode::Esc {
+            return PermissionAction::Close;
+        }
+        if self.minimized {
+            if key == KeyCode::Enter {
+                self.minimized = false;
+            }
+            return PermissionAction::None;
+        }
+        match key {
+            KeyCode::Up => self.selected = self.selected.saturating_sub(1),
+            KeyCode::Down => self.selected = (self.selected + 1).min(PermissionMode::ALL.len() - 1),
+            KeyCode::Enter => return PermissionAction::Apply(PermissionMode::ALL[self.selected]),
+            _ => {}
+        }
+        PermissionAction::None
+    }
+}
+
+fn permission_description(mode: PermissionMode) -> &'static str {
+    match mode {
+        PermissionMode::Plan => "只读探索；仅可写 .blora/plan.md，禁止修改命令",
+        PermissionMode::Ask => "文件写入与修改命令均需确认",
+        PermissionMode::AutoEdit => "工作区文件编辑免确认；修改命令仍需确认",
+        PermissionMode::Yolo => "普通操作免确认；危险命令与网络仍受限制",
+    }
+}
+
 #[derive(Clone)]
 pub struct FrameModel<'a> {
     pub dialog_stack: &'a [DialogId],
@@ -374,6 +431,7 @@ pub struct FrameModel<'a> {
     /// Color-scheme picker; renders as a centered modal dialog.
     pub theme_dialog: Option<&'a ThemeDialog>,
     pub context_dialog: Option<&'a ContextDialog>,
+    pub permission_dialog: Option<&'a PermissionDialog>,
     pub settings_dialog: Option<&'a SettingsDialog>,
     pub tool_dialog: Option<&'a ToolDialog>,
     pub tool_detail_dialog: Option<&'a ToolDetailDialog>,
@@ -383,7 +441,7 @@ pub struct FrameModel<'a> {
     pub hide_tools: bool,
     pub message_roles: bool,
     pub scroll: usize,
-    pub auto_approve: bool,
+    pub permission_mode: PermissionMode,
     pub model: &'a str,
     pub provider: &'a str,
     pub mode_menu: Option<&'a ModeMenu>,
@@ -429,6 +487,7 @@ pub enum Hit {
     ModeRow(usize),
     CancelRun,
     ToggleApprove,
+    PermissionRow(usize),
     ContextUsage,
     ProviderTarget,
     Hint(HintAction),
@@ -517,6 +576,7 @@ pub struct HitMap {
     pub theme_rows: Vec<(Rect, usize)>,
     /// Auto / light / dark section tabs.
     pub theme_tabs: Vec<(Rect, usize)>,
+    pub permission_rows: Vec<(Rect, usize)>,
     pub settings_rows: Vec<(Rect, usize)>,
     pub settings_tabs: Vec<(Rect, usize)>,
 }
@@ -617,6 +677,11 @@ impl HitMap {
         for (rect, idx) in &self.settings_tabs {
             if contains(*rect, col, row) {
                 return Some(Hit::SettingsTab(*idx));
+            }
+        }
+        for (rect, idx) in &self.permission_rows {
+            if contains(*rect, col, row) {
+                return Some(Hit::PermissionRow(*idx));
             }
         }
         for (rect, idx) in &self.settings_rows {
@@ -1388,6 +1453,13 @@ fn render_layer(
             render_context_dialog(frame, area, model.projection, dialog, model.pointer, &theme);
         hits.traffic_lights = dialog_hits.traffic_lights;
         hits.modal_area = dialog_hits.modal_area;
+    } else if id == DialogId::Permission
+        && let Some(dialog) = model.permission_dialog
+    {
+        let dialog_hits = render_permission_dialog(frame, area, model, dialog, &theme);
+        hits.permission_rows = dialog_hits.permission_rows;
+        hits.traffic_lights = dialog_hits.traffic_lights;
+        hits.modal_area = dialog_hits.modal_area;
     } else if id == DialogId::Settings
         && let Some(dialog) = model.settings_dialog
     {
@@ -1828,6 +1900,86 @@ fn render_header(
     }
 }
 
+fn render_permission_dialog(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    model: &FrameModel<'_>,
+    dialog: &PermissionDialog,
+    theme: &Theme,
+) -> HitMap {
+    let mut hits = HitMap::default();
+    let Some(modal) = dialog_outer(area, 76, 14, dialog.fullscreen, dialog.minimized) else {
+        return hits;
+    };
+    let inner = paint_dialog_frame(frame, modal, "权限模式", model.pointer, theme, &mut hits);
+    let inner = Rect::new(
+        inner.x,
+        inner.y.saturating_add(1),
+        inner.width,
+        inner.height.saturating_sub(1),
+    );
+    if dialog.minimized || inner.height == 0 {
+        return hits;
+    }
+    let compact = inner.height < 10;
+    let row_height = if compact { 1 } else { 2 };
+    let capacity = (inner.height.saturating_sub(2) / row_height).max(1) as usize;
+    let start = dialog.selected.saturating_sub(capacity.saturating_sub(1));
+    for (index, mode) in PermissionMode::ALL
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(capacity)
+    {
+        let rect = Rect::new(
+            inner.x,
+            inner.y + ((index - start) as u16 * row_height),
+            inner.width,
+            row_height,
+        );
+        if rect.bottom() > inner.bottom() {
+            break;
+        }
+        let current = if *mode == model.permission_mode {
+            " · 当前"
+        } else {
+            ""
+        };
+        let title = format!(
+            "{} {}{}",
+            if index == dialog.selected { "›" } else { " " },
+            mode.as_str(),
+            current
+        );
+        let text = if compact {
+            title
+        } else {
+            format!("{title}\n  {}", permission_description(*mode))
+        };
+        let style = if index == dialog.selected {
+            theme.base().bg(theme.bg_select)
+        } else {
+            theme.base()
+        };
+        frame.render_widget(Paragraph::new(text).style(style), rect);
+        hits.permission_rows.push((rect, index));
+    }
+    if inner.height >= 2 {
+        let detail = Rect::new(inner.x, inner.bottom() - 2, inner.width, 1);
+        frame.render_widget(
+            Paragraph::new(permission_description(PermissionMode::ALL[dialog.selected]))
+                .style(theme.mute()),
+            detail,
+        );
+        let hint = Rect::new(inner.x, inner.bottom() - 1, inner.width, 1);
+        frame.render_widget(
+            Paragraph::new("↑↓ 选择 · Enter 确认 · Esc 取消").style(theme.mute()),
+            hint,
+        );
+    }
+    hits
+}
+
 fn render_settings_dialog(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -1885,7 +2037,7 @@ fn render_settings_dialog(
         0 => &[
             (
                 "自动批准",
-                if model.auto_approve {
+                if model.permission_mode.auto_approve() {
                     "开启"
                 } else {
                     "关闭"
@@ -4647,7 +4799,7 @@ fn render_composer(
     frame.render_widget(Paragraph::new(prompt_line).style(theme.base()), prompt);
 
     let model_name = display_model_name(model.model, model.provider);
-    let perm = if model.auto_approve { "yolo" } else { "ask" };
+    let perm = model.permission_mode.as_str();
     let provider = if model.provider.is_empty() {
         "—"
     } else {
@@ -5012,6 +5164,141 @@ mod tests {
     use crate::theme::Palette;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+
+    #[test]
+    fn permission_keyboard_confirm_cancel_and_minimize() {
+        use crossterm::event::KeyCode;
+        for (index, mode) in PermissionMode::ALL.iter().enumerate() {
+            let mut dialog = PermissionDialog::new(*mode);
+            assert_eq!(dialog.selected, index);
+            assert_eq!(dialog.key(KeyCode::Enter), PermissionAction::Apply(*mode));
+            assert_eq!(dialog.key(KeyCode::Esc), PermissionAction::Close);
+            dialog.minimized = true;
+            assert_eq!(dialog.key(KeyCode::Down), PermissionAction::None);
+            assert_eq!(dialog.selected, index);
+            assert_eq!(dialog.key(KeyCode::Enter), PermissionAction::None);
+            assert!(!dialog.minimized);
+        }
+        let mut dialog = PermissionDialog::new(PermissionMode::Plan);
+        dialog.key(KeyCode::Up);
+        assert_eq!(dialog.selected, 0);
+        for _ in 0..10 {
+            dialog.key(KeyCode::Down);
+        }
+        assert_eq!(dialog.selected, PermissionMode::ALL.len() - 1);
+    }
+
+    #[test]
+    fn permission_window_rendering_and_hits_at_mobile_sizes() {
+        let mut model = FrameModel {
+            dialog_stack: &[],
+            workspace: Path::new("/tmp"),
+            sessions: &[],
+            index: 0,
+            projection: None,
+            pending: &[],
+            input: "手机终端输入一段很长的中文消息用于验证光标",
+            status: "ready",
+            notice: None,
+            paste_preview: None,
+            passport_dialog: None,
+            provider_dialog: None,
+            add_provider_dialog: None,
+            theme_dialog: None,
+            context_dialog: None,
+            settings_dialog: None,
+            permission_dialog: None,
+            tool_dialog: None,
+            tool_detail_dialog: None,
+            slash_hits: &[],
+            slash_selected: 0,
+            search: None,
+            hide_tools: false,
+            message_roles: true,
+            scroll: 0,
+            permission_mode: PermissionMode::Ask,
+            model: "a-very-long-model-name-that-exceeds-the-phone-width",
+            provider: "provider",
+            mode_menu: None,
+            project_picker: None,
+            folder_picker: None,
+            session_picker: None,
+            git_dialog: None,
+            git_status: None,
+            user_label: "you",
+            running: false,
+            tick: 0,
+            pointer: None,
+            text_selection: None,
+        };
+        for (width, height) in [(20, 10), (24, 10), (36, 12), (40, 24), (100, 30)] {
+            for mode in PermissionMode::ALL {
+                let mut dialog = PermissionDialog::new(mode);
+                model.permission_mode = mode;
+                model.dialog_stack = &[];
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                let mut cache = TranscriptCache::default();
+                let mut footer_hits = HitMap::default();
+                terminal
+                    .draw(|frame| footer_hits = draw(frame, &model, &mut cache))
+                    .unwrap();
+                let rect = footer_hits
+                    .toggle_approve
+                    .expect("visible permission footer");
+                assert_eq!(footer_hits.hit(rect.x, rect.y), Some(Hit::ToggleApprove));
+                let text: String = (rect.x..rect.right())
+                    .map(|x| terminal.backend().buffer()[(x, rect.y)].symbol())
+                    .collect();
+                assert!(text.contains(mode.as_str()), "{text}");
+                model.dialog_stack = &[DialogId::Permission];
+                for (minimized, fullscreen) in [(false, false), (true, false), (false, true)] {
+                    dialog.minimized = minimized;
+                    dialog.fullscreen = fullscreen;
+                    let mut model = model.clone();
+                    model.permission_dialog = Some(&dialog);
+                    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                    let mut cache = TranscriptCache::default();
+                    let mut hits = HitMap::default();
+                    terminal
+                        .draw(|frame| hits = draw(frame, &model, &mut cache))
+                        .unwrap();
+                    assert!(hits.modal);
+                    assert!(hits.traffic_lights.iter().all(Option::is_some));
+                    for (index, hit) in [
+                        Hit::TrafficClose,
+                        Hit::TrafficMinimize,
+                        Hit::TrafficOpenBrowser,
+                    ]
+                    .iter()
+                    .enumerate()
+                    {
+                        let rect = hits.traffic_lights[index].unwrap();
+                        assert_eq!(hits.hit(rect.x, rect.y).as_ref(), Some(hit));
+                    }
+                    if minimized {
+                        assert!(hits.permission_rows.is_empty());
+                    } else {
+                        let (rect, index) = hits
+                            .permission_rows
+                            .iter()
+                            .find(|(_, index)| *index == dialog.selected)
+                            .unwrap();
+                        assert_eq!(hits.hit(rect.x, rect.y), Some(Hit::PermissionRow(*index)));
+                        let row: String = (rect.x..rect.right())
+                            .map(|x| terminal.backend().buffer()[(x, rect.y)].symbol())
+                            .collect();
+                        assert!(row.contains(mode.as_str()), "{row}");
+                        assert!(row.contains("当"), "current marker missing: {row}");
+                        for (rect, _) in &hits.permission_rows {
+                            assert!(rect.right() <= width && rect.bottom() <= height);
+                        }
+                    }
+                    assert_eq!(hits.hit(0, 0), None);
+                    model.permission_dialog = None;
+                }
+            }
+        }
+    }
 
     #[test]
     fn diff_backgrounds_distinguish_added_removed_and_context() {
@@ -6490,6 +6777,7 @@ mod tests {
             theme_dialog: None,
             context_dialog: None,
             settings_dialog: None,
+            permission_dialog: None,
             tool_dialog: None,
             tool_detail_dialog: None,
             slash_hits: &[],
@@ -6498,7 +6786,7 @@ mod tests {
             hide_tools: false,
             message_roles: true,
             scroll: 0,
-            auto_approve: false,
+            permission_mode: PermissionMode::Ask,
             model: "a-very-long-model-name-that-exceeds-the-phone-width",
             provider: "provider",
             mode_menu: None,
@@ -6858,6 +7146,7 @@ mod dialog_layer_tests {
             theme_dialog: None,
             context_dialog: None,
             settings_dialog: Some(&settings),
+            permission_dialog: None,
             tool_dialog: None,
             tool_detail_dialog: None,
             slash_hits: &[],
@@ -6866,7 +7155,7 @@ mod dialog_layer_tests {
             hide_tools: false,
             message_roles: true,
             scroll: 0,
-            auto_approve: false,
+            permission_mode: PermissionMode::Ask,
             model: "model",
             provider: "provider",
             mode_menu: None,

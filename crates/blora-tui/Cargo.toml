@@ -13,6 +13,7 @@ blora-events.workspace = true
 blora-catalog.workspace = true
 blora-context.workspace = true
 blora-model.workspace = true
+blora-policy.workspace = true
 blora-runtime.workspace = true
 blora-session.workspace = true
 blora-storage.workspace = true

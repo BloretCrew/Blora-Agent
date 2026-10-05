@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use blora_policy::PermissionMode;
 use blora_runtime::{CancelToken, RunOptions, Runtime};
 use blora_session::TranscriptItem;
 use blora_storage::{CreateSession, CreateTask};
@@ -206,6 +207,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut add_provider_dialog: Option<view::AddProviderDialog> = None;
     let mut theme_dialog: Option<view::ThemeDialog> = None;
     let mut settings_dialog: Option<view::SettingsDialog> = None;
+    let mut permission_dialog: Option<view::PermissionDialog> = None;
     let mut context_dialog: Option<view::ContextDialog> = None;
     let mut tool_dialog: Option<view::ToolDialog> = None;
     let mut tool_detail_dialog: Option<view::ToolDetailDialog> = None;
@@ -299,7 +301,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     } else {
         String::new()
     };
-    let mut auto_approve = false;
+    let mut permission_mode = PermissionMode::Ask;
     let mut scroll = 0usize;
     let mut search: Option<String> = None;
     let mut hide_tools = false;
@@ -421,6 +423,9 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
             }
             if context_dialog.is_some() {
                 live_dialogs.push(DialogId::Context);
+            }
+            if permission_dialog.is_some() {
+                live_dialogs.push(DialogId::Permission);
             }
             if settings_dialog.is_some() {
                 live_dialogs.push(DialogId::Settings);
@@ -653,6 +658,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             add_provider_dialog: add_provider_dialog.as_ref(),
                             theme_dialog: theme_dialog.as_ref(),
                             settings_dialog: settings_dialog.as_ref(),
+                            permission_dialog: permission_dialog.as_ref(),
                             context_dialog: context_dialog.as_ref(),
                             tool_dialog: tool_dialog.as_ref(),
                             tool_detail_dialog: tool_detail_dialog.as_ref(),
@@ -664,7 +670,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             hide_tools,
                             message_roles: runtime.tui_message_roles().unwrap_or(true),
                             scroll,
-                            auto_approve,
+                            permission_mode,
                             model,
                             provider,
                             mode_menu: mode_menu.as_ref(),
@@ -839,6 +845,20 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                         {
                             input.push('/');
                             slash_selected = 0;
+                            continue;
+                        }
+                        if top_dialog == Some(DialogId::Permission) {
+                            if let Some(dialog) = permission_dialog.as_mut() {
+                                match dialog.key(key.code) {
+                                    view::PermissionAction::Apply(mode) => {
+                                        permission_mode = mode;
+                                        status = format!("permission={mode}");
+                                        permission_dialog = None;
+                                    }
+                                    view::PermissionAction::Close => permission_dialog = None,
+                                    view::PermissionAction::None => {}
+                                }
+                            }
                             continue;
                         }
                         let minimized = match top_dialog {
@@ -1310,7 +1330,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                         dialog.page,
                                         dialog.selected,
                                         increase,
-                                        &mut auto_approve,
+                                        &mut permission_mode,
                                         &mut hide_tools,
                                         &mut model_override,
                                         &mut provider_override,
@@ -1664,7 +1684,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                             runtime,
                                             &command,
                                             id,
-                                            &mut auto_approve,
+                                            &mut permission_mode,
                                             &mut sessions,
                                             &mut index,
                                             &active_workspace,
@@ -1756,7 +1776,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     notice = None;
                                     status = "running…".to_owned();
                                     let options = tui_run_options(
-                                        auto_approve,
+                                        permission_mode,
                                         &model_override,
                                         &provider_override,
                                         passport_user_token.clone(),
@@ -2039,6 +2059,15 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     };
                                 };
                                 match top_dialog {
+                                    Some(DialogId::Permission) => {
+                                        if let Some(dialog) = permission_dialog.as_mut() {
+                                            dialog.key(if up {
+                                                KeyCode::Up
+                                            } else {
+                                                KeyCode::Down
+                                            });
+                                        }
+                                    }
                                     Some(DialogId::Git) => {
                                         if let Some(dialog) = git_dialog.as_mut()
                                             && !dialog.minimized
@@ -2120,6 +2149,13 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     continue;
                                 }
                                 match hit {
+                                    Some(view::Hit::PermissionRow(index)) => {
+                                        if let Some(dialog) = permission_dialog.as_mut() {
+                                            if !dialog.minimized {
+                                                dialog.selected = index;
+                                            }
+                                        }
+                                    }
                                     Some(view::Hit::Slash(idx)) => {
                                         slash_selected = idx;
                                     }
@@ -2233,6 +2269,36 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                             }
                                         }
                                         _ => {}
+                                    }
+                                    continue;
+                                }
+                                if top_dialog == Some(DialogId::Permission) {
+                                    if let Some(dialog) = permission_dialog.as_mut() {
+                                        match hit {
+                                            Some(view::Hit::TrafficClose) => {
+                                                permission_dialog = None
+                                            }
+                                            Some(view::Hit::TrafficMinimize) => {
+                                                dialog.minimized = !dialog.minimized
+                                            }
+                                            Some(view::Hit::TrafficOpenBrowser) => {
+                                                if dialog.minimized {
+                                                    dialog.minimized = false;
+                                                } else {
+                                                    dialog.fullscreen = !dialog.fullscreen;
+                                                }
+                                            }
+                                            Some(view::Hit::PermissionRow(index))
+                                                if !dialog.minimized =>
+                                            {
+                                                if let Some(mode) = PermissionMode::ALL.get(index) {
+                                                    permission_mode = *mode;
+                                                    status = format!("permission={mode}");
+                                                    permission_dialog = None;
+                                                }
+                                            }
+                                            _ => {}
+                                        }
                                     }
                                     continue;
                                 }
@@ -2401,7 +2467,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                                     &provider_override
                                                 };
                                                 let options = tui_run_options(
-                                                    auto_approve,
+                                                    permission_mode,
                                                     selected_model,
                                                     selected_provider,
                                                     passport_user_token.clone(),
@@ -2631,7 +2697,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                             dialog.page,
                                             dialog.selected,
                                             true,
-                                            &mut auto_approve,
+                                            &mut permission_mode,
                                             &mut hide_tools,
                                             &mut model_override,
                                             &mut provider_override,
@@ -2743,7 +2809,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                                     runtime,
                                                     &command,
                                                     id,
-                                                    &mut auto_approve,
+                                                    &mut permission_mode,
                                                     &mut sessions,
                                                     &mut index,
                                                     &active_workspace,
@@ -2801,8 +2867,9 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     cancel.cancel();
                                     status = "cancel requested".to_owned();
                                 } else if hit == Some(view::Hit::ToggleApprove) {
-                                    auto_approve = !auto_approve;
-                                    status = format!("auto-approve={auto_approve}");
+                                    permission_dialog =
+                                        Some(view::PermissionDialog::new(permission_mode));
+                                    dialog_stack.activate(DialogId::Permission);
                                 } else if hit == Some(view::Hit::Notice)
                                     || hit == Some(view::Hit::Hint(view::HintAction::Close))
                                 {
@@ -2870,7 +2937,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                                     runtime,
                                                     &command,
                                                     id,
-                                                    &mut auto_approve,
+                                                    &mut permission_mode,
                                                     &mut sessions,
                                                     &mut index,
                                                     &active_workspace,
@@ -2921,7 +2988,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                         notice = None;
                                         status = "running…".to_owned();
                                         let options = tui_run_options(
-                                            auto_approve,
+                                            permission_mode,
                                             &model_override,
                                             &provider_override,
                                             passport_user_token.clone(),
@@ -3518,15 +3585,24 @@ mod passport_login_tests {
     }
 }
 
+fn legacy_permission(enabled: bool) -> PermissionMode {
+    if enabled {
+        PermissionMode::Yolo
+    } else {
+        PermissionMode::Ask
+    }
+}
+
 fn tui_run_options(
-    auto_approve: bool,
+    permission_mode: PermissionMode,
     model: &str,
     provider: &str,
     passport_user_token: Option<String>,
 ) -> RunOptions {
     RunOptions {
         mock: blora_model::should_auto_mock(provider, passport_user_token.as_deref()),
-        auto_approve,
+        permission: Some(permission_mode),
+        auto_approve: permission_mode.auto_approve(),
         interactive: true,
         model: model.to_owned(),
         provider: provider.to_owned(),
@@ -3814,7 +3890,7 @@ fn apply_settings_row(
     page: usize,
     selected: usize,
     increase: bool,
-    auto_approve: &mut bool,
+    permission_mode: &mut PermissionMode,
     hide_tools: &mut bool,
     model: &mut String,
     provider: &mut String,
@@ -3861,7 +3937,13 @@ fn apply_settings_row(
             let enabled = runtime.tui_message_roles()?;
             runtime.set_tui_message_roles(!enabled)?;
         }
-        (0, 0) => *auto_approve = if increase { true } else { !*auto_approve },
+        (0, 0) => {
+            *permission_mode = legacy_permission(if increase {
+                true
+            } else {
+                !permission_mode.auto_approve()
+            })
+        }
         (0, 1) => *hide_tools = if increase { true } else { !*hide_tools },
         (2, 0) => provider.clear(),
         (2, 1) => model.clear(),
@@ -3873,7 +3955,7 @@ fn apply_settings_row(
 fn apply_settings(
     runtime: &Runtime,
     args: &str,
-    auto_approve: &mut bool,
+    permission_mode: &mut PermissionMode,
     hide_tools: &mut bool,
     model: &mut String,
     provider: &mut String,
@@ -3884,7 +3966,7 @@ fn apply_settings(
             "settings",
             settings_text(
                 runtime.tui_message_roles().unwrap_or(true),
-                *auto_approve,
+                *permission_mode,
                 *hide_tools,
                 model,
                 provider,
@@ -3918,7 +4000,7 @@ fn apply_settings(
         },
         "auto-approve" | "auto" => match parse_setting_bool(value) {
             Some(enabled) => {
-                *auto_approve = enabled;
+                *permission_mode = legacy_permission(enabled);
                 SlashOutcome::Status(format!("auto-approve={enabled}"))
             }
             None => SlashOutcome::Status("布尔设置使用 on 或 off".to_owned()),
@@ -3959,13 +4041,13 @@ fn parse_setting_bool(value: &str) -> Option<bool> {
 
 fn settings_text(
     message_roles: bool,
-    auto_approve: bool,
+    permission_mode: PermissionMode,
     hide_tools: bool,
     model: &str,
     provider: &str,
 ) -> String {
     format!(
-        "当前设置\ntheme={}\nscheme={}\nauto-approve={auto_approve}\nhide-tools={hide_tools}\nmessage-roles={message_roles}\nprovider={}\nmodel={}\n\n修改示例：/settings theme=indigo、/settings auto-approve=on",
+        "当前设置\ntheme={}\nscheme={}\npermission={permission_mode}\nhide-tools={hide_tools}\nmessage-roles={message_roles}\nprovider={}\nmodel={}\n\n修改示例：/settings theme=indigo、/settings auto-approve=on",
         theme::palette().as_str(),
         theme::scheme().as_str(),
         if provider.is_empty() {
@@ -4116,7 +4198,7 @@ fn slash(
     runtime: &Runtime,
     command: &str,
     session_id: &SessionId,
-    auto_approve: &mut bool,
+    permission_mode: &mut PermissionMode,
     sessions: &mut Vec<blora_storage::SessionSummary>,
     index: &mut usize,
     workspace: &Path,
@@ -4143,7 +4225,7 @@ fn slash(
         "keymap" => panel("keymap", slash::keymap_text()),
         "theme" => apply_theme(args),
         "settings" if args.is_empty() => SlashOutcome::SettingsDialog,
-        "settings" => apply_settings(runtime, args, auto_approve, hide_tools, model, provider),
+        "settings" => apply_settings(runtime, args, permission_mode, hide_tools, model, provider),
         "new" => open_session(runtime, workspace, sessions, index, Mode::Code, "tui"),
         "sessions" => panel("sessions", list_session_lines(sessions)),
         "goto" => goto_session(sessions, index, args),
@@ -4233,19 +4315,19 @@ fn slash(
             }
         }
         "yes" => {
-            *auto_approve = match args {
+            *permission_mode = legacy_permission(match args {
                 "off" | "false" | "0" | "no" => false,
                 "on" | "true" | "1" => true,
-                _ => !*auto_approve,
-            };
-            SlashOutcome::Status(format!("auto-approve={auto_approve}"))
+                _ => !permission_mode.auto_approve(),
+            });
+            SlashOutcome::Status(format!("permission={permission_mode}"))
         }
         "no" => {
-            *auto_approve = false;
-            SlashOutcome::Status("auto-approve=false".to_owned())
+            *permission_mode = PermissionMode::Ask;
+            SlashOutcome::Status("permission=ask".to_owned())
         }
         "permissions" => SlashOutcome::Status(format!(
-            "auto-approve={auto_approve}  network={}  exec={}  pty={}  worktree={}",
+            "permission={permission_mode}  network={}  exec={}  pty={}  worktree={}",
             env_flag("BLORA_NETWORK", "0"),
             env_flag("BLORA_EXEC", "local"),
             env_flag("BLORA_PTY", "0"),
@@ -4326,9 +4408,9 @@ fn slash(
             ),
             Err(err) => SlashOutcome::Status(err.to_string()),
         },
-        "task" => queue_task(runtime, session_id, auto_approve, args, None, None),
-        "cron" => queue_cron(runtime, session_id, auto_approve, args),
-        "loop" => queue_loop(runtime, session_id, auto_approve, args),
+        "task" => queue_task(runtime, session_id, permission_mode, args, None, None),
+        "cron" => queue_cron(runtime, session_id, permission_mode, args),
+        "loop" => queue_loop(runtime, session_id, permission_mode, args),
         "pause" => mutate_task(args, |id| runtime.pause_task(id).map(|()| "paused")),
         "unpause" => mutate_task(args, |id| runtime.resume_task(id).map(|()| "resumed")),
         "cancel-task" => mutate_task(args, |id| runtime.cancel_task(id).map(|()| "cancelled")),
@@ -4531,7 +4613,7 @@ fn slash(
         "doctor" => panel(
             "doctor",
             format!(
-                "provider={} (override={})\nmodel={} (override={})\ntheme={}\nexec={}\nworktree={}\nnetwork={}\npty={}\nmcp={}\nhooks={}\nauto-approve={auto_approve}",
+                "provider={} (override={})\nmodel={} (override={})\ntheme={}\nexec={}\nworktree={}\nnetwork={}\npty={}\nmcp={}\nhooks={}\npermission={permission_mode}",
                 env_flag("BLORA_PROVIDER", "openai"),
                 if provider.is_empty() {
                     "-"
@@ -4694,7 +4776,7 @@ fn goto_session(
 fn queue_task(
     runtime: &Runtime,
     session_id: &SessionId,
-    auto_approve: &bool,
+    permission_mode: &PermissionMode,
     prompt: &str,
     delay_until: Option<chrono::DateTime<chrono::Utc>>,
     cron: Option<String>,
@@ -4710,11 +4792,16 @@ fn queue_task(
                 prompt: prompt.to_owned(),
                 delay_until,
                 max_attempts: 3,
-                auto_approve: *auto_approve,
+                auto_approve: permission_mode.auto_approve(),
                 mock: std::env::var("BLORA_API_KEY").is_err(),
                 cron,
             })
-            .map(|id| format!("queued {id}"))
+            .map(|id| {
+                format!(
+                    "queued {id}（后台权限={}；任务仅保存自动批准开关，不继承 plan / auto-edit）",
+                    legacy_permission(permission_mode.auto_approve())
+                )
+            })
             .unwrap_or_else(|err| err.to_string()),
     )
 }
@@ -4722,7 +4809,7 @@ fn queue_task(
 fn queue_cron(
     runtime: &Runtime,
     session_id: &SessionId,
-    auto_approve: &bool,
+    permission_mode: &PermissionMode,
     args: &str,
 ) -> SlashOutcome {
     let parts: Vec<&str> = args.split_whitespace().collect();
@@ -4735,7 +4822,7 @@ fn queue_cron(
         Ok(next) => queue_task(
             runtime,
             session_id,
-            auto_approve,
+            permission_mode,
             &prompt,
             Some(next),
             Some(expr),
@@ -4747,7 +4834,7 @@ fn queue_cron(
 fn queue_loop(
     runtime: &Runtime,
     session_id: &SessionId,
-    auto_approve: &bool,
+    permission_mode: &PermissionMode,
     args: &str,
 ) -> SlashOutcome {
     let Some((spec, prompt)) = args.split_once(char::is_whitespace) else {
@@ -4757,7 +4844,7 @@ fn queue_loop(
         Some(delay) => queue_task(
             runtime,
             session_id,
-            auto_approve,
+            permission_mode,
             prompt.trim(),
             Some(chrono::Utc::now() + delay),
             None,
@@ -5249,6 +5336,7 @@ fn dialog_accepts_hit(top: Option<DialogId>, hit: Option<&view::Hit>) -> bool {
             )
             | (Some(DialogId::Session), Some(Hit::SessionPickerRow(_)))
             | (Some(DialogId::Mode), Some(Hit::ModeRow(_)))
+            | (Some(DialogId::Permission), Some(Hit::PermissionRow(_)))
             | (
                 Some(DialogId::Git),
                 Some(
@@ -5340,7 +5428,7 @@ mod dialog_input_tests {
                 &runtime,
                 command,
                 &SessionId::generate(),
-                &mut false,
+                &mut PermissionMode::Ask,
                 &mut Vec::new(),
                 &mut 0,
                 Path::new("."),
@@ -5835,4 +5923,110 @@ fn write_clipboard(text: &str) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod permission_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_commands_and_settings_update_the_canonical_mode() {
+        let runtime = Runtime::new(blora_storage::SqliteStore::open_in_memory().unwrap());
+        for (command, expected) in [
+            ("/yes on", PermissionMode::Yolo),
+            ("/yes off", PermissionMode::Ask),
+            ("/yes", PermissionMode::Yolo),
+            ("/no", PermissionMode::Ask),
+            ("/settings auto-approve=on", PermissionMode::Yolo),
+            ("/settings auto-approve=off", PermissionMode::Ask),
+        ] {
+            let mut mode = PermissionMode::AutoEdit;
+            let outcome = slash(
+                &runtime,
+                command,
+                &SessionId::generate(),
+                &mut mode,
+                &mut Vec::new(),
+                &mut 0,
+                Path::new("."),
+                &CancelToken::new(),
+                &mut None,
+                &mut false,
+                &mut String::new(),
+                &mut String::new(),
+            );
+            assert!(matches!(outcome, SlashOutcome::Status(_)));
+            assert_eq!(mode, expected, "{command}");
+        }
+        for initial in PermissionMode::ALL {
+            let mut mode = initial;
+            apply_settings_row(
+                &runtime,
+                0,
+                0,
+                false,
+                &mut mode,
+                &mut false,
+                &mut String::new(),
+                &mut String::new(),
+            )
+            .unwrap();
+            assert_eq!(mode, legacy_permission(!initial.auto_approve()));
+        }
+    }
+
+    #[test]
+    fn all_foreground_run_options_keep_explicit_permission() {
+        for mode in PermissionMode::ALL {
+            let options = tui_run_options(mode, "model", "mock", None);
+            assert_eq!(options.permission, Some(mode));
+            assert_eq!(options.permission_mode(), mode);
+            assert_eq!(options.auto_approve, mode == PermissionMode::Yolo);
+            assert!(options.interactive);
+        }
+    }
+
+    #[test]
+    fn legacy_switches_map_only_to_ask_and_yolo() {
+        assert_eq!(legacy_permission(false), PermissionMode::Ask);
+        assert_eq!(legacy_permission(true), PermissionMode::Yolo);
+        for mode in PermissionMode::ALL {
+            assert_eq!(
+                legacy_permission(mode.auto_approve()),
+                if mode == PermissionMode::Yolo {
+                    PermissionMode::Yolo
+                } else {
+                    PermissionMode::Ask
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn permission_window_isolates_background_hits_and_paste() {
+        let top = Some(DialogId::Permission);
+        assert!(dialog_accepts_hit(top, Some(&view::Hit::PermissionRow(2))));
+        assert!(dialog_accepts_hit(top, Some(&view::Hit::TrafficClose)));
+        for hit in [
+            view::Hit::ToggleApprove,
+            view::Hit::Composer,
+            view::Hit::Allow,
+            view::Hit::SettingsRow(0),
+            view::Hit::ProviderRow(0),
+        ] {
+            assert!(!dialog_accepts_hit(top, Some(&hit)));
+        }
+        let mut input = "draft".to_owned();
+        let mut preview = None;
+        paste_into_dialog(top, "paste", &mut None, &mut None, &mut input, &mut preview);
+        assert_eq!(input, "draft");
+        assert!(preview.is_none());
+        let mut stack = DialogStack::default();
+        stack.activate(DialogId::Settings);
+        stack.activate(DialogId::Permission);
+        stack.sync(&[DialogId::Settings, DialogId::Permission]);
+        assert_eq!(stack.top(), top);
+        stack.sync(&[DialogId::Settings]);
+        assert_eq!(stack.top(), Some(DialogId::Settings));
+    }
 }

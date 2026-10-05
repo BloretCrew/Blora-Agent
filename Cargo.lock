@@ -387,6 +387,7 @@ dependencies = [
  "blora-context",
  "blora-events",
  "blora-model",
+ "blora-policy",
  "blora-runtime",
  "blora-session",
  "blora-storage",
