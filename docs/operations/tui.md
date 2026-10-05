@@ -112,3 +112,9 @@ Git 窗口默认打开“操作”页。单击文件行选中并查看差异，�
 也可以执行 `/settings message-roles=off` 关闭，或 `/settings message-roles=on` 恢复。
 
 `/settings permission=default|acceptEdits|plan|bypassPermissions` 设置完整模式。CLI/API 支持旧别名 `ask`、`auto-edit`、`yolo`；CLI 显式 `--permission bypassPermissions` 或 `--yes` 视为非交互式风险授权，不另弹 TUI 确认。
+
+### 权限名称与语言
+
+权限选择器、底栏、设置项、模式切换反馈和风险提示使用同一套翻译资源。默认中文显示「默认确认」「自动接受编辑」「计划」「跳过权限确认」；设置 `BLORA_LOCALE=en` 后使用英文界面名称。内置中文与英文资源支持离线显示，远程翻译按键覆盖，缺失或空白译文保留内置回退。
+
+命令、配置和事件仍使用 `default`、`acceptEdits`、`plan`、`bypassPermissions` 标识，旧别名继续兼容。

@@ -52,5 +52,19 @@
   "passport.browser_opened": "Browser opened",
   "passport.hide_hint": "Esc Hide dialog · ",
   "common.yes": "Yes",
-  "common.no": "No"
+  "common.no": "No",
+  "dialog.permission": "Permission mode",
+  "permission.default": "Default",
+  "permission.accept_edits": "Accept edits",
+  "permission.plan": "Plan",
+  "permission.bypass": "Bypass permissions",
+  "permission.default.description": "Confirm file writes and mutating commands",
+  "permission.accept_edits.description": "Allow workspace edits; confirm mutating commands",
+  "permission.plan.description": "Read-only exploration; only .blora/plan.md is writable",
+  "permission.bypass.description": "Skip approvals, including dangerous commands; hard network and sandbox limits remain",
+  "permission.current": "Current",
+  "permission.select_hint": "↑↓ Select · Enter Confirm · Esc Cancel",
+  "permission.bypass.warning": "Warning: bypassing permissions can delete files, expose secrets, or run dangerous commands.\nUse only in trusted workspaces; network and sandbox limits remain.\n\ny Enable explicitly · n / Esc Cancel (Enter does not enable)",
+  "permission.bypass.confirm_hint": "y Enable · n/Esc Cancel",
+  "permission.changed": "Permission mode: {mode}"
 }

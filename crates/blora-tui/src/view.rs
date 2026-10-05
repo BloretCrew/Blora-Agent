@@ -430,13 +430,26 @@ impl PermissionDialog {
     }
 }
 
-fn permission_description(mode: PermissionMode) -> &'static str {
-    match mode {
-        PermissionMode::Plan => "只读探索；仅可写 .blora/plan.md，禁止修改命令",
-        PermissionMode::Ask => "文件写入与修改命令均需确认",
-        PermissionMode::AutoEdit => "工作区文件编辑免确认；修改命令仍需确认",
-        PermissionMode::Yolo => "跳过所有审批（含危险命令）；硬性网络与沙盒限制保留",
-    }
+fn permission_description(mode: PermissionMode) -> String {
+    let (key, fallback) = match mode {
+        PermissionMode::Plan => (
+            "permission.plan.description",
+            "只读探索；仅可写 .blora/plan.md，禁止修改命令",
+        ),
+        PermissionMode::Ask => (
+            "permission.default.description",
+            "文件写入与修改命令均需确认",
+        ),
+        PermissionMode::AutoEdit => (
+            "permission.accept_edits.description",
+            "工作区文件编辑免确认；修改命令仍需确认",
+        ),
+        PermissionMode::Yolo => (
+            "permission.bypass.description",
+            "跳过所有审批（含危险命令）；硬性网络与沙盒限制保留",
+        ),
+    };
+    i18n::tr(key, fallback)
 }
 
 #[derive(Clone)]
@@ -1940,7 +1953,14 @@ fn render_permission_dialog(
     let Some(modal) = dialog_outer(area, 76, 14, dialog.fullscreen, dialog.minimized) else {
         return hits;
     };
-    let inner = paint_dialog_frame(frame, modal, "权限模式", model.pointer, theme, &mut hits);
+    let inner = paint_dialog_frame(
+        frame,
+        modal,
+        &i18n::tr("dialog.permission", "权限模式"),
+        model.pointer,
+        theme,
+        &mut hits,
+    );
     let inner = Rect::new(
         inner.x,
         inner.y.saturating_add(1),
@@ -1952,13 +1972,17 @@ fn render_permission_dialog(
     }
     if dialog.confirm_bypass {
         frame.render_widget(
-            Paragraph::new("风险：跳过权限确认可能删除文件、泄露密钥或执行危险命令。\n仅在可信工作区使用；网络禁用与沙盒约束仍有效。\n\ny 明确启用 · n / Esc 取消（Enter 不会启用）")
+            Paragraph::new(i18n::tr("permission.bypass.warning", "风险：跳过权限确认可能删除文件、泄露密钥或执行危险命令。\n仅在可信工作区使用；网络禁用与沙盒约束仍有效。\n\ny 明确启用 · n / Esc 取消（Enter 不会启用）"))
                 .wrap(ratatui::widgets::Wrap { trim: false })
                 .style(theme.fg(theme.rust)),
             Rect::new(inner.x, inner.y, inner.width, inner.height.saturating_sub(1)),
         );
         frame.render_widget(
-            Paragraph::new("y 启用 · n/Esc 取消").style(theme.fg(theme.rust)),
+            Paragraph::new(i18n::tr(
+                "permission.bypass.confirm_hint",
+                "y 启用 · n/Esc 取消",
+            ))
+            .style(theme.fg(theme.rust)),
             Rect::new(inner.x, inner.bottom() - 1, inner.width, 1),
         );
         return hits;
@@ -1982,18 +2006,19 @@ fn render_permission_dialog(
         if rect.bottom() > inner.bottom() {
             break;
         }
+        let name = i18n::permission_name(*mode);
         let current = if *mode == model.permission_mode {
-            " · 当前"
+            format!(" · {}", i18n::tr("permission.current", "当前"))
         } else {
-            ""
+            String::new()
         };
-        let title = if inner.width < mode.as_str().len() as u16 + 2 {
-            mode.as_str().to_owned()
+        let title = if usize::from(inner.width) < name.width() + 2 {
+            name
         } else {
             format!(
                 "{} {}{}",
                 if index == dialog.selected { "›" } else { " " },
-                mode.as_str(),
+                name,
                 current
             )
         };
@@ -2019,7 +2044,11 @@ fn render_permission_dialog(
         );
         let hint = Rect::new(inner.x, inner.bottom() - 1, inner.width, 1);
         frame.render_widget(
-            Paragraph::new("↑↓ 选择 · Enter 确认 · Esc 取消").style(theme.mute()),
+            Paragraph::new(i18n::tr(
+                "permission.select_hint",
+                "↑↓ 选择 · Enter 确认 · Esc 取消",
+            ))
+            .style(theme.mute()),
             hint,
         );
     }
@@ -2079,9 +2108,11 @@ fn render_settings_dialog(
     if dialog.minimized {
         return hits;
     }
+    let permission_name = i18n::permission_name(model.permission_mode);
+    let permission_label = i18n::tr("dialog.permission", "权限模式");
     let rows: &[(&str, &str)] = match dialog.page {
         0 => &[
-            ("权限模式", model.permission_mode.as_str()),
+            (&permission_label, &permission_name),
             (
                 "隐藏工具调用",
                 if model.hide_tools { "开启" } else { "关闭" },
@@ -4838,7 +4869,7 @@ fn render_composer(
     frame.render_widget(Paragraph::new(prompt_line).style(theme.base()), prompt);
 
     let model_name = display_model_name(model.model, model.provider);
-    let perm = model.permission_mode.as_str();
+    let perm = i18n::permission_name(model.permission_mode);
     let provider = if model.provider.is_empty() {
         "—"
     } else {
@@ -4846,7 +4877,7 @@ fn render_composer(
     };
     let mut line = Line::default();
     if inner.width < 60 {
-        hits.toggle_approve = chrome_item(&mut line, info, "", perm, theme.dim(), false);
+        hits.toggle_approve = chrome_item(&mut line, info, "", &perm, theme.dim(), false);
         let model_hit = chrome_item(
             &mut line,
             info,
@@ -4860,7 +4891,7 @@ fn render_composer(
         let model_area = Rect::new(
             info.x,
             info.y,
-            info.width.saturating_sub(perm.len() as u16 + 3),
+            info.width.saturating_sub(perm.width() as u16 + 3),
             info.height,
         );
         hits.provider_target = chrome_item(
@@ -4871,7 +4902,7 @@ fn render_composer(
             theme.fg(theme.sage),
             true,
         );
-        hits.toggle_approve = chrome_item(&mut line, info, " · ", perm, theme.dim(), false);
+        hits.toggle_approve = chrome_item(&mut line, info, " · ", &perm, theme.dim(), false);
         if let Some(provider_hit) =
             chrome_item(&mut line, info, " · ", provider, theme.mute(), true)
         {
@@ -5304,7 +5335,11 @@ mod tests {
                 let text: String = (rect.x..rect.right())
                     .map(|x| terminal.backend().buffer()[(x, rect.y)].symbol())
                     .collect();
-                assert!(text.contains(mode.as_str()), "{text}");
+                assert!(
+                    text.replace(' ', "")
+                        .contains(&i18n::permission_name(mode).replace(' ', "")),
+                    "{text}"
+                );
                 model.dialog_stack = &[DialogId::Permission];
                 for (minimized, fullscreen) in [(false, false), (true, false), (false, true)] {
                     dialog.minimized = minimized;
@@ -5342,8 +5377,12 @@ mod tests {
                         let row: String = (rect.x..rect.right())
                             .map(|x| terminal.backend().buffer()[(x, rect.y)].symbol())
                             .collect();
-                        assert!(row.contains(mode.as_str()), "{row}");
-                        if rect.width >= mode.as_str().len() as u16 + 7 {
+                        assert!(
+                            row.replace(' ', "")
+                                .contains(&i18n::permission_name(mode).replace(' ', "")),
+                            "{row}"
+                        );
+                        if rect.width >= i18n::permission_name(mode).width() as u16 + 7 {
                             assert!(row.contains("当"), "current marker missing: {row}");
                         }
                         for (rect, _) in &hits.permission_rows {
@@ -7369,7 +7408,15 @@ mod dialog_layer_tests {
                     hits = draw(f, &model, &mut cache);
                 })
                 .unwrap();
-            assert_eq!(terminal.backend().buffer(), &base);
+            let restored = terminal.backend().buffer();
+            for y in base.area.y..base.area.bottom() {
+                let mut x = base.area.x;
+                while x < base.area.right() {
+                    // Wide glyphs hide continuation cells in the terminal backend.
+                    assert_eq!(restored[(x, y)], base[(x, y)]);
+                    x += base[(x, y)].symbol().width().max(1) as u16;
+                }
+            }
         }
     }
 

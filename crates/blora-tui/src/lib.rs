@@ -856,7 +856,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                         }
                         if top_dialog.is_none() && key.code == KeyCode::BackTab {
                             permission_mode = permission_mode.cycle();
-                            status = format!("permission={permission_mode}");
+                            status = i18n::permission_changed(permission_mode);
                             continue;
                         }
                         if top_dialog == Some(DialogId::Permission) {
@@ -865,7 +865,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     view::PermissionAction::Apply(mode) => {
                                         permission_mode = mode;
                                         confirmed_permission = mode;
-                                        status = format!("permission={mode}");
+                                        status = i18n::permission_changed(mode);
                                         permission_dialog = None;
                                     }
                                     view::PermissionAction::Close => permission_dialog = None,
@@ -2309,7 +2309,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                                 {
                                                     permission_mode = mode;
                                                     confirmed_permission = mode;
-                                                    status = format!("permission={mode}");
+                                                    status = i18n::permission_changed(mode);
                                                     permission_dialog = None;
                                                 }
                                             }
@@ -4030,7 +4030,7 @@ fn apply_settings(
         "permission" | "permission-mode" => match PermissionMode::parse(value) {
             Some(mode) => {
                 *permission_mode = mode;
-                SlashOutcome::Status(format!("permission={mode}"))
+                SlashOutcome::Status(i18n::permission_changed(mode))
             }
             None => SlashOutcome::Status(
                 "权限模式：default、acceptEdits、plan、bypassPermissions".to_owned(),
@@ -4358,11 +4358,11 @@ fn slash(
                 "on" | "true" | "1" => true,
                 _ => !permission_mode.auto_approve(),
             });
-            SlashOutcome::Status(format!("permission={permission_mode}"))
+            SlashOutcome::Status(i18n::permission_changed(*permission_mode))
         }
         "no" => {
             *permission_mode = PermissionMode::Ask;
-            SlashOutcome::Status("permission=default".to_owned())
+            SlashOutcome::Status(i18n::permission_changed(PermissionMode::Ask))
         }
         "permissions" => SlashOutcome::Status(format!(
             "permission={permission_mode}  network={}  exec={}  pty={}  worktree={}",

@@ -22,13 +22,18 @@ struct Catalog {
 pub fn init() -> String {
     let locale = env::var("BLORA_LOCALE").unwrap_or_else(|_| "zh-CN".to_owned());
     let mut values = embedded_source();
+    if locale == "en" {
+        values.extend(
+            serde_json::from_str::<BTreeMap<String, String>>(include_str!("../i18n/en.json"))
+                .unwrap_or_default(),
+        );
+    }
     if locale != "zh-CN" {
         if let Ok(remote) = fetch_translation(&locale) {
-            values.extend(remote);
-        } else if locale == "en" {
             values.extend(
-                serde_json::from_str::<BTreeMap<String, String>>(include_str!("../i18n/en.json"))
-                    .unwrap_or_default(),
+                remote
+                    .into_iter()
+                    .filter(|(_, value)| !value.trim().is_empty()),
             );
         }
     }
@@ -118,6 +123,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn permission_translations_cover_both_locales_and_preserve_placeholders() {
+        let source = embedded_source();
+        let english: BTreeMap<String, String> =
+            serde_json::from_str(include_str!("../i18n/en.json")).unwrap();
+        for (key, value) in &source {
+            if key.starts_with("permission.") || key == "dialog.permission" {
+                let translated = english.get(key).expect("English permission translation");
+                assert!(!value.trim().is_empty());
+                assert!(!translated.trim().is_empty());
+                assert_eq!(value.contains("{mode}"), translated.contains("{mode}"));
+            }
+        }
+        assert_eq!(source["permission.default"], "默认确认");
+        assert_eq!(source["permission.accept_edits"], "自动接受编辑");
+        assert_eq!(source["permission.plan"], "计划");
+        assert_eq!(source["permission.bypass"], "跳过权限确认");
+    }
+
+    #[test]
     fn source_catalog_contains_stable_ui_keys() {
         let values = embedded_source();
         assert_eq!(
@@ -130,4 +154,19 @@ mod tests {
             Some("运行模式")
         );
     }
+}
+
+pub fn permission_name(mode: blora_policy::PermissionMode) -> String {
+    use blora_policy::PermissionMode;
+    let (key, fallback) = match mode {
+        PermissionMode::Ask => ("permission.default", "默认确认"),
+        PermissionMode::AutoEdit => ("permission.accept_edits", "自动接受编辑"),
+        PermissionMode::Plan => ("permission.plan", "计划"),
+        PermissionMode::Yolo => ("permission.bypass", "跳过权限确认"),
+    };
+    tr(key, fallback)
+}
+
+pub fn permission_changed(mode: blora_policy::PermissionMode) -> String {
+    tr("permission.changed", "权限模式：{mode}").replace("{mode}", &permission_name(mode))
 }
