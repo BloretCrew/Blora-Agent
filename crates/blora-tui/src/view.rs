@@ -2608,7 +2608,7 @@ fn render_transcript(
             model.scroll,
         )
     } else {
-        welcome_lines(theme)
+        welcome_lines(inner.width as usize, inner.height as usize, theme)
     };
     let visible = highlight_selection(visible, inner, model.text_selection, theme);
     frame.render_widget(Paragraph::new(visible).style(theme.base()), inner);
@@ -2737,20 +2737,63 @@ fn tool_summary_hit_rows(
     rows
 }
 
-fn welcome_lines(theme: &Theme) -> Vec<Line<'static>> {
-    vec![
-        Line::default(),
-        Line::from(Span::styled("Blora", theme.rose_bold())),
+fn welcome_lines(width: usize, height: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let compact = width < 40 || height < 7;
+    let mut lines = vec![
+        Line::from(Span::styled(ellipsize("Blora", width), theme.rose_bold())),
         Line::from(Span::styled(
-            "local-first code, work, and agent",
-            theme.mute(),
-        )),
-        Line::default(),
-        Line::from(Span::styled(
-            "type a message, or / for commands",
+            ellipsize(&i18n::tr("canvas.start", "输入消息开始，/ 查看命令"), width),
             theme.dim(),
         )),
-    ]
+    ];
+    if !compact {
+        lines.insert(
+            1,
+            Line::from(Span::styled(
+                ellipsize(
+                    &i18n::tr("canvas.tagline", "本地优先 · 编程 · 工作 · 智能体"),
+                    width,
+                ),
+                theme.mute(),
+            )),
+        );
+        lines.push(Line::default());
+        lines.push(Line::from(Span::styled(
+            ellipsize(
+                &i18n::tr("canvas.shortcuts", "Ctrl+N 新建会话 · ↑/↓ 输入历史"),
+                width,
+            ),
+            theme.mute(),
+        )));
+        lines.insert(0, Line::default());
+    }
+    lines.truncate(height);
+    lines
+}
+
+fn composer_placeholder(imagine: bool, running: bool, width: usize) -> String {
+    let (key, fallback) = if running {
+        ("composer.queued", "输入补充，Enter 排队发送")
+    } else if imagine {
+        ("composer.imagine", "描述画面，或输入 / 命令")
+    } else if width < 30 {
+        ("composer.compact", "输入消息 / 命令")
+    } else {
+        ("composer.message", "输入消息，或 / 查看命令")
+    };
+    ellipsize(&i18n::tr(key, fallback), width)
+}
+
+fn workspace_status(workspace: &Path, status: &str, width: usize) -> String {
+    let label = if status.is_empty() {
+        workspace
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| workspace.display().to_string())
+    } else {
+        status.to_owned()
+    };
+    ellipsize(&label, width)
 }
 
 /// Imagine sessions list saved files instead of a coding transcript.
@@ -5040,11 +5083,7 @@ fn render_composer(
         Line::from(vec![
             Span::styled("❯ ", theme.rose_bold()),
             Span::styled(
-                if imagine {
-                    "描述画面，或输入 / 命令"
-                } else {
-                    "message or /command"
-                },
+                composer_placeholder(imagine, model.running, available),
                 theme.mute(),
             ),
         ])
@@ -5125,16 +5164,7 @@ fn render_composer(
 
 fn render_status(frame: &mut Frame<'_>, area: Rect, model: &FrameModel<'_>, theme: &Theme) {
     let inner = inset(area);
-    let cwd = model
-        .workspace
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| model.workspace.display().to_string());
-    let left = if model.status.is_empty() {
-        format!("~/{}", ellipsize(&cwd, 24))
-    } else {
-        ellipsize(model.status, inner.width.saturating_sub(4) as usize)
-    };
+    let left = workspace_status(model.workspace, model.status, inner.width as usize);
     frame.render_widget(Paragraph::new(left).style(theme.mute()), inner);
 }
 
@@ -5170,7 +5200,13 @@ fn render_hints(
     };
     let mut line = Line::default();
     for (key, label, action) in items {
-        let text = if inner.width < 60 {
+        let text = if matches!(action, HintAction::Send) && model.running {
+            if inner.width < 60 {
+                i18n::tr("hint.queue.compact", "⏎ 排队")
+            } else {
+                i18n::tr("hint.queue", "⏎ queue")
+            }
+        } else if inner.width < 60 {
             match action {
                 HintAction::Send => "⏎ 发送",
                 HintAction::Commands => "/ 命令",
@@ -5441,6 +5477,45 @@ mod tests {
     use crate::theme::Palette;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+
+    #[test]
+    fn welcome_adapts_to_small_and_large_canvases() {
+        let theme = Theme::current();
+        for width in [0, 18, 22, 36, 80, 120] {
+            for height in [0, 1, 3, 6, 20] {
+                let lines = welcome_lines(width, height, &theme);
+                assert!(lines.len() <= height);
+                assert!(lines.iter().all(|line| line.width() <= width));
+                if width >= 18 && height >= 3 {
+                    assert!(lines.iter().any(|line| line.to_string().contains('/')));
+                }
+            }
+        }
+        let lines = welcome_lines(80, 20, &theme);
+        assert!(lines.iter().any(|line| line.to_string().contains("Ctrl+N")));
+    }
+
+    #[test]
+    fn composer_feedback_and_workspace_labels_fit_available_width() {
+        for width in [0, 1, 18, 22, 80] {
+            for imagine in [false, true] {
+                for running in [false, true] {
+                    assert!(composer_placeholder(imagine, running, width).width() <= width);
+                }
+            }
+            assert!(workspace_status(Path::new("/data/中文项目"), "", width).width() <= width);
+        }
+        assert!(composer_placeholder(false, true, 80).contains("Enter"));
+        assert_eq!(
+            workspace_status(Path::new("/data/project"), "", 80),
+            "project"
+        );
+        assert_eq!(workspace_status(Path::new("/"), "", 80), "/");
+        assert_eq!(
+            workspace_status(Path::new("/data/project"), "ready", 80),
+            "ready"
+        );
+    }
 
     #[test]
     fn harness_disabled_keys_and_minimize() {
@@ -7322,6 +7397,27 @@ mod tests {
                     }
                 }
             }
+            model.input = "";
+            model.slash_hits = &[];
+            model.running = true;
+            let mut hits = HitMap::default();
+            terminal
+                .draw(|frame| hits = draw(frame, &model, &mut cache))
+                .unwrap();
+            let (send, _) = hits
+                .hints
+                .iter()
+                .find(|(_, action)| matches!(action, HintAction::Send))
+                .unwrap();
+            let label: String = (send.x..send.right())
+                .map(|x| terminal.backend().buffer()[(x, send.y)].symbol())
+                .collect();
+            assert!(label.contains("排") || label.contains("queue"), "{label}");
+            assert!(matches!(
+                hits.hit(send.x, send.y),
+                Some(Hit::Hint(HintAction::Send))
+            ));
+            model.running = false;
         }
     }
 

@@ -1,4 +1,13 @@
 {
+  "canvas.start": "输入消息开始，/ 查看命令",
+  "canvas.tagline": "本地优先 · 编程 · 工作 · 智能体",
+  "canvas.shortcuts": "Ctrl+N 新建会话 · ↑/↓ 输入历史",
+  "composer.queued": "输入补充，Enter 排队发送",
+  "composer.imagine": "描述画面，或输入 / 命令",
+  "composer.compact": "输入消息 / 命令",
+  "composer.message": "输入消息，或 / 查看命令",
+  "hint.queue.compact": "⏎ 排队",
+  "hint.queue": "⏎ 排队发送",
   "app.name": "Blora",
   "action.close": "关闭",
   "action.cancel": "取消",

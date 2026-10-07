@@ -1,4 +1,13 @@
 {
+  "canvas.start": "Type a message, or / for commands",
+  "canvas.tagline": "Local-first · Code · Work · Agent",
+  "canvas.shortcuts": "Ctrl+N new session · ↑/↓ input history",
+  "composer.queued": "Add a message, Enter to queue",
+  "composer.imagine": "Describe an image, or / for commands",
+  "composer.compact": "Message / command",
+  "composer.message": "Type a message, or / for commands",
+  "hint.queue.compact": "⏎ queue",
+  "hint.queue": "⏎ queue",
   "app.name": "Blora",
   "action.close": "Close",
   "action.cancel": "Cancel",
