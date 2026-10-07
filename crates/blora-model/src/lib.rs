@@ -247,7 +247,7 @@ impl Provider for MockProvider {
                 finish_reason: "tool_calls".to_owned(),
                 ..Completion::default()
             }
-        } else if system.contains("local agent harness")
+        } else if system.contains("# Mode: Agent")
             || last_user.to_ascii_lowercase().contains("delegate")
             || last_user.to_ascii_lowercase().contains("subagent")
         {
@@ -280,7 +280,7 @@ impl Provider for MockProvider {
                 finish_reason: "tool_calls".to_owned(),
                 ..Completion::default()
             }
-        } else if system.contains("local work harness") {
+        } else if system.contains("# Mode: Work") {
             Completion {
                 tool_calls: vec![ToolCall {
                     id: "call_mock_schedule".to_owned(),

@@ -108,12 +108,7 @@ impl Runtime {
                 options.permission
             },
         };
-        let can_spawn = depth < MAX_SUBAGENT_DEPTH;
-        let child_prompt = if can_spawn {
-            format!("[subagent:{role}] {prompt}")
-        } else {
-            format!("[subagent:{role}] {prompt}\nDo not spawn another subagent.")
-        };
+        let child_prompt = subagent_brief(role, prompt, depth < MAX_SUBAGENT_DEPTH);
         let result = self.run(&child_session, &child_prompt, cancel, &child_options);
         // Steer/stop: a control row may have been written while the child ran.
         let control = self.store.get_agent(&agent_id).ok();
@@ -216,11 +211,61 @@ impl Runtime {
     }
 }
 
+/// Task text for a child agent. The child cannot see the parent conversation,
+/// so the brief states its role, limits, and the expected final report.
+fn subagent_brief(role: &str, prompt: &str, can_spawn: bool) -> String {
+    let duty = match role {
+        "research" => {
+            "You are a read-only research subagent. Investigate with read_file, list_dir, glob, search, and git tools. Do not edit files. Back every finding with a path:line reference or the command output it came from."
+        }
+        "review" => {
+            "You are a read-only review subagent. Inspect the code or change described below. Report concrete problems ordered by severity (bug, risk, style), each with a path:line reference and a suggested fix. Say so if you find nothing significant."
+        }
+        "plan" => {
+            "You are a read-only planning subagent. Study the relevant code, then produce an ordered implementation plan: steps, files to touch, risks, and how to verify each step. Do not edit files."
+        }
+        "code" => {
+            "You are an implementation subagent. Make the change described below, following the existing conventions. Run the most relevant build or test command to verify it."
+        }
+        _ => "You are a subagent working on one self-contained task for a parent agent.",
+    };
+    let mut out = format!("[subagent:{role}] {duty}\n");
+    out.push_str(
+        "Your turn budget is small: work efficiently, use parallel read-only calls, and stop when the task is done.\n",
+    );
+    if !can_spawn {
+        out.push_str("Do not spawn another subagent.\n");
+    }
+    out.push_str(
+        "Finish with a final message for the parent agent: the result first, then key evidence (paths, commands, outputs), files changed if any, and open questions. The parent only sees that final message.\n\n<task>\n",
+    );
+    out.push_str(prompt.trim());
+    out.push_str("\n</task>");
+    out
+}
+
 fn role_limits(role: &str) -> (u32, bool) {
     match role {
         "research" | "review" => (6, true),
         "plan" => (4, true),
         "code" => (8, false),
         _ => (SUBAGENT_TURNS, false),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn brief_states_role_task_and_report_contract() {
+        let brief = subagent_brief("review", "  check the parser  ", true);
+        assert!(brief.starts_with("[subagent:review]"));
+        assert!(brief.contains("ordered by severity"));
+        assert!(brief.contains("<task>\ncheck the parser\n</task>"));
+        assert!(brief.contains("The parent only sees that final message"));
+        assert!(!brief.contains("Do not spawn"));
+        assert!(subagent_brief("code", "x", false).contains("Do not spawn another subagent."));
+        assert!(subagent_brief("other", "x", true).contains("self-contained task"));
     }
 }

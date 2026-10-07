@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Blora Agent contributors
 
-use blora_context::{EnvSnapshot, compile_messages, estimate_messages};
+use blora_context::{EnvSnapshot, compile_messages_with_tools, estimate_messages};
 use blora_events::{
-    AssistantDelta, AssistantMessageCompleted, ContextSnapshotCreated, EventEnvelope,
-    HookCompleted, KnownPayload, ModeChanged, ModelRequested, ModelResponseCompleted, NewEvent,
-    PlanStep, PlanUpdated, ProviderChanged, RetryStarted, RoutingChanged, RunCancelRequested,
-    RunCancelled, RunCompleted, RunCreated, RunFailed, RunStarted, SessionArchived,
-    SessionCwdChanged, SessionResumed, SessionTitleChanged, ToolCompleted, ToolFailed, ToolOutput,
-    ToolRequested, ToolStarted, UsageRecorded, UserInput,
+    AssistantDelta, AssistantMessageCompleted, AssistantReasoning, ContextSnapshotCreated,
+    EventEnvelope, HookCompleted, KnownPayload, ModeChanged, ModelRequested,
+    ModelResponseCompleted, NewEvent, PlanStep, PlanUpdated, ProviderChanged, RetryStarted,
+    RoutingChanged, RunCancelRequested, RunCancelled, RunCompleted, RunCreated, RunFailed,
+    RunStarted, SessionArchived, SessionCwdChanged, SessionResumed, SessionTitleChanged,
+    ToolCompleted, ToolFailed, ToolOutput, ToolRequested, ToolStarted, UsageRecorded, UserInput,
 };
 use blora_exec::{Isolation, LocalBackend, ShellKind, WorktreeHandle, shell_cwd_after};
 use blora_model::retry::{self, RetryClass};
@@ -31,6 +31,14 @@ use crate::hooks::{self, HookDecision};
 const MAX_TOOL_RESULT_CHARS: usize = 24_000;
 /// Identical tool calls in a row: nudge at this count, abort at twice this count.
 const DOOM_LOOP_NUDGE: u32 = 3;
+/// Default model turns per run. Each turn is one model call plus its tool batch.
+pub const DEFAULT_MAX_TURNS: u32 = 40;
+/// Automatic continuations when a reply stops at the output-token limit.
+const MAX_LENGTH_CONTINUATIONS: u32 = 2;
+/// Cap on reasoning text recorded per model call.
+const MAX_REASONING_CHARS: usize = 32_000;
+const CONTINUE_PROMPT: &str = "[auto-continue] Your previous reply hit the output limit. Continue exactly where it stopped, without repeating earlier text.";
+const TURN_LIMIT_PROMPT: &str = "[turn-limit] This run has used its model-turn budget. Do not call any more tools. Reply to the user now with: what was completed, what is still unfinished, and the next concrete step.";
 
 #[derive(Clone, Debug)]
 pub struct MockRunOptions {
@@ -106,7 +114,7 @@ impl Default for RunOptions {
             mock: false,
             auto_approve: false,
             interactive: false,
-            max_turns: 12,
+            max_turns: DEFAULT_MAX_TURNS,
             provider: String::new(),
             read_only: false,
             worktree: false,
@@ -122,6 +130,9 @@ pub struct Runtime {
     /// Live event subscribers (SSE, TUI). Lossy: a slow subscriber drops events
     /// and must resynchronise from the store, which it can always do.
     subscribers: Mutex<Vec<SyncSender<EventEnvelope>>>,
+    /// Scripted provider used by unit tests in place of the resolved chain.
+    #[cfg(test)]
+    pub(crate) test_provider: Mutex<Option<std::sync::Arc<dyn Provider>>>,
 }
 
 impl Runtime {
@@ -131,7 +142,21 @@ impl Runtime {
             store,
             foreground_sessions: Mutex::new(std::collections::HashSet::new()),
             subscribers: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            test_provider: Mutex::new(None),
         }
+    }
+
+    fn provider_chain(&self, options: &RunOptions, requested: &str) -> Vec<Box<dyn Provider>> {
+        #[cfg(test)]
+        if let Some(mock) = self.test_provider.lock().unwrap().clone() {
+            return vec![Box::new(SharedProvider(mock))];
+        }
+        resolve_provider_chain(
+            options.mock,
+            requested,
+            options.passport_user_token.as_deref(),
+        )
     }
 
     /// Receive every event appended by this runtime, across all sessions.
@@ -754,11 +779,7 @@ impl Runtime {
         } else {
             options.provider.clone()
         };
-        let providers = resolve_provider_chain(
-            options.mock,
-            &requested_provider,
-            options.passport_user_token.as_deref(),
-        );
+        let providers = self.provider_chain(options, &requested_provider);
         let mut provider_index = 0;
         let model = if !options.model.trim().is_empty() {
             options.model.clone()
@@ -898,10 +919,12 @@ impl Runtime {
         if !options.read_only && !imagine {
             tools.extend(plugins.iter().map(crate::plugins::PluginSpec::declaration));
         }
+        let tool_names: Vec<String> = tools.iter().map(|tool| tool.name.clone()).collect();
         let window = blora_context::context_window();
         let compact_at = window * blora_context::compact_threshold_pct() / 100;
         let mut last_fingerprint: Option<String> = None;
         let mut repeat_count: u32 = 0;
+        let mut continuations: u32 = 0;
 
         if imagine {
             let image = blora_imagine::ImageRequest::from_user_text(&prompt);
@@ -986,13 +1009,16 @@ impl Runtime {
                     }),
                 )?;
             }
-            env.shell_cwd = self
-                .show_session(session_id)?
+            let current = self.show_session(session_id)?;
+            env.shell_cwd = current
                 .shell_cwd
+                .clone()
                 .filter(|cwd| !cwd.is_empty())
                 .unwrap_or_else(|| ".".to_owned());
+            env.plan = render_plan(&current);
             let mut events = self.store.load_events(session_id)?;
-            let mut messages = compile_messages(&events, &exec_root, mode.as_str(), &env)?;
+            let mut messages =
+                compile_messages_with_tools(&events, &exec_root, mode.as_str(), &env, &tool_names)?;
             if estimate_messages(&messages) >= compact_at {
                 match self.compact_with(
                     session_id,
@@ -1002,13 +1028,24 @@ impl Runtime {
                 ) {
                     Ok(_) => {
                         events = self.store.load_events(session_id)?;
-                        messages = compile_messages(&events, &exec_root, mode.as_str(), &env)?;
+                        messages = compile_messages_with_tools(
+                            &events,
+                            &exec_root,
+                            mode.as_str(),
+                            &env,
+                            &tool_names,
+                        )?;
                     }
                     Err(BloraError::Cancelled) => {
                         return self.cancel_run(session_id, &run_id, &turn_id);
                     }
                     Err(err) => tracing::warn!("auto-compaction skipped: {err}"),
                 }
+            }
+            if continuations > 0 && messages.last().is_some_and(|m| m.role == "assistant") {
+                // Ephemeral: the continuation request is not logged, so the
+                // replayed transcript reads as one uninterrupted reply.
+                messages.push(ChatMessage::text("user", CONTINUE_PROMPT));
             }
             self.emit(
                 session_id,
@@ -1099,6 +1136,13 @@ impl Runtime {
             )?;
 
             if completion.tool_calls.is_empty() {
+                if hit_output_limit(&completion.finish_reason)
+                    && continuations < MAX_LENGTH_CONTINUATIONS
+                    && turn + 1 < options.max_turns
+                {
+                    continuations += 1;
+                    continue;
+                }
                 self.emit(
                     session_id,
                     Some(&run_id),
@@ -1147,6 +1191,7 @@ impl Runtime {
                 ));
             }
             let nudge = repeat_count >= DOOM_LOOP_NUDGE;
+            continuations = 0;
 
             self.dispatch_batch(
                 session_id,
@@ -1162,6 +1207,64 @@ impl Runtime {
                 &exec_root,
                 nudge,
             )?;
+        }
+
+        // Out of turns: ask once, without tools, for a progress report so the
+        // user is not left with a bare failure.
+        if !cancel.is_cancelled() {
+            let events = self.store.load_events(session_id)?;
+            let mut messages =
+                compile_messages_with_tools(&events, &exec_root, mode.as_str(), &env, &tool_names)?;
+            messages.push(ChatMessage::text("user", TURN_LIMIT_PROMPT));
+            let request = CompletionRequest {
+                model: model.clone(),
+                messages,
+                tools: Vec::new(),
+                max_output_tokens: None,
+                cache_key: Some(session_id.to_string()),
+            };
+            if let Ok((completion, streamed)) = self.call_with_retry(
+                session_id,
+                &run_id,
+                &turn_id,
+                &providers,
+                &mut provider_index,
+                &model,
+                &request,
+                cancel,
+            ) {
+                let text = if completion.text.is_empty() {
+                    streamed.clone()
+                } else {
+                    completion.text.clone()
+                };
+                if !text.is_empty() && streamed.is_empty() {
+                    self.emit(
+                        session_id,
+                        Some(&run_id),
+                        Some(&turn_id),
+                        KnownPayload::AssistantDelta(AssistantDelta { text: text.clone() }),
+                    )?;
+                }
+                if !text.is_empty() {
+                    self.emit(
+                        session_id,
+                        Some(&run_id),
+                        Some(&turn_id),
+                        KnownPayload::AssistantMessageCompleted(AssistantMessageCompleted { text }),
+                    )?;
+                }
+                self.emit(
+                    session_id,
+                    Some(&run_id),
+                    Some(&turn_id),
+                    KnownPayload::UsageRecorded(UsageRecorded {
+                        input_tokens: completion.input_tokens,
+                        output_tokens: completion.output_tokens,
+                        cached_tokens: completion.cached_tokens,
+                    }),
+                )?;
+            }
         }
 
         self.emit(
@@ -1195,6 +1298,7 @@ impl Runtime {
             let mut attempt = 0u32;
             let outcome = loop {
                 let mut streamed = String::new();
+                let mut reasoning = String::new();
                 let result = provider.complete(request, cancel, &mut |event| match event {
                     StreamEvent::TextDelta(text) => {
                         streamed.push_str(&text);
@@ -1205,7 +1309,13 @@ impl Runtime {
                             KnownPayload::AssistantDelta(AssistantDelta { text }),
                         )
                     }
-                    StreamEvent::ReasoningDelta(_) | StreamEvent::ReasoningComplete => Ok(()),
+                    StreamEvent::ReasoningDelta(text) => {
+                        if reasoning.len() < MAX_REASONING_CHARS {
+                            reasoning.push_str(&text);
+                        }
+                        Ok(())
+                    }
+                    StreamEvent::ReasoningComplete => Ok(()),
                     StreamEvent::ToolCall(call) => {
                         let arguments = serde_json::from_str(&call.arguments)
                             .unwrap_or_else(|_| json!({ "raw": call.arguments }));
@@ -1222,7 +1332,21 @@ impl Runtime {
                     }
                 });
                 match result {
-                    Ok(completion) => break Ok((completion, streamed)),
+                    Ok(completion) => {
+                        // Reasoning is kept for display and audit only; the
+                        // context compiler never sends it back to a provider.
+                        if !reasoning.trim().is_empty() {
+                            self.emit(
+                                session_id,
+                                Some(run_id),
+                                Some(turn_id),
+                                KnownPayload::AssistantReasoning(AssistantReasoning {
+                                    text: reasoning,
+                                }),
+                            )?;
+                        }
+                        break Ok((completion, streamed));
+                    }
                     Err(BloraError::Cancelled) => return Err(BloraError::Cancelled),
                     Err(err) => {
                         // Partial text already streamed must not be retried into a
@@ -1393,8 +1517,22 @@ impl Runtime {
         precomputed: Option<Result<String>>,
         nudge: bool,
     ) -> Result<()> {
-        let arguments: Value = serde_json::from_str(&call.arguments)
-            .unwrap_or_else(|_| json!({ "raw": call.arguments }));
+        let arguments: Value = match parse_tool_arguments(&call.arguments) {
+            Ok(value) => value,
+            Err(message) => {
+                self.emit(
+                    session_id,
+                    Some(run_id),
+                    Some(turn_id),
+                    KnownPayload::ToolRequested(ToolRequested {
+                        tool: call.name.clone(),
+                        arguments: json!({ "raw": call.arguments }),
+                        call_id: Some(call.id.clone()),
+                    }),
+                )?;
+                return self.record_tool_failure(session_id, run_id, turn_id, call, message);
+            }
+        };
         if mode == Mode::Imagine && call.name != "generate_image" {
             return self.record_tool_failure(
                 session_id,
@@ -1857,6 +1995,82 @@ trait ClonedResult {
 
 /// Tools whose execution lives in `dispatch_tool` (they touch the store or emit
 /// events) rather than in `ToolRegistry::execute`.
+/// Parse model-supplied tool arguments. Empty input means no arguments. A parse
+/// failure becomes an explanation the model can act on.
+fn parse_tool_arguments(raw: &str) -> std::result::Result<Value, String> {
+    if raw.trim().is_empty() {
+        return Ok(json!({}));
+    }
+    match serde_json::from_str::<Value>(raw) {
+        Ok(value @ Value::Object(_)) => Ok(value),
+        Ok(other) => Err(format!(
+            "invalid tool arguments: expected a JSON object, got {}. Call the tool again with an object matching its schema.",
+            match other {
+                Value::Array(_) => "an array",
+                Value::String(_) => "a string",
+                Value::Number(_) => "a number",
+                Value::Bool(_) => "a boolean",
+                _ => "null",
+            }
+        )),
+        Err(err) => {
+            let excerpt: String = raw.chars().take(300).collect();
+            Err(format!(
+                "invalid tool arguments: {err}. Received: {excerpt}{}\nCall the tool again with valid JSON. For long file contents, prefer several smaller apply_patch edits.",
+                if raw.chars().count() > 300 { "…" } else { "" }
+            ))
+        }
+    }
+}
+
+/// True when the provider stopped because the reply hit the output-token limit.
+fn hit_output_limit(finish_reason: &str) -> bool {
+    matches!(
+        finish_reason.to_ascii_lowercase().as_str(),
+        "length" | "max_tokens" | "max_output_tokens"
+    )
+}
+
+/// Checklist text for the environment fragment, or `None` when there is no plan
+/// or every step is done.
+fn render_plan(projection: &SessionProjection) -> Option<String> {
+    if projection.plan.is_empty() || projection.plan.iter().all(|step| step.status == "done") {
+        return None;
+    }
+    let mut out = String::new();
+    for step in &projection.plan {
+        let mark = match step.status.as_str() {
+            "done" => "[x]",
+            "in_progress" => "[>]",
+            _ => "[ ]",
+        };
+        out.push_str(&format!("{mark} {}\n", step.title));
+    }
+    if let Some(note) = &projection.plan_note {
+        out.push_str(&format!("Note: {note}\n"));
+    }
+    Some(out)
+}
+
+#[cfg(test)]
+struct SharedProvider(std::sync::Arc<dyn Provider>);
+
+#[cfg(test)]
+impl Provider for SharedProvider {
+    fn name(&self) -> &str {
+        self.0.name()
+    }
+
+    fn complete(
+        &self,
+        request: &CompletionRequest,
+        cancel: &CancelToken,
+        on_event: &mut dyn FnMut(StreamEvent) -> Result<()>,
+    ) -> Result<Completion> {
+        self.0.complete(request, cancel, on_event)
+    }
+}
+
 fn runtime_handled_tool(name: &str) -> bool {
     matches!(name, "recall" | "update_plan" | "shell")
 }
@@ -2495,6 +2709,13 @@ mod tests {
         );
         let events = runtime.events(&session).unwrap();
         assert!(events.iter().any(|e| e.event_type == "usage.recorded"));
+        let messages = blora_context::compile_transcript(&events).unwrap();
+        let ids: Vec<String> = messages
+            .iter()
+            .flat_map(|m| m.tool_calls.clone().unwrap_or_default())
+            .map(|call| call.id)
+            .collect();
+        assert_eq!(ids, vec!["call_mock_list"], "tool calls are not duplicated");
     }
 
     #[test]
@@ -2562,6 +2783,279 @@ mod tests {
             .find(|e| e.event_type == "run.created")
             .unwrap();
         assert_eq!(created.payload["permission_mode"], "plan");
+    }
+
+    /// Scripted provider that records every request it receives.
+    struct Recorder {
+        script: Mutex<std::collections::VecDeque<Completion>>,
+        reasoning: Option<String>,
+        requests: Mutex<Vec<CompletionRequest>>,
+    }
+
+    impl Recorder {
+        fn install(
+            runtime: &Runtime,
+            script: Vec<Completion>,
+            reasoning: Option<&str>,
+        ) -> std::sync::Arc<Self> {
+            let recorder = std::sync::Arc::new(Self {
+                script: Mutex::new(script.into()),
+                reasoning: reasoning.map(str::to_owned),
+                requests: Mutex::new(Vec::new()),
+            });
+            *runtime.test_provider.lock().unwrap() = Some(recorder.clone());
+            recorder
+        }
+    }
+
+    impl Provider for Recorder {
+        fn name(&self) -> &str {
+            "mock"
+        }
+
+        fn complete(
+            &self,
+            request: &CompletionRequest,
+            _cancel: &CancelToken,
+            on_event: &mut dyn FnMut(StreamEvent) -> Result<()>,
+        ) -> Result<Completion> {
+            self.requests.lock().unwrap().push(request.clone());
+            if let Some(text) = &self.reasoning {
+                on_event(StreamEvent::ReasoningDelta(text.clone()))?;
+                on_event(StreamEvent::ReasoningComplete)?;
+            }
+            let completion = self
+                .script
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(Completion {
+                    text: "done".to_owned(),
+                    finish_reason: "stop".to_owned(),
+                    ..Completion::default()
+                });
+            if !completion.text.is_empty() {
+                on_event(StreamEvent::TextDelta(completion.text.clone()))?;
+            }
+            for call in &completion.tool_calls {
+                on_event(StreamEvent::ToolCall(call.clone()))?;
+            }
+            Ok(completion)
+        }
+    }
+
+    fn text_reply(text: &str, finish: &str) -> Completion {
+        Completion {
+            text: text.to_owned(),
+            finish_reason: finish.to_owned(),
+            ..Completion::default()
+        }
+    }
+
+    fn tool_reply(id: &str, name: &str, arguments: &str) -> Completion {
+        Completion {
+            tool_calls: vec![ToolCall {
+                id: id.to_owned(),
+                name: name.to_owned(),
+                arguments: arguments.to_owned(),
+            }],
+            finish_reason: "tool_calls".to_owned(),
+            ..Completion::default()
+        }
+    }
+
+    fn yolo() -> RunOptions {
+        RunOptions {
+            auto_approve: true,
+            ..RunOptions::default()
+        }
+    }
+
+    #[test]
+    fn length_stop_is_continued_without_logging_the_nudge() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = Runtime::new(SqliteStore::open_in_memory().unwrap());
+        let session = session(&runtime, Mode::Code, dir.path().to_str().unwrap());
+        let recorder = Recorder::install(
+            &runtime,
+            vec![
+                text_reply("part one ", "length"),
+                text_reply("part two", "stop"),
+            ],
+            None,
+        );
+        runtime
+            .run(
+                &session,
+                "write a long answer",
+                &CancelToken::new(),
+                &yolo(),
+            )
+            .unwrap();
+        let requests = recorder.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        let last = requests[1].messages.last().unwrap();
+        assert_eq!(last.content.as_deref(), Some(CONTINUE_PROMPT));
+        let events = runtime.events(&session).unwrap();
+        let logged = blora_context::compile_transcript(&events).unwrap();
+        assert!(
+            !logged
+                .iter()
+                .any(|m| m.content.as_deref() == Some(CONTINUE_PROMPT)),
+            "continuation nudge stays out of the event log"
+        );
+        assert!(
+            runtime
+                .show_session(&session)
+                .unwrap()
+                .runs
+                .iter()
+                .any(|run| run.status.as_str() == "completed")
+        );
+    }
+
+    #[test]
+    fn turn_limit_asks_for_a_tool_free_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = Runtime::new(SqliteStore::open_in_memory().unwrap());
+        let session = session(&runtime, Mode::Code, dir.path().to_str().unwrap());
+        let recorder = Recorder::install(
+            &runtime,
+            vec![
+                tool_reply("c1", "list_dir", "{}"),
+                tool_reply("c2", "glob", r#"{"pattern":"*.rs"}"#),
+                text_reply("Progress: listed files. Next: edit.", "stop"),
+            ],
+            None,
+        );
+        let options = RunOptions {
+            max_turns: 2,
+            ..yolo()
+        };
+        let err = runtime
+            .run(&session, "do a big job", &CancelToken::new(), &options)
+            .unwrap_err();
+        assert!(err.to_string().contains("maximum model turns"));
+        let requests = recorder.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[2].tools.is_empty(), "summary request has no tools");
+        let projection = runtime.show_session(&session).unwrap();
+        assert!(projection.transcript.iter().any(|item| matches!(
+            item,
+            TranscriptItem::Assistant { text, .. } if text.contains("Progress: listed files")
+        )));
+    }
+
+    #[test]
+    fn malformed_tool_arguments_return_a_correctable_error() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "hello").unwrap();
+        let runtime = Runtime::new(SqliteStore::open_in_memory().unwrap());
+        let session = session(&runtime, Mode::Code, dir.path().to_str().unwrap());
+        let recorder = Recorder::install(
+            &runtime,
+            vec![
+                tool_reply("bad", "read_file", r#"{"path": "a.txt""#),
+                text_reply("fixed", "stop"),
+            ],
+            None,
+        );
+        runtime
+            .run(&session, "read it", &CancelToken::new(), &yolo())
+            .unwrap();
+        let requests = recorder.requests.lock().unwrap();
+        let tool = requests[1]
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == "tool")
+            .unwrap();
+        let text = tool.content.as_deref().unwrap();
+        assert!(text.contains("invalid tool arguments"), "{text}");
+        assert!(text.contains(r#""path": "a.txt""#));
+    }
+
+    #[test]
+    fn reasoning_is_recorded_but_not_replayed() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = Runtime::new(SqliteStore::open_in_memory().unwrap());
+        let session = session(&runtime, Mode::Code, dir.path().to_str().unwrap());
+        let recorder = Recorder::install(
+            &runtime,
+            vec![text_reply("answer", "stop"), text_reply("again", "stop")],
+            Some("SECRET-THOUGHTS"),
+        );
+        runtime
+            .run(&session, "think", &CancelToken::new(), &yolo())
+            .unwrap();
+        let events = runtime.events(&session).unwrap();
+        assert!(events.iter().any(|e| e.event_type == "assistant.reasoning"));
+        runtime
+            .run(&session, "next", &CancelToken::new(), &yolo())
+            .unwrap();
+        let requests = recorder.requests.lock().unwrap();
+        assert!(!requests[1].messages.iter().any(|m| {
+            m.content
+                .as_deref()
+                .is_some_and(|c| c.contains("SECRET-THOUGHTS"))
+        }));
+    }
+
+    #[test]
+    fn open_plan_and_declared_tools_reach_the_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = Runtime::new(SqliteStore::open_in_memory().unwrap());
+        let session = session(&runtime, Mode::Code, dir.path().to_str().unwrap());
+        let recorder = Recorder::install(
+            &runtime,
+            vec![
+                tool_reply(
+                    "p",
+                    "update_plan",
+                    &json!({"steps": [
+                        {"title": "inspect", "status": "done"},
+                        {"title": "patch parser", "status": "in_progress"}
+                    ]})
+                    .to_string(),
+                ),
+                text_reply("ok", "stop"),
+            ],
+            None,
+        );
+        let options = RunOptions {
+            read_only: true,
+            ..RunOptions::default()
+        };
+        runtime
+            .run(&session, "plan it", &CancelToken::new(), &options)
+            .unwrap();
+        let requests = recorder.requests.lock().unwrap();
+        let env = requests[1]
+            .messages
+            .iter()
+            .filter_map(|m| m.content.as_deref())
+            .find(|c| c.starts_with("<environment_context>"))
+            .unwrap();
+        assert!(env.contains("[>] patch parser"), "{env}");
+        let context = requests[0].messages[1].content.as_deref().unwrap();
+        assert!(context.contains("read_file"));
+        assert!(
+            !context.contains("write_file"),
+            "read-only runs list only read-only tools"
+        );
+    }
+
+    #[test]
+    fn parses_tool_arguments() {
+        assert_eq!(parse_tool_arguments("").unwrap(), json!({}));
+        assert!(
+            parse_tool_arguments("[1]")
+                .unwrap_err()
+                .contains("an array")
+        );
+        assert!(parse_tool_arguments("{oops").is_err());
+        assert!(hit_output_limit("max_tokens") && hit_output_limit("length"));
+        assert!(!hit_output_limit("stop"));
     }
 
     #[test]
@@ -2710,7 +3204,8 @@ mod tests {
     #[test]
     fn oversized_tool_output_is_spilled_to_disk() {
         let dir = tempfile::tempdir().unwrap();
-        let big = "line\n".repeat(8_000);
+        // Few long lines: large enough to spill, short enough to skip read_file paging.
+        let big = format!("{}\n", "x".repeat(400)).repeat(100);
         std::fs::write(dir.path().join("big.txt"), &big).unwrap();
         let runtime = Runtime::new(SqliteStore::open_in_memory().unwrap());
         let session = session(&runtime, Mode::Code, dir.path().to_str().unwrap());

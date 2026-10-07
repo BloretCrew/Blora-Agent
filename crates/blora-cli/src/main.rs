@@ -10,7 +10,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use blora_runtime::{CancelToken, PermissionMode, RunOptions, Runtime};
+use blora_runtime::{CancelToken, DEFAULT_MAX_TURNS, PermissionMode, RunOptions, Runtime};
 use blora_session::TranscriptItem;
 use blora_storage::{CreateSession, CreateTask, SqliteStore};
 use blora_types::{Mode, SessionId, TaskId};
@@ -51,7 +51,7 @@ struct Cli {
     /// Output for `--print`: `text`, `json`, or `stream-json`.
     #[arg(long, default_value = "text", value_parser = ["text", "json", "stream-json"])]
     output_format: String,
-    /// Turn budget for `--print` (default 12).
+    /// Turn budget for `--print` (default 40).
     #[arg(long)]
     max_turns: Option<u32>,
     /// Existing session for `--print` (`ses_…`). Omit to create one.
@@ -622,7 +622,7 @@ fn dispatch(
                     mock,
                     auto_approve,
                     interactive: false,
-                    max_turns: 12,
+                    max_turns: DEFAULT_MAX_TURNS,
                     provider: provider.unwrap_or_default(),
                     read_only: false,
                     worktree,
@@ -800,7 +800,7 @@ fn headless(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             mock: cli.mock,
             auto_approve,
             interactive: false,
-            max_turns: cli.max_turns.unwrap_or(12),
+            max_turns: cli.max_turns.unwrap_or(DEFAULT_MAX_TURNS),
             provider: cli.provider.clone().unwrap_or_default(),
             read_only: false,
             worktree: false,

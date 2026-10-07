@@ -574,6 +574,62 @@ impl LocalBackend {
         self.git(&["diff", "--numstat", "HEAD"])
     }
 
+    /// Diff for the agent tool. `staged` compares the index with HEAD; otherwise
+    /// the working tree is compared with HEAD. `stat` returns only the summary.
+    /// `path` limits the diff to one workspace path.
+    pub fn git_diff_with(&self, staged: bool, stat: bool, path: Option<&str>) -> Result<String> {
+        self.policy.require(self.policy.file_read(), "git_diff")?;
+        let mut args: Vec<String> = vec!["diff".into(), "--no-color".into()];
+        if staged {
+            args.push("--cached".into());
+        } else {
+            args.push("HEAD".into());
+        }
+        if stat {
+            args.push("--stat".into());
+        }
+        if let Some(path) = path.map(str::trim).filter(|p| !p.is_empty() && *p != ".") {
+            args.push("--".into());
+            args.push(self.workspace_pathspec(path)?);
+        }
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        self.git(&refs)
+    }
+
+    /// Linear commit history for the agent tool, newest first.
+    pub fn git_log_with(&self, limit: usize, path: Option<&str>) -> Result<String> {
+        self.policy.require(self.policy.file_read(), "git_log")?;
+        let limit = format!("-{}", limit.clamp(1, 200));
+        let mut args: Vec<String> = vec![
+            "log".into(),
+            "--color=never".into(),
+            limit,
+            "--date=short".into(),
+            "--format=%h %ad %an %s".into(),
+        ];
+        if let Some(path) = path.map(str::trim).filter(|p| !p.is_empty() && *p != ".") {
+            args.push("--".into());
+            args.push(self.workspace_pathspec(path)?);
+        }
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        self.git(&refs)
+    }
+
+    /// Workspace-relative pathspec for a git command, rejecting paths outside
+    /// the workspace and option-like values.
+    fn workspace_pathspec(&self, path: &str) -> Result<String> {
+        let resolved = self.policy.resolve(path)?;
+        let relative = resolved
+            .strip_prefix(self.policy.workspace())
+            .map_err(|_| BloraError::Policy(format!("path outside workspace: {path}")))?;
+        let text = relative.to_string_lossy().into_owned();
+        Ok(if text.is_empty() {
+            ".".to_owned()
+        } else {
+            text
+        })
+    }
+
     pub fn git_log(&self) -> Result<String> {
         self.policy.require(self.policy.file_read(), "git_log")?;
         self.git(&[
@@ -1144,6 +1200,36 @@ mod tests {
         );
         let backend = LocalBackend::new(Policy::new(dir.path(), true).unwrap());
         (dir, backend)
+    }
+
+    #[test]
+    fn agent_git_diff_and_log_take_parameters() {
+        let (dir, backend) = diff_repo();
+        backend.write_file("a.txt", "one\n").unwrap();
+        backend.write_file("b.txt", "bee\n").unwrap();
+        repo_git(dir.path(), &["add", "."]);
+        repo_git(dir.path(), &["commit", "-q", "-m", "first commit"]);
+        backend.write_file("a.txt", "two\n").unwrap();
+        backend.write_file("b.txt", "buzz\n").unwrap();
+        repo_git(dir.path(), &["add", "b.txt"]);
+
+        let full = backend.git_diff_with(false, false, None).unwrap();
+        assert!(full.contains("-one\n+two"), "{full}");
+        assert!(full.contains("b.txt"));
+        let only_a = backend.git_diff_with(false, false, Some("a.txt")).unwrap();
+        assert!(only_a.contains("a.txt") && !only_a.contains("b.txt"));
+        let staged = backend.git_diff_with(true, false, None).unwrap();
+        assert!(staged.contains("+buzz") && !staged.contains("a.txt"));
+        let stat = backend.git_diff_with(false, true, None).unwrap();
+        assert!(!stat.contains("@@") && stat.contains("a.txt"));
+        assert!(backend.git_diff_with(false, false, Some("../x")).is_err());
+
+        let log = backend.git_log_with(5, Some("a.txt")).unwrap();
+        assert!(
+            log.contains("first commit") && log.contains("Diff Test"),
+            "{log}"
+        );
+        assert_eq!(log.lines().count(), 1);
     }
 
     fn repo_git(path: &Path, args: &[&str]) {

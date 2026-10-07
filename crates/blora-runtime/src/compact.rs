@@ -286,8 +286,8 @@ fn model_summary(
     let mut prompt = String::from("[compaction request]\n");
     prompt.push_str(
         "Write a handoff summary for another engineer who will continue this session. Use exactly these sections:\n\
-         ## Goal\n## Constraints\n## Progress (done / in progress / blocked)\n## Key decisions\n## Files and symbols (exact paths, function names, error strings)\n## All user messages (verbatim, in order)\n## Next steps\n\
-         Be terse. Do not mention the compaction process. Preserve identifiers exactly.\n",
+         ## Goal\n## Constraints and user preferences\n## Progress (done / in progress / blocked)\n## Current plan (open checklist items, in order)\n## Key decisions and why\n## Files changed or created (exact paths, with one line each on what changed)\n## Files and symbols still relevant (exact paths, function names, error strings)\n## Verification state (commands run and their results; what is still unverified)\n## All user messages (verbatim, in order)\n## Next steps\n\
+         Be terse. Do not mention the compaction process. Preserve identifiers, paths, and commands exactly. Write \"none\" for an empty section.\n",
     );
     if !instructions.trim().is_empty() {
         prompt.push_str("Extra focus requested by the operator:\n");

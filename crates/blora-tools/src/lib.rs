@@ -27,7 +27,7 @@ impl ToolRegistry {
         vec![
             ToolSpec {
                 name: "read_file",
-                description: "Read a UTF-8 text file inside the workspace. Optional offset/limit select a line range for large files. Images and other non-UTF-8 files return a short description (type, byte size, dimensions) instead of raw bytes.",
+                description: "Read a UTF-8 text file inside the workspace. Without offset/limit, files up to 2000 lines are returned whole; longer files return the first 2000 numbered lines. offset/limit select a numbered line range. Images and other non-UTF-8 files return a short description (type, byte size, dimensions) instead of raw bytes.",
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -130,14 +130,27 @@ impl ToolRegistry {
             },
             ToolSpec {
                 name: "git_diff",
-                description: "Show git diff --stat against HEAD.",
-                parameters: json!({"type": "object", "properties": {}}),
+                description: "Show uncommitted changes as a unified diff against HEAD. staged=true shows only the index; stat=true returns just the per-file summary; path limits the diff to one file or directory. Use it to review your own edits before finishing.",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Workspace-relative file or directory"},
+                        "staged": {"type": "boolean", "description": "Diff the index against HEAD"},
+                        "stat": {"type": "boolean", "description": "Only the summary of changed files"}
+                    }
+                }),
                 read_only: true,
             },
             ToolSpec {
                 name: "git_log",
-                description: "Show recent git commits.",
-                parameters: json!({"type": "object", "properties": {}}),
+                description: "Show recent commits, newest first, one per line (hash, date, author, subject). limit defaults to 20 (max 200); path restricts history to one file or directory.",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+                        "path": {"type": "string", "description": "Workspace-relative file or directory"}
+                    }
+                }),
                 read_only: true,
             },
             ToolSpec {
@@ -173,7 +186,7 @@ impl ToolRegistry {
             },
             ToolSpec {
                 name: "apply_patch",
-                description: "Edit a workspace file by replacing old_string with new_string. old_string must match exactly once; include enough surrounding lines to make it unique. Set replace_all to change every occurrence.",
+                description: "Edit a workspace file by replacing old_string with new_string. Read the file first. old_string must match the file text exactly, including indentation, and exactly once; include enough surrounding lines to make it unique. Set replace_all to change every occurrence. Make several small edits rather than one huge one.",
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -188,12 +201,12 @@ impl ToolRegistry {
             },
             ToolSpec {
                 name: "delegate",
-                description: "Spawn a child agent with a limited turn budget. Roles: research, review, plan (read-only), code.",
+                description: "Spawn a child agent with a small turn budget and return its final report. The child cannot see this conversation, so the prompt must be a complete brief: goal, relevant paths, constraints, and what to report. Roles: research, review, plan (read-only), code (may edit).",
                 parameters: json!({
                     "type": "object",
                     "properties": {
-                        "role": {"type": "string"},
-                        "prompt": {"type": "string"}
+                        "role": {"type": "string", "enum": ["research", "review", "plan", "code"]},
+                        "prompt": {"type": "string", "description": "Self-contained task brief for the child agent"}
                     },
                     "required": ["prompt"]
                 }),
@@ -392,8 +405,18 @@ impl ToolRegistry {
                 required_str(arguments, "name")?,
             ),
             "git_status" => backend.git_status(),
-            "git_diff" => backend.git_diff(),
-            "git_log" => backend.git_log(),
+            "git_diff" => backend.git_diff_with(
+                optional_bool(arguments, "staged"),
+                optional_bool(arguments, "stat"),
+                optional_str(arguments, "path"),
+            ),
+            "git_log" => backend.git_log_with(
+                arguments
+                    .get("limit")
+                    .and_then(Value::as_u64)
+                    .map_or(20, |n| n as usize),
+                optional_str(arguments, "path"),
+            ),
             "git_branch" => backend.git_branch(),
             "git_worktree" => backend.git_worktree(
                 optional_str(arguments, "action").unwrap_or("list"),
@@ -433,9 +456,19 @@ impl ToolRegistry {
     }
 }
 
+/// Lines returned by read_file when the caller gives no range.
+const DEFAULT_READ_LINES: u64 = 2_000;
+
 fn slice_lines(text: &str, offset: Option<u64>, limit: Option<u64>) -> String {
     if offset.is_none() && limit.is_none() {
-        return text.to_owned();
+        if text.lines().count() as u64 <= DEFAULT_READ_LINES {
+            return text.to_owned();
+        }
+        let mut out = slice_lines(text, Some(1), Some(DEFAULT_READ_LINES));
+        out.push_str(&format!(
+            "\n[file is long; showing lines 1-{DEFAULT_READ_LINES}. Use offset/limit to read further, or search to locate a section.]"
+        ));
+        return out;
     }
     let start = offset.unwrap_or(1).max(1) as usize - 1;
     let take = limit.unwrap_or(u64::MAX) as usize;
@@ -482,6 +515,10 @@ fn required_str<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
         .ok_or_else(|| BloraError::Other(format!("missing string field {key}")))
 }
 
+fn optional_bool(value: &Value, key: &str) -> bool {
+    value.get(key).and_then(Value::as_bool).unwrap_or(false)
+}
+
 fn optional_str<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     value.get(key).and_then(Value::as_str)
 }
@@ -524,5 +561,27 @@ mod tests {
         assert!(out.contains("    3\tc"));
         assert!(out.contains("1 more lines"));
         assert_eq!(slice_lines(text, None, None), text);
+    }
+
+    #[test]
+    fn long_files_are_paged_by_default() {
+        let text = (1..=2_500)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let out = slice_lines(&text, None, None);
+        assert!(out.contains(" 2000\tline 2000"));
+        assert!(!out.contains("line 2001\n"));
+        assert!(out.contains("500 more lines"));
+        assert!(out.contains("Use offset/limit"));
+    }
+
+    #[test]
+    fn git_tools_declare_parameters() {
+        let specs = ToolRegistry::specs();
+        let diff = specs.iter().find(|s| s.name == "git_diff").unwrap();
+        assert!(diff.parameters["properties"]["staged"].is_object());
+        let log = specs.iter().find(|s| s.name == "git_log").unwrap();
+        assert!(log.parameters["properties"]["limit"].is_object());
     }
 }
