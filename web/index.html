@@ -145,6 +145,7 @@
               <div id="session-plan" hidden></div>
               <div id="subagents" class="ba-subagents" hidden></div>
               <div id="session-approvals" class="ba-approvals blora-list" hidden></div>
+              <div id="session-question" class="ba-question" role="group" aria-label="Blora 提问" hidden></div>
               <section class="ba-thread" id="thread" aria-live="polite">
                 <blora-empty
                   id="thread-empty"
@@ -196,9 +197,9 @@
                 <label class="ba-perm">
                   <span>模式</span>
                   <select id="run-mode" class="blora-input">
-                    <option value="code">Code</option>
-                    <option value="work">Work</option>
-                    <option value="agent">Agent</option>
+                    <option value="code" title="读改代码、运行测试与 Git">Code · 编码</option>
+                    <option value="work" title="联网调研、读取文档，产出报告与表格">Work · 工作产出</option>
+                    <option value="agent" title="委派与定时执行，自动沉淀技能和记忆">Agent · 自主助理</option>
                     <option value="imagine">Imagine</option>
                   </select>
                 </label>

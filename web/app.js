@@ -268,7 +268,18 @@ function renderUsage(session) {
     usage.textContent = "";
     return;
   }
+  const compactions = Number(session.compaction_count || 0);
   usage.textContent = `${formatTokens(session.input_tokens)} 入 / ${formatTokens(session.output_tokens)} 出`;
+  usage.title = "";
+  delete usage.dataset.warn;
+  if (compactions > 0) {
+    usage.textContent += ` · 已压缩 ${compactions} 次`;
+    usage.title = "较早的对话已被摘要；压缩次数越多，细节越可能丢失";
+    if (compactions >= 3) {
+      usage.dataset.warn = "true";
+      usage.title += "。建议为无关的新任务开启新会话";
+    }
+  }
 }
 
 function renderPlan(session) {
@@ -331,6 +342,14 @@ function bubbleParts(kind) {
     author.textContent = "工具";
     avatar.textContent = "⌘";
     avatar.dataset.variant = "neutral";
+  } else if (kind === "reasoning") {
+    author.textContent = "思考过程";
+    avatar.textContent = "…";
+    avatar.dataset.variant = "neutral";
+  } else if (kind.startsWith("question")) {
+    author.textContent = "Blora 提问";
+    avatar.textContent = "?";
+    avatar.dataset.variant = "warning";
   } else {
     author.textContent = kind;
     avatar.textContent = (kind || "?").slice(0, 1).toUpperCase();
@@ -340,6 +359,39 @@ function bubbleParts(kind) {
 }
 
 function setBubbleText(body, kind, text) {
+  if (kind === "reasoning") {
+    // Folded by default; the model's reasoning is for inspection only.
+    const details = document.createElement("details");
+    details.className = "ba-reasoning";
+    details.open = stored("blora-show-reasoning") === "on";
+    const summary = document.createElement("summary");
+    summary.textContent = `思考过程 · ${text.replace(/\s/g, "").length} 字`;
+    const pre = document.createElement("div");
+    pre.className = "ba-reasoning__body";
+    pre.textContent = text;
+    details.append(summary, pre);
+    body.replaceChildren(details);
+    return details;
+  }
+  if (kind.startsWith("question")) {
+    const [question, answer] = String(text).split("\n→ ");
+    const ask = document.createElement("p");
+    ask.className = "ba-question__text";
+    ask.textContent = question;
+    body.replaceChildren(ask);
+    if (answer !== undefined) {
+      const reply = document.createElement("p");
+      reply.className = "ba-question__answer";
+      reply.textContent = `→ ${answer}`;
+      body.append(reply);
+    } else if (kind === "question.dismissed") {
+      const reply = document.createElement("p");
+      reply.className = "ba-question__answer";
+      reply.textContent = "已跳过";
+      body.append(reply);
+    }
+    return body;
+  }
   if (kind === "user" || kind === "assistant") {
     let node = body.querySelector("blora-markdown");
     if (!node) {
@@ -398,6 +450,93 @@ function renderTranscript(items) {
   }
   state.stick = stick;
   followTail(stick);
+}
+
+// Card for an open ask_user question: option buttons, a free-form answer,
+// and skip. Answers go to POST /api/sessions/:id/input.
+function renderQuestion(session) {
+  const host = document.querySelector("#session-question");
+  if (!host) return;
+  const pending = session && session.pending_input;
+  if (!pending) {
+    host.hidden = true;
+    host.replaceChildren();
+    delete host.dataset.request;
+    return;
+  }
+  if (host.dataset.request === pending.request_id && !host.hidden) return;
+  host.dataset.request = pending.request_id;
+  host.hidden = false;
+  host.replaceChildren();
+  const sessionId = state.sessionId;
+  const heading = document.createElement("p");
+  heading.className = "ba-question__label";
+  heading.textContent = "Blora 需要你的决定";
+  const text = document.createElement("p");
+  text.className = "ba-question__text";
+  text.textContent = pending.question;
+  const options = document.createElement("div");
+  options.className = "ba-question__options";
+  const form = document.createElement("form");
+  form.className = "ba-question__form";
+  const input = document.createElement("input");
+  input.className = "blora-input";
+  input.placeholder = "输入回答…";
+  input.setAttribute("aria-label", "回答");
+  input.maxLength = 8000;
+  const submit = document.createElement("button");
+  submit.type = "submit";
+  submit.className = "blora-button";
+  submit.dataset.variant = "primary";
+  submit.dataset.size = "sm";
+  submit.textContent = "回答";
+  const skip = document.createElement("button");
+  skip.type = "button";
+  skip.className = "blora-button";
+  skip.dataset.variant = "ghost";
+  skip.dataset.size = "sm";
+  skip.textContent = "跳过";
+  const controls = [submit, skip, input];
+  const send = async (answer) => {
+    controls.forEach((control) => { control.disabled = true; });
+    options.querySelectorAll("button").forEach((button) => { button.disabled = true; });
+    try {
+      await api(`/api/sessions/${encodeURIComponent(sessionId)}/input`, {
+        method: "POST",
+        body: JSON.stringify({ request_id: pending.request_id, answer }),
+      });
+      if (state.sessionId === sessionId) {
+        host.hidden = true;
+        host.replaceChildren();
+        delete host.dataset.request;
+      }
+    } catch (error) {
+      controls.forEach((control) => { control.disabled = false; });
+      options.querySelectorAll("button").forEach((button) => { button.disabled = false; });
+      showAlert(error.message);
+    }
+  };
+  (pending.options || []).forEach((option, index) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "blora-button";
+    button.dataset.variant = index === 0 ? "primary" : "ghost";
+    button.dataset.size = "sm";
+    button.textContent = option;
+    button.addEventListener("click", () => send(option));
+    options.append(button);
+  });
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const answer = input.value.trim();
+    if (answer) send(answer);
+  });
+  skip.addEventListener("click", () => send(null));
+  form.append(input, submit, skip);
+  host.append(heading, text);
+  if (options.childElementCount) host.append(options);
+  host.append(form);
+  if (!(pending.options || []).length) input.focus();
 }
 
 function renderGallery(items) {
@@ -486,6 +625,7 @@ async function selectSession(id) {
   }
   renderUsage(session);
   renderPlan(session);
+  renderQuestion(session);
   renderTranscript(session.transcript);
   renderSubagents(session.subagents);
   await refreshApprovals();
@@ -541,6 +681,9 @@ async function handleSessionEvent(id, data) {
   }
   if (
     kind === "assistant.message.completed" ||
+    kind === "assistant.reasoning" ||
+    kind.startsWith("input.") ||
+    kind === "skill.changed" ||
     kind === "tool.completed" ||
     kind === "tool.failed" ||
     kind === "routing.changed" ||
@@ -554,6 +697,7 @@ async function handleSessionEvent(id, data) {
     pathEl.textContent = `${latest.workspace_path} · ${latest.mode} · ${latest.status}`;
     renderUsage(latest);
     renderPlan(latest);
+    renderQuestion(latest);
     renderTranscript(latest.transcript);
     renderSubagents(latest.subagents);
   }

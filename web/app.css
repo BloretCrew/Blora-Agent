@@ -182,6 +182,70 @@ blora-sidebar-layout {
   padding-bottom: var(--blora-space-3);
 }
 
+/* ask_user question card */
+.ba-question {
+  width: min(48rem, 100%);
+  margin: 0 auto var(--blora-space-3);
+  padding: var(--blora-space-3) var(--blora-space-4);
+  border: var(--blora-border-width) solid var(--blora-color-status-warning, var(--blora-color-border));
+  border-radius: var(--blora-radius-md);
+  background: var(--blora-color-surface-raised);
+  display: grid;
+  gap: var(--blora-space-2);
+}
+
+.ba-question__label {
+  margin: 0;
+  font-size: var(--blora-text-sm);
+  color: var(--blora-color-text-muted);
+}
+
+.ba-question__text {
+  margin: 0;
+  color: var(--blora-color-text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.ba-question__answer {
+  margin: var(--blora-space-1) 0 0;
+  color: var(--blora-color-text-muted);
+}
+
+.ba-question__options,
+.ba-question__form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--blora-space-2);
+  align-items: center;
+}
+
+.ba-question__form .blora-input {
+  flex: 1 1 14rem;
+  min-width: 0;
+}
+
+/* Folded model reasoning inside a transcript bubble */
+.ba-reasoning > summary {
+  cursor: pointer;
+  color: var(--blora-color-text-muted);
+  font-size: var(--blora-text-sm);
+}
+
+.ba-reasoning__body {
+  margin-top: var(--blora-space-2);
+  color: var(--blora-color-text-muted);
+  font-size: var(--blora-text-sm);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 24rem;
+  overflow: auto;
+}
+
+#session-usage[data-warn="true"] {
+  color: var(--blora-color-status-warning, var(--blora-color-text));
+}
+
 .ba-jump {
   position: absolute;
   bottom: var(--blora-space-3);
