@@ -13,7 +13,9 @@ Run 状态：`queued`、`running`、`waiting_approval`、`waiting_input`、`wait
 
 默认回合上限为 40（`RunOptions::default()`、CLI `--max-turns`）。用完时内核再发一次不带工具的收尾请求，让模型说明已完成、未完成和下一步，然后记 `run.failed{maximum model turns reached}`。
 
-Provider 的推理流（reasoning）在每次调用结束时汇总为一条 `assistant.reasoning` 事件（单次最多 32k 字符），只用于展示与审计，不会回放给模型。
+Provider 的推理流（reasoning）在每次调用结束时汇总为一条 `assistant.reasoning` 事件（单次最多 32k 字符），只用于展示与审计，不会回放给模型。TUI 与 Web 默认折叠显示，`/reasoning` 切换展开。
+
+`ask_user` 写 `input.requested` 并让 Run 进入 `waiting_input`，回答写 `input.provided` 后恢复 `running`。`RunOptions::can_ask` 表示有人在场（TUI、Web）；无人值守的运行直接得到“请自行判断”的工具结果，不会阻塞。模式与工具集的划分见 [modes.md](modes.md)。
 
 事件序列（mock）：
 
