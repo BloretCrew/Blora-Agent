@@ -313,6 +313,7 @@ dependencies = [
 name = "blora-runtime"
 version = "0.1.0-beta.3"
 dependencies = [
+ "blora-catalog",
  "blora-context",
  "blora-events",
  "blora-exec",
@@ -325,6 +326,7 @@ dependencies = [
  "blora-tools",
  "blora-types",
  "chrono",
+ "dirs",
  "serde",
  "serde_json",
  "tempfile",
@@ -337,6 +339,7 @@ version = "0.1.0-beta.3"
 dependencies = [
  "axum",
  "blora-auth",
+ "blora-events",
  "blora-model",
  "blora-runtime",
  "blora-session",
@@ -373,6 +376,7 @@ dependencies = [
  "blora-types",
  "chrono",
  "rusqlite",
+ "serde",
  "serde_json",
  "sha2",
  "tempfile",
@@ -386,9 +390,12 @@ dependencies = [
  "blora-context",
  "blora-exec",
  "blora-imagine",
+ "blora-policy",
  "blora-types",
+ "blora-web",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -422,6 +429,17 @@ dependencies = [
  "serde",
  "thiserror",
  "uuid",
+]
+
+[[package]]
+name = "blora-web"
+version = "0.1.0-beta.3"
+dependencies = [
+ "blora-types",
+ "flate2",
+ "serde_json",
+ "tempfile",
+ "ureq",
 ]
 
 [[package]]

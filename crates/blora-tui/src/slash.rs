@@ -116,6 +116,13 @@ pub const COMMANDS: &[SlashCommand] = &[
         "Toggle tool-call lines in the transcript",
         "session",
     ),
+    cmd(
+        "reasoning",
+        &["thinking"],
+        "",
+        "Expand or collapse model reasoning",
+        "session",
+    ),
     cmd("copy", &[], "", "Copy the last assistant reply", "session"),
     cmd("cancel", &["stop"], "", "Cancel the in-flight run", "run"),
     cmd(
@@ -175,9 +182,9 @@ pub const COMMANDS: &[SlashCommand] = &[
     cmd(
         "plan",
         &[],
-        "[prompt]",
-        "Open an agent session titled plan",
-        "session",
+        "",
+        "Toggle read-only plan permission mode",
+        "run",
     ),
     cmd("exec", &["sandbox"], "", "Show BLORA_EXEC isolation", "run"),
     cmd("worktree", &[], "", "Show worktree execution flag", "run"),

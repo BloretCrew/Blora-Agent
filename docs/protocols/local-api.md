@@ -16,6 +16,7 @@ POST   /api/sessions/:id/resume
 POST   /api/sessions/:id/compact
 POST   /api/sessions/:id/cancel
 POST   /api/sessions/:id/steer        {"message": "..."} — delivered at the next turn boundary
+POST   /api/sessions/:id/input        {"request_id": "...", "answer": "..." | null} — answer or dismiss the open ask_user question
 GET    /api/tasks
 POST   /api/tasks
 POST   /api/tasks/:id/cancel

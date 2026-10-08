@@ -83,6 +83,18 @@ fn transcript_lines(projection: &SessionProjection, hide_tools: bool) -> Vec<Str
                 text.lines().map(str::to_owned).collect::<Vec<_>>()
             }
             TranscriptItem::Tool { name, status, .. } => vec![format!("{name} [{status}]")],
+            TranscriptItem::Reasoning { text, .. } => {
+                text.lines().map(str::to_owned).collect::<Vec<_>>()
+            }
+            TranscriptItem::Question {
+                question, answer, ..
+            } => {
+                let mut lines: Vec<String> = question.lines().map(str::to_owned).collect();
+                if let Some(answer) = answer {
+                    lines.push(format!("→ {answer}"));
+                }
+                lines
+            }
             TranscriptItem::Routing {
                 to_provider,
                 to_model,

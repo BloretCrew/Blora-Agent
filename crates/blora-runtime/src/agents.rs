@@ -63,7 +63,12 @@ impl Runtime {
         let child_session = self.create_session(CreateSession {
             title: Some(format!("subagent:{role}")),
             workspace_path: parent.workspace_path,
-            mode: Mode::Code,
+            // Children keep the parent's strategy (Work children can research
+            // the web); Imagine has no tool loop to delegate into.
+            mode: match parent.mode {
+                Mode::Imagine => Mode::Code,
+                mode => mode,
+            },
             parent_session_id: Some(parent_session.clone()),
         })?;
         let agent_id = AgentId::generate();
@@ -97,6 +102,8 @@ impl Runtime {
             mock: options.mock,
             auto_approve: options.auto_approve && !read_only,
             interactive: options.interactive,
+            // Children report to the parent agent; only the parent talks to the user.
+            can_ask: false,
             max_turns: budget,
             provider: options.provider.clone(),
             read_only,

@@ -69,6 +69,23 @@ pub enum TranscriptItem {
         at: DateTime<Utc>,
         event_id: EventId,
     },
+    /// Model reasoning recorded for display; never sent back to a provider.
+    Reasoning {
+        text: String,
+        event_id: EventId,
+    },
+    /// A question the agent asked through `ask_user`, with the answer once given.
+    Question {
+        request_id: String,
+        question: String,
+        #[serde(default)]
+        options: Vec<String>,
+        #[serde(default)]
+        answer: Option<String>,
+        /// `pending`, `answered`, or `dismissed`.
+        status: String,
+        event_id: EventId,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -127,8 +144,23 @@ pub struct SessionProjection {
     /// `None` and `.` both mean the workspace root.
     #[serde(default)]
     pub shell_cwd: Option<String>,
+    /// Number of completed context compactions in this session.
+    #[serde(default)]
+    pub compaction_count: u32,
+    /// Open `ask_user` question awaiting an answer.
+    #[serde(default)]
+    pub pending_input: Option<PendingInput>,
     #[serde(skip)]
     open_assistant: String,
+}
+
+/// The question a waiting run needs answered.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PendingInput {
+    pub request_id: String,
+    pub question: String,
+    #[serde(default)]
+    pub options: Vec<String>,
 }
 
 /// An explicit external continuation scoped to this session and working directory.
@@ -658,7 +690,77 @@ pub fn apply_event(projection: &mut SessionProjection, event: &EventEnvelope) ->
                 run.updated_at = event.timestamp;
             }
         }
+        KnownPayload::AssistantReasoning(reasoning) => {
+            projection.transcript.push(TranscriptItem::Reasoning {
+                text: reasoning.text,
+                event_id: event.event_id.clone(),
+            });
+            if event.run_id.is_some() {
+                touch_run(projection, event)?;
+            }
+        }
+        KnownPayload::InputRequested(request) => {
+            projection.pending_input = Some(PendingInput {
+                request_id: request.request_id.clone(),
+                question: request.question.clone(),
+                options: request.options.clone(),
+            });
+            projection.transcript.push(TranscriptItem::Question {
+                request_id: request.request_id,
+                question: request.question,
+                options: request.options,
+                answer: None,
+                status: "pending".to_owned(),
+                event_id: event.event_id.clone(),
+            });
+            set_run_status(projection, event, RunStatus::WaitingInput)?;
+        }
+        KnownPayload::InputProvided(provided) => {
+            if projection
+                .pending_input
+                .as_ref()
+                .is_some_and(|pending| pending.request_id == provided.request_id)
+            {
+                projection.pending_input = None;
+            }
+            for item in projection.transcript.iter_mut().rev() {
+                if let TranscriptItem::Question {
+                    request_id,
+                    answer,
+                    status,
+                    ..
+                } = item
+                    && *request_id == provided.request_id
+                {
+                    status.clone_from(&if provided.answer.is_some() {
+                        "answered".to_owned()
+                    } else {
+                        "dismissed".to_owned()
+                    });
+                    answer.clone_from(&provided.answer);
+                    break;
+                }
+            }
+            set_run_status(projection, event, RunStatus::Running)?;
+        }
+        KnownPayload::SkillChanged(changed) => {
+            projection.transcript.push(TranscriptItem::System {
+                summary: format!("skill.{}: {} ({})", changed.action, changed.name, changed.scope),
+                event_id: event.event_id.clone(),
+            });
+        }
         other => {
+            if matches!(other, KnownPayload::ContextCompactionCompleted(_)) {
+                projection.compaction_count += 1;
+            }
+            if matches!(
+                other,
+                KnownPayload::RunCompleted(_)
+                    | KnownPayload::RunFailed(_)
+                    | KnownPayload::RunCancelled(_)
+            ) {
+                projection.pending_input = None;
+            }
             apply_run_transition(projection, event, &other)?;
             if matches!(
                 other,
@@ -733,6 +835,23 @@ fn find_tool_mut<'a>(
         }
         name.is_some_and(|name| item_name == name)
     })
+}
+
+/// Move a non-terminal run to `status` (used for waiting on user input).
+fn set_run_status(
+    projection: &mut SessionProjection,
+    event: &EventEnvelope,
+    status: RunStatus,
+) -> Result<()> {
+    if event.run_id.is_none() {
+        return Ok(());
+    }
+    let run = run_mut(projection, event)?;
+    if !run.status.is_terminal() {
+        run.status = status;
+    }
+    run.updated_at = event.timestamp;
+    Ok(())
 }
 
 fn apply_run_transition(

@@ -153,6 +153,7 @@ impl AgentDriver for RuntimeAgent<'_> {
                     mock: false,
                     auto_approve: permission.auto_approve(),
                     interactive: false,
+                    can_ask: false,
                     max_turns: request.max_turns.max(1),
                     provider: request.provider.to_string(),
                     read_only: request.read_only,

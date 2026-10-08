@@ -622,6 +622,7 @@ fn dispatch(
                     mock,
                     auto_approve,
                     interactive: false,
+                    can_ask: false,
                     max_turns: DEFAULT_MAX_TURNS,
                     provider: provider.unwrap_or_default(),
                     read_only: false,
@@ -692,6 +693,20 @@ fn print_projection(
                 }
             }
             TranscriptItem::System { summary, .. } => println!("  system: {summary}"),
+            TranscriptItem::Reasoning { text, .. } => {
+                println!("  reasoning: {}", text.lines().next().unwrap_or(""));
+            }
+            TranscriptItem::Question {
+                question,
+                answer,
+                status,
+                ..
+            } => {
+                println!("  question [{status}]: {question}");
+                if let Some(answer) = answer {
+                    println!("    answer: {answer}");
+                }
+            }
             TranscriptItem::Routing {
                 from_provider,
                 to_provider,
@@ -800,6 +815,7 @@ fn headless(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             mock: cli.mock,
             auto_approve,
             interactive: false,
+            can_ask: false,
             max_turns: cli.max_turns.unwrap_or(DEFAULT_MAX_TURNS),
             provider: cli.provider.clone().unwrap_or_default(),
             read_only: false,

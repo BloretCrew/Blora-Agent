@@ -269,9 +269,10 @@ impl SqliteStore {
         conn.query_row(
             "SELECT user_id FROM sessions WHERE id = ?1",
             params![session_id.as_str()],
-            |row| row.get(0),
+            |row| row.get::<_, Option<String>>(0),
         )
         .optional()
+        .map(Option::flatten)
         .map_err(BloraError::storage)
     }
 

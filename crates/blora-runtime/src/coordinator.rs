@@ -86,6 +86,9 @@ pub struct RunOptions {
     pub passport_user_token: Option<String>,
     /// Explicit permission mode. `None` derives from `read_only` / `auto_approve`.
     pub permission: Option<PermissionMode>,
+    /// A person is watching and can answer `ask_user` questions. Independent
+    /// of `interactive` (approvals): bypass-permission runs can still ask.
+    pub can_ask: bool,
 }
 
 impl RunOptions {
@@ -120,6 +123,7 @@ impl Default for RunOptions {
             worktree: false,
             passport_user_token: None,
             permission: None,
+            can_ask: false,
         }
     }
 }
@@ -130,6 +134,8 @@ pub struct Runtime {
     /// Live event subscribers (SSE, TUI). Lossy: a slow subscriber drops events
     /// and must resynchronise from the store, which it can always do.
     subscribers: Mutex<Vec<SyncSender<EventEnvelope>>>,
+    /// Answers to open `ask_user` questions, keyed by request id. `None` is a dismissal.
+    pub(crate) input_answers: Mutex<std::collections::HashMap<String, Option<String>>>,
     /// Scripted provider used by unit tests in place of the resolved chain.
     #[cfg(test)]
     pub(crate) test_provider: Mutex<Option<std::sync::Arc<dyn Provider>>>,
@@ -142,6 +148,7 @@ impl Runtime {
             store,
             foreground_sessions: Mutex::new(std::collections::HashSet::new()),
             subscribers: Mutex::new(Vec::new()),
+            input_answers: Mutex::new(std::collections::HashMap::new()),
             #[cfg(test)]
             test_provider: Mutex::new(None),
         }
@@ -559,52 +566,28 @@ impl Runtime {
         self.store.session_user_id(session_id)
     }
 
+    /// Sessions whose id or title contains `query`, or whose conversation text
+    /// matches it (full-text index), most recently updated first.
     pub fn search_sessions(&self, query: &str) -> Result<Vec<SessionSummary>> {
-        let needle = query.trim().to_ascii_lowercase();
+        let needle = query.trim().to_lowercase();
         if needle.is_empty() {
             return self.list_sessions();
         }
-        let mut out = Vec::new();
-        for summary in self.list_sessions()? {
-            let hay = format!("{} {}", summary.id, summary.title.as_deref().unwrap_or(""))
-                .to_ascii_lowercase();
-            let in_transcript = self
-                .show_session(&summary.id)?
-                .transcript
-                .iter()
-                .any(|item| match item {
-                    blora_session::TranscriptItem::User { text, .. }
-                    | blora_session::TranscriptItem::Assistant { text, .. } => {
-                        text.to_ascii_lowercase().contains(&needle)
-                    }
-                    blora_session::TranscriptItem::Tool { name, .. } => {
-                        name.to_ascii_lowercase().contains(&needle)
-                    }
-                    blora_session::TranscriptItem::System { summary, .. } => {
-                        summary.to_ascii_lowercase().contains(&needle)
-                    }
-                    blora_session::TranscriptItem::Routing {
-                        to_provider,
-                        to_model,
-                        from_provider,
-                        from_model,
-                        ..
-                    } => {
-                        to_provider.to_ascii_lowercase().contains(&needle)
-                            || to_model.to_ascii_lowercase().contains(&needle)
-                            || from_provider
-                                .as_deref()
-                                .is_some_and(|value| value.to_ascii_lowercase().contains(&needle))
-                            || from_model
-                                .as_deref()
-                                .is_some_and(|value| value.to_ascii_lowercase().contains(&needle))
-                    }
-                });
-            if hay.contains(&needle) || in_transcript {
-                out.push(summary);
-            }
-        }
-        Ok(out)
+        let matched: std::collections::HashSet<String> = self
+            .store
+            .search_transcripts(query, 200, None, None)?
+            .into_iter()
+            .map(|hit| hit.session_id)
+            .collect();
+        Ok(self
+            .list_sessions()?
+            .into_iter()
+            .filter(|summary| {
+                let hay = format!("{} {}", summary.id, summary.title.as_deref().unwrap_or(""))
+                    .to_lowercase();
+                hay.contains(&needle) || matched.contains(summary.id.as_str())
+            })
+            .collect())
     }
 
     pub fn list_artifacts(
@@ -920,7 +903,7 @@ impl Runtime {
             tools.extend(plugins.iter().map(crate::plugins::PluginSpec::declaration));
         }
         let tool_names: Vec<String> = tools.iter().map(|tool| tool.name.clone()).collect();
-        let window = blora_context::context_window();
+        let window = blora_context::context_window_for(blora_catalog::context_limit(&model));
         let compact_at = window * blora_context::compact_threshold_pct() / 100;
         let mut last_fingerprint: Option<String> = None;
         let mut repeat_count: u32 = 0;
@@ -1016,6 +999,7 @@ impl Runtime {
                 .filter(|cwd| !cwd.is_empty())
                 .unwrap_or_else(|| ".".to_owned());
             env.plan = render_plan(&current);
+            env.compactions = current.compaction_count;
             let mut events = self.store.load_events(session_id)?;
             let mut messages =
                 compile_messages_with_tools(&events, &exec_root, mode.as_str(), &env, &tool_names)?;
@@ -1687,6 +1671,7 @@ impl Runtime {
                 } else {
                     self.store
                         .upsert_memory(workspace, key, value, chrono::Utc::now())?;
+                    self.write_memory_file(workspace)?;
                     Ok(format!("remembered {key}"))
                 }
             }
@@ -1716,8 +1701,61 @@ impl Runtime {
                     .and_then(Value::as_str)
                     .unwrap_or_default();
                 self.store.delete_memory(workspace, key)?;
+                self.write_memory_file(workspace)?;
                 Ok(format!("forgot {key}"))
             }
+            "ask_user" => self.ask_user(
+                session_id,
+                run_id,
+                turn_id,
+                &call.id,
+                arguments
+                    .get("question")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+                arguments
+                    .get("options")
+                    .and_then(Value::as_array)
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(|item| item.as_str().map(str::to_owned))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                options.can_ask || options.interactive,
+                cancel,
+            ),
+            "skill_manage" => self.manage_skill(
+                session_id,
+                run_id,
+                turn_id,
+                workspace,
+                arguments
+                    .get("action")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+                arguments
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+                arguments.get("content").and_then(Value::as_str),
+                arguments
+                    .get("scope")
+                    .and_then(Value::as_str)
+                    .unwrap_or("workspace"),
+            ),
+            "session_search" => self.session_search_text(
+                session_id,
+                arguments
+                    .get("query")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+                arguments
+                    .get("limit")
+                    .and_then(Value::as_u64)
+                    .map_or(8, |n| n as usize),
+            ),
             "update_plan" => {
                 let steps: Vec<PlanStep> = arguments
                     .get("steps")
@@ -1907,6 +1945,18 @@ impl Runtime {
         Err(BloraError::Cancelled)
     }
 
+    /// Append a canonical event for an existing session and notify
+    /// subscribers. For integrations that import or replay events; regular
+    /// runs append their own events.
+    pub fn append_event(
+        &self,
+        session_id: &SessionId,
+        run_id: Option<&RunId>,
+        payload: KnownPayload,
+    ) -> Result<()> {
+        self.emit(session_id, run_id, None, payload)
+    }
+
     pub(crate) fn emit(
         &self,
         session_id: &SessionId,
@@ -2072,7 +2122,10 @@ impl Provider for SharedProvider {
 }
 
 fn runtime_handled_tool(name: &str) -> bool {
-    matches!(name, "recall" | "update_plan" | "shell")
+    matches!(
+        name,
+        "recall" | "update_plan" | "shell" | "ask_user" | "session_search"
+    )
 }
 
 /// Keep at most this many spilled tool outputs per workspace.
@@ -3043,6 +3096,195 @@ mod tests {
             !context.contains("write_file"),
             "read-only runs list only read-only tools"
         );
+    }
+
+    #[test]
+    fn ask_user_waits_for_an_answer_in_interactive_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = std::sync::Arc::new(Runtime::new(SqliteStore::open_in_memory().unwrap()));
+        let session = session(&runtime, Mode::Code, dir.path().to_str().unwrap());
+        let recorder = Recorder::install(
+            &runtime,
+            vec![
+                tool_reply(
+                    "q1",
+                    "ask_user",
+                    r#"{"question":"Which database?","options":["SQLite","Postgres"]}"#,
+                ),
+                text_reply("Using Postgres.", "stop"),
+            ],
+            None,
+        );
+        let worker = {
+            let runtime = runtime.clone();
+            let session = session.clone();
+            std::thread::spawn(move || {
+                runtime.run(
+                    &session,
+                    "set up storage",
+                    &CancelToken::new(),
+                    &RunOptions {
+                        interactive: true,
+                        ..yolo()
+                    },
+                )
+            })
+        };
+        let pending = loop {
+            if let Some(pending) = runtime.show_session(&session).unwrap().pending_input {
+                break pending;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        assert_eq!(pending.options, vec!["SQLite", "Postgres"]);
+        let projection = runtime.show_session(&session).unwrap();
+        assert_eq!(
+            projection.runs.last().unwrap().status,
+            blora_types::RunStatus::WaitingInput
+        );
+        assert!(
+            runtime
+                .answer_input(&session, "wrong-id", Some("x".to_owned()))
+                .is_err()
+        );
+        runtime
+            .answer_input(&session, &pending.request_id, Some("Postgres".to_owned()))
+            .unwrap();
+        worker.join().unwrap().unwrap();
+        let requests = recorder.requests.lock().unwrap();
+        let tool = requests[1].messages.iter().rev().find(|m| m.role == "tool").unwrap();
+        assert_eq!(tool.content.as_deref(), Some("User answered: Postgres"));
+        let projection = runtime.show_session(&session).unwrap();
+        assert!(projection.pending_input.is_none());
+        assert!(projection.transcript.iter().any(|item| matches!(
+            item,
+            TranscriptItem::Question { answer: Some(answer), status, .. }
+                if answer == "Postgres" && status == "answered"
+        )));
+    }
+
+    #[test]
+    fn ask_user_does_not_block_non_interactive_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = Runtime::new(SqliteStore::open_in_memory().unwrap());
+        let session = session(&runtime, Mode::Code, dir.path().to_str().unwrap());
+        let recorder = Recorder::install(
+            &runtime,
+            vec![
+                tool_reply("q", "ask_user", r#"{"question":"Proceed?"}"#),
+                text_reply("ok", "stop"),
+            ],
+            None,
+        );
+        runtime
+            .run(&session, "go", &CancelToken::new(), &yolo())
+            .unwrap();
+        let requests = recorder.requests.lock().unwrap();
+        let tool = requests[1].messages.iter().rev().find(|m| m.role == "tool").unwrap();
+        assert_eq!(tool.content.as_deref(), Some(crate::NO_USER));
+        assert!(runtime.show_session(&session).unwrap().pending_input.is_none());
+    }
+
+    #[test]
+    fn agent_saves_skills_and_searches_past_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().to_str().unwrap();
+        let runtime = Runtime::new(SqliteStore::open_in_memory().unwrap());
+        let earlier = session(&runtime, Mode::Agent, workspace);
+        runtime
+            .emit(
+                &earlier,
+                None,
+                None,
+                KnownPayload::UserInput(UserInput {
+                    text: "Draft the quarterly revenue report".to_owned(),
+                }),
+            )
+            .unwrap();
+        let current = session(&runtime, Mode::Agent, workspace);
+        let recorder = Recorder::install(
+            &runtime,
+            vec![
+                tool_reply("s", "session_search", r#"{"query":"quarterly revenue"}"#),
+                tool_reply(
+                    "k",
+                    "skill_manage",
+                    &json!({
+                        "action": "create",
+                        "name": "quarterly-report",
+                        "content": "Build the quarterly report\n1. Pull numbers\n2. Write summary"
+                    })
+                    .to_string(),
+                ),
+                tool_reply(
+                    "k2",
+                    "skill_manage",
+                    r#"{"action":"create","name":"quarterly-report","content":"dup"}"#,
+                ),
+                text_reply("Saved.", "stop"),
+            ],
+            None,
+        );
+        runtime
+            .run(&current, "do it like last time", &CancelToken::new(), &yolo())
+            .unwrap();
+        let requests = recorder.requests.lock().unwrap();
+        let tools: Vec<String> = requests[3]
+            .messages
+            .iter()
+            .filter(|m| m.role == "tool")
+            .filter_map(|m| m.content.clone())
+            .collect();
+        assert!(tools[0].contains(earlier.as_str()), "{}", tools[0]);
+        assert!(tools[0].contains("quarterly revenue report"));
+        assert!(tools[1].contains("skill quarterly-report created"));
+        assert!(tools[2].contains("already exists"));
+        let skill = dir.path().join(".blora/skills/quarterly-report.md");
+        assert!(std::fs::read_to_string(&skill).unwrap().starts_with("Build the quarterly report"));
+        let events = runtime.events(&current).unwrap();
+        assert!(events.iter().any(|e| e.event_type == "skill.changed"));
+        // The new skill appears in the next request's context block.
+        let context = requests[3].messages[1].content.as_deref().unwrap();
+        assert!(context.contains("- quarterly-report: Build the quarterly report"));
+        assert!(context.contains("skill_manage"), "Agent mode offers skill_manage");
+    }
+
+    #[test]
+    fn code_mode_does_not_offer_agent_or_web_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = Runtime::new(SqliteStore::open_in_memory().unwrap());
+        let session = session(&runtime, Mode::Code, dir.path().to_str().unwrap());
+        let recorder = Recorder::install(&runtime, vec![text_reply("hi", "stop")], None);
+        runtime
+            .run(&session, "hello", &CancelToken::new(), &yolo())
+            .unwrap();
+        let requests = recorder.requests.lock().unwrap();
+        let names: Vec<&str> = requests[0].tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"apply_patch") && names.contains(&"ask_user"));
+        assert!(!names.contains(&"skill_manage") && !names.contains(&"web_search"));
+        assert!(requests[0].messages[0].content.as_deref().unwrap().contains("# Mode: Code"));
+    }
+
+    #[test]
+    fn remember_updates_memory_file_without_session_summaries() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = Runtime::new(SqliteStore::open_in_memory().unwrap());
+        let session = session(&runtime, Mode::Agent, dir.path().to_str().unwrap());
+        Recorder::install(
+            &runtime,
+            vec![
+                tool_reply("m", "remember", r#"{"key":"pkg","value":"use pnpm"}"#),
+                text_reply("Done.\nRemember: deploys go through staging", "stop"),
+            ],
+            None,
+        );
+        runtime
+            .run(&session, "note it", &CancelToken::new(), &yolo())
+            .unwrap();
+        let memory = std::fs::read_to_string(dir.path().join(".blora/memory.md")).unwrap();
+        assert!(memory.contains("pkg: use pnpm"));
+        assert!(memory.contains("deploys go through staging"));
+        assert!(!memory.contains("session:"), "{memory}");
     }
 
     #[test]

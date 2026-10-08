@@ -6,11 +6,13 @@
 mod approvals;
 mod onboarding;
 mod preferences;
+mod search;
 mod sqlite;
 mod tasks;
 mod users;
 
 pub use approvals::ApprovalRecord;
+pub use search::SearchMatch;
 pub use sqlite::{
     ArtifactRecord, CreateSession, MemoryRecord, SessionSummary, SqliteStore, UsageTotals,
 };

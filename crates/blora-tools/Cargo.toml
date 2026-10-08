@@ -12,8 +12,13 @@ blora-context.workspace = true
 blora-exec.workspace = true
 blora-imagine.workspace = true
 blora-types.workspace = true
+blora-web.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+blora-policy.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

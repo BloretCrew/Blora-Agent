@@ -1,0 +1,20 @@
+[package]
+name = "blora-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description = "Web search, page fetching, and office document reading for Blora Agent."
+
+[dependencies]
+blora-types.workspace = true
+flate2 = "1"
+serde_json.workspace = true
+ureq.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

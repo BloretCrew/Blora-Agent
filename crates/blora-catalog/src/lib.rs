@@ -56,6 +56,9 @@ impl MessageFormat {
 pub struct CatalogModel {
     pub id: String,
     pub name: String,
+    /// Context window in tokens (`limit.context` on models.dev), when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,7 +114,16 @@ pub fn parse_models_dev(value: &serde_json::Value) -> Vec<CatalogEntry> {
                             .and_then(|n| n.as_str())
                             .unwrap_or(&mid)
                             .to_owned();
-                        Some(CatalogModel { id: mid, name })
+                        let context = model
+                            .get("limit")
+                            .and_then(|limit| limit.get("context"))
+                            .and_then(serde_json::Value::as_u64)
+                            .filter(|tokens| *tokens > 0);
+                        Some(CatalogModel {
+                            id: mid,
+                            name,
+                            context,
+                        })
                     })
                     .collect()
             })
@@ -180,6 +192,52 @@ pub fn cached_catalog() -> Vec<CatalogEntry> {
         .ok()
         .and_then(|g| g.clone())
         .unwrap_or_default()
+}
+
+/// Context window for `model` from the cached catalog, saved providers, or
+/// well-known model families. `None` when nothing is known.
+#[must_use]
+pub fn context_limit(model: &str) -> Option<u64> {
+    let model = model.trim();
+    if model.is_empty() {
+        return None;
+    }
+    let bare = model.rsplit('/').next().unwrap_or(model);
+    let from_list = |models: &[CatalogModel]| {
+        models
+            .iter()
+            .find(|candidate| candidate.id == model || candidate.id == bare)
+            .and_then(|candidate| candidate.context)
+    };
+    cached_catalog()
+        .iter()
+        .find_map(|entry| from_list(&entry.models))
+        .or_else(|| load_saved().iter().find_map(|saved| from_list(&saved.models)))
+        .or_else(|| family_context(bare))
+}
+
+/// Conservative windows for common model families when no catalog is loaded.
+fn family_context(model: &str) -> Option<u64> {
+    let id = model.to_ascii_lowercase();
+    let table: &[(&str, u64)] = &[
+        ("claude", 200_000),
+        ("gemini", 1_000_000),
+        ("gpt-4.1", 1_000_000),
+        ("gpt-5", 400_000),
+        ("gpt-4o", 128_000),
+        ("o3", 200_000),
+        ("o4", 200_000),
+        ("grok-4", 256_000),
+        ("grok-code", 256_000),
+        ("deepseek", 128_000),
+        ("qwen", 128_000),
+        ("kimi", 128_000),
+        ("glm", 128_000),
+    ];
+    table
+        .iter()
+        .find(|(prefix, _)| id.starts_with(prefix) || id.contains(&format!("-{prefix}")))
+        .map(|(_, tokens)| *tokens)
 }
 
 pub fn config_path() -> PathBuf {
@@ -280,7 +338,11 @@ fn fetch_openai_models_url(url: &str, api_key: &str) -> Result<Vec<CatalogModel>
                 .filter(|s| !s.is_empty())
                 .unwrap_or(id.as_str())
                 .to_owned();
-            models.push(CatalogModel { name, id });
+            models.push(CatalogModel {
+                name,
+                id,
+                context: None,
+            });
         }
     }
     Ok(models)
@@ -328,7 +390,7 @@ mod tests {
                 "npm": "@ai-sdk/openai",
                 "env": ["OPENAI_API_KEY"],
                 "models": {
-                    "gpt-4o": { "id": "gpt-4o", "name": "GPT-4o" }
+                    "gpt-4o": { "id": "gpt-4o", "name": "GPT-4o", "limit": { "context": 128000, "output": 16384 } }
                 }
             },
             "anthropic": {
@@ -344,9 +406,18 @@ mod tests {
         assert_eq!(list.len(), 2);
         let openai = list.iter().find(|p| p.id == "openai").unwrap();
         assert_eq!(openai.models[0].id, "gpt-4o");
+        assert_eq!(openai.models[0].context, Some(128_000));
         assert_eq!(openai.format(), MessageFormat::Openai);
         let anthropic = list.iter().find(|p| p.id == "anthropic").unwrap();
         assert_eq!(anthropic.format(), MessageFormat::Anthropic);
+    }
+
+    #[test]
+    fn family_context_covers_common_models() {
+        assert_eq!(family_context("claude-sonnet-4-5"), Some(200_000));
+        assert_eq!(family_context("gemini-2.5-pro"), Some(1_000_000));
+        assert_eq!(family_context("mystery"), None);
+        assert_eq!(context_limit(""), None);
     }
 
     #[test]

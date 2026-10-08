@@ -225,18 +225,18 @@ pub struct ModeOption {
 pub const MODE_OPTIONS: [ModeOption; 4] = [
     ModeOption {
         mode: Mode::Code,
-        title: "Code",
-        description: "读写代码、运行命令并完成明确的开发任务。",
+        title: "Code · 编码",
+        description: "读改代码、运行测试与 Git，像结对工程师一样完成开发任务。",
     },
     ModeOption {
         mode: Mode::Work,
-        title: "Work",
-        description: "处理工作区任务、后台任务和持续推进的工作流。",
+        title: "Work · 工作产出",
+        description: "联网调研、读取 PDF/Office 文档，产出报告、表格等成果文件。",
     },
     ModeOption {
         mode: Mode::Agent,
-        title: "Agent",
-        description: "自主拆解任务，使用工具并在需要时派发子代理。",
+        title: "Agent · 自主助理",
+        description: "端到端推进目标，委派与定时执行，自动沉淀技能、记忆并检索历史。",
     },
     ModeOption {
         mode: Mode::Imagine,
@@ -605,6 +605,8 @@ pub enum Hit {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HintAction {
     Send,
+    /// Submit the composer text as the answer to an open question.
+    Answer,
     Commands,
     SessionNext,
     New,
@@ -926,7 +928,7 @@ pub fn draw(
     } else {
         0
     };
-    let show_approval = !model.pending.is_empty();
+    let show_approval = !model.pending.is_empty() || pending_question(model).is_some();
     let compact = area.height < 14;
     let chrome_height = if compact { 5 } else { 6 };
     let extra = extra.min(
@@ -1922,15 +1924,28 @@ fn render_header(
     let mode_title = mode_label(mode);
     let compact = inner.width < 80;
     let separator = if compact { " · " } else { "  ·  " };
+    let compactions = model.projection.map_or(0, |p| p.compaction_count);
+    let compaction_badge = (compactions > 0).then(|| {
+        let color = if compactions >= blora_context::COMPACTION_WARNING {
+            theme.amber
+        } else {
+            theme.text_dim
+        };
+        Span::styled(format!("⟲{compactions} "), theme.fg(color))
+    });
     let right = if model.running {
-        Line::from(Span::styled(
+        let mut line = Line::from(Span::styled(
             if compact {
                 spinner(model.tick).to_string()
             } else {
                 format!("{}  running", spinner(model.tick))
             },
             theme.fg(theme.sage),
-        ))
+        ));
+        if let Some(badge) = compaction_badge.clone().filter(|_| !compact) {
+            line.spans.insert(0, badge);
+        }
+        line
     } else {
         let used = model
             .projection
@@ -1940,7 +1955,11 @@ fn render_header(
                     .saturating_add(projection.output_tokens)
             })
             .unwrap_or(0);
-        let usage = context_usage_line(used, blora_context::context_window(), theme);
+        let window = blora_context::context_window_for(blora_catalog::context_limit(model.model));
+        let mut usage = context_usage_line(used, window, theme);
+        if let Some(badge) = compaction_badge {
+            usage.spans.insert(0, badge);
+        }
         if compact {
             Line::from(Span::styled(
                 usage.spans.last().unwrap().content.trim().to_owned(),
@@ -2619,6 +2638,18 @@ fn render_transcript(
     };
 }
 
+/// Whether reasoning blocks are expanded. Toggled by `/reasoning`.
+static SHOW_REASONING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Flip reasoning visibility and return the new state.
+pub fn toggle_reasoning() -> bool {
+    !SHOW_REASONING.fetch_xor(true, std::sync::atomic::Ordering::Relaxed)
+}
+
+fn show_reasoning() -> bool {
+    SHOW_REASONING.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct TranscriptCacheKey {
     session_id: String,
@@ -2628,6 +2659,7 @@ struct TranscriptCacheKey {
     search: String,
     hide_tools: bool,
     message_roles: bool,
+    show_reasoning: bool,
     user_label: String,
     theme: Theme,
 }
@@ -2680,6 +2712,7 @@ impl TranscriptCache {
             search: search.unwrap_or("").to_owned(),
             hide_tools,
             message_roles,
+            show_reasoning: show_reasoning(),
             user_label: user_label.to_owned(),
             theme: *theme,
         };
@@ -2898,6 +2931,7 @@ fn transcript_lines(
         return imagine_lines(projection, width, theme);
     }
     let needle = search.map(str::to_ascii_lowercase);
+    let show_reasoning = show_reasoning();
     let mut out = Vec::new();
     let mut marks = Vec::new();
     let visible: Vec<(usize, &TranscriptItem)> = projection
@@ -3019,6 +3053,77 @@ fn transcript_lines(
                     Span::styled("  ", theme.mute()),
                     Span::styled(summary.clone(), theme.mute().add_modifier(Modifier::ITALIC)),
                 ]));
+            }
+            TranscriptItem::Reasoning { text, .. } => {
+                let body_width = width.saturating_sub(4).max(8);
+                if show_reasoning {
+                    out.push(Line::from(vec![Span::styled(
+                        format!("  {}", crate::i18n::tr("reasoning.label", "思考过程")),
+                        theme.mute().add_modifier(Modifier::ITALIC),
+                    )]));
+                    for line in wrap_text(text, body_width) {
+                        out.push(Line::from(vec![
+                            Span::styled("  │ ", theme.mute()),
+                            Span::styled(line, theme.mute().add_modifier(Modifier::ITALIC)),
+                        ]));
+                    }
+                } else {
+                    let words = text.chars().filter(|ch| !ch.is_whitespace()).count();
+                    out.push(Line::from(vec![Span::styled(
+                        format!(
+                            "  ▸ {} · {words} {}",
+                            crate::i18n::tr("reasoning.label", "思考过程"),
+                            crate::i18n::tr("reasoning.chars", "字"),
+                        ),
+                        theme.mute().add_modifier(Modifier::ITALIC),
+                    )]));
+                }
+            }
+            TranscriptItem::Question {
+                question,
+                options,
+                answer,
+                status,
+                ..
+            } => {
+                let accent = if status == "pending" {
+                    theme.amber
+                } else {
+                    theme.text_dim
+                };
+                out.push(Line::from(vec![
+                    Span::styled("┃ ", theme.fg(accent)),
+                    Span::styled(
+                        crate::i18n::tr("question.label", "Blora 提问"),
+                        theme.fg(accent).add_modifier(Modifier::BOLD),
+                    ),
+                ]));
+                let body_width = width.saturating_sub(2).max(8);
+                for line in wrap_text(question, body_width) {
+                    out.push(Line::from(vec![
+                        Span::styled("  ", theme.mute()),
+                        Span::styled(line, theme.fg(theme.text)),
+                    ]));
+                }
+                if status == "pending" {
+                    for (index, option) in options.iter().enumerate() {
+                        out.push(Line::from(vec![Span::styled(
+                            format!("  {}. {option}", index + 1),
+                            theme.fg(theme.text_dim),
+                        )]));
+                    }
+                }
+                match (status.as_str(), answer) {
+                    (_, Some(answer)) => out.push(Line::from(vec![
+                        Span::styled("  → ", theme.fg(theme.sage)),
+                        Span::styled(answer.clone(), theme.fg(theme.sage)),
+                    ])),
+                    ("dismissed", None) => out.push(Line::from(vec![Span::styled(
+                        format!("  {}", crate::i18n::tr("question.dismissed", "已跳过")),
+                        theme.mute(),
+                    )])),
+                    _ => {}
+                }
             }
             TranscriptItem::Routing {
                 from_provider,
@@ -3187,6 +3292,15 @@ fn item_matches(item: &TranscriptItem, needle: Option<&str>) -> bool {
                     .is_some_and(|text| text.to_ascii_lowercase().contains(needle))
         }
         TranscriptItem::System { summary, .. } => summary.to_ascii_lowercase().contains(needle),
+        TranscriptItem::Reasoning { text, .. } => text.to_ascii_lowercase().contains(needle),
+        TranscriptItem::Question {
+            question, answer, ..
+        } => {
+            question.to_ascii_lowercase().contains(needle)
+                || answer
+                    .as_deref()
+                    .is_some_and(|text| text.to_ascii_lowercase().contains(needle))
+        }
         TranscriptItem::Routing {
             to_provider,
             to_model,
@@ -3304,6 +3418,29 @@ fn render_approval(
 ) {
     let inner = inset(area);
     let Some(first) = model.pending.first() else {
+        if let Some(question) = pending_question(model) {
+            let options = question
+                .options
+                .iter()
+                .enumerate()
+                .map(|(index, option)| format!("{} {option}", index + 1))
+                .collect::<Vec<_>>()
+                .join("  ");
+            let room = inner.width.saturating_sub(4) as usize;
+            let text = if options.is_empty() {
+                question.question.clone()
+            } else {
+                format!("{}   {options}", question.question)
+            };
+            let line = Line::from(vec![
+                Span::styled("?  ", theme.fg(theme.amber).add_modifier(Modifier::BOLD)),
+                Span::styled(ellipsize(&text, room), theme.fg(theme.amber)),
+            ]);
+            frame.render_widget(
+                Paragraph::new(line).style(Style::default().bg(theme.bg_raised)),
+                inner,
+            );
+        }
         return;
     };
     let summary = ellipsize(&first.summary, inner.width.saturating_sub(22) as usize);
@@ -3336,6 +3473,11 @@ fn render_approval(
         Paragraph::new(line).style(Style::default().bg(theme.bg_raised)),
         inner,
     );
+}
+
+/// Open `ask_user` question of the visible session, if any.
+pub fn pending_question<'a>(model: &FrameModel<'a>) -> Option<&'a blora_session::PendingInput> {
+    model.projection?.pending_input.as_ref()
 }
 
 fn render_slash(
@@ -5083,7 +5225,14 @@ fn render_composer(
         Line::from(vec![
             Span::styled("❯ ", theme.rose_bold()),
             Span::styled(
-                composer_placeholder(imagine, model.running, available),
+                if pending_question(model).is_some() {
+                    ellipsize(
+                        &i18n::tr("composer.answer", "输入回答，Enter 提交；数字键选择选项"),
+                        available,
+                    )
+                } else {
+                    composer_placeholder(imagine, model.running, available)
+                },
                 theme.mute(),
             ),
         ])
@@ -5189,6 +5338,12 @@ fn render_hints(
             ("n", "deny", HintAction::Deny),
             ("esc", "quit", HintAction::Quit),
         ]
+    } else if pending_question(model).is_some() {
+        &[
+            ("⏎", "answer", HintAction::Answer),
+            ("1-9", "option", HintAction::Answer),
+            ("esc", "skip", HintAction::Close),
+        ]
     } else {
         &[
             ("⏎", "send", HintAction::Send),
@@ -5209,6 +5364,8 @@ fn render_hints(
         } else if inner.width < 60 {
             match action {
                 HintAction::Send => "⏎ 发送",
+                HintAction::Answer if *key == "1-9" => "1-9 选项",
+                HintAction::Answer => "⏎ 回答",
                 HintAction::Commands => "/ 命令",
                 HintAction::SessionNext => "› 会话",
                 HintAction::New => "+ 新建",
@@ -5539,6 +5696,142 @@ mod tests {
         assert_eq!(dialog.key(KeyCode::Enter), None);
         assert!(!dialog.minimized);
         assert_eq!(dialog.selected, 2);
+    }
+
+    fn frame_text(terminal: &Terminal<TestBackend>) -> String {
+        let buffer = terminal.backend().buffer();
+        let area = buffer.area;
+        (0..area.height)
+            .map(|y| {
+                let mut line = String::new();
+                let mut skip = 0usize;
+                for x in 0..area.width {
+                    if skip > 0 {
+                        skip -= 1;
+                        continue;
+                    }
+                    let symbol = buffer[(x, y)].symbol();
+                    skip = symbol.width().saturating_sub(1);
+                    line.push_str(symbol);
+                }
+                line
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn question_projection() -> SessionProjection {
+        use blora_events::{
+            AssistantReasoning, ContextCompactionCompleted, EventEnvelope, InputRequested,
+            KnownPayload, NewEvent, SessionCreated,
+        };
+        let id = blora_types::SessionId::generate();
+        let payloads = vec![
+            KnownPayload::SessionCreated(SessionCreated {
+                title: Some("q".to_owned()),
+                workspace_path: "/tmp".to_owned(),
+                mode: Mode::Agent,
+                parent_session_id: None,
+            }),
+            KnownPayload::AssistantReasoning(AssistantReasoning {
+                text: "HIDDEN-THOUGHT about the plan".to_owned(),
+            }),
+            KnownPayload::ContextCompactionCompleted(ContextCompactionCompleted {
+                summary: "s".to_owned(),
+                preserve_from_sequence: None,
+                tokens_before: 0,
+                tokens_after: 0,
+            }),
+            KnownPayload::InputRequested(InputRequested {
+                request_id: "ask_1".to_owned(),
+                question: "Which region?".to_owned(),
+                options: vec!["EU".to_owned(), "US".to_owned()],
+                call_id: None,
+            }),
+        ];
+        let events: Vec<EventEnvelope> = payloads
+            .into_iter()
+            .enumerate()
+            .map(|(i, payload)| {
+                EventEnvelope::from_new(
+                    NewEvent::new(id.clone(), payload),
+                    i as u64 + 1,
+                    &blora_types::SystemClock,
+                )
+                .unwrap()
+            })
+            .collect();
+        blora_session::rebuild(&events).unwrap()
+    }
+
+    #[test]
+    fn question_bar_reasoning_fold_and_compaction_badge() {
+        let projection = question_projection();
+        assert!(projection.pending_input.is_some());
+        let mut model = FrameModel {
+            dialog_stack: &[],
+            workspace: Path::new("/tmp"),
+            sessions: &[],
+            index: 0,
+            projection: Some(&projection),
+            pending: &[],
+            input: "",
+            status: "ready",
+            notice: None,
+            paste_preview: None,
+            passport_dialog: None,
+            provider_dialog: None,
+            add_provider_dialog: None,
+            theme_dialog: None,
+            context_dialog: None,
+            settings_dialog: None,
+            harness_dialog: None,
+            permission_dialog: None,
+            tool_dialog: None,
+            tool_detail_dialog: None,
+            slash_hits: &[],
+            slash_selected: 0,
+            search: None,
+            hide_tools: false,
+            message_roles: true,
+            scroll: 0,
+            permission_mode: PermissionMode::Ask,
+            model: "mock",
+            provider: "mock",
+            mode_menu: None,
+            project_picker: None,
+            folder_picker: None,
+            session_picker: None,
+            git_dialog: None,
+            git_status: None,
+            user_label: "you",
+            running: true,
+            tick: 0,
+            pointer: None,
+            text_selection: None,
+        };
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let mut cache = TranscriptCache::default();
+        terminal
+            .draw(|frame| {
+                draw(frame, &model, &mut cache);
+            })
+            .unwrap();
+        let text = frame_text(&terminal);
+        assert!(text.contains("?  Which region?   1 EU  2 US"), "{text}");
+        assert!(text.contains("answer"), "hints switch to answering:\n{text}");
+        assert!(text.contains("思考过程"), "reasoning is summarised");
+        assert!(!text.contains("HIDDEN-THOUGHT"), "reasoning is folded by default");
+        assert!(text.contains("⟲1"), "compaction count is shown");
+        assert!(toggle_reasoning());
+        model.input = "x";
+        terminal
+            .draw(|frame| {
+                draw(frame, &model, &mut cache);
+            })
+            .unwrap();
+        assert!(frame_text(&terminal).contains("HIDDEN-THOUGHT"));
+        assert!(!toggle_reasoning());
     }
 
     #[test]
@@ -7023,6 +7316,7 @@ mod tests {
                     models: vec![blora_catalog::CatalogModel {
                         id: "gpt-4o".to_owned(),
                         name: "GPT-4o".to_owned(),
+                        context: None,
                     }],
                 },
                 blora_catalog::CatalogEntry {
@@ -7075,10 +7369,12 @@ mod tests {
                 blora_catalog::CatalogModel {
                     id: "fusion".to_owned(),
                     name: "fusion".to_owned(),
+                    context: None,
                 },
                 blora_catalog::CatalogModel {
                     id: "crew-router".to_owned(),
                     name: "crew-router".to_owned(),
+                    context: None,
                 },
             ],
             resolved_base: "https://router.bloret.net/v1".to_owned(),

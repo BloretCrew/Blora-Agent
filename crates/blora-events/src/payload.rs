@@ -385,6 +385,41 @@ pub struct SessionCwdChanged {
     pub cwd: String,
 }
 
+/// The agent asked the user a question and the run waits for an answer.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct InputRequested {
+    pub request_id: String,
+    pub question: String,
+    /// Suggested answers; the user may still type a free-form reply.
+    #[serde(default)]
+    pub options: Vec<String>,
+    #[serde(default)]
+    pub call_id: Option<String>,
+}
+
+/// The user answered an [`InputRequested`] question, or it was dismissed.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct InputProvided {
+    pub request_id: String,
+    /// `None` means the question was dismissed without an answer.
+    #[serde(default)]
+    pub answer: Option<String>,
+}
+
+/// A skill file was created, updated, or deleted by the agent.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SkillChanged {
+    pub name: String,
+    /// `create`, `update`, or `delete`.
+    pub action: String,
+    /// `workspace` or `global`.
+    pub scope: String,
+    pub path: String,
+    /// Previous file contents, kept so the change can be undone.
+    #[serde(default)]
+    pub previous: Option<String>,
+}
+
 /// Strongly-typed payloads. Unknown wire types stay as raw JSON on the envelope.
 #[derive(Clone, Debug, PartialEq)]
 pub enum KnownPayload {
@@ -441,6 +476,9 @@ pub enum KnownPayload {
     CheckpointCreated(CheckpointCreated),
     PlanUpdated(PlanUpdated),
     SessionCwdChanged(SessionCwdChanged),
+    InputRequested(InputRequested),
+    InputProvided(InputProvided),
+    SkillChanged(SkillChanged),
 }
 
 impl KnownPayload {
@@ -500,17 +538,22 @@ impl KnownPayload {
             Self::CheckpointCreated(_) => "checkpoint.created",
             Self::PlanUpdated(_) => "plan.updated",
             Self::SessionCwdChanged(_) => "session.cwd.changed",
+            Self::InputRequested(_) => "input.requested",
+            Self::InputProvided(_) => "input.provided",
+            Self::SkillChanged(_) => "skill.changed",
         }
     }
 
     #[must_use]
     pub fn default_actor(&self) -> Actor {
         match self {
-            Self::UserInput(_) | Self::ApprovalResolved(_) => Actor::User,
+            Self::UserInput(_) | Self::ApprovalResolved(_) | Self::InputProvided(_) => Actor::User,
             Self::AssistantDelta(_)
             | Self::AssistantMessageCompleted(_)
             | Self::AssistantReasoning(_)
-            | Self::PlanUpdated(_) => Actor::Assistant,
+            | Self::PlanUpdated(_)
+            | Self::InputRequested(_)
+            | Self::SkillChanged(_) => Actor::Assistant,
             Self::ToolRequested(_)
             | Self::ToolStarted(_)
             | Self::ToolOutput(_)
@@ -585,6 +628,9 @@ impl KnownPayload {
             Self::CheckpointCreated(v) => serde_json::to_value(v),
             Self::PlanUpdated(v) => serde_json::to_value(v),
             Self::SessionCwdChanged(v) => serde_json::to_value(v),
+            Self::InputRequested(v) => serde_json::to_value(v),
+            Self::InputProvided(v) => serde_json::to_value(v),
+            Self::SkillChanged(v) => serde_json::to_value(v),
         };
         value.map_err(|err| BloraError::event(err.to_string()))
     }
@@ -645,6 +691,9 @@ impl KnownPayload {
             "checkpoint.created" => Self::CheckpointCreated(from_value(value)?),
             "plan.updated" => Self::PlanUpdated(from_value(value)?),
             "session.cwd.changed" => Self::SessionCwdChanged(from_value(value)?),
+            "input.requested" => Self::InputRequested(from_value(value)?),
+            "input.provided" => Self::InputProvided(from_value(value)?),
+            "skill.changed" => Self::SkillChanged(from_value(value)?),
             _ => return Ok(None),
         };
         Ok(Some(known))

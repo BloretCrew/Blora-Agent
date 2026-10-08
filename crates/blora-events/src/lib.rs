@@ -12,11 +12,11 @@ pub use payload::{
     ApprovalRequested, ApprovalResolved, ArtifactCreated, AssistantDelta,
     AssistantMessageCompleted, AssistantReasoning, CheckpointCreated, ContextCompactionCompleted,
     ContextCompactionFailed, ContextCompactionStarted, ContextDeltaCreated, ContextSnapshotCreated,
-    ExternalSessionBound, HarnessChanged, HookCompleted, KnownPayload, ModeChanged, ModelRequested,
+    ExternalSessionBound, HarnessChanged, HookCompleted, InputProvided, InputRequested, KnownPayload, ModeChanged, ModelRequested,
     ModelResponseCompleted, PlanStep, PlanUpdated, PolicyDenied, ProviderChanged, RetryStarted,
     RoutingChanged, RunCancelRequested, RunCancelled, RunCompleted, RunCreated, RunFailed,
     RunPaused, RunStarted, SessionArchived, SessionCreated, SessionCwdChanged, SessionForked,
-    SessionResumed, SessionTitleChanged, SubagentCompleted, SubagentFailed, SubagentMessage,
+    SessionResumed, SessionTitleChanged, SkillChanged, SubagentCompleted, SubagentFailed, SubagentMessage,
     SubagentSpawned, TaskCompleted, TaskCreated, TaskFailed, TaskProgress, TaskStarted, TaskWakeup,
     ToolCompleted, ToolFailed, ToolOutput, ToolRequested, ToolStarted, UsageRecorded, UserInput,
 };

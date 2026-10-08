@@ -108,6 +108,8 @@ struct SessionJson {
     shell_cwd: Option<String>,
     plan: Vec<PlanStepJson>,
     plan_note: Option<String>,
+    compaction_count: u32,
+    pending_input: Option<blora_session::PendingInput>,
     transcript: Vec<TranscriptJson>,
     tasks: Vec<TaskJson>,
     subagents: Vec<SubagentJson>,
@@ -225,6 +227,7 @@ fn app(state: AppState) -> Router {
         .route("/api/sessions/{id}/compact", post(compact_session))
         .route("/api/sessions/{id}/cancel", post(cancel_session))
         .route("/api/sessions/{id}/steer", post(steer_session))
+        .route("/api/sessions/{id}/input", post(answer_input))
         .route("/api/usage", get(usage))
         .route("/api/plugins", get(plugins))
         .route("/api/artifacts", get(list_artifacts))
@@ -959,6 +962,7 @@ async fn run_session(
         mock: body.mock || blora_model::should_auto_mock(&provider, passport_user_token.as_deref()),
         auto_approve,
         interactive: !auto_approve,
+        can_ask: true,
         provider,
         model: body.model.unwrap_or_default(),
         worktree: body.worktree,
@@ -1133,6 +1137,36 @@ async fn steer_session(
         .queue_steer(&session_id, &body.message)
         .map_err(ApiError::from)?;
     Ok(Json(serde_json::json!({ "queued": true })))
+}
+
+#[derive(Deserialize)]
+struct InputBody {
+    request_id: String,
+    /// Omit or send null to dismiss the question.
+    #[serde(default)]
+    answer: Option<String>,
+}
+
+/// Answer (or dismiss) the open `ask_user` question of a running session.
+async fn answer_input(
+    State(state): State<AppState>,
+    headers: HttpHeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<InputBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let session_id = SessionId::parse(&id).map_err(ApiError::from)?;
+    ensure_session(&state, &headers, &session_id)?;
+    if body.answer.as_deref().is_some_and(|text| text.len() > 8_000) {
+        return Err(ApiError("answer too long".to_owned()));
+    }
+    let runtime = state.runtime.clone();
+    tokio::task::spawn_blocking(move || {
+        runtime.answer_input(&session_id, &body.request_id, body.answer)
+    })
+    .await
+    .map_err(|err| ApiError(err.to_string()))?
+    .map_err(ApiError::from)?;
+    Ok(Json(serde_json::json!({ "answered": true })))
 }
 
 async fn pump_tasks(State(state): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
@@ -1494,6 +1528,8 @@ fn to_json(state: &AppState, id: &SessionId) -> Result<SessionJson, ApiError> {
             })
             .collect(),
         plan_note: projection.plan_note.clone(),
+        compaction_count: projection.compaction_count,
+        pending_input: projection.pending_input.clone(),
         transcript: {
             let items = projection.transcript;
             let mut out = Vec::new();
@@ -1530,6 +1566,22 @@ fn to_json(state: &AppState, id: &SessionId) -> Result<SessionJson, ApiError> {
                     TranscriptItem::System { summary, .. } => TranscriptJson {
                         kind: "system".to_owned(),
                         text: summary.clone(),
+                    },
+                    TranscriptItem::Reasoning { text, .. } => TranscriptJson {
+                        kind: "reasoning".to_owned(),
+                        text: text.clone(),
+                    },
+                    TranscriptItem::Question {
+                        question,
+                        answer,
+                        status,
+                        ..
+                    } => TranscriptJson {
+                        kind: format!("question.{status}"),
+                        text: match answer {
+                            Some(answer) => format!("{question}\n→ {answer}"),
+                            None => question.clone(),
+                        },
                     },
                     TranscriptItem::Routing {
                         from_provider,
@@ -2036,6 +2088,60 @@ mod tests {
             )
             .await
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn input_endpoint_answers_open_question_and_exposes_state() {
+        let h = OAuthHarness::new(false).await;
+        let (_, _, created) = h
+            .request("/api/sessions", "", Some(serde_json::json!({})), "")
+            .await;
+        let created: serde_json::Value = serde_json::from_str(&created).unwrap();
+        assert_eq!(created["compaction_count"], 0);
+        assert!(created["pending_input"].is_null());
+        let id = created["id"].as_str().unwrap().to_owned();
+        let session = SessionId::parse(&id).unwrap();
+        let run = blora_types::RunId::generate();
+        let runtime = h.state.runtime.clone();
+        let emit = |payload: blora_events::KnownPayload| {
+            runtime
+                .append_event(&session, Some(&run), payload)
+                .unwrap();
+        };
+        emit(blora_events::KnownPayload::RunCreated(blora_events::RunCreated {
+            mode: Mode::Code,
+            model: None,
+            permission_mode: None,
+        }));
+        emit(blora_events::KnownPayload::RunStarted(blora_events::RunStarted { model: None }));
+        emit(blora_events::KnownPayload::InputRequested(blora_events::InputRequested {
+            request_id: "ask_1".to_owned(),
+            question: "Ship it?".to_owned(),
+            options: vec!["Yes".to_owned(), "No".to_owned()],
+            call_id: None,
+        }));
+        let (_, _, body) = h.request(&format!("/api/sessions/{id}"), "", None, "").await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["pending_input"]["question"], "Ship it?");
+        assert!(
+            json["transcript"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["kind"] == "question.pending")
+        );
+        let route = format!("/api/sessions/{id}/input");
+        let wrong = h
+            .request(&route, "", Some(serde_json::json!({"request_id":"nope","answer":"x"})), "")
+            .await;
+        assert_eq!(wrong.0, 400, "{}", wrong.2);
+        let ok = h
+            .request(&route, "", Some(serde_json::json!({"request_id":"ask_1","answer":"Yes"})), "")
+            .await;
+        assert_eq!(ok.0, 200, "{}", ok.2);
+        let (_, _, body) = h.request(&format!("/api/sessions/{id}"), "", None, "").await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(json["pending_input"].is_null());
     }
 
     fn success_token() -> serde_json::Value {

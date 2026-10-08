@@ -1073,6 +1073,37 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                         {
                             continue;
                         }
+                        // An open ask_user question takes the composer: Enter
+                        // answers, a digit picks an option, Esc skips.
+                        if top_dialog.is_none()
+                            && mode_menu.is_none()
+                            && !input.starts_with('/')
+                            && let Some(id) = session_id.as_ref()
+                            && let Some(question) = cached
+                                .as_ref()
+                                .and_then(|(_, projection)| projection.pending_input.clone())
+                        {
+                            let answer = match key.code {
+                                KeyCode::Enter if !input.trim().is_empty() => {
+                                    Some(Some(std::mem::take(&mut input)))
+                                }
+                                KeyCode::Char(digit @ '1'..='9') if input.is_empty() => question
+                                    .options
+                                    .get(digit as usize - '1' as usize)
+                                    .cloned()
+                                    .map(Some),
+                                KeyCode::Esc if input.is_empty() => Some(None),
+                                _ => None,
+                            };
+                            if let Some(answer) = answer {
+                                status = match runtime.answer_input(id, &question.request_id, answer)
+                                {
+                                    Ok(()) => i18n::tr("question.sent", "已回答"),
+                                    Err(err) => err.to_string(),
+                                };
+                                continue;
+                            }
+                        }
                         match key.code {
                             KeyCode::Esc if top_dialog.is_none() && text_selection.is_some() => {
                                 text_selection = None;
@@ -3040,6 +3071,23 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                         input = slash::complete(cmd);
                                         slash_selected = 0;
                                     }
+                                } else if hit == Some(view::Hit::Hint(view::HintAction::Answer)) {
+                                    if let Some(id) = session_id.as_ref()
+                                        && let Some(question) = cached.as_ref().and_then(
+                                            |(_, projection)| projection.pending_input.clone(),
+                                        )
+                                        && !input.trim().is_empty()
+                                    {
+                                        let answer = std::mem::take(&mut input);
+                                        status = match runtime.answer_input(
+                                            id,
+                                            &question.request_id,
+                                            Some(answer),
+                                        ) {
+                                            Ok(()) => i18n::tr("question.sent", "已回答"),
+                                            Err(err) => err.to_string(),
+                                        };
+                                    }
                                 } else if hit == Some(view::Hit::Hint(view::HintAction::Run))
                                     || hit == Some(view::Hit::Hint(view::HintAction::Send))
                                 {
@@ -3808,6 +3856,7 @@ fn tui_run_options(
         permission: Some(permission_mode),
         auto_approve: permission_mode.auto_approve(),
         interactive: true,
+        can_ask: true,
         model: model.to_owned(),
         provider: provider.to_owned(),
         passport_user_token,
@@ -4514,6 +4563,14 @@ fn slash(
             *hide_tools = !*hide_tools;
             SlashOutcome::Status(format!("hide-tools={hide_tools}"))
         }
+        "reasoning" => {
+            let shown = view::toggle_reasoning();
+            SlashOutcome::Status(if shown {
+                crate::i18n::tr("reasoning.shown", "已展开思考过程")
+            } else {
+                crate::i18n::tr("reasoning.hidden", "已折叠思考过程")
+            })
+        }
         "copy" => SlashOutcome::Status(copy_last_assistant(runtime, session_id)),
         "cancel" => {
             cancel.cancel();
@@ -4622,7 +4679,16 @@ fn slash(
             Mode::Imagine,
             "imagine",
         ),
-        "plan" => open_session(runtime, workspace, sessions, index, Mode::Agent, "plan"),
+        // `/plan` toggles the read-only plan permission mode, matching the
+        // permission picker; it used to open an Agent session titled "plan".
+        "plan" => {
+            *permission_mode = if *permission_mode == PermissionMode::Plan {
+                PermissionMode::Ask
+            } else {
+                PermissionMode::Plan
+            };
+            SlashOutcome::Status(i18n::permission_changed(*permission_mode))
+        }
         "exec" => SlashOutcome::Status(env_flag("BLORA_EXEC", "local")),
         "worktree" => SlashOutcome::Status(format!(
             "BLORA_WORKTREE={}",
