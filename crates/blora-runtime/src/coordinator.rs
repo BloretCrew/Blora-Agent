@@ -375,6 +375,11 @@ impl Runtime {
         self.store.usage_totals(session_id)
     }
 
+    /// Daily token samples and session lifetimes for the usage dialog.
+    pub fn usage_activity(&self) -> Result<blora_storage::UsageActivity> {
+        self.store.usage_activity()
+    }
+
     /// Queue a user message to be delivered at the next safe point of a running
     /// session (between model turns). Safe to call from another thread.
     pub fn queue_steer(&self, session_id: &SessionId, message: &str) -> Result<()> {

@@ -342,8 +342,44 @@ pub struct GitDialog {
 #[derive(Clone, Debug)]
 pub struct ContextDialog {
     pub scroll: usize,
+    /// `0` current context, `1` overview, `2` models.
+    pub page: usize,
+    /// `0` all time, `1` last 7 days, `2` last 30 days.
+    pub range: usize,
     pub fullscreen: bool,
     pub minimized: bool,
+    pub activity: blora_storage::UsageActivity,
+}
+
+impl ContextDialog {
+    pub fn set_page(&mut self, page: usize) {
+        let page = page % 3;
+        if page != self.page {
+            self.page = page;
+            self.scroll = 0;
+        }
+    }
+
+    pub fn cycle_page(&mut self, step: isize) {
+        let next = (self.page as isize + step).rem_euclid(3);
+        self.set_page(usize::try_from(next).unwrap_or(0));
+    }
+
+    pub fn set_range(&mut self, range: usize) {
+        let range = range % 3;
+        if range != self.range {
+            self.range = range;
+            self.scroll = 0;
+        }
+    }
+
+    /// Cycles the date filter on the overview and model pages.
+    pub fn cycle_range(&mut self) {
+        if self.page == 0 {
+            return;
+        }
+        self.set_range(self.range + 1);
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -580,6 +616,8 @@ pub enum Hit {
     Harness,
     HarnessRow(usize),
     ContextUsage,
+    ContextTab(usize),
+    ContextRange(usize),
     ProviderTarget,
     Hint(HintAction),
     Notice,
@@ -653,6 +691,8 @@ pub struct HitMap {
     pub toggle_approve: Option<Rect>,
     pub provider_target: Option<Rect>,
     pub context_usage: Option<Rect>,
+    pub context_tabs: Vec<(Rect, usize)>,
+    pub context_ranges: Vec<(Rect, usize)>,
     pub git_status: Option<Rect>,
     pub git_tabs: Vec<(Rect, usize)>,
     pub git_message: Option<Rect>,
@@ -779,6 +819,16 @@ impl HitMap {
         for (rect, idx) in &self.settings_tabs {
             if contains(*rect, col, row) {
                 return Some(Hit::SettingsTab(*idx));
+            }
+        }
+        for (rect, idx) in &self.context_tabs {
+            if contains(*rect, col, row) {
+                return Some(Hit::ContextTab(*idx));
+            }
+        }
+        for (rect, idx) in &self.context_ranges {
+            if contains(*rect, col, row) {
+                return Some(Hit::ContextRange(*idx));
             }
         }
         if self.harness.is_some_and(|rect| contains(rect, col, row)) {
@@ -1576,6 +1626,8 @@ fn render_layer(
     {
         let dialog_hits =
             render_context_dialog(frame, area, model.projection, dialog, model.pointer, &theme);
+        hits.context_tabs = dialog_hits.context_tabs;
+        hits.context_ranges = dialog_hits.context_ranges;
         hits.traffic_lights = dialog_hits.traffic_lights;
         hits.modal_area = dialog_hits.modal_area;
     } else if id == DialogId::Harness
@@ -2798,27 +2850,7 @@ fn render_context_dialog(
     theme: &Theme,
 ) -> HitMap {
     let mut hits = HitMap::default();
-    let Some(projection) = projection else {
-        return hits;
-    };
-    let window = blora_context::context_window().max(1);
-    let used = projection
-        .input_tokens
-        .saturating_add(projection.output_tokens);
-    let input = projection.input_tokens.min(used);
-    let output = projection.output_tokens.min(used.saturating_sub(input));
-    let system = estimate_system_tokens(projection).min(input);
-    let messages = input.saturating_sub(system);
-    let free = window.saturating_sub(used);
-    let compact_width = 72u16.min(area.width.saturating_sub(4)).max(40);
-    let compact_height = 17u16;
-    let Some(modal) = dialog_outer(
-        area,
-        compact_width,
-        compact_height,
-        dialog.fullscreen,
-        dialog.minimized,
-    ) else {
+    let Some(modal) = dialog_outer(area, 100, 26, dialog.fullscreen, dialog.minimized) else {
         return hits;
     };
     let inner = paint_dialog_frame(
@@ -2829,7 +2861,8 @@ fn render_context_dialog(
         theme,
         &mut hits,
     );
-    let [_, content, hint_row] = Layout::vertical([
+    let [_, tabs, content, hint_row] = Layout::vertical([
+        Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Min(3),
         Constraint::Length(1),
@@ -2838,8 +2871,121 @@ fn render_context_dialog(
     if dialog.minimized {
         return hits;
     }
+    paint_context_tabs(frame, tabs, dialog.page, theme, &mut hits);
+    let today = chrono::Utc::now().date_naive();
+    let summary = crate::usage_stats::summarize(&dialog.activity, dialog.range, today);
+    let rendered = match dialog.page {
+        0 => crate::usage_stats::RenderedStats {
+            lines: context_current_lines(projection, content.width as usize, theme),
+            range_line: None,
+            range_spans: [(0, 0); 3],
+        },
+        1 => crate::usage_stats::overview(&summary, content.width as usize, theme),
+        _ => crate::usage_stats::models(&summary, content.width as usize, theme),
+    };
+    place_range_hits(&mut hits, content, &rendered, dialog.scroll);
+    let mut lines = rendered.lines;
+    let visible = lines.len().saturating_sub(content.height as usize);
+    let start = dialog.scroll.min(visible);
+    if content.height > 0 {
+        lines.drain(0..start);
+    }
+    frame.render_widget(Paragraph::new(lines).style(theme.base()), content);
+    frame.render_widget(
+        Paragraph::new(crate::usage_stats::hint(dialog.page)).style(theme.mute()),
+        hint_row,
+    );
+    hits
+}
+
+fn paint_context_tabs(
+    frame: &mut Frame<'_>,
+    tabs: Rect,
+    page: usize,
+    theme: &Theme,
+    hits: &mut HitMap,
+) {
+    if tabs.width == 0 || tabs.height == 0 {
+        return;
+    }
+    for index in 0..3 {
+        let start = tabs.x + tabs.width * u16::try_from(index).unwrap_or(0) / 3;
+        let end = tabs.x + tabs.width * u16::try_from(index + 1).unwrap_or(3) / 3;
+        let rect = Rect::new(start, tabs.y, end.saturating_sub(start).max(1), 1);
+        hits.context_tabs.push((rect, index));
+        let selected = page == index;
+        let style = if selected {
+            theme
+                .fg(theme.text)
+                .bg(theme.bg_select)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            theme.mute()
+        };
+        frame.render_widget(
+            Paragraph::new(format!(
+                " {} {} ",
+                if selected { "▸" } else { " " },
+                crate::usage_stats::page_label(index)
+            ))
+            .style(style),
+            rect,
+        );
+    }
+}
+
+fn place_range_hits(
+    hits: &mut HitMap,
+    content: Rect,
+    rendered: &crate::usage_stats::RenderedStats,
+    scroll: usize,
+) {
+    let Some(range_line) = rendered.range_line else {
+        return;
+    };
+    let start = scroll.min(rendered.lines.len().saturating_sub(content.height as usize));
+    let visible = range_line as i64 - start as i64;
+    if visible < 0 || visible >= i64::from(content.height) {
+        return;
+    }
+    let y = content.y + u16::try_from(visible).unwrap_or(0);
+    for (index, (column, span_width)) in rendered.range_spans.iter().enumerate() {
+        if *span_width == 0 {
+            continue;
+        }
+        let x = content
+            .x
+            .saturating_add(u16::try_from(*column).unwrap_or(0));
+        let room = content.width.saturating_sub(x.saturating_sub(content.x));
+        let width = u16::try_from(*span_width).unwrap_or(0).min(room);
+        if width > 0 {
+            hits.context_ranges.push((Rect::new(x, y, width, 1), index));
+        }
+    }
+}
+
+fn context_current_lines(
+    projection: Option<&SessionProjection>,
+    width: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let Some(projection) = projection else {
+        return vec![Line::from(Span::styled(
+            i18n::tr("context.no_session", "当前没有打开的会话。"),
+            theme.mute(),
+        ))];
+    };
+    let window = blora_context::context_window().max(1);
+    let used = projection
+        .input_tokens
+        .saturating_add(projection.output_tokens);
+    let input = projection.input_tokens.min(used);
+    let output = projection.output_tokens.min(used.saturating_sub(input));
+    let system = estimate_system_tokens(projection).min(input);
+    let messages = input.saturating_sub(system);
+    let free = window.saturating_sub(used);
     let used_pct = percentage(used, window);
-    let mut lines = vec![
+    vec![
         Line::from(vec![
             Span::styled(
                 format!("{}  ", i18n::tr("dialog.context_current", "当前上下文")),
@@ -2866,7 +3012,7 @@ fn render_context_dialog(
                 (free, theme.text_mute),
             ],
             window,
-            content.width as usize,
+            width.max(10),
             theme,
         ),
         Line::default(),
@@ -2906,20 +3052,7 @@ fn render_context_dialog(
             ),
             theme.mute(),
         )),
-    ];
-    let visible = lines.len().saturating_sub(content.height as usize);
-    let start = dialog.scroll.min(visible);
-    lines.drain(0..start);
-    frame.render_widget(Paragraph::new(lines).style(theme.base()), content);
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            "↑/↓ 滚动 · Esc 关闭",
-            theme.mute(),
-        )))
-        .style(theme.base()),
-        hint_row,
-    );
-    hits
+    ]
 }
 
 fn estimate_system_tokens(projection: &SessionProjection) -> u64 {
@@ -6683,6 +6816,103 @@ mod tests {
         let mid_text: String = mid.spans.iter().map(|span| span.content.as_ref()).collect();
         assert!(mid_text.contains("▣"), "{mid_text}");
         assert!(mid_text.contains("▢"), "{mid_text}");
+    }
+
+    #[test]
+    fn context_dialog_has_current_overview_and_model_pages() {
+        use chrono::{Duration, TimeZone, Utc};
+        let today = Utc::now().date_naive();
+        let previous = today.checked_sub_signed(Duration::days(1)).unwrap_or(today);
+        let activity = blora_storage::UsageActivity {
+            samples: vec![blora_storage::UsageSample {
+                day: previous,
+                model: "Fable 5.1".to_owned(),
+                session_id: "s".to_owned(),
+                input_tokens: 1_000,
+                output_tokens: 2_000,
+                cached_tokens: 30,
+            }],
+            sessions: vec![blora_storage::SessionSpan {
+                id: "s".to_owned(),
+                created_at: Utc.from_utc_datetime(&previous.and_hms_opt(0, 0, 0).unwrap()),
+                updated_at: Utc.from_utc_datetime(&today.and_hms_opt(4, 0, 0).unwrap()),
+            }],
+        };
+        let mut projection = SessionProjection::default();
+        projection.input_tokens = 1_000;
+        projection.output_tokens = 250;
+        let mut dialog = ContextDialog {
+            scroll: 0,
+            page: 0,
+            range: 0,
+            fullscreen: false,
+            minimized: false,
+            activity,
+        };
+        let theme = Theme::dark();
+        let page0 = context_page_text(&projection, &dialog, &theme);
+        assert!(page0.contains("当前上下文"), "{page0}");
+        assert!(page0.contains("总览"), "{page0}");
+        assert!(page0.contains("模型"), "{page0}");
+        assert!(page0.contains("翻页"), "{page0}");
+        dialog.page = 1;
+        let page1 = context_page_text(&projection, &dialog, &theme);
+        assert!(page1.contains("常用模型"), "{page1}");
+        assert!(page1.contains("Fable 5.1"), "{page1}");
+        assert!(page1.contains("近 7 天"), "{page1}");
+        assert!(page1.contains("少"), "{page1}");
+        dialog.page = 2;
+        let (page2, hits) = context_page(&projection, &dialog, &theme);
+        assert!(page2.contains("每日 Token"), "{page2}");
+        assert!(page2.contains("Fable 5.1"), "{page2}");
+        assert!(page2.contains("缓存读取"), "{page2}");
+        assert_eq!(hits.context_tabs.len(), 3);
+        assert_eq!(hits.context_ranges.len(), 3);
+        let (tab, index) = &hits.context_tabs[1];
+        assert_eq!(*index, 1);
+        assert_eq!(hits.hit(tab.x, tab.y), Some(Hit::ContextTab(1)));
+        let (range, range_index) = &hits.context_ranges[2];
+        assert_eq!(*range_index, 2);
+        assert_eq!(hits.hit(range.x, range.y), Some(Hit::ContextRange(2)));
+        dialog.cycle_page(1);
+        assert_eq!(dialog.page, 0);
+        dialog.cycle_page(-1);
+        assert_eq!(dialog.page, 2);
+        dialog.cycle_range();
+        assert_eq!(dialog.range, 1);
+        dialog.set_page(0);
+        dialog.cycle_range();
+        assert_eq!(dialog.range, 1);
+    }
+
+    fn context_page_text(
+        projection: &SessionProjection,
+        dialog: &ContextDialog,
+        theme: &Theme,
+    ) -> String {
+        context_page(projection, dialog, theme).0
+    }
+
+    fn context_page(
+        projection: &SessionProjection,
+        dialog: &ContextDialog,
+        theme: &Theme,
+    ) -> (String, HitMap) {
+        let mut terminal = Terminal::new(TestBackend::new(110, 36)).unwrap();
+        let mut hits = HitMap::default();
+        terminal
+            .draw(|frame| {
+                hits = render_context_dialog(
+                    frame,
+                    frame.area(),
+                    Some(projection),
+                    dialog,
+                    None,
+                    theme,
+                );
+            })
+            .unwrap();
+        (frame_text(&terminal), hits)
     }
 
     #[test]

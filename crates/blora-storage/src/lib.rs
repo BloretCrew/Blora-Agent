@@ -14,7 +14,8 @@ mod users;
 pub use approvals::ApprovalRecord;
 pub use search::SearchMatch;
 pub use sqlite::{
-    ArtifactRecord, CreateSession, MemoryRecord, SessionSummary, SqliteStore, UsageTotals,
+    ArtifactRecord, CreateSession, MemoryRecord, SessionSpan, SessionSummary, SqliteStore,
+    UsageActivity, UsageSample, UsageTotals,
 };
 pub use tasks::{AgentRecord, CreateTask, TaskRecord};
 pub use users::UserRecord;

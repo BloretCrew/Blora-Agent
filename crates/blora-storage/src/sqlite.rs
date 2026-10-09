@@ -12,7 +12,7 @@ use blora_types::{
     Actor, AgentId, ArtifactId, BloraError, Clock, EventId, Mode, Result, RunId, SCHEMA_VERSION,
     SessionId, SessionStatus, SystemClock, TaskId, TaskStatus, TurnId, Visibility,
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 
 const SCHEMA_SQL: &str = include_str!("schema.sql");
@@ -48,6 +48,32 @@ pub struct UsageTotals {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cached_tokens: u64,
+}
+
+/// One model’s token totals on one UTC day in one session.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UsageSample {
+    pub day: NaiveDate,
+    pub model: String,
+    pub session_id: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cached_tokens: u64,
+}
+
+/// Session lifetime used for streak and duration stats.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionSpan {
+    pub id: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Recorded usage and session lifetimes for the context-usage pages.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct UsageActivity {
+    pub samples: Vec<UsageSample>,
+    pub sessions: Vec<SessionSpan>,
 }
 
 #[derive(Clone, Debug)]
@@ -784,6 +810,76 @@ impl SqliteStore {
         })
     }
 
+    /// Daily usage joined to run models, plus every session’s lifetime.
+    pub fn usage_activity(&self) -> Result<UsageActivity> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT substr(u.created_at, 1, 10),
+                        COALESCE(r.model, ''),
+                        u.session_id,
+                        SUM(u.input_tokens),
+                        SUM(u.output_tokens),
+                        SUM(u.cached_tokens)
+                 FROM provider_usage u
+                 LEFT JOIN runs r ON r.id = u.run_id
+                 GROUP BY 1, 2, 3
+                 ORDER BY 1, 2, 3",
+            )
+            .map_err(BloraError::storage)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            })
+            .map_err(BloraError::storage)?;
+        let mut samples = Vec::new();
+        for row in rows {
+            let (day, model, session_id, input, output, cached) =
+                row.map_err(BloraError::storage)?;
+            let Some(day) = NaiveDate::parse_from_str(&day, "%Y-%m-%d").ok() else {
+                continue;
+            };
+            samples.push(UsageSample {
+                day,
+                model,
+                session_id,
+                input_tokens: u64::try_from(input).unwrap_or(0),
+                output_tokens: u64::try_from(output).unwrap_or(0),
+                cached_tokens: u64::try_from(cached).unwrap_or(0),
+            });
+        }
+        drop(stmt);
+        let mut stmt = conn
+            .prepare("SELECT id, created_at, updated_at FROM sessions ORDER BY created_at")
+            .map_err(BloraError::storage)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(BloraError::storage)?;
+        let mut sessions = Vec::new();
+        for row in rows {
+            let (id, created_at, updated_at) = row.map_err(BloraError::storage)?;
+            sessions.push(SessionSpan {
+                id,
+                created_at: parse_time(&created_at)?,
+                updated_at: parse_time(&updated_at)?,
+            });
+        }
+        Ok(UsageActivity { samples, sessions })
+    }
+
     pub fn insert_artifact(
         &self,
         id: &blora_types::ArtifactId,
@@ -1350,5 +1446,109 @@ mod tests {
             .execute("UPDATE events SET event_type = 'x' WHERE sequence = 1", [])
             .unwrap_err();
         assert!(err.to_string().contains("append-only"));
+    }
+
+    #[test]
+    fn usage_activity_groups_days_and_models() {
+        use blora_events::{RunCreated, UsageRecorded};
+        use blora_types::RunId;
+
+        let store = SqliteStore::open_in_memory().unwrap();
+        let session = store
+            .create_session(CreateSession {
+                title: Some("stats".to_owned()),
+                workspace_path: "/tmp/ws".to_owned(),
+                mode: Mode::Code,
+                parent_session_id: None,
+            })
+            .unwrap();
+        let fable = RunId::generate();
+        let opus = RunId::generate();
+        store
+            .append(
+                NewEvent::new(
+                    session.clone(),
+                    KnownPayload::RunCreated(RunCreated {
+                        mode: Mode::Code,
+                        model: Some("Fable 5.1".to_owned()),
+                        permission_mode: None,
+                    }),
+                )
+                .with_run(fable.clone()),
+            )
+            .unwrap();
+        store
+            .append(
+                NewEvent::new(
+                    session.clone(),
+                    KnownPayload::UsageRecorded(UsageRecorded {
+                        input_tokens: 100,
+                        output_tokens: 40,
+                        cached_tokens: 7,
+                    }),
+                )
+                .with_run(fable),
+            )
+            .unwrap();
+        store
+            .append(
+                NewEvent::new(
+                    session.clone(),
+                    KnownPayload::RunCreated(RunCreated {
+                        mode: Mode::Code,
+                        model: Some("Opus 5.5".to_owned()),
+                        permission_mode: None,
+                    }),
+                )
+                .with_run(opus.clone()),
+            )
+            .unwrap();
+        store
+            .append(
+                NewEvent::new(
+                    session.clone(),
+                    KnownPayload::UsageRecorded(UsageRecorded {
+                        input_tokens: 5,
+                        output_tokens: 2,
+                        cached_tokens: 0,
+                    }),
+                )
+                .with_run(opus),
+            )
+            .unwrap();
+        store
+            .lock()
+            .execute(
+                "UPDATE provider_usage SET created_at = '2026-09-14T01:00:00+00:00' WHERE input_tokens = 100",
+                [],
+            )
+            .unwrap();
+        store
+            .lock()
+            .execute(
+                "UPDATE provider_usage SET created_at = '2026-09-16T01:00:00+00:00' WHERE input_tokens = 5",
+                [],
+            )
+            .unwrap();
+        store
+            .lock()
+            .execute(
+                "UPDATE sessions SET created_at = '2026-09-14T00:00:00+00:00', updated_at = '2026-09-16T00:00:00+00:00' WHERE id = ?1",
+                params![session.as_str()],
+            )
+            .unwrap();
+
+        let activity = store.usage_activity().unwrap();
+        assert_eq!(activity.samples.len(), 2);
+        assert_eq!(activity.samples[0].model, "Fable 5.1");
+        assert_eq!(activity.samples[0].day.to_string(), "2026-09-14");
+        assert_eq!(activity.samples[0].cached_tokens, 7);
+        assert_eq!(activity.samples[1].model, "Opus 5.5");
+        assert_eq!(activity.samples[1].output_tokens, 2);
+        assert_eq!(activity.sessions.len(), 1);
+        assert_eq!(
+            activity.sessions[0].created_at.date_naive().to_string(),
+            "2026-09-14"
+        );
     }
 }

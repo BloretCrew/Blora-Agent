@@ -11,6 +11,7 @@ mod question;
 mod selection;
 mod slash;
 mod theme;
+mod usage_stats;
 mod view;
 
 use dialogs::{DialogId, DialogStack};
@@ -2172,6 +2173,33 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     dialog.scroll = dialog.scroll.saturating_add(1);
                                 }
                             }
+                            KeyCode::Left | KeyCode::BackTab
+                                if top_dialog == Some(DialogId::Context)
+                                    && context_dialog.is_some() =>
+                            {
+                                if let Some(dialog) = context_dialog.as_mut() {
+                                    dialog.cycle_page(-1);
+                                    refresh_context_activity(runtime, dialog);
+                                }
+                            }
+                            KeyCode::Right | KeyCode::Tab
+                                if top_dialog == Some(DialogId::Context)
+                                    && context_dialog.is_some() =>
+                            {
+                                if let Some(dialog) = context_dialog.as_mut() {
+                                    dialog.cycle_page(1);
+                                    refresh_context_activity(runtime, dialog);
+                                }
+                            }
+                            KeyCode::Char('r') | KeyCode::Char('R')
+                                if top_dialog == Some(DialogId::Context)
+                                    && context_dialog.is_some() =>
+                            {
+                                if let Some(dialog) = context_dialog.as_mut() {
+                                    dialog.cycle_range();
+                                    refresh_context_activity(runtime, dialog);
+                                }
+                            }
                             KeyCode::Esc if top_dialog.is_none() && notice.is_some() => {
                                 notice = None;
                             }
@@ -2831,8 +2859,11 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     dialog_stack.activate(DialogId::Context);
                                     context_dialog = Some(view::ContextDialog {
                                         scroll: 0,
+                                        page: 0,
+                                        range: 0,
                                         fullscreen: false,
                                         minimized: false,
+                                        activity: runtime.usage_activity().unwrap_or_default(),
                                     });
                                     continue;
                                 }
@@ -2933,6 +2964,20 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                         fullscreen: false,
                                         minimized: false,
                                     });
+                                    continue;
+                                }
+                                if let Some(view::Hit::ContextTab(idx)) = hit {
+                                    if let Some(dialog) = context_dialog.as_mut() {
+                                        dialog.set_page(idx);
+                                        refresh_context_activity(runtime, dialog);
+                                    }
+                                    continue;
+                                }
+                                if let Some(view::Hit::ContextRange(idx)) = hit {
+                                    if let Some(dialog) = context_dialog.as_mut() {
+                                        dialog.set_range(idx);
+                                        refresh_context_activity(runtime, dialog);
+                                    }
                                     continue;
                                 }
                                 if let Some(view::Hit::SettingsTab(idx)) = hit {
@@ -5711,6 +5756,12 @@ mod git_status_tests {
     }
 }
 
+fn refresh_context_activity(runtime: &Runtime, dialog: &mut view::ContextDialog) {
+    if let Ok(activity) = runtime.usage_activity() {
+        dialog.activity = activity;
+    }
+}
+
 fn dialog_accepts_hit(top: Option<DialogId>, hit: Option<&view::Hit>) -> bool {
     use view::Hit;
     if top.is_none() {
@@ -5761,6 +5812,10 @@ fn dialog_accepts_hit(top: Option<DialogId>, hit: Option<&view::Hit>) -> bool {
             | (
                 Some(DialogId::Settings),
                 Some(Hit::SettingsRow(_) | Hit::SettingsTab(_))
+            )
+            | (
+                Some(DialogId::Context),
+                Some(Hit::ContextTab(_) | Hit::ContextRange(_))
             )
             | (
                 Some(DialogId::Question),
