@@ -1,0 +1,2 @@
+  const titles = { session: '会话', project: '项目', folder: '目录', file: '文件', mode: '工作模式', harness: '执行内核', provider: '供应商', model: '模型', 'add-provider': '新增供应商', permission: '权限', theme: '主题预览', settings: '设置', context: '上下文', tools: '工具', 'tool-detail': '工具详情', 'reasoning-detail': '完整思考过程', git: 'Git', tasks: '任务', memory: '记忆', plugins: '插件与集成', diagnostics: '诊断', help: '帮助', passport: 'PassPort 账号' };
+        case 'reasoning-detail':

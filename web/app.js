@@ -7,6 +7,12 @@ const state = {
   streaming: null,
   stick: true,
   slashIndex: 0,
+  session: null,
+  history: [],
+  historyIndex: -1,
+  draft: "",
+  transcriptQuery: "",
+  selectionVersion: 0,
 };
 
 const SLASH = [
@@ -310,6 +316,8 @@ function renderPlan(session) {
 function bubbleParts(kind) {
   const root = document.createElement("article");
   root.className = "blora-chat";
+  root.dataset.kind = kind;
+  root.hidden = (kind === "tool" || kind === "tools") && stored("blora-hide-tools") === "on";
   if (kind === "user") {
     root.classList.add("blora-chat--end");
   }
@@ -326,6 +334,9 @@ function bubbleParts(kind) {
   meta.append(author);
   content.append(meta, body);
   root.append(avatar, content);
+  const hideRoles = stored("blora-message-roles", "on") === "off";
+  avatar.hidden = hideRoles;
+  meta.hidden = hideRoles;
   if (kind === "user") {
     author.textContent = "你";
     avatar.textContent = "You";
@@ -366,6 +377,12 @@ function setBubbleText(body, kind, text) {
     details.open = stored("blora-show-reasoning") === "on";
     const summary = document.createElement("summary");
     summary.textContent = `思考过程 · ${text.replace(/\s/g, "").length} 字`;
+    summary.title = "双击查看完整思考过程";
+    summary.addEventListener("dblclick", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      window.BloraWorkbench?.open("reasoning-detail", { text });
+    });
     const pre = document.createElement("div");
     pre.className = "ba-reasoning__body";
     pre.textContent = text;
@@ -403,6 +420,10 @@ function setBubbleText(body, kind, text) {
     return node;
   }
   body.replaceChildren(document.createTextNode(text));
+  if (kind === "tool" || kind === "tools") {
+    body.title = "双击查看工具详情";
+    body.ondblclick = () => window.BloraWorkbench?.open("tool-detail", { text, sessionId: state.sessionId });
+  }
   appendGeneratedImages(body, text);
   return body;
 }
@@ -443,6 +464,7 @@ function renderTranscript(items) {
   }
   threadEmpty.hidden = true;
   for (const item of items) {
+    if (state.transcriptQuery && !String(item.text || "").toLowerCase().includes(state.transcriptQuery.toLowerCase())) continue;
     const kind = item.kind || "system";
     const bubble = bubbleParts(kind);
     setBubbleText(bubble.body, kind, item.text || "");
@@ -611,14 +633,24 @@ async function refreshSessions() {
 }
 
 async function selectSession(id) {
+  const previousId = state.sessionId;
+  const version = ++state.selectionVersion;
+  if (state.source) { state.source.close(); state.source = null; }
   state.sessionId = id;
   state.stick = true;
   hideAlert();
   const session = await api(`/api/sessions/${id}`);
+  if (version !== state.selectionVersion || state.sessionId !== id) return;
+  state.session = session;
+  setRunning(["running", "waiting_approval", "waiting_input"].includes(session.run_status));
+  window.dispatchEvent(new CustomEvent("blora-session", { detail: session }));
   title.textContent = sessionTitle(session);
   pathEl.textContent = `${session.workspace_path} · ${session.mode} · ${session.status}`;
+  if (previousId !== id && state.permission === "yolo") applyPermission("ask", false);
   if (session.permission_mode) {
-    applyPermission(session.permission_mode, false);
+    applyPermission(["bypassPermissions", "yolo"].includes(session.permission_mode)
+      ? previousId === id && state.permission === "yolo" ? "yolo" : "ask"
+      : session.permission_mode, false);
   }
   if (session.mode) {
     applyRunMode(session.mode, false);
@@ -631,9 +663,8 @@ async function selectSession(id) {
   await refreshApprovals();
   await refreshTasks();
   await refreshSessions();
-  if (state.source) {
-    state.source.close();
-  }
+  if (version !== state.selectionVersion || state.sessionId !== id) return;
+  if (state.source) state.source.close();
   state.streaming = null;
   state.source = new EventSource(`/api/sessions/${id}/events`);
   state.source.onmessage = (message) => {
@@ -657,7 +688,7 @@ async function handleSessionEvent(id, data) {
   const kind = data.type || "";
   const payload = data.payload || {};
   if (data.status) {
-    pathEl.textContent = pathEl.textContent.replace(/ · [a-z_]+ · /, ` · ${data.status} · `);
+    setRunning(["running", "waiting_approval", "waiting_input"].includes(data.status));
   }
   if (kind === "assistant.delta") {
     appendStreamingText(payload.text || "");
@@ -694,6 +725,10 @@ async function handleSessionEvent(id, data) {
   ) {
     state.streaming = null;
     const latest = await api(`/api/sessions/${id}`);
+    if (id !== state.sessionId || (state.session && latest.last_sequence < state.session.last_sequence)) return;
+    state.session = latest;
+    setRunning(["running", "waiting_approval", "waiting_input"].includes(latest.run_status));
+    window.dispatchEvent(new CustomEvent("blora-session", { detail: latest }));
     pathEl.textContent = `${latest.workspace_path} · ${latest.mode} · ${latest.status}`;
     renderUsage(latest);
     renderPlan(latest);
@@ -814,20 +849,25 @@ document.querySelector("#composer").addEventListener("submit", async (event) => 
   if (!text) {
     return;
   }
+  state.history.push(text);
+  state.historyIndex = -1;
+  state.draft = "";
   box.value = "";
   box.style.height = "";
   hideSlash();
   state.stick = true;
   if (text.startsWith("/")) {
-    await runSlash(text);
+    try { await runSlash(text); } catch (error) { showAlert(error.message); }
     return;
   }
   if (!state.sessionId) {
     const session = await api("/api/sessions", {
       method: "POST", body: JSON.stringify({ mode: currentRunMode() }),
     });
-    state.sessionId = session.id;
+    await selectSession(session.id);
+    location.hash = `#/session/${session.id}`;
   }
+  const runSessionId = state.sessionId;
   // While a run is in flight the composer becomes a steering channel: the
   // message is queued and delivered at the next model-turn boundary.
   if (state.running) {
@@ -835,25 +875,30 @@ document.querySelector("#composer").addEventListener("submit", async (event) => 
       method: "POST",
       body: JSON.stringify({ message: text }),
     });
+    showNotice("消息已排队，将在下一轮送达", "info", "插话已排队");
     return;
   }
   setRunning(true);
   try {
-    await api(`/api/sessions/${state.sessionId}/run`, {
+    await api(`/api/sessions/${runSessionId}/run`, {
       method: "POST",
       body: JSON.stringify({
         prompt: imaginePrompt(text),
         permission_mode: currentPermission(),
         auto_approve: currentPermission() === "yolo",
-        provider: stored("blora-provider"),
-        model: stored("blora-model"),
-        worktree: isChecked(document.querySelector("#pref-worktree")),
+        confirmed: currentPermission() === "yolo",
+        provider: state.session?.provider || stored("blora-provider"),
+        model: state.session?.model || stored("blora-model"),
+        worktree: stored("blora-worktree") === "on" || isChecked(document.querySelector("#pref-worktree")),
       }),
     });
+  } catch (error) {
+    showAlert(error.message);
+    if (state.sessionId === runSessionId && !box.value) box.value = text;
   } finally {
-    setRunning(false);
+    if (state.sessionId === runSessionId) setRunning(false);
   }
-  await selectSession(state.sessionId);
+  if (state.sessionId === runSessionId) await selectSession(runSessionId);
 });
 
 let workOrbHandle = null;
@@ -886,7 +931,7 @@ function setRunning(running) {
   state.running = running;
   const send = document.querySelector("#send");
   if (send) {
-    send.textContent = running ? "插话" : "发送";
+    send.textContent = running ? "排队发送" : currentRunMode() === "imagine" ? "生成" : "发送";
   }
   const box = fieldInput("#prompt") || prompt;
   if (box) {
@@ -1020,6 +1065,8 @@ function approvalItem(row, onDone) {
       body: JSON.stringify({ allow: true }),
     });
     await onDone();
+    if (state.view === "approvals") await refreshApprovalPage();
+    await refreshApprovals();
   });
   const deny = document.createElement("button");
   deny.type = "button";
@@ -1033,6 +1080,8 @@ function approvalItem(row, onDone) {
       body: JSON.stringify({ allow: false }),
     });
     await onDone();
+    if (state.view === "approvals") await refreshApprovalPage();
+    await refreshApprovals();
   });
   item.append(meta, allow, deny);
   return item;
@@ -1049,7 +1098,10 @@ async function refreshApprovals() {
     }
     return;
   }
-  const rows = await api(`/api/approvals?session=${state.sessionId}`);
+  const id = state.sessionId;
+  const version = state.selectionVersion;
+  const rows = await api(`/api/approvals?session=${id}`);
+  if (id !== state.sessionId || version !== state.selectionVersion) return;
   approvalList.replaceChildren();
   listOrEmpty(approvalList, approvalEmpty, rows.length);
   if (strip) {
@@ -1132,7 +1184,10 @@ async function refreshArtifacts() {
 }
 
 async function refreshWorkspace() {
-  const info = await api("/api/workspace");
+  const context = state.sessionId ? `?session=${encodeURIComponent(state.sessionId)}` : "";
+  const id = state.sessionId;
+  const info = await api(`/api/workspace${context}`);
+  if (id !== state.sessionId) return;
   document.querySelector("#workspace-path").textContent = info.path;
   document.querySelector("#workspace-git").textContent =
     [info.git_branch, info.git_status, info.git_log, info.git_diff].join("\n\n");
@@ -1147,7 +1202,7 @@ async function refreshWorkspace() {
     item.textContent = name;
     if (!name.endsWith("/")) {
       item.addEventListener("click", async () => {
-        const file = await api(`/api/workspace/file?path=${encodeURIComponent(name)}`);
+        const file = await api(`/api/workspace/file?path=${encodeURIComponent(name)}${state.sessionId ? `&session=${encodeURIComponent(state.sessionId)}` : ""}`);
         document.querySelector("#workspace-file").textContent = file.contents || "";
       });
     }
@@ -1161,12 +1216,8 @@ async function refreshSettings() {
   const info = await api("/api/settings");
   const provider = fieldInput("#pref-provider") || document.querySelector("#pref-provider");
   const model = fieldInput("#pref-model") || document.querySelector("#pref-model");
-  if (provider && !provider.value) {
-    provider.value = stored("blora-provider", info.provider);
-  }
-  if (model && !model.value) {
-    model.value = stored("blora-model", info.model);
-  }
+  if (provider) provider.value = state.session?.provider || stored("blora-provider", info.provider);
+  if (model) model.value = state.session?.model || stored("blora-model", info.model);
   document.querySelector("#settings-meta").textContent =
     `供应商 ${info.provider_display || info.provider} · 模型 ${info.model} · exec=${info.exec} gateway=${info.gateway} key=${info.has_api_key} mcp=${info.mcp} plugins=${(info.plugins || []).join(",") || "-"}`;
   const tokenInput = fieldInput("#pref-token") || document.querySelector("#pref-token");
@@ -1255,7 +1306,7 @@ document.querySelector("#task-form").addEventListener("submit", async (event) =>
       prompt: ((fieldInput("#task-prompt") || document.querySelector("#task-prompt"))?.value || titleInput?.value || "").trim(),
       delay_seconds: numberValue(delayInput),
       cron: (cronInput?.value || "").trim() || null,
-      auto_approve: isChecked(autoApprove),
+      auto_approve: false,
     }),
   });
   if (titleInput) {
@@ -1271,10 +1322,10 @@ document.querySelector("#task-form").addEventListener("submit", async (event) =>
 const prefProvider = fieldInput("#pref-provider") || document.querySelector("#pref-provider");
 const prefModel = fieldInput("#pref-model") || document.querySelector("#pref-model");
 if (prefProvider) {
-  prefProvider.addEventListener("change", () => store("blora-provider", prefProvider.value));
+  prefProvider.addEventListener("change", () => runSlash(`/provider ${prefProvider.value}`).catch(error => showAlert(error.message)));
 }
 if (prefModel) {
-  prefModel.addEventListener("change", () => store("blora-model", prefModel.value));
+  prefModel.addEventListener("change", () => runSlash(`/model ${prefModel.value}`).catch(error => showAlert(error.message)));
 }
 const prefToken = fieldInput("#pref-token") || document.querySelector("#pref-token");
 if (prefToken) {
@@ -1305,6 +1356,7 @@ if (promptBox) {
   };
   promptBox.addEventListener("input", () => {
     growPrompt();
+    state.historyIndex = -1;
     state.slashIndex = 0;
     renderSlash(promptBox.value);
   });
@@ -1321,12 +1373,23 @@ if (promptBox) {
       renderSlash(promptBox.value);
       return;
     }
-    if (open && event.key === "Tab") {
+    if (!open && (event.key === "ArrowUp" || event.key === "ArrowDown") && !event.shiftKey && !event.isComposing && (state.historyIndex >= 0 || !promptBox.value.includes("\n"))) {
+      if (state.history.length) {
+        event.preventDefault();
+        if (state.historyIndex < 0) { state.draft = promptBox.value; state.historyIndex = state.history.length; }
+        state.historyIndex = Math.max(0, Math.min(state.history.length, state.historyIndex + (event.key === "ArrowUp" ? -1 : 1)));
+        promptBox.value = state.historyIndex === state.history.length ? state.draft : state.history[state.historyIndex];
+        growPrompt();
+      }
+      return;
+    }
+    if (open && (event.key === "Tab" || event.key === "Enter")) {
       event.preventDefault();
-      const picked = SLASH.filter((row) => row[0].startsWith(slashToken(promptBox.value)))[state.slashIndex];
+      const picked = slashMatches(promptBox.value)[state.slashIndex];
       if (picked) {
         promptBox.value = `/${picked[0]} `;
         hideSlash();
+        if (event.key === "Enter" && !picked[2]?.startsWith("<")) document.querySelector("#composer").requestSubmit();
       }
       return;
     }
@@ -1445,6 +1508,7 @@ function applyPermission(mode, persist = true) {
   mode = aliases[mode] || mode;
   const allowed = ["ask", "plan", "auto-edit", "yolo"];
   const next = allowed.includes(mode) ? mode : "ask";
+  state.permission = next;
   const select = document.querySelector("#permission-mode");
   if (select) {
     select.value = next;
@@ -1475,6 +1539,12 @@ function hideSlash() {
   }
 }
 
+function slashMatches(text) {
+  const token = slashToken(text) || "";
+  if (window.BloraCommands) return window.BloraCommands.matches(`/${token}`).map(c => [c.name, c.about, c.hint]);
+  return SLASH.filter(row => row[0].startsWith(token));
+}
+
 function renderSlash(text) {
   const menu = document.querySelector("#slash-menu");
   const token = slashToken(text);
@@ -1482,7 +1552,7 @@ function renderSlash(text) {
     hideSlash();
     return;
   }
-  const hits = SLASH.filter((row) => row[0].startsWith(token));
+  const hits = slashMatches(text);
   if (!hits.length) {
     hideSlash();
     return;
@@ -1517,8 +1587,10 @@ function renderSlash(text) {
 }
 
 async function runSlash(raw) {
+  if (window.BloraCommands && await window.BloraCommands.execute(raw, window.BloraWeb)) return;
   const parts = raw.trim().slice(1).split(/\s+/);
-  const name = (parts.shift() || "").toLowerCase();
+  const token = (parts.shift() || "").toLowerCase();
+  const name = window.BloraCommands?.resolve(token)?.name || token;
   const rest = parts.join(" ");
   const go = (view) => {
     location.hash = `#/${view}`;
@@ -1553,7 +1625,7 @@ async function runSlash(raw) {
     return;
   }
   if (name === "yes" || name === "yolo") {
-    applyPermission("yolo");
+    if (await window.BloraWorkbench?.requestPermission("yolo")) applyPermission("yolo");
     return;
   }
   if (name === "no") {
@@ -1602,7 +1674,7 @@ async function runSlash(raw) {
   }
   if (name === "read" && rest) {
     go("workspace");
-    const file = await api(`/api/workspace/file?path=${encodeURIComponent(rest)}`);
+    const file = await api(`/api/workspace/file?path=${encodeURIComponent(rest)}${state.sessionId ? `&session=${encodeURIComponent(state.sessionId)}` : ""}`);
     document.querySelector("#workspace-file").textContent = file.contents || "";
     return;
   }
@@ -1697,13 +1769,19 @@ document.querySelector("#hero-chips")?.addEventListener("click", (event) => {
   box.focus();
 });
 
-applyPermission(stored("blora-permission", "ask"), false);
+const savedPermission = stored("blora-permission", "ask");
+applyPermission(["yolo", "bypassPermissions"].includes(savedPermission) ? "ask" : savedPermission, false);
 const runModeSelect = document.querySelector("#run-mode");
 if (runModeSelect) {
   applyRunMode(stored("blora-run-mode", "code"), false);
   runModeSelect.addEventListener("change", async () => {
     applyRunMode(runModeSelect.value);
     if (!state.sessionId) {
+      return;
+    }
+    if (state.running) {
+      applyRunMode(state.session?.mode || "code", false);
+      showAlert("运行中不能切换工作模式");
       return;
     }
     try {
@@ -1713,6 +1791,7 @@ if (runModeSelect) {
       });
       await selectSession(state.sessionId);
     } catch (error) {
+      applyRunMode(state.session?.mode || "code", false);
       showAlert(error.message);
     }
   });
@@ -1720,14 +1799,21 @@ if (runModeSelect) {
 
 const permissionSelect = document.querySelector("#permission-mode");
 if (permissionSelect) {
-  permissionSelect.addEventListener("change", () => applyPermission(permissionSelect.value));
+  permissionSelect.addEventListener("change", async () => {
+    const next = permissionSelect.value;
+    applyPermission(state.permission || "ask", false);
+    if (window.BloraWorkbench && await window.BloraWorkbench.requestPermission(next)) applyPermission(next);
+    else if (!["yolo", "bypassPermissions"].includes(next)) applyPermission(next);
+  });
 }
 if (autoApprove) {
   autoApprove.addEventListener("blora-change", () => {
     if (syncingPermission) {
       return;
     }
-    applyPermission(isChecked(autoApprove) ? "yolo" : "ask");
+    const next = isChecked(autoApprove) ? "yolo" : "ask";
+    applyPermission(state.permission || "ask", false);
+    window.BloraWorkbench?.requestPermission(next).then(allowed => { if (allowed) applyPermission(next); });
   });
 }
 for (const [id, action] of [
@@ -1753,3 +1839,19 @@ document.querySelector("#export-session")?.addEventListener("click", async () =>
 
 
 enhance();
+
+window.BloraWeb = {
+  api, getState: () => state, stored, store, applyPermission, applyRunMode,
+  refreshSessions, selectSession, runSlash, showNotice, showAlert, refreshSettings,
+  enterOnboarding: (...args) => enterOnboarding(...args),
+  refreshPassport: (...args) => refreshPassport(...args),
+  setRunning, renderUsage,
+  renderTranscript: () => renderTranscript(state.session?.transcript || []),
+  setSearch: query => { state.transcriptQuery = query; renderTranscript(state.session?.transcript || []); },
+};
+document.addEventListener("keydown", event => {
+  if (window.BloraDialogs?.top?.()) return;
+  if (event.ctrlKey && event.key.toLowerCase() === "p" && !promptBox.value) {
+    event.preventDefault(); promptBox.value = "/"; promptBox.focus(); renderSlash("/");
+  }
+});
