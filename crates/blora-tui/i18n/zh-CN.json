@@ -95,11 +95,13 @@
   "question.yes": "是",
   "question.no": "否",
   "question.other_input": "其他：",
+  "question.field": "回答",
+  "question.placeholder": "在此输入…",
   "question.pick_folder": "选择此文件夹",
   "question.picked": "已选",
   "question.ready": "Enter 提交",
   "question.pending": "还有题目未回答",
-  "question.hint": "Tab 切换 · Space 选择 · Esc 跳过",
+  "question.hint": "← → 切换 · ↑ ↓ 选择或换题 · Space 确定 · Esc 跳过",
   "question.sent": "已回答",
   "question.dismissed": "已跳过"
 }

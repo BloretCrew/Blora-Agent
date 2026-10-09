@@ -2256,10 +2256,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                             && !form.minimized
                                         {
                                             for _ in 0..3 {
-                                                form.on_key(
-                                                    if up { KeyCode::Up } else { KeyCode::Down },
-                                                    &active_workspace,
-                                                );
+                                                form.scroll_rows(if up { -1 } else { 1 });
                                             }
                                         }
                                     }
@@ -2425,6 +2422,13 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                                 } else {
                                                     form.fullscreen = !form.fullscreen;
                                                 }
+                                            }
+                                        }
+                                        Some(view::Hit::QuestionTab(index)) => {
+                                            if let Some(form) = question_dialog.as_mut()
+                                                && !form.minimized
+                                            {
+                                                form.click_tab(index);
                                             }
                                         }
                                         Some(view::Hit::QuestionOption(question, option)) => {
@@ -5760,7 +5764,7 @@ fn dialog_accepts_hit(top: Option<DialogId>, hit: Option<&view::Hit>) -> bool {
             )
             | (
                 Some(DialogId::Question),
-                Some(Hit::QuestionOption(_, _) | Hit::QuestionRow(_))
+                Some(Hit::QuestionOption(_, _) | Hit::QuestionRow(_) | Hit::QuestionTab(_))
             )
     )
 }
@@ -5899,6 +5903,10 @@ mod dialog_input_tests {
         assert!(dialog_accepts_hit(
             Some(DialogId::Question),
             Some(&view::Hit::QuestionRow(0))
+        ));
+        assert!(dialog_accepts_hit(
+            Some(DialogId::Question),
+            Some(&view::Hit::QuestionTab(1))
         ));
         assert!(!dialog_accepts_hit(
             Some(DialogId::Theme),

@@ -95,11 +95,13 @@
   "question.yes": "Yes",
   "question.no": "No",
   "question.other_input": "Other:",
+  "question.field": "Answer",
+  "question.placeholder": "Type here…",
   "question.pick_folder": "Select this folder",
   "question.picked": "Selected",
   "question.ready": "Enter to submit",
   "question.pending": "Some questions are unanswered",
-  "question.hint": "Tab switches · Space selects · Esc skips",
+  "question.hint": "← → switch · ↑ ↓ select or change · Space confirms · Esc skips",
   "question.sent": "Answered",
   "question.dismissed": "Skipped"
 }

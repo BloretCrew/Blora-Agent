@@ -601,6 +601,8 @@ pub enum Hit {
     ThemeTab(usize),
     SettingsTab(usize),
     SettingsRow(usize),
+    /// Question title in the horizontal tab row.
+    QuestionTab(usize),
     /// Option row inside the question dialog: question index, option index.
     QuestionOption(usize, usize),
     /// Picker row inside the focused file or folder question.
@@ -640,6 +642,7 @@ pub struct HitMap {
     pub project_picker_rows: Vec<(Rect, usize)>,
     pub folder_picker_rows: Vec<(Rect, usize)>,
     pub folder_picker_open: Option<Rect>,
+    pub question_tabs: Vec<(Rect, usize)>,
     pub question_options: Vec<(Rect, usize, usize)>,
     pub question_rows: Vec<(Rect, usize)>,
     pub session_picker: Option<Rect>,
@@ -809,6 +812,11 @@ impl HitMap {
         for (rect, idx) in &self.project_picker_rows {
             if contains(*rect, col, row) {
                 return Some(Hit::ProjectPickerRow(*idx));
+            }
+        }
+        for (rect, idx) in &self.question_tabs {
+            if contains(*rect, col, row) {
+                return Some(Hit::QuestionTab(*idx));
             }
         }
         for (rect, question, option) in &self.question_options {
@@ -1596,6 +1604,7 @@ fn render_layer(
         && let Some(dialog) = model.question_dialog
     {
         let dialog_hits = render_question_dialog(frame, area, dialog, model.pointer, &theme);
+        hits.question_tabs = dialog_hits.question_tabs;
         hits.question_options = dialog_hits.question_options;
         hits.question_rows = dialog_hits.question_rows;
         hits.traffic_lights = dialog_hits.traffic_lights;
@@ -1629,51 +1638,30 @@ fn render_question_dialog(
     if form.minimized {
         return hits;
     }
-    let [_, body, hint] = Layout::vertical([
+    let [_, tabs, body, hint] = Layout::vertical([
+        Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Min(1),
         Constraint::Length(1),
     ])
     .areas(inner);
-    let mut row = 0u16;
-    for (index, question) in form.questions.iter().enumerate() {
-        if row >= body.height {
-            break;
+    render_question_tabs(frame, tabs, form, theme, &mut hits);
+    if let Some(question) = form.questions.get(form.focus) {
+        let index = form.focus;
+        let mut row = 0u16;
+        if row < body.height {
+            frame.render_widget(
+                Paragraph::new(ellipsize(&question.question, body.width as usize))
+                    .style(theme.dim()),
+                Rect::new(body.x, body.y, body.width, 1),
+            );
+            row += 1;
         }
-        let focused = index == form.focus;
-        let title = question.header.clone().unwrap_or_else(|| {
-            question
-                .question
-                .lines()
-                .next()
-                .unwrap_or(question.question.as_str())
-                .to_owned()
-        });
-        let marker = if focused { "❯" } else { " " };
-        let rect = Rect::new(body.x, body.y + row, body.width, 1);
-        frame.render_widget(
-            Paragraph::new(format!("{marker} {title}")).style(if focused {
-                theme.fg(theme.text).add_modifier(Modifier::BOLD)
-            } else {
-                theme.dim()
-            }),
-            rect,
-        );
-        row += 1;
-        if !focused || row >= body.height {
-            continue;
-        }
-        let prompt = Rect::new(body.x, body.y + row, body.width, 1);
-        frame.render_widget(
-            Paragraph::new(ellipsize(&question.question, body.width as usize))
-                .style(theme.fg(theme.text_dim)),
-            prompt,
-        );
-        row += 1;
+        let input_reserved = u16::from(form.accepts_text());
         match question.kind.as_str() {
             "single" | "multi" | "boolean" => {
                 for (option_index, option) in question.options.iter().enumerate() {
-                    if row >= body.height {
+                    if row + input_reserved >= body.height {
                         break;
                     }
                     let rect = Rect::new(body.x, body.y + row, body.width, 1);
@@ -1715,29 +1703,25 @@ fn render_question_dialog(
                     );
                     row += 1;
                 }
-                if form.accepts_text() && question.kind != "text" && row < body.height {
-                    let rect = Rect::new(body.x, body.y + row, body.width, 1);
-                    frame.render_widget(
-                        Paragraph::new(format!(
-                            "  {} {}",
-                            i18n::tr("question.other_input", "其他："),
-                            form.field_text()
-                        ))
-                        .style(theme.fg(theme.sage)),
-                        rect,
+                if form.accepts_text() && row < body.height {
+                    paint_question_field(
+                        frame,
+                        Rect::new(body.x, body.y + row, body.width, 1),
+                        &i18n::tr("question.other", "其他"),
+                        form.field_text(),
+                        theme,
                     );
-                    row += 1;
                 }
             }
             "text" => {
                 if row < body.height {
-                    let rect = Rect::new(body.x, body.y + row, body.width, 1);
-                    frame.render_widget(
-                        Paragraph::new(format!("  {}", form.text[index]))
-                            .style(theme.fg(theme.sage)),
-                        rect,
+                    paint_question_field(
+                        frame,
+                        Rect::new(body.x, body.y + row, body.width, 1),
+                        &i18n::tr("question.field", "回答"),
+                        form.field_text(),
+                        theme,
                     );
-                    row += 1;
                 }
             }
             "folder" | "file" => {
@@ -1800,12 +1784,205 @@ fn render_question_dialog(
     frame.render_widget(
         Paragraph::new(format!(
             "{} · {ready}",
-            i18n::tr("question.hint", "Tab 切换 · Space 选择 · Esc 跳过")
+            i18n::tr(
+                "question.hint",
+                "← → 切换 · ↑ ↓ 选择或换题 · Space 确定 · Esc 跳过"
+            )
         ))
         .style(theme.mute()),
         hint,
     );
     hits
+}
+
+fn render_question_tabs(
+    frame: &mut Frame<'_>,
+    tabs: Rect,
+    form: &crate::question::QuestionForm,
+    theme: &Theme,
+    hits: &mut HitMap,
+) {
+    if tabs.width == 0 || tabs.height == 0 || form.questions.is_empty() {
+        return;
+    }
+    let labels: Vec<String> = form
+        .questions
+        .iter()
+        .enumerate()
+        .map(|(index, question)| {
+            let mark = if index == form.focus {
+                "▸"
+            } else if form.is_answered(index) {
+                "✓"
+            } else {
+                "·"
+            };
+            format!(" {mark} {} ", question.answer_title())
+        })
+        .collect();
+    let widths: Vec<u16> = labels
+        .iter()
+        .map(|label| (label.width() as u16).max(1))
+        .collect();
+    let total: u16 = widths.iter().copied().sum();
+    let overflow = total > tabs.width && tabs.width > 2;
+    let gutter = u16::from(overflow);
+    let view = tabs.width.saturating_sub(gutter.saturating_mul(2));
+    let focus = form.focus.min(form.questions.len() - 1);
+    let scroll = if overflow {
+        question_tab_scroll(&widths, focus, view)
+    } else {
+        0
+    };
+    let chrome = theme.mute().bg(theme.bg);
+    if overflow {
+        frame.render_widget(
+            Paragraph::new(if scroll > 0 { "‹" } else { " " }).style(chrome),
+            Rect::new(tabs.x, tabs.y, 1, 1),
+        );
+        let more = scroll.saturating_add(view) < total;
+        frame.render_widget(
+            Paragraph::new(if more { "›" } else { " " }).style(chrome),
+            Rect::new(tabs.x + tabs.width - 1, tabs.y, 1, 1),
+        );
+    }
+    let origin = tabs.x + gutter;
+    let mut col = 0u16;
+    for (index, (label, width)) in labels.iter().zip(&widths).enumerate() {
+        let tab_start = col;
+        let tab_end = col.saturating_add(*width);
+        col = tab_end;
+        if tab_end <= scroll || tab_start >= scroll.saturating_add(view) {
+            continue;
+        }
+        let visible_start = tab_start.max(scroll);
+        let visible_end = tab_end.min(scroll.saturating_add(view));
+        let rect = Rect::new(
+            origin + (visible_start - scroll),
+            tabs.y,
+            visible_end - visible_start,
+            1,
+        );
+        hits.question_tabs.push((rect, index));
+        let style = if index == focus {
+            theme
+                .fg(theme.text)
+                .bg(theme.bg_select)
+                .add_modifier(Modifier::BOLD)
+        } else if form.is_answered(index) {
+            theme.fg(theme.sage).bg(theme.bg)
+        } else {
+            theme.mute().bg(theme.bg)
+        };
+        frame.render_widget(
+            Paragraph::new(slice_cols(
+                label,
+                usize::from(visible_start - tab_start),
+                usize::from(visible_end - visible_start),
+            ))
+            .style(style),
+            rect,
+        );
+    }
+}
+
+fn question_tab_scroll(widths: &[u16], focus: usize, view: u16) -> u16 {
+    if view == 0 {
+        return 0;
+    }
+    let mut acc = 0u16;
+    for (index, width) in widths.iter().enumerate() {
+        if index == focus {
+            let end = acc.saturating_add(*width);
+            return if end > view {
+                end.saturating_sub(view)
+            } else {
+                0
+            };
+        }
+        acc = acc.saturating_add(*width);
+    }
+    0
+}
+
+fn paint_question_field(
+    frame: &mut Frame<'_>,
+    rect: Rect,
+    label: &str,
+    value: &str,
+    theme: &Theme,
+) {
+    if rect.width == 0 || rect.height == 0 {
+        return;
+    }
+    let prefix = format!(" {label} [");
+    let cursor = "▌";
+    let close = "]";
+    let placeholder = i18n::tr("question.placeholder", "在此输入…");
+    let empty = value.is_empty();
+    let budget = usize::from(rect.width)
+        .saturating_sub(prefix.width() + cursor.width().max(1) + close.width());
+    let body = tail_cols(if empty { placeholder.as_str() } else { value }, budget);
+    let base = Style::default().bg(theme.bg_select).fg(theme.text);
+    let line = Line::from(vec![
+        Span::styled(prefix, base.fg(theme.text_dim)),
+        Span::styled(
+            body,
+            if empty {
+                base.fg(theme.text_mute)
+            } else {
+                base
+            },
+        ),
+        Span::styled(
+            cursor.to_owned(),
+            base.fg(theme.rose).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(close.to_owned(), base.fg(theme.text_dim)),
+    ]);
+    frame.render_widget(Paragraph::new(line).style(base), rect);
+}
+
+fn slice_cols(text: &str, skip: usize, take: usize) -> String {
+    if take == 0 {
+        return String::new();
+    }
+    let mut seen = 0usize;
+    let mut taken = 0usize;
+    let mut out = String::new();
+    for ch in text.chars() {
+        let width = ch.width().unwrap_or(0);
+        if seen < skip {
+            seen += width;
+            continue;
+        }
+        if taken + width > take {
+            break;
+        }
+        out.push(ch);
+        taken += width;
+    }
+    out
+}
+
+fn tail_cols(text: &str, max: usize) -> String {
+    if max == 0 || text.is_empty() {
+        return String::new();
+    }
+    if text.width() <= max {
+        return text.to_owned();
+    }
+    let mut acc = 0usize;
+    let mut start = text.len();
+    for (idx, ch) in text.char_indices().rev() {
+        let width = ch.width().unwrap_or(0);
+        if acc + width > max {
+            break;
+        }
+        acc += width;
+        start = idx;
+    }
+    text[start..].to_owned()
 }
 
 fn color_rgb(color: Color, fallback: Color) -> (u8, u8, u8) {
@@ -6148,10 +6325,19 @@ mod tests {
         assert!(text.contains("数据库"), "{text}");
         assert!(text.contains("其他"), "{text}");
         assert!(text.contains("Tu"), "{text}");
+        assert!(text.contains("▌"), "{text}");
+        assert!(text.contains('['), "{text}");
+        let tabs_at = text.find("继续").expect("sibling title");
+        let prompt_at = text.find("用哪个").expect("prompt");
+        assert!(
+            tabs_at < prompt_at && text.find("文件").unwrap() < prompt_at,
+            "titles stay on the top row:\n{text}"
+        );
         form.focus = 2;
         let text = render(&form);
         assert!(text.contains("note.txt"), "{text}");
         assert!(text.contains("sub/"), "{text}");
+        assert!(text.find("数据库").unwrap() < text.find("读哪个").unwrap());
         assert!(
             !text.contains(" .."),
             "parent stays inside the workspace:\n{text}"
