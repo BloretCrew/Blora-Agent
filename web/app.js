@@ -381,7 +381,9 @@ function setBubbleText(body, kind, text) {
     summary.addEventListener("dblclick", (event) => {
       event.preventDefault();
       event.stopPropagation();
-      window.BloraWorkbench?.open("reasoning-detail", { text });
+      const openDetails = () => window.BloraWorkbench?.open("reasoning-detail", { text });
+      if (window.BloraWorkbench) openDetails();
+      else window.setTimeout(openDetails, 0);
     });
     const pre = document.createElement("div");
     pre.className = "ba-reasoning__body";
