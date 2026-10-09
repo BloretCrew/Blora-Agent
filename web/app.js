@@ -377,14 +377,8 @@ function setBubbleText(body, kind, text) {
     details.open = stored("blora-show-reasoning") === "on";
     const summary = document.createElement("summary");
     summary.textContent = `思考过程 · ${text.replace(/\s/g, "").length} 字`;
-    summary.title = "双击查看完整思考过程";
-    summary.addEventListener("dblclick", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      const openDetails = () => window.BloraWorkbench?.open("reasoning-detail", { text });
-      if (window.BloraWorkbench) openDetails();
-      else window.setTimeout(openDetails, 0);
-    });
+    body.title = "双击查看完整思考过程";
+    body.ondblclick = () => window.BloraWorkbench?.open("reasoning-detail", { text });
     const pre = document.createElement("div");
     pre.className = "ba-reasoning__body";
     pre.textContent = text;
