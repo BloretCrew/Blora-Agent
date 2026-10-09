@@ -32,6 +32,7 @@ use tower_http::cors::CorsLayer;
 
 const INDEX_HTML: &str = include_str!("../../../web/index.html");
 const APP_JS: &str = include_str!("../../../web/app.js");
+const DIALOGS_JS: &str = include_str!("../../../web/dialogs.js");
 const ONBOARDING_JS: &str = include_str!("../../../web/onboarding.js");
 const IMAGINE_JS: &str = include_str!("../../../web/imagine.js");
 const APP_CSS: &str = include_str!("../../../web/app.css");
@@ -198,6 +199,7 @@ fn app(state: AppState) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/app.js", get(app_js))
+        .route("/dialogs.js", get(dialogs_js))
         .route("/imagine.js", get(imagine_js))
         .route("/app.css", get(app_css))
         .route("/thinking-orbs-host.js", get(thinking_orbs_host))
@@ -239,6 +241,7 @@ fn app(state: AppState) -> Router {
         .route("/api/approvals", get(list_approvals))
         .route("/api/approvals/{id}/resolve", post(resolve_approval))
         .route("/api/workspace", get(workspace_snapshot))
+        .route("/api/workspace/list", get(workspace_list))
         .route("/api/workspace/file", get(workspace_file))
         .route("/api/settings", get(settings))
         .route("/api/login", post(login))
@@ -692,6 +695,10 @@ fn cookie_value(headers: &HttpHeaderMap, name: &str) -> Option<String> {
 
 async fn app_js() -> Response {
     js(APP_JS)
+}
+
+async fn dialogs_js() -> Response {
+    js(DIALOGS_JS)
 }
 
 async fn imagine_js() -> Response {
@@ -1156,7 +1163,7 @@ async fn answer_input(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let session_id = SessionId::parse(&id).map_err(ApiError::from)?;
     ensure_session(&state, &headers, &session_id)?;
-    if body.answer.as_deref().is_some_and(|text| text.len() > 8_000) {
+    if body.answer.as_deref().is_some_and(|text| text.len() > 16_000) {
         return Err(ApiError("answer too long".to_owned()));
     }
     let runtime = state.runtime.clone();
@@ -1335,6 +1342,49 @@ async fn workspace_snapshot(
 #[derive(Deserialize)]
 struct FileQuery {
     path: String,
+}
+
+#[derive(Deserialize)]
+struct WorkspaceListQuery {
+    #[serde(default)]
+    path: String,
+    #[serde(default)]
+    session: Option<String>,
+}
+
+async fn workspace_list(
+    State(state): State<AppState>,
+    headers: HttpHeaderMap,
+    Query(query): Query<WorkspaceListQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let workspace = if let Some(id) = query.session.as_deref().filter(|value| !value.is_empty()) {
+        let session_id = SessionId::parse(id).map_err(ApiError::from)?;
+        ensure_session(&state, &headers, &session_id)?;
+        let projection = state
+            .runtime
+            .show_session(&session_id)
+            .map_err(ApiError::from)?;
+        projection
+            .session
+            .as_ref()
+            .map(|session| session.workspace_path.clone())
+            .ok_or_else(|| ApiError("session not found".to_owned()))?
+    } else {
+        state.workspace.display().to_string()
+    };
+    let path = if query.path.trim().is_empty() {
+        ".".to_owned()
+    } else {
+        query.path
+    };
+    let entries = state
+        .runtime
+        .list_workspace_entries(std::path::Path::new(&workspace), &path)
+        .map_err(ApiError::from)?;
+    Ok(Json(serde_json::json!({
+        "path": path,
+        "entries": entries,
+    })))
 }
 
 async fn workspace_file(
@@ -2119,6 +2169,7 @@ mod tests {
             question: "Ship it?".to_owned(),
             options: vec!["Yes".to_owned(), "No".to_owned()],
             call_id: None,
+            questions: Vec::new(),
         }));
         let (_, _, body) = h.request(&format!("/api/sessions/{id}"), "", None, "").await;
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();

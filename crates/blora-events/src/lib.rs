@@ -9,14 +9,15 @@ mod payload;
 
 pub use envelope::{EventEnvelope, NewEvent};
 pub use payload::{
-    ApprovalRequested, ApprovalResolved, ArtifactCreated, AssistantDelta,
+    ApprovalRequested, ApprovalResolved, ArtifactCreated, AskedQuestion, AssistantDelta,
     AssistantMessageCompleted, AssistantReasoning, CheckpointCreated, ContextCompactionCompleted,
     ContextCompactionFailed, ContextCompactionStarted, ContextDeltaCreated, ContextSnapshotCreated,
-    ExternalSessionBound, HarnessChanged, HookCompleted, InputProvided, InputRequested, KnownPayload, ModeChanged, ModelRequested,
-    ModelResponseCompleted, PlanStep, PlanUpdated, PolicyDenied, ProviderChanged, RetryStarted,
-    RoutingChanged, RunCancelRequested, RunCancelled, RunCompleted, RunCreated, RunFailed,
-    RunPaused, RunStarted, SessionArchived, SessionCreated, SessionCwdChanged, SessionForked,
-    SessionResumed, SessionTitleChanged, SkillChanged, SubagentCompleted, SubagentFailed, SubagentMessage,
+    ExternalSessionBound, HarnessChanged, HookCompleted, InputProvided, InputRequested,
+    KnownPayload, ModeChanged, ModelRequested, ModelResponseCompleted, PlanStep, PlanUpdated,
+    PolicyDenied, ProviderChanged, QuestionChoice, RetryStarted, RoutingChanged,
+    RunCancelRequested, RunCancelled, RunCompleted, RunCreated, RunFailed, RunPaused, RunStarted,
+    SessionArchived, SessionCreated, SessionCwdChanged, SessionForked, SessionResumed,
+    SessionTitleChanged, SkillChanged, SubagentCompleted, SubagentFailed, SubagentMessage,
     SubagentSpawned, TaskCompleted, TaskCreated, TaskFailed, TaskProgress, TaskStarted, TaskWakeup,
     ToolCompleted, ToolFailed, ToolOutput, ToolRequested, ToolStarted, UsageRecorded, UserInput,
 };

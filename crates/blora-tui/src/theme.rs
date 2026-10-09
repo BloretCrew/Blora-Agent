@@ -471,6 +471,22 @@ pub fn title_osc(title: &str) -> String {
     format!("\x1b]0;{title}\x07\x1b[?25l")
 }
 
+/// Terminal notification for a question dialog. OSC 9 (iTerm2 and compatible)
+/// plus OSC 777 (VTE-style notify). Control characters are stripped.
+#[must_use]
+pub fn question_notify_osc(title: &str, body: &str) -> String {
+    let title = osc_text(title);
+    let body = osc_text(body);
+    format!("\x1b]9;{title}: {body}\x07\x1b]777;notify;{title};{body}\x07")
+}
+
+fn osc_text(text: &str) -> String {
+    text.chars()
+        .filter(|ch| !matches!(ch, '\u{1b}' | '\u{7}' | '\n' | '\r' | ';'))
+        .take(120)
+        .collect()
+}
+
 fn terminal_is_light() -> bool {
     let Ok(value) = std::env::var("COLORFGBG") else {
         return false;
@@ -484,6 +500,15 @@ fn terminal_is_light() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn question_notification_uses_terminal_osc() {
+        let sequence = question_notify_osc("Blora 提问", "用哪个？\n\u{1b}]9;nope\u{7}");
+        assert!(sequence.contains("\u{1b}]9;"));
+        assert!(sequence.contains("\u{1b}]777;notify;"));
+        assert!(!sequence.contains('\n'));
+        assert_eq!(sequence.matches('\u{7}').count(), 2);
+    }
 
     #[test]
     fn dark_matches_coral_tokens() {

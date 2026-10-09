@@ -418,6 +418,28 @@ impl Runtime {
         })
     }
 
+    /// Names in one workspace directory. Directory names end with `/`.
+    /// `path` is relative to the workspace and cannot escape it.
+    pub fn list_workspace_entries(
+        &self,
+        workspace: &std::path::Path,
+        path: &str,
+    ) -> Result<Vec<String>> {
+        let policy = Policy::new(workspace, true)?;
+        let backend = LocalBackend::new(policy);
+        let requested = if path.trim().is_empty() {
+            "."
+        } else {
+            path.trim()
+        };
+        let text = backend.list_dir(requested)?;
+        Ok(text
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(ToOwned::to_owned)
+            .collect())
+    }
+
     pub fn generate_git_commit_message(
         &self,
         path: &std::path::Path,
@@ -1704,28 +1726,18 @@ impl Runtime {
                 self.write_memory_file(workspace)?;
                 Ok(format!("forgot {key}"))
             }
-            "ask_user" => self.ask_user(
-                session_id,
-                run_id,
-                turn_id,
-                &call.id,
-                arguments
-                    .get("question")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default(),
-                arguments
-                    .get("options")
-                    .and_then(Value::as_array)
-                    .map(|items| {
-                        items
-                            .iter()
-                            .filter_map(|item| item.as_str().map(str::to_owned))
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-                options.can_ask || options.interactive,
-                cancel,
-            ),
+            "ask_user" => {
+                let questions = crate::input::normalize_questions(&arguments)?;
+                self.ask_user(
+                    session_id,
+                    run_id,
+                    turn_id,
+                    &call.id,
+                    questions,
+                    options.can_ask || options.interactive,
+                    cancel,
+                )
+            }
             "skill_manage" => self.manage_skill(
                 session_id,
                 run_id,
@@ -3136,7 +3148,16 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         };
-        assert_eq!(pending.options, vec!["SQLite", "Postgres"]);
+        assert_eq!(
+            pending.options,
+            vec![
+                "SQLite".to_owned(),
+                "Postgres".to_owned(),
+                "其他".to_owned()
+            ]
+        );
+        assert_eq!(pending.questions[0].kind, "single");
+        assert!(pending.questions[0].options.last().unwrap().other);
         let projection = runtime.show_session(&session).unwrap();
         assert_eq!(
             projection.runs.last().unwrap().status,
@@ -3147,19 +3168,30 @@ mod tests {
                 .answer_input(&session, "wrong-id", Some("x".to_owned()))
                 .is_err()
         );
+        let answer =
+            crate::format_question_answers(&pending.questions, &["Postgres".to_owned()]).unwrap();
+        assert_eq!(answer, "1. Which database?：Postgres");
         runtime
-            .answer_input(&session, &pending.request_id, Some("Postgres".to_owned()))
+            .answer_input(&session, &pending.request_id, Some(answer.clone()))
             .unwrap();
         worker.join().unwrap().unwrap();
         let requests = recorder.requests.lock().unwrap();
-        let tool = requests[1].messages.iter().rev().find(|m| m.role == "tool").unwrap();
-        assert_eq!(tool.content.as_deref(), Some("User answered: Postgres"));
+        let tool = requests[1]
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == "tool")
+            .unwrap();
+        assert_eq!(
+            tool.content.as_deref(),
+            Some("User answered:\n1. Which database?：Postgres")
+        );
         let projection = runtime.show_session(&session).unwrap();
         assert!(projection.pending_input.is_none());
         assert!(projection.transcript.iter().any(|item| matches!(
             item,
             TranscriptItem::Question { answer: Some(answer), status, .. }
-                if answer == "Postgres" && status == "answered"
+                if answer == "1. Which database?：Postgres" && status == "answered"
         )));
     }
 

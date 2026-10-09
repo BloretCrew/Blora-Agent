@@ -312,14 +312,41 @@ impl ToolRegistry {
             },
             ToolSpec {
                 name: "ask_user",
-                description: "Ask the user a question and wait for the answer. Use it only when you cannot proceed responsibly without their decision (ambiguous requirements, a choice between materially different approaches, missing credentials). Offer 2-4 short options when the answers are predictable; the user can always type their own. Do not ask for permission for routine steps.",
+                description: "Ask the user one or more questions and wait for the answers. Use it only when you cannot proceed responsibly without their decision. Put every independent question in one call (1-6). Do not add an Other option: single, multi, and boolean questions get one automatically, and choosing it opens a text field. Put the recommended option first and append \"(Recommended)\" to its label. Types: single (2-6 options, one answer), multi (2-6 options, several answers), boolean (yes/no, do not send options), text (a short written answer), folder (a workspace directory), file (a workspace file). Do not ask for permission for routine steps.",
                 parameters: json!({
                     "type": "object",
                     "properties": {
-                        "question": {"type": "string", "description": "One clear question"},
-                        "options": {"type": "array", "items": {"type": "string"}, "maxItems": 6, "description": "Suggested answers, recommended first"}
-                    },
-                    "required": ["question"]
+                        "questions": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": 6,
+                            "description": "Questions asked together. Mix types when the answers do not depend on each other.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "type": {"type": "string", "enum": ["single", "multi", "boolean", "text", "folder", "file"]},
+                                    "question": {"type": "string", "description": "The full question."},
+                                    "header": {"type": "string", "description": "Short label, at most 16 characters."},
+                                    "options": {
+                                        "type": "array",
+                                        "maxItems": 6,
+                                        "description": "Choices for single and multi. Omit for boolean, text, folder, and file. Do not include Other.",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "label": {"type": "string"},
+                                                "description": {"type": "string"}
+                                            },
+                                            "required": ["label"]
+                                        }
+                                    }
+                                },
+                                "required": ["type", "question"]
+                            }
+                        },
+                        "question": {"type": "string", "description": "Legacy one-question form. Prefer questions."},
+                        "options": {"type": "array", "items": {"type": "string"}, "maxItems": 6, "description": "Legacy choices for question."}
+                    }
                 }),
                 read_only: true,
             },

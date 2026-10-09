@@ -53,8 +53,10 @@ Blora 的 Code、Work、Agent 三种模式共用一个 Runtime 和同一套事�
 
 ## 向用户提问
 
-`ask_user` 会写入 `input.requested` 事件，运行状态变为 `waiting_input`。界面通过 `Runtime::answer_input` 或 `POST /api/sessions/:id/input` 写入 `input.provided`，运行随即继续。
+`ask_user` 会写入 `input.requested` 事件，运行状态变为 `waiting_input`。一次调用可以混合 1 到 6 道题：单选、多选、判断、主观、文件夹和文件。界面通过 `Runtime::answer_input` 或 `POST /api/sessions/:id/input` 写入 `input.provided`，运行随即继续。答案是一段文本，每题一行，形如 `1. 标题：内容`。
 
-- TUI：提问显示在输入框上方。Enter 提交输入的文字，数字键选择选项，Esc 跳过。
-- Web：对话区上方显示问题卡片，包括选项按钮、输入框和跳过按钮。
-- 无人值守的运行（CLI `--print`、后台任务、子代理）不会阻塞，会直接告诉模型“无法询问，请自行判断并说明假设”。
+- 单选、多选和判断会自动附带「其他」。选中后才出现输入框，空内容不能提交。提交时输入的文字替换「其他」。
+- 文件夹和文件题在提问对话框里选择工作区内的路径，不能跳出工作区。
+- TUI：提问打开对话框。Tab 切换题目，Space 选择，Enter 在全部答完后提交，Esc 跳过。打开时通过终端 OSC 通知一次。
+- Web：提问打开标题为「Blora 提问」的对话框，并在浏览器允许时发一次通知。Esc 或关闭等于跳过。
+- 无人值守的运行（CLI `--print`、后台任务、子代理）不会阻塞，不会打开对话框或发通知，会直接告诉模型“无法询问，请自行判断并说明假设”。

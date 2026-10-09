@@ -220,7 +220,7 @@ const CORE_RULES: &str = "# Working method\n\
 - Images and other binary files are described, not inlined.\n\
 - Skills are listed by name only. Load one with the skill tool before following it.\n\
 - Store durable facts the user asks you to remember with remember; look them up with recall.\n\
-- Use ask_user only for decisions you cannot make responsibly yourself; offer short options.\n\n\
+- Use ask_user only for decisions you cannot make responsibly yourself. Batch independent questions in one call, using single, multi, boolean, text, folder, or file. Do not add an Other option.\n\n\
 # Verification\n\
 - Check your work with tool output before you say it is done, fixed, or passing. If you could not verify something, say so plainly.\n\n\
 # Safety\n\

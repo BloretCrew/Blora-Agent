@@ -7,6 +7,7 @@ mod dialogs;
 mod i18n;
 mod markdown;
 mod onboarding;
+mod question;
 mod selection;
 mod slash;
 mod theme;
@@ -226,6 +227,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut mode_menu: Option<view::ModeMenu> = None;
     let mut project_picker: Option<view::ProjectPicker> = None;
     let mut folder_picker: Option<view::FolderPicker> = None;
+    let mut question_dialog: Option<question::QuestionForm> = None;
     let mut session_picker: Option<view::SessionPicker> = None;
     // PassPort user token of the logged-in user; drives the default provider.
     let mut passport_user_token: Option<String> = None;
@@ -456,6 +458,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                 tool_detail_dialog = None;
                 context_dialog = None;
                 harness_dialog = None;
+                question_dialog = None;
                 git_file_click = None;
                 git_diff_requested = None;
                 git_diff_generation = git_diff_generation.wrapping_add(1);
@@ -489,6 +492,28 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                 cached = None;
             }
             let projection = cached.as_ref().map(|(_, projection)| projection);
+            let question_opened = question::sync(
+                &mut question_dialog,
+                projection.and_then(|item| item.pending_input.as_ref()),
+                &active_workspace,
+            );
+            if question_opened && let Some(form) = question_dialog.as_ref() {
+                let body = form
+                    .questions
+                    .first()
+                    .map(|item| item.question.as_str())
+                    .unwrap_or("");
+                let _ = write!(
+                    io::stdout(),
+                    "{}",
+                    theme::question_notify_osc(&i18n::tr("question.title", "Blora 提问"), body)
+                );
+                let _ = execute!(io::stdout(), Hide);
+            }
+            if question_dialog.is_some() {
+                live_dialogs.push(DialogId::Question);
+            }
+            dialog_stack.sync(&live_dialogs);
             let current_harness = projection.map(|p| p.harness).unwrap_or_default();
             if session_id.as_ref() != last_routing_session.as_ref() {
                 last_routing_session = session_id.clone();
@@ -694,6 +719,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             mode_menu: mode_menu.as_ref(),
                             project_picker: project_picker.as_ref(),
                             folder_picker: folder_picker.as_ref(),
+                            question_dialog: question_dialog.as_ref(),
                             session_picker: session_picker.as_ref(),
                             user_label: &passport_username,
                             running: job.is_some(),
@@ -814,16 +840,24 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                 }
                 match event {
                     Event::Paste(text) => {
-                        paste_into_dialog(
-                            top_dialog,
-                            &text,
-                            &mut add_provider_dialog,
-                            &mut git_dialog,
-                            &mut input,
-                            &mut paste_preview,
-                        );
-                        if top_dialog.is_none() {
-                            history_index = None;
+                        if top_dialog == Some(DialogId::Question) {
+                            if let Some(form) = question_dialog.as_mut()
+                                && !form.minimized
+                            {
+                                form.paste(&text);
+                            }
+                        } else {
+                            paste_into_dialog(
+                                top_dialog,
+                                &text,
+                                &mut add_provider_dialog,
+                                &mut git_dialog,
+                                &mut input,
+                                &mut paste_preview,
+                            );
+                            if top_dialog.is_none() {
+                                history_index = None;
+                            }
                         }
                     }
                     Event::Key(key) if key.kind == KeyEventKind::Press => {
@@ -938,6 +972,9 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             Some(DialogId::Settings) => settings_dialog
                                 .as_ref()
                                 .is_some_and(|dialog| dialog.minimized),
+                            Some(DialogId::Question) => question_dialog
+                                .as_ref()
+                                .is_some_and(|dialog| dialog.minimized),
                             _ => false,
                         };
                         if minimized && key.code != KeyCode::Esc {
@@ -1003,6 +1040,11 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                             dialog.minimized = false;
                                         }
                                     }
+                                    Some(DialogId::Question) => {
+                                        if let Some(dialog) = question_dialog.as_mut() {
+                                            dialog.minimized = false;
+                                        }
+                                    }
                                     _ => {}
                                 }
                             }
@@ -1052,7 +1094,14 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             && key.modifiers.contains(KeyModifiers::CONTROL))
                             || key.code == KeyCode::Insert
                         {
-                            if top_dialog.is_none() {
+                            if top_dialog == Some(DialogId::Question) {
+                                if let Some(text) = read_clipboard_text()
+                                    && let Some(form) = question_dialog.as_mut()
+                                    && !form.minimized
+                                {
+                                    form.paste(&text);
+                                }
+                            } else if top_dialog.is_none() {
                                 paste_clipboard(&mut input, &mut paste_preview);
                                 history_index = None;
                             } else if let Some(text) = read_clipboard_text() {
@@ -1073,36 +1122,38 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                         {
                             continue;
                         }
-                        // An open ask_user question takes the composer: Enter
-                        // answers, a digit picks an option, Esc skips.
-                        if top_dialog.is_none()
-                            && mode_menu.is_none()
-                            && !input.starts_with('/')
-                            && let Some(id) = session_id.as_ref()
-                            && let Some(question) = cached
-                                .as_ref()
-                                .and_then(|(_, projection)| projection.pending_input.clone())
+                        if top_dialog == Some(DialogId::Question)
+                            && let Some(form) = question_dialog.as_mut()
                         {
-                            let answer = match key.code {
-                                KeyCode::Enter if !input.trim().is_empty() => {
-                                    Some(Some(std::mem::take(&mut input)))
+                            if form.minimized {
+                                if key.code == KeyCode::Esc {
+                                    let request_id = form.request_id.clone();
+                                    answer_question(
+                                        runtime,
+                                        session_id.as_ref(),
+                                        &request_id,
+                                        None,
+                                        &mut status,
+                                    );
                                 }
-                                KeyCode::Char(digit @ '1'..='9') if input.is_empty() => question
-                                    .options
-                                    .get(digit as usize - '1' as usize)
-                                    .cloned()
-                                    .map(Some),
-                                KeyCode::Esc if input.is_empty() => Some(None),
-                                _ => None,
-                            };
-                            if let Some(answer) = answer {
-                                status = match runtime.answer_input(id, &question.request_id, answer)
-                                {
-                                    Ok(()) => i18n::tr("question.sent", "已回答"),
-                                    Err(err) => err.to_string(),
-                                };
-                                continue;
+                            } else {
+                                let action = form.on_key(key.code, &active_workspace);
+                                if !matches!(action, question::QuestionAction::None) {
+                                    let request_id = form.request_id.clone();
+                                    let answer = match action {
+                                        question::QuestionAction::Submit(text) => Some(text),
+                                        _ => None,
+                                    };
+                                    answer_question(
+                                        runtime,
+                                        session_id.as_ref(),
+                                        &request_id,
+                                        answer,
+                                        &mut status,
+                                    );
+                                }
                             }
+                            continue;
                         }
                         match key.code {
                             KeyCode::Esc if top_dialog.is_none() && text_selection.is_some() => {
@@ -2200,6 +2251,18 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                                 .min(dialog.entries.len().saturating_sub(1));
                                         }
                                     }
+                                    Some(DialogId::Question) => {
+                                        if let Some(form) = question_dialog.as_mut()
+                                            && !form.minimized
+                                        {
+                                            for _ in 0..3 {
+                                                form.on_key(
+                                                    if up { KeyCode::Up } else { KeyCode::Down },
+                                                    &active_workspace,
+                                                );
+                                            }
+                                        }
+                                    }
                                     Some(DialogId::Tool) => {
                                         if let Some(dialog) = tool_dialog.as_mut()
                                             && !dialog.minimized
@@ -2335,6 +2398,53 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                         tool_summary_click.register(None, Instant::now());
                                         false
                                     };
+                                if top_dialog == Some(DialogId::Question) {
+                                    match hit {
+                                        Some(view::Hit::TrafficClose) => {
+                                            if let Some(form) = question_dialog.as_ref() {
+                                                let request_id = form.request_id.clone();
+                                                answer_question(
+                                                    runtime,
+                                                    session_id.as_ref(),
+                                                    &request_id,
+                                                    None,
+                                                    &mut status,
+                                                );
+                                            }
+                                        }
+                                        Some(view::Hit::TrafficMinimize) => {
+                                            if let Some(form) = question_dialog.as_mut() {
+                                                form.minimized = true;
+                                                form.fullscreen = false;
+                                            }
+                                        }
+                                        Some(view::Hit::TrafficOpenBrowser) => {
+                                            if let Some(form) = question_dialog.as_mut() {
+                                                if form.minimized {
+                                                    form.minimized = false;
+                                                } else {
+                                                    form.fullscreen = !form.fullscreen;
+                                                }
+                                            }
+                                        }
+                                        Some(view::Hit::QuestionOption(question, option)) => {
+                                            if let Some(form) = question_dialog.as_mut()
+                                                && !form.minimized
+                                            {
+                                                form.click_option(question, option);
+                                            }
+                                        }
+                                        Some(view::Hit::QuestionRow(row)) => {
+                                            if let Some(form) = question_dialog.as_mut()
+                                                && !form.minimized
+                                            {
+                                                form.click_row(row, &active_workspace);
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                    continue;
+                                }
                                 if top_dialog == Some(DialogId::Folder) {
                                     match hit {
                                         Some(view::Hit::TrafficClose) => folder_picker = None,
@@ -3070,23 +3180,6 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     if let Some(cmd) = slash_hits.get(slash_selected) {
                                         input = slash::complete(cmd);
                                         slash_selected = 0;
-                                    }
-                                } else if hit == Some(view::Hit::Hint(view::HintAction::Answer)) {
-                                    if let Some(id) = session_id.as_ref()
-                                        && let Some(question) = cached.as_ref().and_then(
-                                            |(_, projection)| projection.pending_input.clone(),
-                                        )
-                                        && !input.trim().is_empty()
-                                    {
-                                        let answer = std::mem::take(&mut input);
-                                        status = match runtime.answer_input(
-                                            id,
-                                            &question.request_id,
-                                            Some(answer),
-                                        ) {
-                                            Ok(()) => i18n::tr("question.sent", "已回答"),
-                                            Err(err) => err.to_string(),
-                                        };
                                     }
                                 } else if hit == Some(view::Hit::Hint(view::HintAction::Run))
                                     || hit == Some(view::Hit::Hint(view::HintAction::Send))
@@ -5665,7 +5758,28 @@ fn dialog_accepts_hit(top: Option<DialogId>, hit: Option<&view::Hit>) -> bool {
                 Some(DialogId::Settings),
                 Some(Hit::SettingsRow(_) | Hit::SettingsTab(_))
             )
+            | (
+                Some(DialogId::Question),
+                Some(Hit::QuestionOption(_, _) | Hit::QuestionRow(_))
+            )
     )
+}
+
+fn answer_question(
+    runtime: &Runtime,
+    session_id: Option<&SessionId>,
+    request_id: &str,
+    answer: Option<String>,
+    status: &mut String,
+) {
+    let Some(id) = session_id else {
+        *status = i18n::tr("harness.no_session", "请先创建会话");
+        return;
+    };
+    *status = match runtime.answer_input(id, request_id, answer) {
+        Ok(()) => i18n::tr("question.sent", "已回答"),
+        Err(err) => err.to_string(),
+    };
 }
 
 fn paste_into_dialog(
@@ -5767,6 +5881,7 @@ mod dialog_input_tests {
             DialogId::Context,
             DialogId::Settings,
             DialogId::Onboarding,
+            DialogId::Question,
         ] {
             assert!(!dialog_accepts_hit(Some(id), Some(&view::Hit::Composer)));
             assert!(!dialog_accepts_hit(Some(id), Some(&view::Hit::Allow)));
@@ -5776,6 +5891,14 @@ mod dialog_input_tests {
         assert!(dialog_accepts_hit(
             Some(DialogId::Provider),
             Some(&view::Hit::ProviderRow(0))
+        ));
+        assert!(dialog_accepts_hit(
+            Some(DialogId::Question),
+            Some(&view::Hit::QuestionOption(0, 1))
+        ));
+        assert!(dialog_accepts_hit(
+            Some(DialogId::Question),
+            Some(&view::Hit::QuestionRow(0))
         ));
         assert!(!dialog_accepts_hit(
             Some(DialogId::Theme),

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Blora Agent contributors
 
-use blora_events::{EventEnvelope, KnownPayload};
+use blora_events::{AskedQuestion, EventEnvelope, KnownPayload};
 use blora_types::{
     AgentId, ApprovalId, BloraError, EventId, HarnessKind, Mode, Result, RunId, RunStatus,
     SessionId, SessionStatus, TaskId, TaskStatus, TurnId,
@@ -80,6 +80,8 @@ pub enum TranscriptItem {
         question: String,
         #[serde(default)]
         options: Vec<String>,
+        #[serde(default)]
+        questions: Vec<AskedQuestion>,
         #[serde(default)]
         answer: Option<String>,
         /// `pending`, `answered`, or `dismissed`.
@@ -161,6 +163,9 @@ pub struct PendingInput {
     pub question: String,
     #[serde(default)]
     pub options: Vec<String>,
+    /// Structured questions. Older events are synthesized into one entry.
+    #[serde(default)]
+    pub questions: Vec<AskedQuestion>,
 }
 
 /// An explicit external continuation scoped to this session and working directory.
@@ -700,15 +705,25 @@ pub fn apply_event(projection: &mut SessionProjection, event: &EventEnvelope) ->
             }
         }
         KnownPayload::InputRequested(request) => {
+            let questions = if request.questions.is_empty() {
+                vec![AskedQuestion::from_legacy(
+                    &request.question,
+                    &request.options,
+                )]
+            } else {
+                request.questions.clone()
+            };
             projection.pending_input = Some(PendingInput {
                 request_id: request.request_id.clone(),
                 question: request.question.clone(),
                 options: request.options.clone(),
+                questions: questions.clone(),
             });
             projection.transcript.push(TranscriptItem::Question {
                 request_id: request.request_id,
                 question: request.question,
                 options: request.options,
+                questions,
                 answer: None,
                 status: "pending".to_owned(),
                 event_id: event.event_id.clone(),
@@ -985,6 +1000,61 @@ mod tests {
         let projection = rebuild(&[created, unknown]).unwrap();
         assert_eq!(projection.last_sequence, 2);
         assert!(projection.session.is_some());
+    }
+
+    #[test]
+    fn old_input_requested_without_questions_synthesizes_one() {
+        let session_id = SessionId::generate();
+        let created = envelope(
+            &session_id,
+            1,
+            KnownPayload::SessionCreated(SessionCreated {
+                title: None,
+                workspace_path: "/tmp/ws".to_owned(),
+                mode: Mode::Code,
+                parent_session_id: None,
+            }),
+        );
+        let asked = envelope(
+            &session_id,
+            2,
+            KnownPayload::InputRequested(blora_events::InputRequested {
+                request_id: "ask_old".to_owned(),
+                question: "Which region?".to_owned(),
+                options: vec!["EU".to_owned(), "US".to_owned()],
+                call_id: None,
+                questions: Vec::new(),
+            }),
+        );
+        let projection = rebuild(&[created, asked]).unwrap();
+        let pending = projection.pending_input.expect("pending question");
+        assert_eq!(pending.options, vec!["EU".to_owned(), "US".to_owned()]);
+        assert_eq!(pending.questions.len(), 1);
+        assert_eq!(pending.questions[0].kind, "single");
+        assert!(
+            pending.questions[0]
+                .options
+                .iter()
+                .all(|choice| !choice.other)
+        );
+        match projection.transcript.last() {
+            Some(TranscriptItem::Question {
+                questions, status, ..
+            }) => {
+                assert_eq!(questions.len(), 1);
+                assert_eq!(status, "pending");
+            }
+            other => panic!("expected a question, got {other:?}"),
+        }
+
+        let bare = serde_json::from_value::<blora_events::InputRequested>(serde_json::json!({
+            "request_id": "ask_text",
+            "question": "Why?"
+        }))
+        .unwrap();
+        assert!(bare.questions.is_empty());
+        let synthesized = AskedQuestion::from_legacy(&bare.question, &bare.options);
+        assert_eq!(synthesized.kind, "text");
     }
 
     #[test]

@@ -535,6 +535,7 @@ pub struct FrameModel<'a> {
     pub mode_menu: Option<&'a ModeMenu>,
     pub project_picker: Option<&'a ProjectPicker>,
     pub folder_picker: Option<&'a FolderPicker>,
+    pub question_dialog: Option<&'a crate::question::QuestionForm>,
     pub session_picker: Option<&'a SessionPicker>,
     pub git_dialog: Option<&'a GitDialog>,
     pub git_status: Option<&'a GitStatusInfo>,
@@ -600,13 +601,15 @@ pub enum Hit {
     ThemeTab(usize),
     SettingsTab(usize),
     SettingsRow(usize),
+    /// Option row inside the question dialog: question index, option index.
+    QuestionOption(usize, usize),
+    /// Picker row inside the focused file or folder question.
+    QuestionRow(usize),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HintAction {
     Send,
-    /// Submit the composer text as the answer to an open question.
-    Answer,
     Commands,
     SessionNext,
     New,
@@ -637,6 +640,8 @@ pub struct HitMap {
     pub project_picker_rows: Vec<(Rect, usize)>,
     pub folder_picker_rows: Vec<(Rect, usize)>,
     pub folder_picker_open: Option<Rect>,
+    pub question_options: Vec<(Rect, usize, usize)>,
+    pub question_rows: Vec<(Rect, usize)>,
     pub session_picker: Option<Rect>,
     pub session_picker_rows: Vec<(Rect, usize)>,
     pub mode: Option<Rect>,
@@ -806,6 +811,16 @@ impl HitMap {
                 return Some(Hit::ProjectPickerRow(*idx));
             }
         }
+        for (rect, question, option) in &self.question_options {
+            if contains(*rect, col, row) {
+                return Some(Hit::QuestionOption(*question, *option));
+            }
+        }
+        for (rect, idx) in &self.question_rows {
+            if contains(*rect, col, row) {
+                return Some(Hit::QuestionRow(*idx));
+            }
+        }
         for (rect, idx) in &self.folder_picker_rows {
             if contains(*rect, col, row) {
                 return Some(Hit::FolderPickerRow(*idx));
@@ -928,7 +943,7 @@ pub fn draw(
     } else {
         0
     };
-    let show_approval = !model.pending.is_empty() || pending_question(model).is_some();
+    let show_approval = !model.pending.is_empty();
     let compact = area.height < 14;
     let chrome_height = if compact { 5 } else { 6 };
     let extra = extra.min(
@@ -1577,7 +1592,219 @@ fn render_layer(
         hits.settings_tabs = dialog_hits.settings_tabs;
         hits.traffic_lights = dialog_hits.traffic_lights;
         hits.modal_area = dialog_hits.modal_area;
+    } else if id == DialogId::Question
+        && let Some(dialog) = model.question_dialog
+    {
+        let dialog_hits = render_question_dialog(frame, area, dialog, model.pointer, &theme);
+        hits.question_options = dialog_hits.question_options;
+        hits.question_rows = dialog_hits.question_rows;
+        hits.traffic_lights = dialog_hits.traffic_lights;
+        hits.modal_area = dialog_hits.modal_area;
     }
+    hits
+}
+
+fn render_question_dialog(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    form: &crate::question::QuestionForm,
+    pointer: Option<(u16, u16)>,
+    theme: &Theme,
+) -> HitMap {
+    let mut hits = HitMap {
+        modal: true,
+        ..HitMap::default()
+    };
+    let Some(modal) = dialog_outer(area, 78, 22, form.fullscreen, form.minimized) else {
+        return hits;
+    };
+    let inner = paint_dialog_frame(
+        frame,
+        modal,
+        &i18n::tr("question.title", "Blora 提问"),
+        pointer,
+        theme,
+        &mut hits,
+    );
+    if form.minimized {
+        return hits;
+    }
+    let [_, body, hint] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+    let mut row = 0u16;
+    for (index, question) in form.questions.iter().enumerate() {
+        if row >= body.height {
+            break;
+        }
+        let focused = index == form.focus;
+        let title = question.header.clone().unwrap_or_else(|| {
+            question
+                .question
+                .lines()
+                .next()
+                .unwrap_or(question.question.as_str())
+                .to_owned()
+        });
+        let marker = if focused { "❯" } else { " " };
+        let rect = Rect::new(body.x, body.y + row, body.width, 1);
+        frame.render_widget(
+            Paragraph::new(format!("{marker} {title}")).style(if focused {
+                theme.fg(theme.text).add_modifier(Modifier::BOLD)
+            } else {
+                theme.dim()
+            }),
+            rect,
+        );
+        row += 1;
+        if !focused || row >= body.height {
+            continue;
+        }
+        let prompt = Rect::new(body.x, body.y + row, body.width, 1);
+        frame.render_widget(
+            Paragraph::new(ellipsize(&question.question, body.width as usize))
+                .style(theme.fg(theme.text_dim)),
+            prompt,
+        );
+        row += 1;
+        match question.kind.as_str() {
+            "single" | "multi" | "boolean" => {
+                for (option_index, option) in question.options.iter().enumerate() {
+                    if row >= body.height {
+                        break;
+                    }
+                    let rect = Rect::new(body.x, body.y + row, body.width, 1);
+                    hits.question_options.push((rect, index, option_index));
+                    let selected = if question.kind == "multi" {
+                        form.checks[index]
+                            .get(option_index)
+                            .copied()
+                            .unwrap_or(false)
+                    } else {
+                        form.choice[index] == Some(option_index)
+                    };
+                    let cursor = form.cursor[index] == option_index;
+                    if cursor {
+                        frame.render_widget(
+                            Block::default().style(Style::default().bg(theme.bg_select)),
+                            rect,
+                        );
+                    }
+                    let mark = if question.kind == "multi" {
+                        if selected { "[x]" } else { "[ ]" }
+                    } else if selected {
+                        "(•)"
+                    } else {
+                        "( )"
+                    };
+                    let label = if option.other {
+                        i18n::tr("question.other", "其他")
+                    } else if question.kind == "boolean" && option_index == 0 {
+                        i18n::tr("question.yes", "是")
+                    } else if question.kind == "boolean" && option_index == 1 {
+                        i18n::tr("question.no", "否")
+                    } else {
+                        option.label.clone()
+                    };
+                    frame.render_widget(
+                        Paragraph::new(format!("  {mark} {label}")).style(theme.fg(theme.text)),
+                        rect,
+                    );
+                    row += 1;
+                }
+                if form.accepts_text() && question.kind != "text" && row < body.height {
+                    let rect = Rect::new(body.x, body.y + row, body.width, 1);
+                    frame.render_widget(
+                        Paragraph::new(format!(
+                            "  {} {}",
+                            i18n::tr("question.other_input", "其他："),
+                            form.field_text()
+                        ))
+                        .style(theme.fg(theme.sage)),
+                        rect,
+                    );
+                    row += 1;
+                }
+            }
+            "text" => {
+                if row < body.height {
+                    let rect = Rect::new(body.x, body.y + row, body.width, 1);
+                    frame.render_widget(
+                        Paragraph::new(format!("  {}", form.text[index]))
+                            .style(theme.fg(theme.sage)),
+                        rect,
+                    );
+                    row += 1;
+                }
+            }
+            "folder" | "file" => {
+                let visible = body.height.saturating_sub(row).saturating_sub(1);
+                let scroll = form.scroll[index].min(
+                    form.entries[index]
+                        .len()
+                        .saturating_sub(usize::from(visible).max(1)),
+                );
+                for (offset, entry) in form.entries[index]
+                    .iter()
+                    .enumerate()
+                    .skip(scroll)
+                    .take(visible as usize)
+                {
+                    let rect = Rect::new(body.x, body.y + row, body.width, 1);
+                    hits.question_rows.push((rect, offset));
+                    if offset == form.cursor[index] {
+                        frame.render_widget(
+                            Block::default().style(Style::default().bg(theme.bg_select)),
+                            rect,
+                        );
+                    }
+                    let name = if entry == "*" {
+                        i18n::tr("question.pick_folder", "选择此文件夹")
+                    } else {
+                        entry.clone()
+                    };
+                    let mark = if form.cursor[index] == offset {
+                        "❯"
+                    } else {
+                        " "
+                    };
+                    frame.render_widget(
+                        Paragraph::new(format!("  {mark} {name}")).style(theme.fg(theme.text)),
+                        rect,
+                    );
+                    row += 1;
+                }
+                if row < body.height {
+                    let picked = form.picked[index].as_deref().unwrap_or("—");
+                    frame.render_widget(
+                        Paragraph::new(format!(
+                            "  {} {picked}",
+                            i18n::tr("question.picked", "已选")
+                        ))
+                        .style(theme.dim()),
+                        Rect::new(body.x, body.y + row, body.width, 1),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    let ready = if form.formatted().is_some() {
+        i18n::tr("question.ready", "Enter 提交")
+    } else {
+        i18n::tr("question.pending", "还有题目未回答")
+    };
+    frame.render_widget(
+        Paragraph::new(format!(
+            "{} · {ready}",
+            i18n::tr("question.hint", "Tab 切换 · Space 选择 · Esc 跳过")
+        ))
+        .style(theme.mute()),
+        hint,
+    );
     hits
 }
 
@@ -3418,29 +3645,6 @@ fn render_approval(
 ) {
     let inner = inset(area);
     let Some(first) = model.pending.first() else {
-        if let Some(question) = pending_question(model) {
-            let options = question
-                .options
-                .iter()
-                .enumerate()
-                .map(|(index, option)| format!("{} {option}", index + 1))
-                .collect::<Vec<_>>()
-                .join("  ");
-            let room = inner.width.saturating_sub(4) as usize;
-            let text = if options.is_empty() {
-                question.question.clone()
-            } else {
-                format!("{}   {options}", question.question)
-            };
-            let line = Line::from(vec![
-                Span::styled("?  ", theme.fg(theme.amber).add_modifier(Modifier::BOLD)),
-                Span::styled(ellipsize(&text, room), theme.fg(theme.amber)),
-            ]);
-            frame.render_widget(
-                Paragraph::new(line).style(Style::default().bg(theme.bg_raised)),
-                inner,
-            );
-        }
         return;
     };
     let summary = ellipsize(&first.summary, inner.width.saturating_sub(22) as usize);
@@ -3473,11 +3677,6 @@ fn render_approval(
         Paragraph::new(line).style(Style::default().bg(theme.bg_raised)),
         inner,
     );
-}
-
-/// Open `ask_user` question of the visible session, if any.
-pub fn pending_question<'a>(model: &FrameModel<'a>) -> Option<&'a blora_session::PendingInput> {
-    model.projection?.pending_input.as_ref()
 }
 
 fn render_slash(
@@ -5225,14 +5424,7 @@ fn render_composer(
         Line::from(vec![
             Span::styled("❯ ", theme.rose_bold()),
             Span::styled(
-                if pending_question(model).is_some() {
-                    ellipsize(
-                        &i18n::tr("composer.answer", "输入回答，Enter 提交；数字键选择选项"),
-                        available,
-                    )
-                } else {
-                    composer_placeholder(imagine, model.running, available)
-                },
+                composer_placeholder(imagine, model.running, available),
                 theme.mute(),
             ),
         ])
@@ -5338,12 +5530,6 @@ fn render_hints(
             ("n", "deny", HintAction::Deny),
             ("esc", "quit", HintAction::Quit),
         ]
-    } else if pending_question(model).is_some() {
-        &[
-            ("⏎", "answer", HintAction::Answer),
-            ("1-9", "option", HintAction::Answer),
-            ("esc", "skip", HintAction::Close),
-        ]
     } else {
         &[
             ("⏎", "send", HintAction::Send),
@@ -5364,8 +5550,6 @@ fn render_hints(
         } else if inner.width < 60 {
             match action {
                 HintAction::Send => "⏎ 发送",
-                HintAction::Answer if *key == "1-9" => "1-9 选项",
-                HintAction::Answer => "⏎ 回答",
                 HintAction::Commands => "/ 命令",
                 HintAction::SessionNext => "› 会话",
                 HintAction::New => "+ 新建",
@@ -5747,6 +5931,7 @@ mod tests {
                 question: "Which region?".to_owned(),
                 options: vec!["EU".to_owned(), "US".to_owned()],
                 call_id: None,
+                questions: Vec::new(),
             }),
         ];
         let events: Vec<EventEnvelope> = payloads
@@ -5801,6 +5986,7 @@ mod tests {
             mode_menu: None,
             project_picker: None,
             folder_picker: None,
+            question_dialog: None,
             session_picker: None,
             git_dialog: None,
             git_status: None,
@@ -5818,10 +6004,17 @@ mod tests {
             })
             .unwrap();
         let text = frame_text(&terminal);
-        assert!(text.contains("?  Which region?   1 EU  2 US"), "{text}");
-        assert!(text.contains("answer"), "hints switch to answering:\n{text}");
+        assert!(text.contains("Which region?"), "{text}");
+        assert!(text.contains("1. EU"), "{text}");
+        assert!(
+            !text.contains("数字键选择选项"),
+            "the composer no longer answers questions:\n{text}"
+        );
         assert!(text.contains("思考过程"), "reasoning is summarised");
-        assert!(!text.contains("HIDDEN-THOUGHT"), "reasoning is folded by default");
+        assert!(
+            !text.contains("HIDDEN-THOUGHT"),
+            "reasoning is folded by default"
+        );
         assert!(text.contains("⟲1"), "compaction count is shown");
         assert!(toggle_reasoning());
         model.input = "x";
@@ -5832,6 +6025,138 @@ mod tests {
             .unwrap();
         assert!(frame_text(&terminal).contains("HIDDEN-THOUGHT"));
         assert!(!toggle_reasoning());
+    }
+
+    #[test]
+    fn question_dialog_shows_types_other_input_and_files() {
+        let dir = std::env::temp_dir().join(format!("blora-ask-view-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("note.txt"), "hi").unwrap();
+        let questions = vec![
+            blora_events::AskedQuestion {
+                id: "q1".into(),
+                kind: "single".into(),
+                question: "用哪个？".into(),
+                header: Some("数据库".into()),
+                options: vec![
+                    blora_events::QuestionChoice {
+                        label: "SQLite".into(),
+                        description: None,
+                        other: false,
+                    },
+                    blora_events::QuestionChoice {
+                        label: "其他".into(),
+                        description: None,
+                        other: true,
+                    },
+                ],
+            },
+            blora_events::AskedQuestion {
+                id: "q2".into(),
+                kind: "boolean".into(),
+                question: "继续吗？".into(),
+                header: Some("继续".into()),
+                options: vec![
+                    blora_events::QuestionChoice {
+                        label: "是".into(),
+                        description: None,
+                        other: false,
+                    },
+                    blora_events::QuestionChoice {
+                        label: "否".into(),
+                        description: None,
+                        other: false,
+                    },
+                ],
+            },
+            blora_events::AskedQuestion {
+                id: "q3".into(),
+                kind: "file".into(),
+                question: "读哪个文件？".into(),
+                header: Some("文件".into()),
+                options: Vec::new(),
+            },
+        ];
+        let pending = blora_session::PendingInput {
+            request_id: "ask_1".into(),
+            question: "用哪个？".into(),
+            options: Vec::new(),
+            questions,
+        };
+        let mut form = crate::question::QuestionForm::open(&pending, &dir);
+        form.on_key(crossterm::event::KeyCode::Down, &dir);
+        form.on_key(crossterm::event::KeyCode::Char(' '), &dir);
+        form.on_key(crossterm::event::KeyCode::Char('T'), &dir);
+        form.on_key(crossterm::event::KeyCode::Char('u'), &dir);
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let mut render = |form: &crate::question::QuestionForm| {
+            let stack = [DialogId::Question];
+            let model = FrameModel {
+                dialog_stack: &stack,
+                workspace: &dir,
+                sessions: &[],
+                index: 0,
+                projection: None,
+                pending: &[],
+                input: "",
+                status: "ready",
+                notice: None,
+                paste_preview: None,
+                passport_dialog: None,
+                provider_dialog: None,
+                add_provider_dialog: None,
+                theme_dialog: None,
+                context_dialog: None,
+                settings_dialog: None,
+                harness_dialog: None,
+                permission_dialog: None,
+                tool_dialog: None,
+                tool_detail_dialog: None,
+                slash_hits: &[],
+                slash_selected: 0,
+                search: None,
+                hide_tools: false,
+                message_roles: true,
+                scroll: 0,
+                permission_mode: PermissionMode::Ask,
+                model: "mock",
+                provider: "mock",
+                mode_menu: None,
+                project_picker: None,
+                folder_picker: None,
+                question_dialog: Some(form),
+                session_picker: None,
+                git_dialog: None,
+                git_status: None,
+                user_label: "you",
+                running: false,
+                tick: 0,
+                pointer: None,
+                text_selection: None,
+            };
+            let mut cache = TranscriptCache::default();
+            terminal
+                .draw(|frame| {
+                    draw(frame, &model, &mut cache);
+                })
+                .unwrap();
+            frame_text(&terminal)
+        };
+        let text = render(&form);
+        assert!(text.contains("Blora 提问"), "{text}");
+        assert!(text.contains("数据库"), "{text}");
+        assert!(text.contains("其他"), "{text}");
+        assert!(text.contains("Tu"), "{text}");
+        form.focus = 2;
+        let text = render(&form);
+        assert!(text.contains("note.txt"), "{text}");
+        assert!(text.contains("sub/"), "{text}");
+        assert!(
+            !text.contains(" .."),
+            "parent stays inside the workspace:\n{text}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -5869,6 +6194,7 @@ mod tests {
             mode_menu: None,
             project_picker: None,
             folder_picker: None,
+            question_dialog: None,
             session_picker: None,
             git_dialog: None,
             git_status: None,
@@ -6002,6 +6328,7 @@ mod tests {
             mode_menu: None,
             project_picker: None,
             folder_picker: None,
+            question_dialog: None,
             session_picker: None,
             git_dialog: None,
             git_status: None,
@@ -7636,6 +7963,7 @@ mod tests {
             mode_menu: None,
             project_picker: None,
             folder_picker: None,
+            question_dialog: None,
             session_picker: None,
             git_dialog: None,
             git_status: None,
@@ -8027,6 +8355,7 @@ mod dialog_layer_tests {
             mode_menu: None,
             project_picker: None,
             folder_picker: None,
+            question_dialog: None,
             session_picker: None,
             git_dialog: None,
             git_status: None,

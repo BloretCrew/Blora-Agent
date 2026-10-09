@@ -385,16 +385,88 @@ pub struct SessionCwdChanged {
     pub cwd: String,
 }
 
+/// One choice on a single-choice, multiple-choice, or yes/no question.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuestionChoice {
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Selecting this choice reveals a text field. The typed text replaces the label.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub other: bool,
+}
+
+/// One question inside an [`InputRequested`] questionnaire.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AskedQuestion {
+    pub id: String,
+    /// `single`, `multi`, `boolean`, `text`, `folder`, or `file`.
+    pub kind: String,
+    pub question: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<QuestionChoice>,
+}
+
+impl AskedQuestion {
+    /// A question reconstructed from an older event that only stored text and labels.
+    pub fn from_legacy(question: &str, options: &[String]) -> Self {
+        Self {
+            id: "q1".to_owned(),
+            kind: if options.is_empty() {
+                "text".to_owned()
+            } else {
+                "single".to_owned()
+            },
+            question: question.to_owned(),
+            header: None,
+            options: options
+                .iter()
+                .map(|label| QuestionChoice {
+                    label: label.clone(),
+                    description: None,
+                    other: false,
+                })
+                .collect(),
+        }
+    }
+
+    /// Stable title used on each answer line. Colons are removed so the line parses.
+    pub fn answer_title(&self) -> String {
+        let raw = self
+            .header
+            .as_deref()
+            .filter(|text| !text.trim().is_empty())
+            .unwrap_or(self.question.as_str());
+        let line = raw.lines().next().unwrap_or(raw);
+        let title: String = line
+            .chars()
+            .filter(|ch| *ch != '：' && *ch != ':')
+            .take(80)
+            .collect();
+        let title = title.trim();
+        if title.is_empty() {
+            "问题".to_owned()
+        } else {
+            title.to_owned()
+        }
+    }
+}
+
 /// The agent asked the user a question and the run waits for an answer.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct InputRequested {
     pub request_id: String,
     pub question: String,
-    /// Suggested answers; the user may still type a free-form reply.
+    /// Labels of the first question, kept so older clients can still show them.
     #[serde(default)]
     pub options: Vec<String>,
     #[serde(default)]
     pub call_id: Option<String>,
+    /// Every question in this call. Empty on events written before questionnaires.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub questions: Vec<AskedQuestion>,
 }
 
 /// The user answered an [`InputRequested`] question, or it was dismissed.

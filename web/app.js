@@ -470,91 +470,317 @@ function renderTranscript(items) {
   followTail(stick);
 }
 
-// Card for an open ask_user question: option buttons, a free-form answer,
-// and skip. Answers go to POST /api/sessions/:id/input.
+// Open ask_user questionnaire. The card host stays hidden; the dialog is the UI.
+let questionWindow = null;
+let questionRequest = null;
+let questionNotified = null;
+
+function questionsOf(pending) {
+  if (pending.questions && pending.questions.length) return pending.questions;
+  const options = pending.options || [];
+  if (options.length) {
+    return [{
+      id: "q1",
+      kind: "single",
+      question: pending.question,
+      header: null,
+      options: options.map((label) => ({ label, description: null, other: false })),
+    }];
+  }
+  return [{ id: "q1", kind: "text", question: pending.question, header: null, options: [] }];
+}
+
+function answerTitle(question) {
+  const raw = (question.header && question.header.trim()) || question.question || "";
+  const line = String(raw).split(/\r?\n/)[0] || "";
+  const title = [...line].filter((ch) => ch !== "：" && ch !== ":").slice(0, 80).join("").trim();
+  return title || "问题";
+}
+
+function formatQuestionAnswers(questions, values) {
+  return questions.map((question, index) => {
+    const value = String(values[index] || "").replace(/\r?\n/g, " ").trim();
+    return `${index + 1}. ${answerTitle(question)}：${value}`;
+  }).join("\n");
+}
+
+function notifyQuestion(pending) {
+  if (questionNotified === pending.request_id || typeof Notification === "undefined") return;
+  questionNotified = pending.request_id;
+  const title = "Blora 提问";
+  const body = pending.question || "";
+  const show = () => {
+    try { new Notification(title, { body }); } catch (_) { /* dialog still works */ }
+  };
+  if (Notification.permission === "granted") show();
+  else if (Notification.permission === "default" && Notification.requestPermission) {
+    Notification.requestPermission().then((result) => {
+      if (result === "granted") show();
+    }).catch(() => {});
+  }
+}
+
 function renderQuestion(session) {
   const host = document.querySelector("#session-question");
-  if (!host) return;
-  const pending = session && session.pending_input;
-  if (!pending) {
+  if (host) {
     host.hidden = true;
     host.replaceChildren();
-    delete host.dataset.request;
+  }
+  const pending = session && session.pending_input;
+  if (!pending || !window.BloraDialogs) {
+    if (questionWindow && !questionWindow.closed) questionWindow.close(true);
+    questionWindow = null;
+    questionRequest = null;
     return;
   }
-  if (host.dataset.request === pending.request_id && !host.hidden) return;
-  host.dataset.request = pending.request_id;
-  host.hidden = false;
-  host.replaceChildren();
+  if (questionWindow && questionRequest === pending.request_id) return;
+  if (questionWindow && !questionWindow.closed) questionWindow.close(true);
+  const questions = questionsOf(pending);
   const sessionId = state.sessionId;
-  const heading = document.createElement("p");
-  heading.className = "ba-question__label";
-  heading.textContent = "Blora 需要你的决定";
-  const text = document.createElement("p");
-  text.className = "ba-question__text";
-  text.textContent = pending.question;
-  const options = document.createElement("div");
-  options.className = "ba-question__options";
-  const form = document.createElement("form");
-  form.className = "ba-question__form";
-  const input = document.createElement("input");
-  input.className = "blora-input";
-  input.placeholder = "输入回答…";
-  input.setAttribute("aria-label", "回答");
-  input.maxLength = 8000;
+  const requestId = pending.request_id;
+  const model = questions.map(() => ({ choice: null, checks: [], other: "", text: "", picked: "", browse: "" }));
+  questions.forEach((question, index) => {
+    model[index].checks = (question.options || []).map(() => false);
+  });
+  notifyQuestion(pending);
+  const win = window.BloraDialogs.open("ask-user", {
+    title: "Blora 提问",
+    onClose(result) {
+      if (questionWindow === win) {
+        questionWindow = null;
+        questionRequest = null;
+      }
+      if (result || state.sessionId !== sessionId) return;
+      api(`/api/sessions/${encodeURIComponent(sessionId)}/input`, {
+        method: "POST",
+        body: JSON.stringify({ request_id: requestId, answer: null }),
+      }).catch((error) => showAlert(error.message));
+    },
+  });
+  questionWindow = win;
+  questionRequest = requestId;
+  const root = document.createElement("div");
+  root.className = "ba-ask";
   const submit = document.createElement("button");
-  submit.type = "submit";
+  submit.type = "button";
   submit.className = "blora-button";
   submit.dataset.variant = "primary";
   submit.dataset.size = "sm";
-  submit.textContent = "回答";
+  submit.textContent = "提交";
+  const valueOf = (index) => {
+    const question = questions[index];
+    const row = model[index];
+    const kind = question.kind;
+    if (kind === "single" || kind === "boolean") {
+      if (row.choice == null) return "";
+      const option = (question.options || [])[row.choice];
+      if (!option) return "";
+      return option.other ? row.other.trim() : option.label;
+    }
+    if (kind === "multi") {
+      const parts = [];
+      (question.options || []).forEach((option, optionIndex) => {
+        if (!row.checks[optionIndex]) return;
+        parts.push(option.other ? row.other.trim() : option.label);
+      });
+      if (parts.some((part) => !part)) return "";
+      return parts.join(", ");
+    }
+    if (kind === "text") return row.text.trim();
+    return row.picked || "";
+  };
+  const refresh = () => {
+    submit.disabled = questions.some((_, index) => !valueOf(index));
+  };
+  const paintChoices = (block, index) => {
+    const question = questions[index];
+    const options = document.createElement("div");
+    options.className = "ba-ask__options";
+    (question.options || []).forEach((option, optionIndex) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "blora-button";
+      button.dataset.size = "sm";
+      const selected = question.kind === "multi"
+        ? model[index].checks[optionIndex]
+        : model[index].choice === optionIndex;
+      button.dataset.variant = selected ? "primary" : "ghost";
+      button.setAttribute("aria-pressed", String(selected));
+      button.textContent = option.other ? "其他" : option.label;
+      button.addEventListener("click", () => {
+        if (question.kind === "multi") model[index].checks[optionIndex] = !model[index].checks[optionIndex];
+        else model[index].choice = optionIndex;
+        paintQuestion(block, index);
+        refresh();
+      });
+      options.append(button);
+    });
+    block.append(options);
+    const otherOn = (question.options || []).some((option, optionIndex) => option.other && (
+      question.kind === "multi" ? model[index].checks[optionIndex] : model[index].choice === optionIndex
+    ));
+    if (otherOn) {
+      const field = document.createElement("input");
+      field.className = "blora-input";
+      field.maxLength = 2000;
+      field.placeholder = "其他";
+      field.setAttribute("aria-label", "其他");
+      field.value = model[index].other;
+      field.addEventListener("input", () => {
+        model[index].other = field.value;
+        refresh();
+      });
+      block.append(field);
+      field.focus();
+    }
+  };
+  const loadPicker = async (block, index) => {
+    const question = questions[index];
+    const picker = document.createElement("div");
+    picker.className = "ba-ask__picker";
+    const crumb = document.createElement("p");
+    crumb.className = "ba-ask__prompt";
+    crumb.textContent = model[index].browse || ".";
+    picker.append(crumb);
+    if (question.kind === "folder") {
+      const pick = document.createElement("button");
+      pick.type = "button";
+      pick.className = "blora-button";
+      pick.dataset.variant = "secondary";
+      pick.dataset.size = "sm";
+      pick.textContent = "选择此文件夹";
+      pick.addEventListener("click", () => {
+        model[index].picked = model[index].browse || ".";
+        paintQuestion(block, index);
+        refresh();
+      });
+      picker.append(pick);
+    }
+    if (model[index].browse) {
+      const parent = document.createElement("button");
+      parent.type = "button";
+      parent.className = "blora-button";
+      parent.dataset.variant = "ghost";
+      parent.dataset.size = "sm";
+      parent.textContent = "..";
+      parent.addEventListener("click", () => {
+        const path = model[index].browse;
+        const slash = path.lastIndexOf("/");
+        model[index].browse = slash < 0 ? "" : path.slice(0, slash);
+        paintQuestion(block, index);
+      });
+      picker.append(parent);
+    }
+    const list = document.createElement("div");
+    list.className = "ba-ask__options";
+    picker.append(list);
+    block.append(picker);
+    const requested = model[index].browse || ".";
+    try {
+      const query = new URLSearchParams({ path: requested });
+      if (sessionId) query.set("session", sessionId);
+      const data = await api(`/api/workspace/list?${query}`);
+      if (questionWindow !== win || model[index].browse !== (requested === "." ? "" : requested)) return;
+      const names = (data.entries || []).filter((name) => ![".", "..", "./", "../"].includes(name));
+      names.forEach((name) => {
+        const directory = name.endsWith("/");
+        if (!directory && question.kind === "folder") return;
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "blora-button";
+        button.dataset.variant = "ghost";
+        button.dataset.size = "sm";
+        button.textContent = name;
+        button.addEventListener("click", () => {
+          const bare = directory ? name.slice(0, -1) : name;
+          const next = model[index].browse ? `${model[index].browse}/${bare}` : bare;
+          if (directory) {
+            model[index].browse = next;
+            paintQuestion(block, index);
+          } else if (question.kind === "file") {
+            model[index].picked = next;
+            paintQuestion(block, index);
+            refresh();
+          }
+        });
+        list.append(button);
+      });
+    } catch (error) {
+      const note = document.createElement("p");
+      note.className = "ba-ask__prompt";
+      note.textContent = error.message;
+      picker.append(note);
+    }
+  };
+  const paintQuestion = (block, index) => {
+    const question = questions[index];
+    block.replaceChildren();
+    const title = document.createElement("h3");
+    title.textContent = answerTitle(question);
+    const prompt = document.createElement("p");
+    prompt.className = "ba-ask__prompt";
+    prompt.textContent = question.question;
+    block.append(title, prompt);
+    if (question.kind === "text") {
+      const field = document.createElement("input");
+      field.className = "blora-input";
+      field.maxLength = 2000;
+      field.setAttribute("aria-label", answerTitle(question));
+      field.value = model[index].text;
+      field.addEventListener("input", () => {
+        model[index].text = field.value;
+        refresh();
+      });
+      block.append(field);
+    } else if (question.kind === "folder" || question.kind === "file") {
+      if (model[index].picked) {
+        const picked = document.createElement("p");
+        picked.className = "ba-ask__prompt";
+        picked.textContent = `已选 ${model[index].picked}`;
+        block.append(picked);
+      }
+      loadPicker(block, index);
+    } else {
+      paintChoices(block, index);
+    }
+  };
+  questions.forEach((question, index) => {
+    const block = document.createElement("section");
+    block.className = "ba-ask__question";
+    root.append(block);
+    paintQuestion(block, index);
+  });
+  const actions = document.createElement("div");
+  actions.className = "ba-ask__actions";
   const skip = document.createElement("button");
   skip.type = "button";
   skip.className = "blora-button";
   skip.dataset.variant = "ghost";
   skip.dataset.size = "sm";
   skip.textContent = "跳过";
-  const controls = [submit, skip, input];
-  const send = async (answer) => {
-    controls.forEach((control) => { control.disabled = true; });
-    options.querySelectorAll("button").forEach((button) => { button.disabled = true; });
+  skip.addEventListener("click", () => win.close());
+  submit.addEventListener("click", async () => {
+    const values = questions.map((_, index) => valueOf(index));
+    if (values.some((value) => !value)) return;
+    submit.disabled = true;
     try {
       await api(`/api/sessions/${encodeURIComponent(sessionId)}/input`, {
         method: "POST",
-        body: JSON.stringify({ request_id: pending.request_id, answer }),
+        body: JSON.stringify({
+          request_id: requestId,
+          answer: formatQuestionAnswers(questions, values),
+        }),
       });
-      if (state.sessionId === sessionId) {
-        host.hidden = true;
-        host.replaceChildren();
-        delete host.dataset.request;
-      }
+      win.close(true);
     } catch (error) {
-      controls.forEach((control) => { control.disabled = false; });
-      options.querySelectorAll("button").forEach((button) => { button.disabled = false; });
       showAlert(error.message);
+      refresh();
     }
-  };
-  (pending.options || []).forEach((option, index) => {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "blora-button";
-    button.dataset.variant = index === 0 ? "primary" : "ghost";
-    button.dataset.size = "sm";
-    button.textContent = option;
-    button.addEventListener("click", () => send(option));
-    options.append(button);
   });
-  form.addEventListener("submit", (event) => {
-    event.preventDefault();
-    const answer = input.value.trim();
-    if (answer) send(answer);
-  });
-  skip.addEventListener("click", () => send(null));
-  form.append(input, submit, skip);
-  host.append(heading, text);
-  if (options.childElementCount) host.append(options);
-  host.append(form);
-  if (!(pending.options || []).length) input.focus();
+  actions.append(skip, submit);
+  root.append(actions);
+  win.body.replaceChildren(root);
+  refresh();
 }
 
 function renderGallery(items) {

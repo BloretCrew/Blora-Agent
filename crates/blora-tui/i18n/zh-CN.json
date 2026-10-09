@@ -88,5 +88,18 @@
   "harness.native_settings": "Blora 原生设置",
   "harness.boundary": "仅前台会话使用所选内核。外部 CLI 使用自身登录、模型、规则、插件和权限/沙盒；不受 Blora 原生配置控制。后台任务、Git 辅助和 Imagine 保持 Blora 原生执行。运行中禁止切换；未安装项不可选。",
   "harness.permission_scope": "外部内核使用自身权限和沙盒。此选择仅映射到 CLI 支持的模式；不支持的组合会被拒绝，Blora 原生边界不覆盖外部工具。",
-  "harness.bypass_warning": "风险：跳过外部 CLI 权限确认可能删除文件、泄露密钥或执行危险命令。Blora 原生网络、路径和沙盒约束不覆盖外部 CLI。仅在可信工作区启用。\n\ny 明确启用 · n / Esc 取消（Enter 不会启用）"
+  "harness.bypass_warning": "风险：跳过外部 CLI 权限确认可能删除文件、泄露密钥或执行危险命令。Blora 原生网络、路径和沙盒约束不覆盖外部 CLI。仅在可信工作区启用。\n\ny 明确启用 · n / Esc 取消（Enter 不会启用）",
+  "question.title": "Blora 提问",
+  "question.label": "Blora 提问",
+  "question.other": "其他",
+  "question.yes": "是",
+  "question.no": "否",
+  "question.other_input": "其他：",
+  "question.pick_folder": "选择此文件夹",
+  "question.picked": "已选",
+  "question.ready": "Enter 提交",
+  "question.pending": "还有题目未回答",
+  "question.hint": "Tab 切换 · Space 选择 · Esc 跳过",
+  "question.sent": "已回答",
+  "question.dismissed": "已跳过"
 }

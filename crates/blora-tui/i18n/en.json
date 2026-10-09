@@ -88,5 +88,18 @@
   "harness.native_settings": "Blora native settings",
   "harness.boundary": "Only foreground chat uses the selected harness. External CLIs use their own login, models, rules, plugins, permissions and sandbox, not Blora native configuration. Background tasks, Git helpers and Imagine remain native. Switching is disabled while running; missing CLIs cannot be selected.",
   "harness.permission_scope": "External harnesses use their own permissions and sandbox. This selection maps only to supported CLI modes; unsupported combinations are rejected. Blora native boundaries do not cover external tools.",
-  "harness.bypass_warning": "Risk: bypassing external CLI approvals can delete files, expose secrets or run dangerous commands. Blora native network, path and sandbox constraints do not cover external CLIs. Enable only in trusted workspaces.\n\ny Enable explicitly · n / Esc Cancel (Enter does not enable)"
+  "harness.bypass_warning": "Risk: bypassing external CLI approvals can delete files, expose secrets or run dangerous commands. Blora native network, path and sandbox constraints do not cover external CLIs. Enable only in trusted workspaces.\n\ny Enable explicitly · n / Esc Cancel (Enter does not enable)",
+  "question.title": "Blora question",
+  "question.label": "Blora question",
+  "question.other": "Other",
+  "question.yes": "Yes",
+  "question.no": "No",
+  "question.other_input": "Other:",
+  "question.pick_folder": "Select this folder",
+  "question.picked": "Selected",
+  "question.ready": "Enter to submit",
+  "question.pending": "Some questions are unanswered",
+  "question.hint": "Tab switches · Space selects · Esc skips",
+  "question.sent": "Answered",
+  "question.dismissed": "Skipped"
 }

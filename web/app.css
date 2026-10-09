@@ -225,6 +225,57 @@ blora-sidebar-layout {
   min-width: 0;
 }
 
+
+.ba-ask {
+  display: grid;
+  gap: var(--blora-space-3);
+  max-height: min(70vh, 36rem);
+  overflow: auto;
+}
+
+.ba-ask__question {
+  display: grid;
+  gap: var(--blora-space-2);
+  margin: 0;
+  min-width: 0;
+}
+
+.ba-ask__question h3,
+.ba-ask__prompt {
+  margin: 0;
+}
+
+.ba-ask__prompt {
+  color: var(--blora-color-text-muted);
+  overflow-wrap: anywhere;
+}
+
+.ba-ask__options,
+.ba-ask__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--blora-space-2);
+}
+
+.ba-ask__actions {
+  justify-content: flex-end;
+}
+
+.ba-ask__picker {
+  display: grid;
+  gap: var(--blora-space-2);
+  max-height: 14rem;
+  overflow: auto;
+  padding: var(--blora-space-2);
+  border: var(--blora-border-width) solid var(--blora-color-border);
+  border-radius: var(--blora-radius-md);
+}
+
+.ba-ask .blora-input {
+  width: 100%;
+  min-width: 0;
+}
+
 /* Folded model reasoning inside a transcript bubble */
 .ba-reasoning > summary {
   cursor: pointer;

@@ -19,6 +19,7 @@ pub enum DialogId {
     Permission,
     Harness,
     Onboarding,
+    Question,
 }
 
 /// Dialog order from bottom to top, with one entry per live dialog.
