@@ -144,6 +144,25 @@ impl Runtime {
             .search_transcripts(query, limit, session_id, user.as_deref())
     }
 
+    /// Search every session visible in the TUI, including the current session.
+    pub fn session_search_page(
+        &self,
+        query: &str,
+        limit: usize,
+        cursor: Option<&(String, i64)>,
+    ) -> Result<(Vec<blora_storage::SearchMatch>, Option<(String, i64)>)> {
+        self.store
+            .search_transcripts_page(query, limit, None, None, cursor)
+    }
+
+    /// Batch latest message previews with canonical last-event sequences.
+    pub fn session_message_previews(
+        &self,
+        session_ids: &[SessionId],
+    ) -> Result<Vec<(SessionId, u64, Option<String>)>> {
+        self.store.session_message_previews(session_ids)
+    }
+
     pub(crate) fn session_search_text(
         &self,
         session_id: &SessionId,

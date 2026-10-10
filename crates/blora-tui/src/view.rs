@@ -275,12 +275,7 @@ pub struct FolderPicker {
     pub minimized: bool,
 }
 
-#[derive(Clone, Debug)]
-pub struct SessionPicker {
-    pub selected: usize,
-    pub fullscreen: bool,
-    pub minimized: bool,
-}
+pub use crate::session_picker::SessionPicker;
 
 #[derive(Clone, Debug)]
 pub struct ToolCallDetail {
@@ -608,6 +603,7 @@ pub enum Hit {
     FolderPickerOpen,
     SessionPicker,
     SessionPickerRow(usize),
+    SessionSearch,
     Mode,
     ModeRow(usize),
     CancelRun,
@@ -684,6 +680,7 @@ pub struct HitMap {
     pub question_options: Vec<(Rect, usize, usize)>,
     pub question_rows: Vec<(Rect, usize)>,
     pub session_picker: Option<Rect>,
+    pub session_search: Option<Rect>,
     pub session_picker_rows: Vec<(Rect, usize)>,
     pub mode: Option<Rect>,
     pub mode_rows: Vec<(Rect, usize)>,
@@ -895,6 +892,12 @@ impl HitMap {
             .is_some_and(|rect| contains(rect, col, row))
         {
             return Some(Hit::ProjectPicker);
+        }
+        if self
+            .session_search
+            .is_some_and(|rect| contains(rect, col, row))
+        {
+            return Some(Hit::SessionSearch);
         }
         for (rect, idx) in &self.session_picker_rows {
             if contains(*rect, col, row) {
@@ -1232,6 +1235,233 @@ fn retheme_layer(buffer: &mut ratatui::buffer::Buffer, old: Theme, new: Theme) {
     }
 }
 
+fn session_relative_time(
+    then: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
+    let seconds = (now - then).num_seconds().max(0);
+    let (key, fallback, count) = match seconds {
+        0..=9 => ("session.time.now", "刚刚", 0),
+        10..=59 => ("session.time.seconds", "{count} 秒前", seconds),
+        60..=3599 => ("session.time.minutes", "{count} 分钟前", seconds / 60),
+        3600..=86399 => ("session.time.hours", "{count} 小时前", seconds / 3600),
+        _ => ("session.time.days", "{count} 天前", seconds / 86400),
+    };
+    i18n::tr(key, fallback).replace("{count}", &count.to_string())
+}
+
+fn render_session_picker(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    picker: &SessionPicker,
+    sessions: &[SessionSummary],
+    pointer: Option<(u16, u16)>,
+    theme: &Theme,
+) -> HitMap {
+    let mut hits = HitMap {
+        modal: true,
+        ..HitMap::default()
+    };
+    let Some(outer) = dialog_outer(
+        area,
+        110,
+        area.height.saturating_sub(2),
+        picker.fullscreen,
+        picker.minimized,
+    ) else {
+        return hits;
+    };
+    let inner = paint_dialog_frame(
+        frame,
+        outer,
+        &i18n::tr("dialog.sessions", "会话"),
+        pointer,
+        theme,
+        &mut hits,
+    );
+    if picker.minimized || inner.height < 2 {
+        return hits;
+    }
+    let search = Rect::new(inner.x, inner.y + 1, inner.width, 1);
+    hits.session_search = Some(search);
+    let label = i18n::tr("session.search", "搜索会话");
+    let query = if picker.query.is_empty() {
+        i18n::tr("session.search.placeholder", "输入标题或内容关键词…")
+    } else {
+        picker.query.clone()
+    };
+    frame.render_widget(
+        Paragraph::new(ellipsize(
+            &format!("{label}: {query}"),
+            search.width as usize,
+        ))
+        .style(theme.fg(theme.text).bg(theme.bg_select)),
+        search,
+    );
+    let footer_height = u16::from(inner.height >= 7);
+    let body = Rect::new(
+        inner.x,
+        search.bottom(),
+        inner.width,
+        inner.height.saturating_sub(2 + footer_height),
+    );
+    if footer_height > 0 {
+        let hint = Rect::new(inner.x, inner.bottom() - 1, inner.width, 1);
+        frame.render_widget(
+            Paragraph::new(ellipsize(
+                &i18n::tr(
+                    "session.hint",
+                    "输入搜索 · ↑/↓ 选择 · Enter 打开 · Esc 关闭",
+                ),
+                hint.width as usize,
+            ))
+            .style(theme.mute()),
+            hint,
+        );
+    }
+    if body.height == 0 || body.width == 0 {
+        return hits;
+    }
+    let width = body.width as usize;
+    let content_count = picker
+        .rows
+        .iter()
+        .filter(|row| row.content.is_some())
+        .count();
+    let status = if let Some(error) = &picker.error {
+        i18n::tr("session.search.error", "内容搜索失败：{error}").replace("{error}", error)
+    } else if picker.searching {
+        i18n::tr("session.search.searching", "正在深入搜索会话内容…")
+    } else {
+        i18n::tr("session.search.done", "内容匹配 · {count} 条结果")
+            .replace("{count}", &content_count.to_string())
+    };
+    let needle = picker.query.trim().to_ascii_lowercase();
+    let now = chrono::Utc::now();
+    let mut lines: Vec<(Option<usize>, Line<'static>)> = vec![(
+        None,
+        Line::styled(
+            ellipsize(&i18n::tr("session.matches", "会话"), width),
+            theme.mute(),
+        ),
+    )];
+    let mut content_started = false;
+    for (index, row) in picker.rows.iter().enumerate() {
+        if row.content.is_some() && !content_started {
+            lines.push((
+                None,
+                Line::styled(
+                    ellipsize(&status, width),
+                    if picker.error.is_some() {
+                        theme.fg(theme.rust)
+                    } else {
+                        theme.mute()
+                    },
+                ),
+            ));
+            content_started = true;
+        }
+        let Some(session) = sessions.iter().find(|session| session.id == row.id) else {
+            continue;
+        };
+        let title = session
+            .title
+            .as_deref()
+            .filter(|title| !title.trim().is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| i18n::tr("session.untitled", "未命名会话"));
+        let selected = index == picker.selected;
+        let project = Path::new(&session.workspace_path)
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| i18n::tr("session.project.none", "无项目"));
+        let metadata = format!(
+            "{project} · {}",
+            session_relative_time(session.updated_at, now)
+        );
+        let metadata = ellipsize(&metadata, width.saturating_sub(2) / 2);
+        let title_width = width.saturating_sub(2 + metadata.width() + 2);
+        let title = ellipsize(&sanitize_title(&title), title_width);
+        let gap = width.saturating_sub(2 + title.width() + metadata.width());
+        let mut spans = vec![Span::styled(
+            if selected { "❯ " } else { "  " },
+            theme.fg(theme.rose),
+        )];
+        spans.extend(highlight_spans(&title, Some(&needle), theme));
+        spans.push(Span::raw(" ".repeat(gap)));
+        spans.push(Span::styled(metadata, theme.mute()));
+        lines.push((Some(index), Line::from(spans)));
+        let preview = row
+            .content
+            .as_deref()
+            .or_else(|| {
+                picker
+                    .previews
+                    .get(row.id.as_str())
+                    .filter(|(sequence, _)| *sequence == session.last_sequence)
+                    .map(|(_, text)| text.as_str())
+            })
+            .filter(|text| !text.trim().is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| i18n::tr("session.preview.empty", "暂无消息预览"));
+        let preview = ellipsize(&sanitize_title(&preview), width.saturating_sub(2));
+        let mut spans = vec![Span::raw("  ")];
+        if row.content.is_some() {
+            spans.extend(highlight_spans(&preview, Some(&needle), theme));
+        } else {
+            spans.push(Span::styled(preview, theme.mute()));
+        }
+        lines.push((Some(index), Line::from(spans)));
+    }
+    if !content_started
+        && (!picker.query.trim().is_empty() || picker.searching || picker.error.is_some())
+    {
+        lines.push((None, Line::styled(ellipsize(&status, width), theme.mute())));
+    }
+    if picker.rows.is_empty() {
+        lines.push((
+            None,
+            Line::styled(
+                ellipsize(&i18n::tr("session.matches.empty", "没有匹配的会话"), width),
+                theme.mute(),
+            ),
+        ));
+    }
+    let capacity = body.height as usize;
+    let mut start = picker
+        .scroll
+        .get()
+        .min(lines.len().saturating_sub(capacity));
+    if let Some(first) = lines
+        .iter()
+        .position(|(index, _)| *index == Some(picker.selected))
+    {
+        let last = (first + 1).min(first + capacity.saturating_sub(1));
+        if first < start {
+            start = first;
+        }
+        if last >= start + capacity {
+            start = last + 1 - capacity;
+        }
+    }
+    picker.scroll.set(start);
+    for (offset, (index, line)) in lines.into_iter().skip(start).take(capacity).enumerate() {
+        let rect = Rect::new(body.x, body.y + offset as u16, body.width, 1);
+        if let Some(index) = index {
+            hits.session_picker_rows.push((rect, index));
+            if index == picker.selected {
+                frame.render_widget(
+                    Block::default().style(Style::default().bg(theme.bg_select)),
+                    rect,
+                );
+            }
+        }
+        frame.render_widget(Paragraph::new(line), rect);
+    }
+    hits
+}
+
 fn render_layer(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -1421,80 +1651,9 @@ fn render_layer(
     if id == DialogId::Session
         && let Some(picker) = model.session_picker
     {
-        let matching: Vec<(usize, &SessionSummary)> = model.sessions.iter().enumerate().collect();
-        let visible = matching.len().clamp(1, 12) as u16;
-        let menu_width = 64u16.min(area.width.saturating_sub(4));
-        let menu_height = (visible + 4).min(area.height.saturating_sub(4));
-        let Some(menu_area) = dialog_outer(
-            area,
-            menu_width,
-            menu_height,
-            picker.fullscreen,
-            picker.minimized,
-        ) else {
-            return hits;
-        };
-        let mut dialog_hits = HitMap::default();
-        let inner = paint_dialog_frame(
-            frame,
-            menu_area,
-            &i18n::tr("dialog.sessions", "会话"),
-            model.pointer,
-            &theme,
-            &mut dialog_hits,
-        );
-        let [_, body, hint_row] = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Min(2),
-            Constraint::Length(1),
-        ])
-        .areas(inner);
-        hits.traffic_lights = dialog_hits.traffic_lights;
-        hits.modal_area = dialog_hits.modal_area;
-        if picker.minimized {
-            return hits;
-        }
-        let rows = split_n_rows(body, visible);
-        for (row_index, (session_index, session)) in
-            matching.iter().take(visible as usize).enumerate()
-        {
-            if let Some(rect) = rows.get(row_index).copied() {
-                hits.session_picker_rows.push((rect, *session_index));
-                let selected = row_index == picker.selected;
-                if selected {
-                    frame.render_widget(
-                        Block::default().style(Style::default().bg(theme.bg_select)),
-                        rect,
-                    );
-                }
-                let marker = if selected { "❯ " } else { "  " };
-                let fallback_title = i18n::tr("session.untitled", "未命名会话");
-                let title = session
-                    .title
-                    .as_deref()
-                    .filter(|title| !title.is_empty())
-                    .unwrap_or(&fallback_title);
-                let line = Line::from(vec![
-                    Span::styled(marker, theme.fg(theme.rose)),
-                    Span::styled(ellipsize(title, 30), theme.fg(theme.text)),
-                    Span::styled("  ", theme.mute()),
-                    Span::styled(short_id(session.id.as_str()), theme.mute()),
-                ]);
-                frame.render_widget(Paragraph::new(line).style(theme.base()), rect);
-            }
-        }
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                i18n::tr(
-                    "hint.select_confirm_close",
-                    "↑/↓ 选择 · Enter 确认 · Esc 关闭",
-                ),
-                theme.mute(),
-            )))
-            .style(theme.base()),
-            hint_row,
-        );
+        return render_session_picker(frame, area, picker, model.sessions, model.pointer, theme);
     }
+
     if id == DialogId::Mode
         && let Some(menu) = model.mode_menu
     {
@@ -2453,6 +2612,16 @@ fn render_header(
         theme.rose_bold(),
         true,
     );
+    if inner.width < 60 {
+        hits.session_picker = header_item(
+            &mut left,
+            left_area,
+            separator,
+            &i18n::tr("dialog.sessions", "会话"),
+            theme.fg(theme.text_dim),
+            false,
+        );
+    }
     hits.mode = header_item(
         &mut left,
         left_area,
@@ -2481,14 +2650,16 @@ fn render_header(
         theme.fg(theme.sage),
         true,
     );
-    hits.session_picker = header_item(
-        &mut left,
-        left_area,
-        separator,
-        &ellipsize(display_title, 28),
-        theme.fg(theme.text_dim),
-        true,
-    );
+    if hits.session_picker.is_none() {
+        hits.session_picker = header_item(
+            &mut left,
+            left_area,
+            separator,
+            &ellipsize(display_title, 28),
+            theme.fg(theme.text_dim),
+            true,
+        );
+    }
     frame.render_widget(Paragraph::new(left.clone()).style(theme.base()), left_area);
     if width > 0 {
         if model.running {
@@ -6026,11 +6197,6 @@ fn pretty_route_id(id: &str) -> String {
         .unwrap_or_else(|| id.to_owned())
 }
 
-fn short_id(id: &str) -> String {
-    let rest = id.split_once('_').map_or(id, |(_, rest)| rest);
-    rest.chars().take(8).collect()
-}
-
 pub(crate) fn spinner(tick: u64) -> char {
     let n = SPINNER.len();
     if n == 0 {
@@ -7364,6 +7530,147 @@ mod tests {
             lines.push(line);
         }
         (lines, hits)
+    }
+
+    fn picker_sessions(count: usize) -> Vec<SessionSummary> {
+        (0..count)
+            .map(|index| SessionSummary {
+                id: blora_types::SessionId::generate(),
+                title: Some(format!("中文会话 {index}")),
+                workspace_path: "/tmp/中文项目".to_owned(),
+                mode: Mode::Code,
+                status: blora_types::SessionStatus::Active,
+                updated_at: chrono::Utc::now(),
+                last_sequence: 1,
+            })
+            .collect()
+    }
+
+    fn render_picker_with_hits(
+        area: Rect,
+        picker: &SessionPicker,
+        sessions: &[SessionSummary],
+    ) -> (Terminal<TestBackend>, HitMap) {
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        let mut hits = HitMap::default();
+        terminal
+            .draw(|frame| {
+                hits =
+                    render_session_picker(frame, area, picker, sessions, None, &Theme::current());
+            })
+            .unwrap();
+        (terminal, hits)
+    }
+
+    #[test]
+    fn session_picker_layout_keeps_selected_rows_visible_on_narrow_screens() {
+        let sessions = picker_sessions(30);
+        for (width, height) in [(140, 40), (80, 24), (24, 10), (20, 5)] {
+            let mut picker = SessionPicker::new(&sessions, None, 0);
+            for selected in [0, 15, 29, 0] {
+                picker.selected = selected;
+                let (_, hits) =
+                    render_picker_with_hits(Rect::new(0, 0, width, height), &picker, &sessions);
+                let outer = hits.modal_area.unwrap();
+                let search = hits.session_search.unwrap();
+                assert_eq!(search.height, 1);
+                assert_eq!(hits.hit(search.x, search.y), Some(Hit::SessionSearch));
+                assert!(
+                    hits.session_picker_rows
+                        .iter()
+                        .any(|(_, index)| *index == selected)
+                );
+                for (rect, index) in &hits.session_picker_rows {
+                    assert!(rect.right() < outer.right());
+                    assert!(rect.bottom() < outer.bottom());
+                    assert_eq!(
+                        hits.hit(rect.x, rect.y),
+                        Some(Hit::SessionPickerRow(*index))
+                    );
+                }
+                assert_eq!(hits.hit(0, 0), None);
+                if width == 140 {
+                    assert_eq!(outer.width, 110);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn session_picker_content_rows_use_picker_indices_and_highlight_matches() {
+        let sessions = picker_sessions(2);
+        let mut picker = SessionPicker::new(&sessions, None, 0);
+        picker.query = "命中".to_owned();
+        picker.rows = vec![
+            crate::session_picker::PickerRow {
+                id: sessions[1].id.clone(),
+                content: None,
+            },
+            crate::session_picker::PickerRow {
+                id: sessions[0].id.clone(),
+                content: Some("这里命中正文".to_owned()),
+            },
+        ];
+        picker
+            .previews
+            .insert(sessions[1].id.to_string(), (1, "缓存预览".to_owned()));
+        picker.selected = 1;
+        picker.searching = true;
+        let (terminal, hits) =
+            render_picker_with_hits(Rect::new(0, 0, 120, 24), &picker, &sessions);
+        let text = frame_text(&terminal);
+        assert!(text.contains("正在深入搜索会话内容"), "{text}");
+        assert!(text.contains("缓存预览"), "{text}");
+        assert!(text.contains("这里命中正文"), "{text}");
+        assert_eq!(
+            hits.session_picker_rows
+                .iter()
+                .map(|(_, index)| *index)
+                .collect::<Vec<_>>(),
+            vec![0, 0, 1, 1]
+        );
+        let preview = hits.session_picker_rows[3].0;
+        assert_eq!(
+            terminal.backend().buffer()[(preview.x + 6, preview.y)].fg,
+            Theme::current().amber
+        );
+        picker.searching = false;
+        let (terminal, _) = render_picker_with_hits(Rect::new(0, 0, 120, 24), &picker, &sessions);
+        assert!(frame_text(&terminal).contains("1 条结果"));
+        picker.error = Some("测试错误".to_owned());
+        let (terminal, _) = render_picker_with_hits(Rect::new(0, 0, 120, 24), &picker, &sessions);
+        assert!(frame_text(&terminal).contains("内容搜索失败：测试错误"));
+    }
+
+    #[test]
+    fn session_picker_empty_fullscreen_and_tiny_layouts_are_safe() {
+        let picker = SessionPicker::new(&[], None, 0);
+        let (terminal, hits) = render_picker_with_hits(Rect::new(0, 0, 80, 24), &picker, &[]);
+        assert!(frame_text(&terminal).contains("没有匹配的会话"));
+        assert!(hits.session_picker_rows.is_empty());
+        let sessions = picker_sessions(1);
+        let mut picker = SessionPicker::new(&sessions, None, 0);
+        picker.fullscreen = true;
+        let (_, hits) = render_picker_with_hits(Rect::new(0, 0, 80, 24), &picker, &sessions);
+        assert_eq!(hits.modal_area.unwrap().width, 78);
+        assert_eq!(hits.session_picker_rows.len(), 2);
+        for (width, height) in [(19, 10), (20, 3), (20, 4)] {
+            let (_, hits) =
+                render_picker_with_hits(Rect::new(0, 0, width, height), &picker, &sessions);
+            assert!(hits.session_picker_rows.is_empty());
+        }
+    }
+
+    #[test]
+    fn session_picker_minimized_has_only_window_controls() {
+        let sessions = picker_sessions(1);
+        let mut picker = SessionPicker::new(&sessions, None, 0);
+        picker.minimized = true;
+        let (terminal, hits) = render_picker_with_hits(Rect::new(0, 0, 80, 24), &picker, &sessions);
+        assert!(hits.session_search.is_none());
+        assert!(hits.session_picker_rows.is_empty());
+        assert!(!frame_text(&terminal).contains("中文会话"));
+        assert!(hits.traffic_lights.iter().all(Option::is_some));
     }
 
     #[test]

@@ -9,6 +9,7 @@ mod markdown;
 mod onboarding;
 mod question;
 mod selection;
+mod session_picker;
 mod slash;
 mod theme;
 mod usage_stats;
@@ -230,6 +231,9 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut folder_picker: Option<view::FolderPicker> = None;
     let mut question_dialog: Option<question::QuestionForm> = None;
     let mut session_picker: Option<view::SessionPicker> = None;
+    let mut session_generation = 0u64;
+    let session_epoch = std::sync::atomic::AtomicU64::new(0);
+    let (session_tx, session_rx) = std::sync::mpsc::sync_channel::<session_picker::Update>(2);
     // PassPort user token of the logged-in user; drives the default provider.
     let mut passport_user_token: Option<String> = None;
     let mut passport_username = String::from("you");
@@ -330,6 +334,8 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut cancel = CancelToken::new();
     let mut cached: Option<(SessionId, blora_session::SessionProjection)> = None;
     let result = thread::scope(|scope| -> Result<()> {
+        let _session_cancel = session_picker::CancelOnDrop(&session_epoch);
+        let mut session_job: Option<thread::ScopedJoinHandle<'_, ()>> = None;
         let mut git_diff_job: Option<thread::ScopedJoinHandle<'_, ()>> = None;
         let mut job: Option<thread::ScopedJoinHandle<'_, Result<blora_types::RunId>>> = None;
         let mut git_generation: Option<thread::ScopedJoinHandle<'_, ()>> = None;
@@ -346,6 +352,29 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                 confirmed_permission = permission_mode;
             }
             refresh_sessions(runtime, &mut sessions, &mut index);
+            if session_job.as_ref().is_some_and(|job| job.is_finished()) {
+                if let Some(job) = session_job.take() {
+                    let _ = job.join();
+                }
+            }
+            if let Ok(update) = session_rx.try_recv() {
+                if let Some(picker) = session_picker.as_mut() {
+                    picker.apply(update, &sessions);
+                }
+            }
+            if let Some(picker) = session_picker.as_mut() {
+                picker.refresh(&sessions);
+                if session_job.is_none() && picker.ready() {
+                    let request = picker.request(&sessions);
+                    let tx = session_tx.clone();
+                    let epoch = &session_epoch;
+                    session_job = Some(
+                        scope.spawn(move || session_picker::work(runtime, request, epoch, tx)),
+                    );
+                }
+            } else {
+                session_epoch.store(u64::MAX, std::sync::atomic::Ordering::Relaxed);
+            }
             if let Some(guide) = onboarding.as_mut()
                 && let Some(user) = guide.poll()
             {
@@ -799,7 +828,14 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
             }
             let wait_ms = if dialog_visuals.active(animation_now) {
                 dialogs::ANIMATION_FRAME.as_millis() as u64
-            } else if job.is_some() || git_generation.is_some() || git_sync.is_some() {
+            } else if job.is_some()
+                || git_generation.is_some()
+                || git_sync.is_some()
+                || session_job.is_some()
+                || session_picker
+                    .as_ref()
+                    .is_some_and(|picker| picker.searching)
+            {
                 50
             } else {
                 200
@@ -841,7 +877,19 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                 }
                 match event {
                     Event::Paste(text) => {
-                        if top_dialog == Some(DialogId::Question) {
+                        if top_dialog == Some(DialogId::Session) {
+                            if let Some(picker) = session_picker.as_mut()
+                                && !picker.minimized
+                            {
+                                picker.query.push_str(&text.replace(['\r', '\n'], " "));
+                                session_generation += 1;
+                                session_epoch.store(
+                                    session_generation,
+                                    std::sync::atomic::Ordering::Relaxed,
+                                );
+                                picker.edit(&sessions, session_generation);
+                            }
+                        } else if top_dialog == Some(DialogId::Question) {
                             if let Some(form) = question_dialog.as_mut()
                                 && !form.minimized
                             {
@@ -1051,6 +1099,34 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             }
                             continue;
                         }
+                        if top_dialog == Some(DialogId::Session) && !minimized {
+                            if let Some(picker) = session_picker.as_mut() {
+                                let edited = match key.code {
+                                    KeyCode::Char(ch)
+                                        if !key.modifiers.intersects(
+                                            KeyModifiers::CONTROL | KeyModifiers::ALT,
+                                        ) =>
+                                    {
+                                        picker.query.push(ch);
+                                        true
+                                    }
+                                    KeyCode::Backspace => {
+                                        picker.query.pop();
+                                        true
+                                    }
+                                    _ => false,
+                                };
+                                if edited {
+                                    session_generation += 1;
+                                    session_epoch.store(
+                                        session_generation,
+                                        std::sync::atomic::Ordering::Relaxed,
+                                    );
+                                    picker.edit(&sessions, session_generation);
+                                    continue;
+                                }
+                            }
+                        }
                         if top_dialog == Some(DialogId::Folder)
                             && key
                                 .modifiers
@@ -1095,7 +1171,20 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             && key.modifiers.contains(KeyModifiers::CONTROL))
                             || key.code == KeyCode::Insert
                         {
-                            if top_dialog == Some(DialogId::Question) {
+                            if top_dialog == Some(DialogId::Session) {
+                                if let Some(text) = read_clipboard_text()
+                                    && let Some(picker) = session_picker.as_mut()
+                                    && !picker.minimized
+                                {
+                                    picker.query.push_str(&text.replace(['\r', '\n'], " "));
+                                    session_generation += 1;
+                                    session_epoch.store(
+                                        session_generation,
+                                        std::sync::atomic::Ordering::Relaxed,
+                                    );
+                                    picker.edit(&sessions, session_generation);
+                                }
+                            } else if top_dialog == Some(DialogId::Question) {
                                 if let Some(text) = read_clipboard_text()
                                     && let Some(form) = question_dialog.as_mut()
                                     && !form.minimized
@@ -2009,13 +2098,13 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     && session_picker.is_some() =>
                             {
                                 if let Some(picker) = session_picker.take() {
-                                    select_mode_session(
-                                        runtime,
-                                        &sessions,
-                                        &mut index,
-                                        (0..sessions.len()).collect(),
-                                        picker.selected,
-                                    );
+                                    if let Some(row) = picker.rows.get(picker.selected)
+                                        && let Some(target) =
+                                            sessions.iter().position(|session| session.id == row.id)
+                                    {
+                                        index = target;
+                                        cached = None;
+                                    }
                                 }
                             }
                             KeyCode::Up
@@ -2023,7 +2112,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     && session_picker.is_some() =>
                             {
                                 if let Some(picker) = session_picker.as_mut() {
-                                    picker.selected = picker.selected.saturating_sub(1);
+                                    picker.move_selection(false);
                                 }
                             }
                             KeyCode::Down
@@ -2031,8 +2120,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     && session_picker.is_some() =>
                             {
                                 if let Some(picker) = session_picker.as_mut() {
-                                    picker.selected =
-                                        (picker.selected + 1).min(sessions.len().saturating_sub(1));
+                                    picker.move_selection(true);
                                 }
                             }
                             KeyCode::Esc
@@ -2231,6 +2319,15 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     };
                                 };
                                 match top_dialog {
+                                    Some(DialogId::Session) => {
+                                        if let Some(picker) = session_picker.as_mut()
+                                            && !picker.minimized
+                                        {
+                                            for _ in 0..3 {
+                                                picker.move_selection(!up);
+                                            }
+                                        }
+                                    }
                                     Some(DialogId::Harness) => {
                                         if let Some(dialog) = harness_dialog.as_mut() {
                                             dialog.key(if up {
@@ -2920,19 +3017,30 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     continue;
                                 }
                                 if let Some(view::Hit::SessionPickerRow(session_index)) = hit {
-                                    index = session_index;
+                                    if let Some(row) = session_picker
+                                        .as_ref()
+                                        .and_then(|picker| picker.rows.get(session_index))
+                                        && let Some(target) =
+                                            sessions.iter().position(|session| session.id == row.id)
+                                    {
+                                        index = target;
+                                    }
                                     session_picker = None;
                                     cached = None;
                                     continue;
                                 }
                                 if matches!(hit, Some(view::Hit::SessionPicker)) {
-                                    let selected = index;
+                                    session_generation += 1;
+                                    session_epoch.store(
+                                        session_generation,
+                                        std::sync::atomic::Ordering::Relaxed,
+                                    );
                                     dialog_stack.activate(DialogId::Session);
-                                    session_picker = Some(view::SessionPicker {
-                                        selected,
-                                        fullscreen: false,
-                                        minimized: false,
-                                    });
+                                    session_picker = Some(view::SessionPicker::new(
+                                        &sessions,
+                                        sessions.get(index).map(|session| &session.id),
+                                        session_generation,
+                                    ));
                                     continue;
                                 }
                                 if let Some(view::Hit::ModeRow(index)) = hit {
@@ -3846,18 +3954,6 @@ fn project_paths(sessions: &[blora_storage::SessionSummary]) -> Vec<String> {
 
 fn project_count(sessions: &[blora_storage::SessionSummary]) -> usize {
     project_paths(sessions).len()
-}
-
-fn select_mode_session(
-    _runtime: &Runtime,
-    _sessions: &[blora_storage::SessionSummary],
-    index: &mut usize,
-    indices: Vec<usize>,
-    selected: usize,
-) {
-    if let Some(session_index) = indices.get(selected) {
-        *index = *session_index;
-    }
 }
 
 fn passport_display_name(user: &blora_storage::UserRecord) -> Option<String> {
@@ -5781,6 +5877,7 @@ fn dialog_accepts_hit(top: Option<DialogId>, hit: Option<&view::Hit>) -> bool {
                 Some(Hit::FolderPickerRow(_) | Hit::FolderPickerOpen)
             )
             | (Some(DialogId::Session), Some(Hit::SessionPickerRow(_)))
+            | (Some(DialogId::Session), Some(Hit::SessionSearch))
             | (Some(DialogId::Mode), Some(Hit::ModeRow(_)))
             | (Some(DialogId::Permission), Some(Hit::PermissionRow(_)))
             | (Some(DialogId::Harness), Some(Hit::HarnessRow(_)))
