@@ -312,6 +312,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut permission_mode = PermissionMode::Ask;
     let mut confirmed_permission = permission_mode;
     let mut scroll = 0usize;
+    let mut sidebar = view::SidebarState::default();
     let mut search: Option<String> = None;
     let mut hide_tools = false;
     let mut slash_selected = 0usize;
@@ -712,6 +713,9 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                         );
                         return;
                     }
+                    if view::canvas_regions(frame.area()).0.is_some() {
+                        sidebar.sync(&sessions, index, &active_workspace, frame.area().height);
+                    }
                     hits = view::draw_animated(
                         frame,
                         Some(&view::FrameModel {
@@ -719,6 +723,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             workspace: &active_workspace,
                             sessions: &sessions,
                             index,
+                            sidebar: &sidebar,
                             projection,
                             pending: &pending,
                             input: &input,
@@ -2409,6 +2414,13 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     _ => {}
                                 }
                             }
+                            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                                if sidebar.scroll(
+                                    &hits,
+                                    mouse.column,
+                                    mouse.row,
+                                    mouse.kind == MouseEventKind::ScrollUp,
+                                ) => {}
                             MouseEventKind::ScrollUp => {
                                 if hits.over_slash(mouse.column, mouse.row) {
                                     slash_selected = slash_selected.saturating_sub(1);
@@ -2971,6 +2983,23 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                         &model_override,
                                         logged_in,
                                     ));
+                                    continue;
+                                }
+                                if let Some(view::Hit::SidebarSession(target)) = hit {
+                                    if target < sessions.len() {
+                                        index = target;
+                                        cached = None;
+                                    }
+                                    continue;
+                                }
+                                if hit == Some(view::Hit::SidebarSettings) {
+                                    dialog_stack.activate(DialogId::Settings);
+                                    settings_dialog = Some(view::SettingsDialog {
+                                        page: 0,
+                                        selected: 0,
+                                        fullscreen: false,
+                                        minimized: false,
+                                    });
                                     continue;
                                 }
                                 if let Some(view::Hit::ProjectPickerRow(project_index)) = hit {
@@ -6040,6 +6069,14 @@ mod dialog_input_tests {
             DialogId::Question,
         ] {
             assert!(!dialog_accepts_hit(Some(id), Some(&view::Hit::Composer)));
+            assert!(!dialog_accepts_hit(
+                Some(id),
+                Some(&view::Hit::SidebarSession(0))
+            ));
+            assert!(!dialog_accepts_hit(
+                Some(id),
+                Some(&view::Hit::SidebarSettings)
+            ));
             assert!(!dialog_accepts_hit(Some(id), Some(&view::Hit::Allow)));
             assert!(!dialog_accepts_hit(Some(id), None));
             assert!(dialog_accepts_hit(Some(id), Some(&view::Hit::TrafficClose)));
@@ -6140,7 +6177,21 @@ mod dialog_input_tests {
     fn paste_is_isolated_and_targets_only_active_editable_field() {
         let mut input = "draft".to_owned();
         let mut preview = None;
-        let mut provider = Some(open_add_provider_dialog());
+        let mut provider = Some(view::AddProviderDialog {
+            step: view::AddProviderStep::Catalog,
+            catalog: Vec::new(),
+            selected: 0,
+            filter: String::new(),
+            custom_id: String::new(),
+            custom_base: String::new(),
+            api_key: String::new(),
+            format: blora_catalog::MessageFormat::Openai,
+            preview_models: Vec::new(),
+            resolved_base: String::new(),
+            error: None,
+            fullscreen: false,
+            minimized: false,
+        });
         provider.as_mut().unwrap().step = view::AddProviderStep::ApiKey;
         let mut git = None;
         paste_into_dialog(

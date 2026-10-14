@@ -147,5 +147,12 @@
   "question.pending": "Some questions are unanswered",
   "question.hint": "← → switch · ↑ ↓ select or change · Space confirms · Esc skips",
   "question.sent": "Answered",
-  "question.dismissed": "Skipped"
+  "question.dismissed": "Skipped",
+  "sidebar.new": "New session",
+  "sidebar.search": "Search sessions",
+  "sidebar.projects": "Projects",
+  "sidebar.recent": "Recent sessions",
+  "sidebar.empty": "No sessions",
+  "sidebar.settings": "Settings",
+  "sidebar.guest": "Not signed in"
 }

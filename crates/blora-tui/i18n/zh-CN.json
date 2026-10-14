@@ -147,5 +147,12 @@
   "question.pending": "还有题目未回答",
   "question.hint": "← → 切换 · ↑ ↓ 选择或换题 · Space 确定 · Esc 跳过",
   "question.sent": "已回答",
-  "question.dismissed": "已跳过"
+  "question.dismissed": "已跳过",
+  "sidebar.new": "新建会话",
+  "sidebar.search": "搜索会话",
+  "sidebar.projects": "项目",
+  "sidebar.recent": "最近会话",
+  "sidebar.empty": "暂无会话",
+  "sidebar.settings": "设置",
+  "sidebar.guest": "未登录"
 }
