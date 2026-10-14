@@ -1017,7 +1017,7 @@ pub(crate) fn canvas_regions(area: Rect) -> (Option<Rect>, Rect) {
 }
 
 fn sidebar_list_heights(height: u16) -> (usize, usize) {
-    let available = height.saturating_sub(10) as usize;
+    let available = height.saturating_sub(11) as usize;
     let projects = (available / 3).clamp(1, 4);
     (projects, available.saturating_sub(projects))
 }
@@ -1125,11 +1125,17 @@ fn sidebar_row(
         theme.rose_bold().bg(theme.bg_select)
     } else if hovered {
         theme.base().bg(theme.bg_select)
+    } else if hit.is_none() || matches!(hit, Some(Hit::ProjectPicker)) {
+        theme.dim().bg(theme.bg_raised)
     } else {
         theme.base().bg(theme.bg_raised)
     };
-    let text = ellipsize(&sanitize_title(text), area.width.saturating_sub(2) as usize);
-    frame.render_widget(Paragraph::new(format!(" {text}")).style(style), area);
+    let text = ellipsize(&sanitize_title(text), area.width.saturating_sub(3) as usize);
+    let marker = if selected { "›" } else { " " };
+    frame.render_widget(
+        Paragraph::new(format!("{marker} {text}")).style(style),
+        area,
+    );
     if let Some(hit) = hit {
         hits.sidebar_rows.push((area, hit));
     }
@@ -1154,7 +1160,10 @@ fn render_sidebar(
         );
     }
     let row = |y| Rect::new(area.x + 1, area.y + y, area.width - 3, 1);
-    sidebar_row(frame, row(1), "✦ Blora", None, true, model, theme, hits);
+    frame.render_widget(
+        Paragraph::new("  ✦ Blora").style(theme.rose_bold().bg(theme.bg_raised)),
+        row(1),
+    );
     sidebar_row(
         frame,
         row(3),
@@ -1201,7 +1210,7 @@ fn render_sidebar(
     ));
     hits.sidebar_sessions = Some(Rect::new(
         area.x,
-        area.y + 8 + project_height as u16,
+        area.y + 9 + project_height as u16,
         area.width - 1,
         session_height as u16,
     ));
@@ -1232,7 +1241,7 @@ fn render_sidebar(
     }
     sidebar_row(
         frame,
-        row(7 + project_height as u16),
+        row(8 + project_height as u16),
         &i18n::tr("sidebar.recent", "最近会话"),
         None,
         false,
@@ -1243,7 +1252,7 @@ fn render_sidebar(
     if indices.is_empty() {
         sidebar_row(
             frame,
-            row(8 + project_height as u16),
+            row(9 + project_height as u16),
             &i18n::tr("sidebar.empty", "暂无会话"),
             None,
             false,
@@ -1261,12 +1270,13 @@ fn render_sidebar(
         let title = model.sessions[*index]
             .title
             .as_deref()
-            .filter(|title| !title.trim().is_empty())
+            .map(str::trim)
+            .filter(|title| !title.is_empty() && *title != "tui")
             .map(str::to_owned)
             .unwrap_or_else(|| i18n::tr("session.untitled", "未命名会话"));
         sidebar_row(
             frame,
-            row(8 + project_height as u16 + visible as u16),
+            row(9 + project_height as u16 + visible as u16),
             &title,
             Some(Hit::SidebarSession(*index)),
             *index == model.index,
@@ -1285,7 +1295,7 @@ fn render_sidebar(
         theme,
         hits,
     );
-    let user = if model.user_label.is_empty() {
+    let user = if model.user_label.trim().is_empty() || model.user_label == "you" {
         i18n::tr("sidebar.guest", "未登录")
     } else {
         model.user_label.to_owned()
@@ -1690,7 +1700,8 @@ fn render_session_picker(
         let title = session
             .title
             .as_deref()
-            .filter(|title| !title.trim().is_empty())
+            .map(str::trim)
+            .filter(|title| !title.is_empty() && *title != "tui")
             .map(str::to_owned)
             .unwrap_or_else(|| i18n::tr("session.untitled", "未命名会话"));
         let selected = index == picker.selected;
@@ -7953,6 +7964,12 @@ mod tests {
             assert_eq!(hits.transcript.x, hits.composer.x);
             if visible {
                 assert_eq!(hits.sidebar.unwrap().width, 28);
+                let buffer = terminal.backend().buffer();
+                assert_eq!(buffer[(3, 1)].bg, Theme::current().bg_raised);
+                let projects = hits.sidebar_projects.unwrap();
+                let recent = hits.sidebar_sessions.unwrap();
+                assert_eq!(recent.y, projects.bottom() + 2);
+                assert!(frame_text(&terminal).contains("未登录"));
                 assert!(hits.sidebar_rows.iter().all(|(rect, _)| rect.right() < 28));
                 assert!(frame_text(&terminal).contains("暂无会话"));
                 assert_eq!(hits.hit(2, 3), Some(Hit::Hint(HintAction::New)));
@@ -7973,7 +7990,7 @@ mod tests {
         let mut sessions = picker_sessions(30);
         sessions[0].workspace_path = "/tmp/other".into();
         sessions[29].title = Some("很长的中文会话标题".repeat(10));
-        sessions[28].title = Some("  ".into());
+        sessions[28].title = Some("tui".into());
         let workspace = Path::new("/tmp/中文项目");
         let mut state = SidebarState::default();
         state.sync(&sessions, 29, workspace, 18);
@@ -7981,7 +7998,7 @@ mod tests {
         model.index = 29;
         let (terminal, hits) = sidebar_frame(100, 18, &model);
         assert_eq!(hits.sidebar_project_max, 0);
-        assert_eq!(hits.sidebar_session_max, 23);
+        assert_eq!(hits.sidebar_session_max, 24);
         assert!(
             hits.sidebar_rows
                 .iter()
@@ -8028,7 +8045,7 @@ mod tests {
         assert_eq!(state.sessions, 0);
         state.sync(&sessions, 29, workspace, 30);
         state.sync(&sessions, 29, workspace, 18);
-        assert_eq!(state.sessions, 23);
+        assert_eq!(state.sessions, 24);
     }
 
     #[test]
