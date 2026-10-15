@@ -4,13 +4,17 @@
 //! Independent right-hand tools and their project/session ownership.
 
 mod chat;
+mod editor;
 mod files;
+mod highlight;
 mod layout;
 use files::*;
 
 use crate::{i18n, theme::Theme, view::FrameModel};
 use blora_runtime::{CancelToken, RunOptions, Runtime};
-use blora_session::{SessionProjection, TranscriptItem};
+use blora_session::SessionProjection;
+#[cfg(test)]
+use blora_session::TranscriptItem;
 use blora_storage::CreateSession;
 use blora_types::{Mode, SessionId};
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
@@ -54,6 +58,9 @@ enum Action {
     Collapse,
     Restore,
     File(usize),
+    FileSave,
+    FileConfirm(bool),
+    FileCancel,
     Back,
     Focus,
     Refresh,
@@ -82,6 +89,8 @@ pub struct SideChat {
     scroll: std::cell::Cell<usize>,
     pub status: String,
     route: Option<(String, String)>,
+    cache: std::cell::RefCell<crate::view::TranscriptCache>,
+    tool_rows: std::cell::RefCell<Vec<(Rect, Vec<usize>)>>,
 }
 pub struct RunRequest {
     pub id: SessionId,
@@ -228,6 +237,21 @@ impl RightPanel {
     pub fn chat_focused(&self) -> bool {
         self.focused && self.active == Tab::Chat
     }
+    pub fn chat_tool_rows(&self) -> Vec<(Rect, SessionId, Vec<usize>)> {
+        if self.active != Tab::Chat || self.collapsed || self.area.is_none() {
+            return Vec::new();
+        }
+        self.chat
+            .as_ref()
+            .map(|chat| {
+                chat.tool_rows
+                    .borrow()
+                    .iter()
+                    .map(|(rect, indices)| (*rect, chat.id.clone(), indices.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
     pub fn draft_empty(&self) -> bool {
         self.chat.as_ref().is_none_or(|chat| chat.draft.is_empty())
     }
@@ -244,6 +268,10 @@ impl RightPanel {
         }
         if self.tabs.contains(&Tab::Files) {
             self.files.sync(workspace);
+            if matches!(self.files.pending_leave, Some(Leave::Project(_))) {
+                self.active = Tab::Files;
+                self.focused = true;
+            }
         }
         if let Some(terminal) = self.terminal.as_mut() {
             terminal.poll();
@@ -299,6 +327,8 @@ impl RightPanel {
                             scroll: 0.into(),
                             status: String::new(),
                             route: None,
+                            cache: Default::default(),
+                            tool_rows: Default::default(),
                         })
                     }
                     Err(error) => self.chat_error = error.to_string(),
@@ -332,6 +362,12 @@ impl RightPanel {
     }
     fn close(&mut self, tab: Tab) {
         if tab == Tab::Info {
+            return;
+        }
+        if tab == Tab::Files && self.files.dirty() {
+            self.files.pending_leave = Some(Leave::Close);
+            self.active = Tab::Files;
+            self.focused = true;
             return;
         }
         self.tabs.retain(|item| *item != tab);
@@ -401,6 +437,14 @@ impl RightPanel {
     pub fn event(&mut self, event: &Event, runtime: &Runtime, workspace: &Path) -> bool {
         if let Event::Mouse(mouse) = event {
             if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                if self
+                    .chat_tool_rows()
+                    .iter()
+                    .any(|(rect, _, _)| rect.contains((mouse.column, mouse.row).into()))
+                {
+                    self.focused = true;
+                    return false;
+                }
                 let hit = {
                     self.hits
                         .borrow()
@@ -409,6 +453,12 @@ impl RightPanel {
                         .cloned()
                 };
                 if let Some((_, action)) = hit {
+                    if self.active == Tab::Files
+                        && self.files.pending_leave.is_some()
+                        && !matches!(action, Action::FileConfirm(_) | Action::FileCancel)
+                    {
+                        return true;
+                    }
                     if !matches!(
                         action,
                         Action::Close(_) | Action::Collapse | Action::Restore
@@ -427,6 +477,11 @@ impl RightPanel {
                             self.focused = true;
                             self.files.open(index);
                         }
+                        Action::FileSave => {
+                            self.files.save();
+                        }
+                        Action::FileConfirm(save) => self.confirm_file_leave(save),
+                        Action::FileCancel => self.files.cancel_leave(),
                         Action::Back => self.files.back(),
                         Action::Focus => self.focused = true,
                         Action::Refresh => self.files.refresh(),
@@ -450,6 +505,9 @@ impl RightPanel {
                             }
                         }
                     }
+                    return true;
+                }
+                if self.active == Tab::Files && self.files.pending_leave.is_some() {
                     return true;
                 }
                 self.focused = false;
@@ -553,6 +611,19 @@ impl RightPanel {
         if !self.focused || self.area.is_none() {
             return false;
         }
+        if self.active == Tab::Files && self.files.pending_leave.is_some() {
+            if let Event::Key(key) = event {
+                if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                    match key.code {
+                        KeyCode::Char('s') => self.confirm_file_leave(true),
+                        KeyCode::Char('d') => self.confirm_file_leave(false),
+                        KeyCode::Char('c') | KeyCode::Esc => self.files.cancel_leave(),
+                        _ => {}
+                    }
+                }
+            }
+            return true;
+        }
         if let Event::Key(key) = event {
             if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
                 return true;
@@ -561,6 +632,10 @@ impl RightPanel {
                 match key.code {
                     KeyCode::Char('g') => {
                         self.focused = false;
+                        return true;
+                    }
+                    KeyCode::Char('q') if self.files.dirty() => {
+                        self.guard_file_leave();
                         return true;
                     }
                     KeyCode::Char('q') => return false,
@@ -579,6 +654,7 @@ impl RightPanel {
                 }
             }
             if key.code == KeyCode::Tab
+                && !(self.active == Tab::Files && self.files.editor.is_some())
                 && (self.active != Tab::Terminal || key.modifiers.contains(KeyModifiers::CONTROL))
             {
                 let index = self
@@ -627,59 +703,110 @@ impl RightPanel {
             }
             Tab::Files => {
                 if let Event::Key(key) = event {
+                    if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && key.code == KeyCode::Char('s')
+                    {
+                        self.files.save();
+                        return true;
+                    }
+                    if key.code == KeyCode::Esc {
+                        self.files.back();
+                        return true;
+                    }
+                }
+                if let Some(editor) = self.files.editor.as_mut() {
+                    match event {
+                        Event::Paste(text) => editor.insert(text),
+                        Event::Key(key) => editor.key(*key),
+                        _ => {}
+                    }
+                    self.files.preview = Some(editor.text.clone());
+                    let (row, _) = editor.position();
                     let page = self
                         .area
-                        .map(|r| r.height.saturating_sub(6) as usize)
-                        .unwrap_or(10)
+                        .map_or(10, |r| r.height.saturating_sub(7) as usize)
                         .max(1);
-                    let preview = self.files.preview_path.is_some();
-                    let delta = match key.code {
-                        KeyCode::Up => -1,
-                        KeyCode::Down => 1,
-                        KeyCode::PageUp => -(page as isize),
-                        KeyCode::PageDown => page as isize,
-                        _ => 0,
-                    };
-                    if preview {
-                        self.files.scroll = self
-                            .files
-                            .scroll
-                            .saturating_add_signed(delta)
-                            .min(self.files.max_scroll.get());
-                    } else {
-                        self.files.selected = self
-                            .files
-                            .selected
-                            .saturating_add_signed(delta)
-                            .min(self.files.entries.len().saturating_sub(1));
+                    if row < self.files.scroll {
+                        self.files.scroll = row;
                     }
-                    match key.code {
-                        KeyCode::Home => {
-                            if preview {
-                                self.files.scroll = 0;
-                                self.files.horizontal = 0;
-                            } else {
-                                self.files.selected = 0;
+                    if row >= self.files.scroll + page {
+                        self.files.scroll = row + 1 - page;
+                    }
+                    let column = unicode_width::UnicodeWidthStr::width(
+                        editor.text[..editor.cursor]
+                            .rsplit('\n')
+                            .next()
+                            .unwrap_or("")
+                            .replace('\t', "    ")
+                            .as_str(),
+                    );
+                    let width = self
+                        .area
+                        .map_or(24, |r| r.width.saturating_sub(8) as usize)
+                        .max(1);
+                    if column < self.files.horizontal {
+                        self.files.horizontal = column;
+                    }
+                    if column >= self.files.horizontal + width {
+                        self.files.horizontal = column + 1 - width;
+                    }
+                } else {
+                    if let Event::Key(key) = event {
+                        let page = self
+                            .area
+                            .map(|r| r.height.saturating_sub(6) as usize)
+                            .unwrap_or(10)
+                            .max(1);
+                        let preview = self.files.preview_path.is_some();
+                        let delta = match key.code {
+                            KeyCode::Up => -1,
+                            KeyCode::Down => 1,
+                            KeyCode::PageUp => -(page as isize),
+                            KeyCode::PageDown => page as isize,
+                            _ => 0,
+                        };
+                        if preview {
+                            self.files.scroll = self
+                                .files
+                                .scroll
+                                .saturating_add_signed(delta)
+                                .min(self.files.max_scroll.get());
+                        } else {
+                            self.files.selected = self
+                                .files
+                                .selected
+                                .saturating_add_signed(delta)
+                                .min(self.files.entries.len().saturating_sub(1));
+                        }
+                        match key.code {
+                            KeyCode::Home => {
+                                if preview {
+                                    self.files.scroll = 0;
+                                    self.files.horizontal = 0;
+                                } else {
+                                    self.files.selected = 0;
+                                }
                             }
-                        }
-                        KeyCode::End => {
-                            if preview {
-                                self.files.scroll = self.files.max_scroll.get();
-                            } else {
-                                self.files.selected = self.files.entries.len().saturating_sub(1);
+                            KeyCode::End => {
+                                if preview {
+                                    self.files.scroll = self.files.max_scroll.get();
+                                } else {
+                                    self.files.selected =
+                                        self.files.entries.len().saturating_sub(1);
+                                }
                             }
+                            KeyCode::Left if preview => {
+                                self.files.horizontal = self.files.horizontal.saturating_sub(4)
+                            }
+                            KeyCode::Right if preview => {
+                                self.files.horizontal =
+                                    (self.files.horizontal + 4).min(self.files.max_horizontal.get())
+                            }
+                            KeyCode::Char('r') => self.files.refresh(),
+                            KeyCode::Enter if !preview => self.files.open(self.files.selected),
+                            KeyCode::Backspace | KeyCode::Esc => self.files.back(),
+                            _ => {}
                         }
-                        KeyCode::Left if preview => {
-                            self.files.horizontal = self.files.horizontal.saturating_sub(4)
-                        }
-                        KeyCode::Right if preview => {
-                            self.files.horizontal =
-                                (self.files.horizontal + 4).min(self.files.max_horizontal.get())
-                        }
-                        KeyCode::Char('r') => self.files.refresh(),
-                        KeyCode::Enter if !preview => self.files.open(self.files.selected),
-                        KeyCode::Backspace | KeyCode::Esc => self.files.back(),
-                        _ => {}
                     }
                 }
             }
@@ -701,6 +828,27 @@ impl RightPanel {
             _ => {}
         }
         true
+    }
+    pub fn guard_file_leave(&mut self) -> bool {
+        if !self.files.dirty() {
+            return true;
+        }
+        self.files.pending_leave = Some(Leave::Close);
+        self.active = Tab::Files;
+        self.focused = true;
+        self.collapsed = false;
+        false
+    }
+    fn confirm_file_leave(&mut self, save: bool) {
+        let Some(leave) = self.files.confirm(save) else {
+            return;
+        };
+        match leave {
+            Leave::Back => self.files.back(),
+            Leave::Refresh => self.files.refresh(),
+            Leave::Close => self.close(Tab::Files),
+            Leave::Project(root) => self.files.sync(&root),
+        }
     }
     pub fn draw(&self, frame: &mut Frame<'_>, model: &FrameModel<'_>, canvas: Rect) {
         let theme = Theme::current();
@@ -935,142 +1083,7 @@ impl RightPanel {
                     hits.insert(0, (rect, Action::Tab(*tab)));
                 }
             }
-            Tab::Files => {
-                let refresh_width = body.width.min(8);
-                let back = Rect::new(body.x, body.y, body.width.saturating_sub(refresh_width), 1);
-                let path = self
-                    .files
-                    .preview_path
-                    .as_ref()
-                    .unwrap_or(&self.files.directory);
-                let relative = path.strip_prefix(&self.files.root).unwrap_or(path);
-                frame.render_widget(
-                    Paragraph::new(format!("‹ /{}", relative.display()))
-                        .style(theme.fg(theme.rose)),
-                    back,
-                );
-                hits.insert(0, (back, Action::Back));
-                let refresh = Rect::new(back.right(), body.y, refresh_width, 1);
-                frame.render_widget(
-                    Paragraph::new(i18n::tr("right.refresh", "刷新 r")).style(
-                        theme
-                            .fg(theme.rose)
-                            .bg(if layout::hovered(refresh, model.pointer) {
-                                theme.hairline
-                            } else {
-                                theme.bg
-                            }),
-                    ),
-                    refresh,
-                );
-                hits.insert(0, (refresh, Action::Refresh));
-                let content = Rect::new(
-                    body.x,
-                    body.y + 1,
-                    body.width,
-                    body.height.saturating_sub(2),
-                );
-                let mut position = String::new();
-                if let Some(preview) = &self.files.preview {
-                    let total = preview.lines().count();
-                    let max = total.saturating_sub(content.height as usize);
-                    self.files.max_scroll.set(max);
-                    let offset = self.files.scroll.min(max);
-                    let digits = total.max(1).to_string().len();
-                    let text_width = content.width.saturating_sub(digits as u16 + 1) as usize;
-                    let max_width = preview
-                        .lines()
-                        .map(unicode_width::UnicodeWidthStr::width)
-                        .max()
-                        .unwrap_or(0);
-                    self.files
-                        .max_horizontal
-                        .set(max_width.saturating_sub(text_width));
-                    let horizontal = self.files.horizontal.min(self.files.max_horizontal.get());
-                    for (row, (index, line)) in preview
-                        .lines()
-                        .enumerate()
-                        .skip(offset)
-                        .take(content.height as usize)
-                        .enumerate()
-                    {
-                        let number = Rect::new(content.x, content.y + row as u16, digits as u16, 1);
-                        frame.render_widget(
-                            Paragraph::new(format!("{:>digits$}", index + 1))
-                                .style(theme.fg(theme.text_dim)),
-                            number,
-                        );
-                        let text = Rect::new(number.right() + 1, number.y, text_width as u16, 1);
-                        frame.render_widget(
-                            Paragraph::new(line)
-                                .scroll((0, horizontal.min(u16::MAX as usize) as u16)),
-                            text,
-                        );
-                    }
-                    position = format!(
-                        "{}–{} / {} · ↔ {}",
-                        offset + 1,
-                        (offset + content.height as usize).min(total),
-                        total,
-                        horizontal
-                    );
-                } else if !self.files.message.is_empty() {
-                    frame.render_widget(
-                        Paragraph::new(self.files.message.as_str()).wrap(Wrap { trim: false }),
-                        content,
-                    );
-                } else {
-                    let start = self
-                        .files
-                        .selected
-                        .saturating_sub(content.height.saturating_sub(1) as usize);
-                    for (row, (index, entry)) in self
-                        .files
-                        .entries
-                        .iter()
-                        .enumerate()
-                        .skip(start)
-                        .take(content.height as usize)
-                        .enumerate()
-                    {
-                        let rect = Rect::new(content.x, content.y + row as u16, content.width, 1);
-                        let label = format!(
-                            "{} {}{}",
-                            if index == self.files.selected {
-                                "›"
-                            } else {
-                                " "
-                            },
-                            entry.path.file_name().unwrap_or_default().to_string_lossy(),
-                            if entry.directory { "/" } else { "" }
-                        );
-                        let style = if index == self.files.selected
-                            || layout::hovered(rect, model.pointer)
-                        {
-                            theme.fg(theme.rose).bg(theme.hairline)
-                        } else {
-                            theme.fg(theme.text)
-                        };
-                        frame.render_widget(Paragraph::new(label).style(style), rect);
-                        hits.insert(0, (rect, Action::File(index)));
-                    }
-                    position = format!(
-                        "{} / {}",
-                        if self.files.entries.is_empty() {
-                            0
-                        } else {
-                            self.files.selected + 1
-                        },
-                        self.files.entries.len()
-                    );
-                }
-                if body.height > 1 {
-                    frame.render_widget(
-                        Paragraph::new(position).style(theme.fg(theme.text_dim)),
-                        Rect::new(body.x, body.bottom() - 1, body.width, 1),
-                    );
-                }
-            }
+            Tab::Files => self.draw_files(frame, model, body, &mut hits),
             Tab::Terminal => {
                 let terminal_label = if let Some(terminal) = self.terminal.as_ref() {
                     if let Some(error) = terminal.error() {
@@ -1187,16 +1200,19 @@ impl RightPanel {
                         Paragraph::new(header).style(theme.fg(theme.text_dim)),
                         Rect::new(body.x, body.y, body.width, 3.min(body.height)),
                     );
-                    let (draft_lines, (cursor_row, cursor_col)) =
-                        chat::draft_lines(&chat.draft, chat.cursor, body.width as usize);
-                    let draft_height = (draft_lines.len() as u16)
+                    let (lines, _) = chat::draft_lines(
+                        &chat.draft,
+                        chat.cursor,
+                        body.width.saturating_sub(3).max(1) as usize,
+                    );
+                    let height = (lines.len() as u16)
                         .clamp(1, 5)
                         .min(body.height.saturating_sub(5).max(1));
                     let draft = Rect::new(
                         body.x,
-                        body.bottom().saturating_sub(1 + draft_height),
+                        body.bottom().saturating_sub(1 + height),
                         body.width,
-                        draft_height,
+                        height,
                     );
                     let content = Rect::new(
                         body.x,
@@ -1204,28 +1220,42 @@ impl RightPanel {
                         body.width,
                         draft.y.saturating_sub(body.y + 3),
                     );
-                    let lines = chat.lines(content.width as usize, &theme);
-                    let count = lines.len();
-                    let max = count.saturating_sub(content.height as usize);
+                    let mut side_model = model.clone();
+                    side_model.projection = Some(&chat.projection);
+                    side_model.input = &chat.draft;
+                    side_model.running = chat.running;
+                    side_model.search = None;
+                    side_model.text_selection = None;
+                    let mut cache = chat.cache.borrow_mut();
+                    cache.ensure(
+                        &chat.projection,
+                        &chat.id.to_string(),
+                        None,
+                        model.hide_tools,
+                        model.message_roles,
+                        content.width.saturating_sub(2).max(8) as usize,
+                        model.user_label,
+                        &theme,
+                    );
+                    let count = cache.lines.len() + usize::from(cache.live_visible && chat.running);
                     let distance = chat.viewport(count, content.height as usize);
-                    frame.render_widget(
-                        Paragraph::new(lines)
-                            .scroll(((max - distance).min(u16::MAX as usize) as u16, 0)),
+                    side_model.scroll = distance;
+                    *chat.tool_rows.borrow_mut() = crate::conversation::render_transcript(
+                        frame,
                         content,
+                        &side_model,
+                        &theme,
+                        &mut cache,
                     );
-                    let draft_offset =
-                        cursor_row.saturating_sub(draft.height.saturating_sub(1) as usize);
-                    frame.render_widget(
-                        Paragraph::new(draft_lines.join("\n"))
-                            .scroll((draft_offset.min(u16::MAX as usize) as u16, 0))
-                            .style(theme.fg(theme.text)),
+                    let (cursor_row, cursor_col) = crate::conversation::render_editor(
+                        frame,
                         draft,
+                        &side_model,
+                        &theme,
+                        Some(chat.cursor),
                     );
-                    if self.focused && cursor_col < draft.width as usize && draft.height > 0 {
-                        frame.set_cursor_position((
-                            draft.x + cursor_col as u16,
-                            draft.y + (cursor_row - draft_offset) as u16,
-                        ));
+                    if self.focused && cursor_col + 2 < draft.width && draft.height > 0 {
+                        frame.set_cursor_position((draft.x + 2 + cursor_col, draft.y + cursor_row));
                     }
                     let controls = Rect::new(body.x, body.bottom() - 1, body.width, 1);
                     let send = Rect::new(controls.x, controls.y, controls.width.min(8), 1);
@@ -2028,7 +2058,7 @@ mod tests {
         );
     }
     #[test]
-    fn side_markdown_preserves_code_and_hides_internal_events() {
+    fn side_markdown_and_system_events_follow_main_transcript() {
         let runtime = runtime();
         let mut panel = RightPanel::default();
         panel.open(Tab::Chat, &runtime, Path::new("/tmp"));
@@ -2049,6 +2079,6 @@ mod tests {
             .join("\n");
         assert!(text.contains("标题"));
         assert!(text.contains("let value = 1;"));
-        assert!(!text.contains("INTERNAL_ONLY"));
+        assert!(text.contains("INTERNAL_ONLY"));
     }
 }

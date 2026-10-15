@@ -25,6 +25,8 @@ ratatui.workspace = true
 portable-pty = "0.9"
 vt100 = "0.15"
 unicode-width.workspace = true
+tempfile.workspace = true
+syntect = { version = "5.3", default-features = false, features = ["default-fancy"] }
 ureq.workspace = true
 serde_json.workspace = true
 

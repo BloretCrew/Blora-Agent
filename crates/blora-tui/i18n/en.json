@@ -199,5 +199,17 @@
   "right.tokens": "Tokens in / out",
   "right.context": "Context",
   "right.done": "Done",
-  "right.special": "Only regular files can be previewed"
+  "right.special": "Only regular files can be previewed",
+  "right.file_saved": "Saved",
+  "right.file_save": "[Save ^S]",
+  "right.file_refresh": "[Refresh r]",
+  "right.file_edit_keys": "^S save ^Z undo ^Y redo Esc back",
+  "right.file_unsaved": "Unsaved file changes. Choose:\nSave and leave / Discard / Cancel",
+  "right.file_confirm_save": "[S Save]",
+  "right.file_confirm_discard": "[D Discard]",
+  "right.file_confirm_cancel": "[C Cancel]",
+  "right.file_binary": "Read-only · Binary file",
+  "right.file_truncated": "Read-only · First 64 KiB only",
+  "right.file_invalid_utf8": "Read-only · Invalid UTF-8",
+  "right.file_truncated_note": "First 64 KiB only"
 }

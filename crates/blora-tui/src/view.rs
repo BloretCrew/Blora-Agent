@@ -586,6 +586,7 @@ pub enum Hit {
     SidebarSession(usize),
     SidebarSettings,
     ToolSummary(Vec<usize>),
+    SideToolSummary(blora_types::SessionId, Vec<usize>),
     ToolDetailRow(usize),
     GitStatus,
     GitTab(usize),
@@ -672,6 +673,7 @@ pub struct HitMap {
     pub modal: bool,
     pub modal_area: Option<Rect>,
     pub transcript: Rect,
+    pub side_tool_summary_rows: Vec<(Rect, blora_types::SessionId, Vec<usize>)>,
     pub tool_summary_rows: Vec<(Rect, Vec<usize>)>,
     pub composer: Rect,
     pub overlay: Option<Rect>,
@@ -796,6 +798,11 @@ impl HitMap {
         for (rect, idx) in &self.tool_detail_rows {
             if contains(*rect, col, row) {
                 return Some(Hit::ToolDetailRow(*idx));
+            }
+        }
+        for (rect, owner, indices) in &self.side_tool_summary_rows {
+            if contains(*rect, col, row) {
+                return Some(Hit::SideToolSummary(owner.clone(), indices.clone()));
             }
         }
         for (rect, indices) in &self.tool_summary_rows {
@@ -1429,6 +1436,7 @@ pub fn draw(
     render_hints(frame, hints, model, &theme, &mut hits);
     if let Some(panel) = model.right_panel {
         panel.draw(frame, model, area);
+        hits.side_tool_summary_rows = panel.chat_tool_rows();
     }
     dim_region(
         frame.buffer_mut(),
@@ -3649,48 +3657,8 @@ fn render_transcript(
     cache: &mut TranscriptCache,
 ) {
     let inner = inset(area);
-    let width = inner.width.saturating_sub(2).max(8) as usize;
-    let session_id = model
-        .projection
-        .and_then(|projection| projection.session.as_ref())
-        .map(|session| session.id.to_string())
-        .unwrap_or_default();
-    if let Some(projection) = model.projection {
-        cache.ensure(
-            projection,
-            &session_id,
-            model.search,
-            model.hide_tools,
-            model.message_roles,
-            width,
-            model.user_label,
-            theme,
-        );
-    }
-    let show_cached = model.projection.is_some() && !cache.lines.is_empty();
-    let spinner = show_cached && cache.live_visible && model.running;
-    let line_count = if show_cached {
-        cache.lines.len() + usize::from(spinner)
-    } else {
-        0
-    };
-    let visible = if show_cached {
-        transcript_window(
-            &cache.lines,
-            spinner.then(|| spinner_line(model.tick, theme)),
-            inner.height as usize,
-            model.scroll,
-        )
-    } else {
-        welcome_lines(inner.width as usize, inner.height as usize, theme)
-    };
-    let visible = highlight_selection(visible, inner, model.text_selection, theme);
-    frame.render_widget(Paragraph::new(visible).style(theme.base()), inner);
-    hits.tool_summary_rows = if show_cached {
-        tool_summary_hit_rows(&cache.marks, line_count, inner, model.scroll)
-    } else {
-        Vec::new()
-    };
+    hits.tool_summary_rows =
+        crate::conversation::render_transcript(frame, inner, model, theme, cache);
 }
 
 /// Whether reasoning blocks are expanded. Toggled by `/reasoning`.
@@ -3720,7 +3688,7 @@ struct TranscriptCacheKey {
 }
 
 #[derive(Clone, Debug)]
-struct ToolSummaryMark {
+pub(crate) struct ToolSummaryMark {
     line: usize,
     width: usize,
     indices: Vec<usize>,
@@ -3736,9 +3704,9 @@ struct RenderedTranscript {
 #[derive(Default)]
 pub struct TranscriptCache {
     key: Option<TranscriptCacheKey>,
-    lines: Vec<Line<'static>>,
-    marks: Vec<ToolSummaryMark>,
-    live_visible: bool,
+    pub(crate) lines: Vec<Line<'static>>,
+    pub(crate) marks: Vec<ToolSummaryMark>,
+    pub(crate) live_visible: bool,
     rebuilds: u64,
 }
 
@@ -3748,7 +3716,7 @@ impl TranscriptCache {
         self.rebuilds
     }
 
-    fn ensure(
+    pub(crate) fn ensure(
         &mut self,
         projection: &SessionProjection,
         session_id: &str,
@@ -3791,7 +3759,7 @@ impl TranscriptCache {
     }
 }
 
-fn tool_summary_hit_rows(
+pub(crate) fn tool_summary_hit_rows(
     marks: &[ToolSummaryMark],
     line_count: usize,
     rect: Rect,
@@ -3825,7 +3793,7 @@ fn tool_summary_hit_rows(
     rows
 }
 
-fn welcome_lines(width: usize, height: usize, theme: &Theme) -> Vec<Line<'static>> {
+pub(crate) fn welcome_lines(width: usize, height: usize, theme: &Theme) -> Vec<Line<'static>> {
     let compact = width < 40 || height < 7;
     let mut lines = vec![
         Line::from(Span::styled(ellipsize("Blora", width), theme.rose_bold())),
@@ -3859,7 +3827,7 @@ fn welcome_lines(width: usize, height: usize, theme: &Theme) -> Vec<Line<'static
     lines
 }
 
-fn composer_placeholder(imagine: bool, running: bool, width: usize) -> String {
+pub(crate) fn composer_placeholder(imagine: bool, running: bool, width: usize) -> String {
     let (key, fallback) = if running {
         ("composer.queued", "输入补充，Enter 排队发送")
     } else if imagine {
@@ -4241,7 +4209,7 @@ fn transcript_lines(
     }
 }
 
-fn spinner_line(tick: u64, theme: &Theme) -> Line<'static> {
+pub(crate) fn spinner_line(tick: u64, theme: &Theme) -> Line<'static> {
     Line::from(vec![
         Span::styled("  ", theme.mute()),
         Span::styled(spinner(tick).to_string(), theme.fg(theme.sage)),
@@ -4250,7 +4218,7 @@ fn spinner_line(tick: u64, theme: &Theme) -> Line<'static> {
 
 /// Keep the latest lines in view. `scroll` is how many lines above the bottom
 /// to reveal; 0 always shows the newest message.
-fn highlight_selection(
+pub(crate) fn highlight_selection(
     lines: Vec<Line<'static>>,
     rect: Rect,
     selection: Option<Selection>,
@@ -4384,7 +4352,7 @@ fn window_start(total: usize, height: usize, scroll: usize) -> usize {
     total - height - from_bottom
 }
 
-fn transcript_window(
+pub(crate) fn transcript_window(
     lines: &[Line<'static>],
     spinner: Option<Line<'static>>,
     height: usize,
@@ -6250,27 +6218,7 @@ fn render_composer(
     if prompt.height == 0 {
         return;
     }
-    let available = prompt.width.saturating_sub(3) as usize;
-    let (visible, cursor_col) = visible_input(model.input, available);
-    let imagine = model
-        .projection
-        .and_then(|projection| projection.session.as_ref())
-        .is_some_and(|session| session.mode == Mode::Imagine);
-    let prompt_line = if model.input.is_empty() {
-        Line::from(vec![
-            Span::styled("❯ ", theme.rose_bold()),
-            Span::styled(
-                composer_placeholder(imagine, model.running, available),
-                theme.mute(),
-            ),
-        ])
-    } else {
-        Line::from(vec![
-            Span::styled("❯ ", theme.rose_bold()),
-            Span::styled(visible, theme.base()),
-        ])
-    };
-    frame.render_widget(Paragraph::new(prompt_line).style(theme.base()), prompt);
+    let cursor_col = crate::conversation::render_composer(frame, prompt, model, theme);
 
     let harness = model.projection.map(|p| p.harness).unwrap_or_default();
     let external_model = model.projection.and_then(|p| p.external_model.as_deref());
@@ -6410,7 +6358,7 @@ fn render_hints(
     frame.render_widget(Paragraph::new(line).style(theme.base()), inner);
 }
 
-fn visible_input(input: &str, width: usize) -> (String, u16) {
+pub(crate) fn visible_input(input: &str, width: usize) -> (String, u16) {
     if width == 0 {
         return (String::new(), 0);
     }
@@ -8476,6 +8424,88 @@ mod tests {
         assert!(text.contains(".blora/images/sess/"));
         assert!(text.contains("HTTP 401"));
         assert!(!text.contains("you"));
+    }
+
+    #[test]
+    fn shared_conversation_matches_main_for_roles_tools_streaming_and_scroll() {
+        let mut projection = SessionProjection::new();
+        projection.transcript.push(TranscriptItem::User {
+            text: "用户 **Markdown**".into(),
+            event_id: blora_types::EventId::generate(),
+        });
+        projection.transcript.push(TranscriptItem::Tool {
+            name: "read_file".into(),
+            status: "completed".into(),
+            event_id: blora_types::EventId::generate(),
+            arguments: None,
+            output: None,
+            call_id: None,
+        });
+        let event = blora_events::EventEnvelope::stamped(
+            blora_events::NewEvent::new(
+                blora_types::SessionId::generate(),
+                blora_events::KnownPayload::AssistantDelta(blora_events::AssistantDelta {
+                    text: "流式 **正文**".into(),
+                }),
+            ),
+            1,
+        )
+        .unwrap();
+        projection.apply(&event).unwrap();
+        let sidebar = SidebarState::default();
+        let mut model = sidebar_model(&[], &sidebar);
+        model.projection = Some(&projection);
+        model.running = true;
+        for roles in [false, true] {
+            for hide in [false, true] {
+                for scroll in [0, 2, 100] {
+                    model.message_roles = roles;
+                    model.hide_tools = hide;
+                    model.scroll = scroll;
+                    let mut main = Terminal::new(TestBackend::new(36, 8)).unwrap();
+                    let mut side = Terminal::new(TestBackend::new(36, 8)).unwrap();
+                    let mut hits = HitMap::default();
+                    let mut rows = Vec::new();
+                    main.draw(|frame| {
+                        render_transcript(
+                            frame,
+                            Rect::new(0, 0, 36, 8),
+                            &model,
+                            &Theme::current(),
+                            &mut hits,
+                            &mut TranscriptCache::default(),
+                        )
+                    })
+                    .unwrap();
+                    side.draw(|frame| {
+                        rows = crate::conversation::render_transcript(
+                            frame,
+                            inset(Rect::new(0, 0, 36, 8)),
+                            &model,
+                            &Theme::current(),
+                            &mut TranscriptCache::default(),
+                        )
+                    })
+                    .unwrap();
+                    assert_eq!(main.backend().buffer(), side.backend().buffer());
+                    assert_eq!(hits.tool_summary_rows, rows);
+                    if hide {
+                        assert!(rows.is_empty());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn side_tool_summary_hit_keeps_session_owner() {
+        let owner = blora_types::SessionId::generate();
+        let mut hits = HitMap::default();
+        hits.tool_summary_rows = vec![(Rect::new(1, 1, 10, 1), vec![0])];
+        hits.side_tool_summary_rows = vec![(Rect::new(40, 1, 10, 1), owner.clone(), vec![0])];
+        assert_eq!(hits.hit(1, 1), Some(Hit::ToolSummary(vec![0])));
+        assert_eq!(hits.hit(40, 1), Some(Hit::SideToolSummary(owner, vec![0])));
+        assert_eq!(hits.hit(50, 1), None);
     }
 
     #[test]

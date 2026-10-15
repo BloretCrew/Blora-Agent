@@ -199,5 +199,17 @@
   "right.terminal": "终端",
   "right.chat": "侧聊",
   "right.done": "已完成",
-  "right.special": "仅支持预览普通文件"
+  "right.special": "仅支持预览普通文件",
+  "right.file_saved": "已保存",
+  "right.file_save": "[保存 ^S]",
+  "right.file_refresh": "[刷新 r]",
+  "right.file_edit_keys": "^S保存 ^Z撤销 ^Y重做 Esc返回",
+  "right.file_unsaved": "文件有未保存修改。请选择：\n保存后离开 / 放弃修改 / 取消离开",
+  "right.file_confirm_save": "[S 保存]",
+  "right.file_confirm_discard": "[D 放弃]",
+  "right.file_confirm_cancel": "[C 取消]",
+  "right.file_binary": "只读 · 二进制文件",
+  "right.file_truncated": "只读 · 仅显示前 64 KiB",
+  "right.file_invalid_utf8": "只读 · 无效 UTF-8",
+  "right.file_truncated_note": "仅显示前 64 KiB"
 }

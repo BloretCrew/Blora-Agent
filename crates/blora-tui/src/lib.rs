@@ -3,6 +3,7 @@
 
 //! Terminal UI. Renders session projections, never provider payloads.
 
+mod conversation;
 mod dialogs;
 mod i18n;
 mod markdown;
@@ -45,22 +46,22 @@ const TOOL_SUMMARY_DOUBLE_CLICK: Duration = Duration::from_millis(500);
 
 #[derive(Default)]
 struct ToolSummaryClick {
-    pending: Option<(Vec<usize>, Instant)>,
+    pending: Option<(view::Hit, Instant)>,
 }
 
 impl ToolSummaryClick {
     fn register(&mut self, hit: Option<&view::Hit>, now: Instant) -> bool {
-        let Some(view::Hit::ToolSummary(indices)) = hit else {
+        let Some(hit @ (view::Hit::ToolSummary(_) | view::Hit::SideToolSummary(_, _))) = hit else {
             self.pending = None;
             return false;
         };
         if self.pending.as_ref().is_some_and(|(previous, time)| {
-            previous == indices && now.saturating_duration_since(*time) <= TOOL_SUMMARY_DOUBLE_CLICK
+            previous == hit && now.saturating_duration_since(*time) <= TOOL_SUMMARY_DOUBLE_CLICK
         }) {
             self.pending = None;
             return true;
         }
-        self.pending = Some((indices.clone(), now));
+        self.pending = Some((hit.clone(), now));
         false
     }
 }
@@ -92,33 +93,7 @@ fn closing_consumes_input(visuals: &dialogs::DialogVisuals, event: &Event) -> bo
     visuals.closing_barrier() && !global_quit(event)
 }
 
-fn browse_input_history(
-    history: &[String],
-    index: &mut Option<usize>,
-    draft: &mut String,
-    input: &mut String,
-    older: bool,
-) {
-    if history.is_empty() {
-        return;
-    }
-    if older {
-        if index.is_none() {
-            draft.clone_from(input);
-        }
-        let next = index.map_or(history.len() - 1, |position| position.saturating_sub(1));
-        *index = Some(next);
-        input.clone_from(&history[next]);
-    } else if let Some(position) = *index {
-        if position + 1 < history.len() {
-            *index = Some(position + 1);
-            input.clone_from(&history[position + 1]);
-        } else {
-            *index = None;
-            input.clone_from(draft);
-        }
-    }
-}
+use conversation::browse_input_history;
 
 #[cfg(test)]
 mod input_history_tests {
@@ -911,6 +886,9 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                     {
                         continue;
                     }
+                    if !right_panel.guard_file_leave() {
+                        continue;
+                    }
                     cancel.cancel();
                     break Ok(());
                 }
@@ -956,6 +934,9 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             }
                         }
                         onboarding::Outcome::Quit => {
+                            if !right_panel.guard_file_leave() {
+                                continue;
+                            }
                             cancel.cancel();
                             break Ok(());
                         }
@@ -1000,6 +981,9 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                         if key.modifiers.contains(KeyModifiers::CONTROL)
                             && (key.code == KeyCode::Char('c') || key.code == KeyCode::Char('q'))
                         {
+                            if !right_panel.guard_file_leave() {
+                                continue;
+                            }
                             cancel.cancel();
                             break Ok(());
                         }
@@ -2009,6 +1993,9 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                             &mut provider_override,
                                         ) {
                                             SlashOutcome::Quit => {
+                                                if !right_panel.guard_file_leave() {
+                                                    continue;
+                                                }
                                                 cancel.cancel();
                                                 break Ok(());
                                             }
@@ -2109,12 +2096,18 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 }
                             }
                             KeyCode::Backspace if top_dialog.is_none() => {
-                                input.pop();
+                                let mut cursor = input.len();
+                                conversation::edit_input(&mut input, &mut cursor, key);
                                 history_index = None;
                                 paste_preview = None;
                             }
                             KeyCode::Char(ch) if top_dialog.is_none() => {
-                                input.push(ch);
+                                let mut cursor = input.len();
+                                conversation::insert_input(
+                                    &mut input,
+                                    &mut cursor,
+                                    &ch.to_string(),
+                                );
                                 history_index = None;
                                 paste_preview = None;
                             }
@@ -2834,13 +2827,29 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 if top_dialog == Some(DialogId::Tool) {
                                     continue;
                                 }
-                                if let Some(view::Hit::ToolSummary(indices)) = hit.clone() {
+                                if let Some(
+                                    summary @ (view::Hit::ToolSummary(_)
+                                    | view::Hit::SideToolSummary(_, _)),
+                                ) = hit.clone()
+                                {
+                                    let (owner, indices) = match &summary {
+                                        view::Hit::SideToolSummary(id, indices) => (
+                                            right_panel
+                                                .chat
+                                                .as_ref()
+                                                .filter(|chat| &chat.id == id)
+                                                .map(|chat| &chat.projection),
+                                            indices,
+                                        ),
+                                        view::Hit::ToolSummary(indices) => (projection, indices),
+                                        _ => unreachable!(),
+                                    };
                                     if !open_tool_summary {
                                         continue;
                                     }
                                     selecting_text = false;
                                     text_selection = None;
-                                    let tools = projection
+                                    let tools = owner
                                         .map(|projection| {
                                             indices
                                                 .iter()
@@ -3374,6 +3383,9 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                                 &mut passport_username,
                                                 &mut onboarding,
                                             ) {
+                                                if !right_panel.guard_file_leave() {
+                                                    continue;
+                                                }
                                                 break Ok(());
                                             }
                                         }
@@ -3517,6 +3529,9 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                                 &mut passport_username,
                                                 &mut onboarding,
                                             ) {
+                                                if !right_panel.guard_file_leave() {
+                                                    continue;
+                                                }
                                                 break Ok(());
                                             }
                                         }
@@ -3564,6 +3579,9 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                         }));
                                     }
                                 } else if hit == Some(view::Hit::Hint(view::HintAction::Quit)) {
+                                    if !right_panel.guard_file_leave() {
+                                        continue;
+                                    }
                                     cancel.cancel();
                                     break Ok(());
                                 } else if slash::is_open(&input)
@@ -5892,6 +5910,17 @@ fn git_branch_counts(status: &str) -> (usize, usize) {
 #[cfg(test)]
 mod tool_summary_click_tests {
     use super::*;
+
+    #[test]
+    fn summary_double_click_does_not_cross_session_owners() {
+        let mut click = ToolSummaryClick::default();
+        let now = Instant::now();
+        let main = view::Hit::ToolSummary(vec![0]);
+        let side = view::Hit::SideToolSummary(blora_types::SessionId::generate(), vec![0]);
+        assert!(!click.register(Some(&main), now));
+        assert!(!click.register(Some(&side), now));
+        assert!(click.register(Some(&side), now));
+    }
 
     #[test]
     fn opens_only_after_two_clicks_on_the_same_summary() {
