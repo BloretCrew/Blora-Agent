@@ -6334,7 +6334,9 @@ fn render_composer(
     frame.render_widget(Paragraph::new(line).style(theme.base()), info);
 
     let cursor_x = prompt.x.saturating_add(2).saturating_add(cursor_col);
-    if cursor_x < prompt.x.saturating_add(prompt.width) {
+    if cursor_x < prompt.x.saturating_add(prompt.width)
+        && !model.right_panel.is_some_and(|panel| panel.focused)
+    {
         frame.set_cursor_position(Position::new(cursor_x, prompt.y));
     }
 }

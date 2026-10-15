@@ -20,6 +20,7 @@ enum Output {
 
 pub struct TerminalPane {
     parser: vt100::Parser,
+    history_screen: Option<vt100::Parser>,
     master: Option<Box<dyn MasterPty + Send>>,
     writer: Option<Box<dyn Write + Send>>,
     child: Box<dyn Child + Send + Sync>,
@@ -78,6 +79,7 @@ impl TerminalPane {
         let stop = Arc::new(AtomicBool::new(false));
         let mut pane = Self {
             parser: vt100::Parser::new(rows.max(1), cols.max(1), 2000),
+            history_screen: None,
             master: Some(pair.master),
             writer: Some(writer),
             child,
@@ -129,17 +131,86 @@ impl TerminalPane {
     }
 
     fn drain_output(&mut self) {
+        let mut changed = false;
         for _ in 0..128 {
             match self.output.try_recv() {
-                Ok(Output::Bytes(bytes)) => self.parser.process(&bytes),
+                Ok(Output::Bytes(bytes)) => {
+                    // VT100 advances a nonzero offset when rows enter scrollback.
+                    self.parser.process(&bytes);
+                    changed = true;
+                }
                 Ok(Output::Error(error)) => self.error = Some(error),
                 Err(_) => break,
             }
         }
+        if changed {
+            self.refresh_history_screen();
+        }
     }
 
+    /// The visible screen, including the application's existing mouse modes.
     pub fn screen(&self) -> &vt100::Screen {
-        self.parser.screen()
+        self.history_screen
+            .as_ref()
+            .unwrap_or(&self.parser)
+            .screen()
+    }
+
+    /// Positive deltas move up into history; negative deltas approach live output.
+    /// Alternate-screen applications have no local scrollback. Mouse routing is
+    /// left to the panel using `screen().mouse_protocol_mode()`.
+    pub fn scroll_history(&mut self, delta: isize) {
+        if self.parser.screen().alternate_screen() {
+            self.follow_output();
+            return;
+        }
+        let offset = self.history_offset();
+        let target = if delta >= 0 {
+            offset.saturating_add(delta as usize)
+        } else {
+            offset.saturating_sub(delta.unsigned_abs())
+        };
+        self.parser.set_scrollback(target);
+        self.refresh_history_screen();
+    }
+
+    /// Actual, clamped distance in rows from live output.
+    pub fn history_offset(&self) -> usize {
+        self.parser.screen().scrollback()
+    }
+
+    pub fn follow_output(&mut self) {
+        self.parser.set_scrollback(0);
+        self.history_screen = None;
+    }
+
+    fn refresh_history_screen(&mut self) {
+        self.history_screen = None;
+        let offset = self.history_offset();
+        let (rows, cols) = self.parser.screen().size();
+        if offset <= usize::from(rows) {
+            return;
+        }
+
+        // vt100 0.15 subtracts the offset from the row count when rendering.
+        // Temporarily pad the grid to avoid underflow for deep history; only
+        // copy the viewport, then restore the live grid before parsing output.
+        self.parser.set_size(offset as u16, cols);
+        let lines: Vec<_> = self
+            .parser
+            .screen()
+            .rows_formatted(0, cols)
+            .take(usize::from(rows))
+            .collect();
+        self.parser.set_size(rows, cols);
+        let mut view = vt100::Parser::new(rows, cols, 0);
+        for (row, line) in lines.into_iter().enumerate() {
+            // rows_formatted assumes the caller positions each row and resets attributes.
+            view.process(format!("\x1b[{};1H\x1b[0m", row + 1).as_bytes());
+            view.process(&line);
+        }
+        view.process(&self.parser.screen().input_mode_formatted());
+        self.history_screen = Some(view);
     }
     pub fn exit_status(&self) -> Option<&ExitStatus> {
         self.exit_status.as_ref()
@@ -160,12 +231,14 @@ impl TerminalPane {
             .map_err(|e| format!("resize terminal: {e}"));
         if result.is_ok() {
             self.parser.set_size(rows.max(1), cols.max(1));
+            self.refresh_history_screen();
         }
         self.record(result)
     }
 
     /// Sends literal bytes, including control characters such as ETX (Ctrl+C).
     pub fn input(&mut self, bytes: &[u8]) -> Result<(), String> {
+        self.follow_output();
         let result = if self.writer.is_none() {
             Err("terminal is closed".into())
         } else if self.pending_input.len() - self.input_offset + bytes.len() > 4 * 1024 * 1024 {
@@ -535,6 +608,117 @@ mod tests {
         assert_eq!(pane.exit_status().unwrap().exit_code(), 7);
         assert!(pane.reader.is_none());
         assert!(pane.input(b"x").is_err());
+    }
+
+    #[test]
+    fn pty_history_scroll_bounds_input_and_resize() {
+        let mut pane = TerminalPane::spawn(Path::new("/tmp"), 90, 8).unwrap();
+        pane.input(b"stty -echo; printf '\\033[2J\\033[H'; i=0; while [ $i -lt 80 ]; do printf '\\033[32mHISTORY_%03d\\033[0m\\n' $i; i=$((i+1)); done; printf 'HISTORY_%s' READY; read history_reply\r")
+            .unwrap();
+        wait_for(&mut pane, "HISTORY_READY");
+        assert_eq!(pane.history_offset(), 0);
+        pane.scroll_history(30);
+        assert_eq!(pane.history_offset(), 30);
+        let historical = pane.screen().contents();
+        assert!(historical.contains("HISTORY_"));
+        assert!(!historical.contains("HISTORY_READY"));
+        assert_eq!(
+            pane.screen().cell(0, 0).unwrap().fgcolor(),
+            vt100::Color::Idx(2)
+        );
+        pane.scroll_history(-3);
+        assert_eq!(pane.history_offset(), 27);
+        pane.scroll_history(3);
+        assert_eq!(pane.screen().contents(), historical);
+        pane.resize(100, 12).unwrap();
+        assert_eq!(pane.screen().size(), (12, 100));
+        assert_eq!(pane.history_offset(), 30);
+        assert_eq!(
+            pane.screen().rows(0, 90).next(),
+            historical.lines().next().map(str::to_owned)
+        );
+        pane.resize(90, 8).unwrap();
+        assert_eq!(pane.screen().contents(), historical);
+        pane.scroll_history(isize::MAX);
+        let oldest = pane.history_offset();
+        assert!(oldest >= 70 && oldest <= 2000);
+        let oldest_contents = pane.screen().contents();
+        assert!(!oldest_contents.is_empty());
+        pane.scroll_history(isize::MAX);
+        assert_eq!(pane.history_offset(), oldest);
+        assert_eq!(pane.screen().contents(), oldest_contents);
+        pane.scroll_history(isize::MIN);
+        assert_eq!(pane.history_offset(), 0);
+        assert!(pane.screen().contents().contains("HISTORY_READY"));
+        pane.scroll_history(10);
+        pane.key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(pane.history_offset(), 0);
+        pane.scroll_history(10);
+        pane.paste("y").unwrap();
+        assert_eq!(pane.history_offset(), 0);
+        pane.scroll_history(10);
+        pane.input(b"z").unwrap();
+        assert_eq!(pane.history_offset(), 0);
+        pane.scroll_history(10);
+        pane.follow_output();
+        assert_eq!(pane.history_offset(), 0);
+    }
+
+    #[test]
+    fn pty_new_output_keeps_history_anchored() {
+        let mut pane = TerminalPane::spawn(Path::new("/tmp"), 90, 8).unwrap();
+        pane.input(b"stty -echo; printf '\\033[2J\\033[H'; i=0; while [ $i -lt 80 ]; do printf 'ANCHOR_%03d\\n' $i; i=$((i+1)); done; printf 'ANCHOR_%s' READY; read history_reply; i=0; while [ $i -lt 12 ]; do printf '\\nNEW_%03d' $i; i=$((i+1)); done; printf 'ANCHOR_%s' UPDATED; read history_reply\r")
+            .unwrap();
+        wait_for(&mut pane, "ANCHOR_READY");
+        pane.scroll_history(30);
+        let historical = pane.screen().contents();
+        // Release the shell's read without the UI input API resuming live view.
+        pane.writer.as_mut().unwrap().write_all(b"\r").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while pane.history_offset() < 42 {
+            pane.poll();
+            assert!(Instant::now() < deadline, "new PTY output missing");
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(pane.screen().contents(), historical);
+        pane.follow_output();
+        wait_for(&mut pane, "ANCHOR_UPDATED");
+    }
+
+    #[test]
+    fn history_alternate_screen_and_mouse_modes() {
+        let mut pane = TerminalPane::spawn(Path::new("/tmp"), 90, 8).unwrap();
+        pane.input(b"stty -echo; i=0; while [ $i -lt 50 ]; do printf 'MODE_%03d\\n' $i; i=$((i+1)); done; printf 'MODE_%s' READY; read history_reply\r")
+            .unwrap();
+        wait_for(&mut pane, "MODE_READY");
+        pane.parser.process(b"\x1b[?1000h\x1b[?1006h");
+        pane.scroll_history(30);
+        assert_eq!(
+            pane.screen().mouse_protocol_mode(),
+            vt100::MouseProtocolMode::PressRelease
+        );
+        assert_eq!(
+            pane.screen().mouse_protocol_encoding(),
+            vt100::MouseProtocolEncoding::Sgr
+        );
+        pane.parser.process(b"\x1b[?1049h\x1b[2J\x1b[HALTERNATE");
+        pane.refresh_history_screen();
+        assert!(pane.screen().alternate_screen());
+        assert_eq!(pane.history_offset(), 0);
+        pane.scroll_history(isize::MAX);
+        assert_eq!(pane.history_offset(), 0);
+        assert!(pane.screen().contents().contains("ALTERNATE"));
+        pane.parser.process(b"\x1b[?1049l\x1b[?1000l\x1b[?1006l");
+        pane.refresh_history_screen();
+        assert!(!pane.screen().alternate_screen());
+        assert_eq!(
+            pane.screen().mouse_protocol_mode(),
+            vt100::MouseProtocolMode::None
+        );
+        assert!(pane.screen().contents().contains("MODE_READY"));
+        pane.scroll_history(30);
+        assert_eq!(pane.history_offset(), 30);
     }
 
     #[test]

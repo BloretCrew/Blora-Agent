@@ -3,6 +3,11 @@
 
 //! Independent right-hand tools and their project/session ownership.
 
+mod chat;
+mod files;
+mod layout;
+use files::*;
+
 use crate::{i18n, theme::Theme, view::FrameModel};
 use blora_runtime::{CancelToken, RunOptions, Runtime};
 use blora_session::{SessionProjection, TranscriptItem};
@@ -51,301 +56,12 @@ enum Action {
     File(usize),
     Back,
     Focus,
-}
-#[derive(Debug)]
-struct FileEntry {
-    path: PathBuf,
-    directory: bool,
-}
-struct FileResult {
-    generation: u64,
-    result: Result<FileData, String>,
-}
-enum FileData {
-    List(Vec<FileEntry>),
-    Preview(String),
-}
-struct FileRequest {
-    generation: u64,
-    root: PathBuf,
-    path: PathBuf,
-    preview: bool,
-    cancel: CancelToken,
-}
-#[derive(Default)]
-struct FileWork {
-    pending: Option<FileRequest>,
-    result: Option<FileResult>,
-    stop: bool,
-}
-#[derive(Default)]
-struct FileWorker {
-    work: std::sync::Mutex<FileWork>,
-    ready: std::sync::Condvar,
-}
-impl FileWorker {
-    fn run(&self) {
-        loop {
-            let request = {
-                let mut work = self.work.lock().unwrap();
-                while work.pending.is_none() && !work.stop {
-                    work = self.ready.wait(work).unwrap();
-                }
-                if work.stop {
-                    return;
-                }
-                work.pending.take().unwrap()
-            };
-            let result = read_file_data_cancelled(
-                &request.root,
-                &request.path,
-                request.preview,
-                &request.cancel,
-            );
-            let mut work = self.work.lock().unwrap();
-            if !work.stop && !request.cancel.is_cancelled() {
-                work.result = Some(FileResult {
-                    generation: request.generation,
-                    result,
-                });
-            }
-        }
-    }
-}
-struct Files {
-    root: PathBuf,
-    directory: PathBuf,
-    generation: u64,
-    entries: Vec<FileEntry>,
-    selected: usize,
-    preview: Option<String>,
-    message: String,
-    worker: std::sync::Arc<FileWorker>,
-    handle: Option<thread::JoinHandle<()>>,
-    cancel: CancelToken,
-    scroll: usize,
-}
-impl Drop for Files {
-    fn drop(&mut self) {
-        self.cancel();
-        {
-            let mut work = self.worker.work.lock().unwrap();
-            work.stop = true;
-        }
-        self.worker.ready.notify_one();
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
-    }
-}
-impl Files {
-    fn new() -> Self {
-        let worker = std::sync::Arc::new(FileWorker::default());
-        let background = worker.clone();
-        let handle = thread::Builder::new()
-            .name("blora-right-files".into())
-            .spawn(move || background.run())
-            .ok();
-        Self {
-            root: PathBuf::new(),
-            directory: PathBuf::new(),
-            generation: 0,
-            entries: vec![],
-            selected: 0,
-            preview: None,
-            message: String::new(),
-            worker,
-            handle,
-            cancel: CancelToken::new(),
-            scroll: 0,
-        }
-    }
-    fn load(&mut self, path: PathBuf, preview: bool) {
-        self.cancel();
-        self.message = i18n::tr("right.loading", "加载中…");
-        self.preview = None;
-        self.scroll = 0;
-        if !preview {
-            self.selected = 0;
-            self.directory = path.clone();
-            self.entries.clear();
-        }
-        if self.handle.is_none() {
-            self.message = "could not start file worker".to_owned();
-            return;
-        }
-        self.cancel = CancelToken::new();
-        let mut work = self.worker.work.lock().unwrap();
-        work.pending = Some(FileRequest {
-            generation: self.generation,
-            root: self.root.clone(),
-            path,
-            preview,
-            cancel: self.cancel.clone(),
-        });
-        self.worker.ready.notify_one();
-    }
-    fn cancel(&mut self) {
-        self.cancel.cancel();
-        self.generation = self.generation.wrapping_add(1);
-        let mut work = self.worker.work.lock().unwrap();
-        work.pending = None;
-        work.result = None;
-    }
-    fn close(&mut self) {
-        self.cancel();
-        self.root.clear();
-        self.directory.clear();
-        self.entries.clear();
-        self.preview = None;
-        self.message.clear();
-    }
-
-    fn sync(&mut self, root: &Path) {
-        if self.root != root {
-            self.root = root.to_path_buf();
-            self.load(root.to_path_buf(), false);
-        }
-        let update = self.worker.work.lock().unwrap().result.take();
-        if let Some(update) = update {
-            if update.generation != self.generation {
-                return;
-            }
-            match update.result {
-                Ok(FileData::List(entries)) => {
-                    self.entries = entries;
-                    self.message = if self.entries.is_empty() {
-                        i18n::tr("right.empty", "空目录")
-                    } else {
-                        String::new()
-                    };
-                }
-                Ok(FileData::Preview(text)) => {
-                    self.preview = Some(text);
-                    self.message = String::new();
-                }
-                Err(error) => self.message = error,
-            }
-        }
-    }
-    fn open(&mut self, index: usize) {
-        if let Some(entry) = self.entries.get(index) {
-            self.load(entry.path.clone(), !entry.directory);
-        }
-    }
-    fn back(&mut self) {
-        if !self.message.is_empty() {
-            self.message.clear();
-            self.cancel();
-        }
-        if self.preview.is_some() {
-            self.preview = None;
-            self.scroll = 0;
-        } else if self.directory != self.root {
-            if let Some(parent) = self.directory.parent() {
-                self.load(parent.to_path_buf(), false);
-            }
-        }
-    }
-}
-#[cfg(test)]
-fn read_file_data(root: &Path, path: &Path, preview: bool) -> Result<FileData, String> {
-    read_file_data_cancelled(root, path, preview, &CancelToken::new())
-}
-fn file_cancelled(cancel: &CancelToken) -> Result<(), String> {
-    if cancel.is_cancelled() {
-        Err("file request cancelled".to_owned())
-    } else {
-        Ok(())
-    }
-}
-fn read_file_data_cancelled(
-    root: &Path,
-    path: &Path,
-    preview: bool,
-    cancel: &CancelToken,
-) -> Result<FileData, String> {
-    file_cancelled(cancel)?;
-    let root = root.canonicalize().map_err(|e| e.to_string())?;
-    file_cancelled(cancel)?;
-    let path = path.canonicalize().map_err(|e| e.to_string())?;
-    file_cancelled(cancel)?;
-    if !path.starts_with(&root) {
-        return Err(i18n::tr("right.boundary", "路径超出项目边界"));
-    }
-    if preview {
-        if !path.is_file() {
-            return Err(i18n::tr("right.special", "仅支持预览普通文件"));
-        }
-        file_cancelled(cancel)?;
-        let mut file = fs::File::open(&path).map_err(|e| e.to_string())?;
-        let truncated = file.metadata().map_err(|e| e.to_string())?.len() > 65536;
-        let mut bytes = Vec::new();
-        let mut chunk = [0; 8192];
-        while bytes.len() < 65536 {
-            file_cancelled(cancel)?;
-            let remaining = (65536 - bytes.len()).min(chunk.len());
-            let count = file
-                .read(&mut chunk[..remaining])
-                .map_err(|e| e.to_string())?;
-            if count == 0 {
-                break;
-            }
-            bytes.extend_from_slice(&chunk[..count]);
-        }
-        file_cancelled(cancel)?;
-        if bytes.contains(&0)
-            || std::str::from_utf8(&bytes)
-                .is_err_and(|error| error.error_len().is_some() || !truncated)
-        {
-            return Err(i18n::tr("right.binary", "二进制文件，无法预览"));
-        }
-        let mut text = String::from_utf8_lossy(&bytes).into_owned();
-        if truncated {
-            text.push_str(&format!(
-                "\n{}",
-                i18n::tr("right.truncated", "仅显示前 64 KiB")
-            ));
-        }
-        if text.is_empty() {
-            text = i18n::tr("right.empty_file", "空文件");
-        }
-        Ok(FileData::Preview(text))
-    } else {
-        let mut entries = Vec::new();
-        file_cancelled(cancel)?;
-        let mut directory = fs::read_dir(&path).map_err(|e| e.to_string())?;
-        for _ in 0..1001 {
-            file_cancelled(cancel)?;
-            let Some(entry) = directory.next() else {
-                break;
-            };
-            file_cancelled(cancel)?;
-            let entry = entry.map_err(|e| e.to_string())?;
-            let canonical = match entry.path().canonicalize() {
-                Ok(p) if p.starts_with(&root) => p,
-                _ => continue,
-            };
-            file_cancelled(cancel)?;
-            if !canonical.is_dir() && !canonical.is_file() {
-                continue;
-            }
-            entries.push(FileEntry {
-                directory: canonical.is_dir(),
-                path: entry.path(),
-            });
-        }
-        if entries.len() > 1000 {
-            return Err(i18n::tr(
-                "right.too_many",
-                "目录超过 1000 项，请选择更小的目录",
-            ));
-        }
-        file_cancelled(cancel)?;
-        entries.sort_by(|a, b| b.directory.cmp(&a.directory).then(a.path.cmp(&b.path)));
-        file_cancelled(cancel)?;
-        Ok(FileData::List(entries))
-    }
+    Refresh,
+    Restart,
+    Send,
+    Cancel,
+    Bottom,
+    ExpandId,
 }
 
 pub struct SideChat {
@@ -355,8 +71,15 @@ pub struct SideChat {
     pub cancel: CancelToken,
     pub running: bool,
     draft: String,
+    cursor: usize,
+    history: Vec<String>,
+    history_index: Option<usize>,
+    saved_draft: String,
+    rendered: std::cell::Cell<usize>,
+    max_scroll: std::cell::Cell<usize>,
+    unread: std::cell::Cell<usize>,
     queue: VecDeque<String>,
-    scroll: usize,
+    scroll: std::cell::Cell<usize>,
     pub status: String,
     route: Option<(String, String)>,
 }
@@ -377,7 +100,9 @@ pub struct RightPanel {
     pub chat: Option<SideChat>,
     terminal: Option<crate::right_terminal::TerminalPane>,
     terminal_error: String,
-    info_scroll: usize,
+    info_scroll: std::cell::Cell<usize>,
+    info_max: std::cell::Cell<usize>,
+    expanded_id: bool,
     chat_error: String,
     terminal_workspace: PathBuf,
     done_tx: Sender<(SessionId, String)>,
@@ -398,7 +123,9 @@ impl Default for RightPanel {
             chat: None,
             terminal: None,
             terminal_error: String::new(),
-            info_scroll: 0,
+            info_scroll: 0.into(),
+            info_max: 0.into(),
+            expanded_id: false,
             chat_error: String::new(),
             terminal_workspace: PathBuf::new(),
             done_tx,
@@ -561,8 +288,15 @@ impl RightPanel {
                             cancel: CancelToken::new(),
                             running: false,
                             draft: String::new(),
+                            cursor: 0,
+                            history: vec![],
+                            history_index: None,
+                            saved_draft: String::new(),
+                            rendered: 0.into(),
+                            max_scroll: 0.into(),
+                            unread: 0.into(),
                             queue: VecDeque::new(),
-                            scroll: 0,
+                            scroll: 0.into(),
                             status: String::new(),
                             route: None,
                         })
@@ -574,6 +308,27 @@ impl RightPanel {
         }
         self.active = tab;
         self.focused = true;
+    }
+    fn restart_terminal(&mut self) {
+        if self
+            .terminal
+            .as_ref()
+            .is_some_and(|pane| pane.exit_status().is_none() && pane.error().is_none())
+        {
+            return;
+        }
+        self.terminal = None;
+        self.terminal_error.clear();
+        let area = self
+            .area
+            .map(|area| layout::body(Rect::new(area.x + 1, area.y, area.width - 1, area.height)));
+        let (cols, rows) = area
+            .map(|r| (r.width, r.height.saturating_sub(1)))
+            .unwrap_or((34, 13));
+        match crate::right_terminal::TerminalPane::spawn(&self.terminal_workspace, cols, rows) {
+            Ok(pane) => self.terminal = Some(pane),
+            Err(error) => self.terminal_error = error,
+        }
     }
     fn close(&mut self, tab: Tab) {
         if tab == Tab::Info {
@@ -654,6 +409,12 @@ impl RightPanel {
                         .cloned()
                 };
                 if let Some((_, action)) = hit {
+                    if !matches!(
+                        action,
+                        Action::Close(_) | Action::Collapse | Action::Restore
+                    ) {
+                        self.focused = true;
+                    }
                     match action {
                         Action::Tab(tab) => self.open(tab, runtime, workspace),
                         Action::Close(tab) => self.close(tab),
@@ -668,6 +429,26 @@ impl RightPanel {
                         }
                         Action::Back => self.files.back(),
                         Action::Focus => self.focused = true,
+                        Action::Refresh => self.files.refresh(),
+                        Action::Restart => self.restart_terminal(),
+                        Action::ExpandId => self.expanded_id = !self.expanded_id,
+                        Action::Send => {
+                            if let Some(chat) = self.chat.as_mut() {
+                                chat.send();
+                            }
+                        }
+                        Action::Cancel => {
+                            if let Some(chat) = self.chat.as_mut() {
+                                chat.cancel.cancel();
+                                chat.queue.clear();
+                            }
+                        }
+                        Action::Bottom => {
+                            if let Some(chat) = self.chat.as_ref() {
+                                chat.scroll.set(0);
+                                chat.unread.set(0);
+                            }
+                        }
                     }
                     return true;
                 }
@@ -683,10 +464,19 @@ impl RightPanel {
                     _ => return true,
                 };
                 match self.active {
-                    Tab::Info => self.info_scroll = self.info_scroll.saturating_add_signed(delta),
+                    Tab::Info => self.info_scroll.set(
+                        self.info_scroll
+                            .get()
+                            .saturating_add_signed(delta)
+                            .min(self.info_max.get()),
+                    ),
                     Tab::Files => {
                         if self.files.preview.is_some() {
-                            self.files.scroll = self.files.scroll.saturating_add_signed(delta);
+                            self.files.scroll = self
+                                .files
+                                .scroll
+                                .saturating_add_signed(delta)
+                                .min(self.files.max_scroll.get());
                         } else {
                             self.files.selected = self
                                 .files
@@ -697,10 +487,64 @@ impl RightPanel {
                     }
                     Tab::Chat => {
                         if let Some(chat) = self.chat.as_mut() {
-                            chat.scroll = chat.scroll.saturating_add_signed(delta);
+                            chat.scroll.set(
+                                chat.scroll
+                                    .get()
+                                    .saturating_add_signed(-delta)
+                                    .min(chat.max_scroll.get()),
+                            );
                         }
                     }
-                    _ => {}
+                    Tab::Terminal => {
+                        if let Some(terminal) = self.terminal.as_mut() {
+                            let content = self.area.map(|area| {
+                                let inner =
+                                    Rect::new(area.x + 1, area.y, area.width - 1, area.height);
+                                let body = layout::body(inner);
+                                Rect::new(
+                                    body.x,
+                                    body.y + 1,
+                                    body.width,
+                                    body.height.saturating_sub(1),
+                                )
+                            });
+                            if let Some(content) = content
+                                .filter(|rect| rect.contains((mouse.column, mouse.row).into()))
+                            {
+                                if terminal.screen().mouse_protocol_mode()
+                                    != vt100::MouseProtocolMode::None
+                                    && terminal.history_offset() == 0
+                                    && !mouse.modifiers.contains(KeyModifiers::SHIFT)
+                                {
+                                    let button = if delta < 0 { 64 } else { 65 };
+                                    let col = mouse.column - content.x + 1;
+                                    let row = mouse.row - content.y + 1;
+                                    match terminal.screen().mouse_protocol_encoding() {
+                                        vt100::MouseProtocolEncoding::Sgr => {
+                                            let _ = terminal.input(
+                                                format!("\x1b[<{button};{col};{row}M").as_bytes(),
+                                            );
+                                        }
+                                        vt100::MouseProtocolEncoding::Default
+                                            if col < 224 && row < 224 =>
+                                        {
+                                            let _ = terminal.input(&[
+                                                27,
+                                                b'[',
+                                                b'M',
+                                                button + 32,
+                                                col as u8 + 32,
+                                                row as u8 + 32,
+                                            ]);
+                                        }
+                                        _ => {}
+                                    }
+                                } else {
+                                    terminal.scroll_history(-delta);
+                                }
+                            }
+                        }
+                    }
                 }
                 return true;
             }
@@ -710,13 +554,7 @@ impl RightPanel {
             return false;
         }
         if let Event::Key(key) = event {
-            if key.kind == KeyEventKind::Repeat && self.active == Tab::Terminal {
-                if let Some(terminal) = self.terminal.as_mut() {
-                    let _ = terminal.key(*key);
-                }
-                return true;
-            }
-            if key.kind != KeyEventKind::Press {
+            if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
                 return true;
             }
             if key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -757,9 +595,30 @@ impl RightPanel {
                 if let Some(terminal) = self.terminal.as_mut() {
                     match event {
                         Event::Paste(text) => {
+                            terminal.follow_output();
                             let _ = terminal.paste(text);
                         }
+                        Event::Key(key)
+                            if key.modifiers.contains(KeyModifiers::SHIFT)
+                                && matches!(key.code, KeyCode::PageUp | KeyCode::PageDown) =>
+                        {
+                            let page = self
+                                .area
+                                .map(|area| area.height.saturating_sub(5) as isize)
+                                .unwrap_or(10);
+                            terminal.scroll_history(if key.code == KeyCode::PageUp {
+                                page
+                            } else {
+                                -page
+                            });
+                        }
+                        Event::Key(key)
+                            if key.code == KeyCode::End && terminal.history_offset() > 0 =>
+                        {
+                            terminal.follow_output()
+                        }
                         Event::Key(key) => {
+                            terminal.follow_output();
                             let _ = terminal.key(*key);
                         }
                         _ => {}
@@ -768,18 +627,58 @@ impl RightPanel {
             }
             Tab::Files => {
                 if let Event::Key(key) = event {
+                    let page = self
+                        .area
+                        .map(|r| r.height.saturating_sub(6) as usize)
+                        .unwrap_or(10)
+                        .max(1);
+                    let preview = self.files.preview_path.is_some();
+                    let delta = match key.code {
+                        KeyCode::Up => -1,
+                        KeyCode::Down => 1,
+                        KeyCode::PageUp => -(page as isize),
+                        KeyCode::PageDown => page as isize,
+                        _ => 0,
+                    };
+                    if preview {
+                        self.files.scroll = self
+                            .files
+                            .scroll
+                            .saturating_add_signed(delta)
+                            .min(self.files.max_scroll.get());
+                    } else {
+                        self.files.selected = self
+                            .files
+                            .selected
+                            .saturating_add_signed(delta)
+                            .min(self.files.entries.len().saturating_sub(1));
+                    }
                     match key.code {
-                        KeyCode::Up => self.files.selected = self.files.selected.saturating_sub(1),
-                        KeyCode::Down => {
-                            self.files.selected = (self.files.selected + 1)
-                                .min(self.files.entries.len().saturating_sub(1))
+                        KeyCode::Home => {
+                            if preview {
+                                self.files.scroll = 0;
+                                self.files.horizontal = 0;
+                            } else {
+                                self.files.selected = 0;
+                            }
                         }
-                        KeyCode::Enter => self.files.open(self.files.selected),
+                        KeyCode::End => {
+                            if preview {
+                                self.files.scroll = self.files.max_scroll.get();
+                            } else {
+                                self.files.selected = self.files.entries.len().saturating_sub(1);
+                            }
+                        }
+                        KeyCode::Left if preview => {
+                            self.files.horizontal = self.files.horizontal.saturating_sub(4)
+                        }
+                        KeyCode::Right if preview => {
+                            self.files.horizontal =
+                                (self.files.horizontal + 4).min(self.files.max_horizontal.get())
+                        }
+                        KeyCode::Char('r') => self.files.refresh(),
+                        KeyCode::Enter if !preview => self.files.open(self.files.selected),
                         KeyCode::Backspace | KeyCode::Esc => self.files.back(),
-                        KeyCode::PageDown => {
-                            self.files.scroll = self.files.scroll.saturating_add(10)
-                        }
-                        KeyCode::PageUp => self.files.scroll = self.files.scroll.saturating_sub(10),
                         _ => {}
                     }
                 }
@@ -787,24 +686,14 @@ impl RightPanel {
             Tab::Chat => {
                 if let Some(chat) = self.chat.as_mut() {
                     match event {
-                        Event::Paste(text) => chat.draft.push_str(text),
-                        Event::Key(key) => match key.code {
-                            KeyCode::Enter if !chat.draft.trim().is_empty() => {
-                                chat.queue.push_back(std::mem::take(&mut chat.draft));
-                                chat.scroll = 0;
-                            }
-                            KeyCode::Backspace => {
-                                chat.draft.pop();
-                            }
-                            KeyCode::Char(c)
-                                if !key
-                                    .modifiers
-                                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-                            {
-                                chat.draft.push(c)
-                            }
-                            _ => {}
-                        },
+                        Event::Paste(text) => chat.insert(text),
+                        Event::Key(key) if key.code == KeyCode::PageUp => chat
+                            .scroll
+                            .set((chat.scroll.get() + 10).min(chat.max_scroll.get())),
+                        Event::Key(key) if key.code == KeyCode::PageDown => {
+                            chat.scroll.set(chat.scroll.get().saturating_sub(10))
+                        }
+                        Event::Key(key) => chat.edit(*key),
                         _ => {}
                     }
                 }
@@ -835,25 +724,36 @@ impl RightPanel {
             area,
         );
         let inner = Rect::new(area.x + 1, area.y, area.width - 1, area.height);
-        let mut x = inner.x;
-        for tab in &self.tabs {
-            let width = if *tab == Tab::Info { 6 } else { 8 };
-            let rect = Rect::new(x, inner.y, width, 1);
+        for (tab, rect) in self.tabs.iter().zip(layout::tabs(inner, self.tabs.len())) {
+            let selected = *tab == self.active;
+            let style = if selected || layout::hovered(rect, model.pointer) {
+                theme
+                    .fg(theme.rose)
+                    .bg(theme.hairline)
+                    .add_modifier(ratatui::style::Modifier::UNDERLINED)
+            } else {
+                theme.fg(theme.text_dim)
+            };
+            let style = if selected && self.focused {
+                style.add_modifier(ratatui::style::Modifier::BOLD)
+            } else {
+                style
+            };
+            let reserve = if *tab == Tab::Info { 0 } else { 2 };
             frame.render_widget(
-                Paragraph::new(tab.label()).style(theme.fg(if *tab == self.active {
-                    theme.rose
-                } else {
-                    theme.text_dim
-                })),
+                Paragraph::new(layout::clip(
+                    &tab.label(),
+                    rect.width.saturating_sub(reserve) as usize,
+                ))
+                .style(style),
                 rect,
             );
             hits.push((rect, Action::Tab(*tab)));
-            if *tab != Tab::Info {
-                let close = Rect::new(x + width - 2, inner.y, 1, 1);
-                frame.render_widget(Paragraph::new("×"), close);
+            if *tab != Tab::Info && rect.width >= 2 {
+                let close = Rect::new(rect.right() - 1, rect.y, 1, 1);
+                frame.render_widget(Paragraph::new("×").style(style), close);
                 hits.insert(0, (close, Action::Close(*tab)));
             }
-            x += width;
         }
         let collapse = Rect::new(inner.right() - 2, inner.y, 2, 1);
         frame.render_widget(Paragraph::new("›"), collapse);
@@ -867,129 +767,252 @@ impl RightPanel {
             Paragraph::new(hint).style(theme.fg(theme.text_mute)),
             Rect::new(inner.x, inner.bottom() - 1, inner.width, 1),
         );
-        let body = Rect::new(
-            inner.x,
-            inner.y + 2,
-            inner.width,
-            inner.height.saturating_sub(3),
-        );
+        let body = layout::body(inner);
         hits.push((body, Action::Focus));
         match self.active {
             Tab::Info => {
                 let unknown = i18n::tr("right.unknown", "未知");
                 let session = model.sessions.get(model.index);
                 let p = model.projection;
-                let lines = vec![
-                    format!(
-                        "{}: {}",
-                        i18n::tr("right.title", "会话"),
-                        session.and_then(|s| s.title.as_deref()).unwrap_or(&unknown)
+                let harness = p.map(|p| p.harness).unwrap_or_default();
+                let external = harness != blora_types::HarnessKind::Blora;
+                let title = session
+                    .and_then(|s| s.title.as_deref())
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty() && *t != "tui")
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| i18n::tr("session.untitled", "未命名会话"));
+                let id = session
+                    .map(|s| s.id.to_string())
+                    .unwrap_or_else(|| unknown.clone());
+                let shown_id = if self.expanded_id {
+                    id.clone()
+                } else {
+                    format!("{}… [↔]", layout::clip(&id, 8))
+                };
+                let provider = if external {
+                    i18n::tr("right.external_provider", "由外部内核管理")
+                } else if !model.provider.is_empty() {
+                    model.provider.to_owned()
+                } else {
+                    p.and_then(|p| p.provider.clone())
+                        .unwrap_or_else(|| unknown.clone())
+                };
+                let model_name = if external {
+                    p.and_then(|p| p.external_model.clone())
+                        .unwrap_or_else(|| unknown.clone())
+                } else if !model.model.is_empty() {
+                    model.model.to_owned()
+                } else {
+                    p.and_then(|p| p.model.clone())
+                        .unwrap_or_else(|| unknown.clone())
+                };
+                let mut lines = Vec::new();
+                let mut id_rows = (0, 0);
+                let sections = [
+                    (
+                        i18n::tr("right.section_session", "会话"),
+                        vec![
+                            (i18n::tr("right.title", "会话"), title),
+                            ("ID".into(), shown_id),
+                            (
+                                i18n::tr("right.project", "项目"),
+                                model.workspace.display().to_string(),
+                            ),
+                            (
+                                i18n::tr("right.state", "状态"),
+                                if model.running {
+                                    i18n::tr("right.running", "运行中…")
+                                } else {
+                                    i18n::tr("right.idle", "空闲")
+                                },
+                            ),
+                        ],
                     ),
-                    format!(
-                        "ID: {}",
-                        session
-                            .map(|s| s.id.to_string())
-                            .unwrap_or_else(|| unknown.clone())
+                    (
+                        i18n::tr("right.section_config", "运行配置"),
+                        vec![
+                            (
+                                i18n::tr("right.kernel", "内核"),
+                                harness.display_name().to_owned(),
+                            ),
+                            (i18n::tr("right.provider", "供应商"), provider),
+                            (i18n::tr("right.model", "模型"), model_name),
+                            (
+                                i18n::tr("right.permission", "权限"),
+                                if external {
+                                    i18n::tr(
+                                        "right.external_permission",
+                                        "由外部内核执行；主窗口控制授权",
+                                    )
+                                } else {
+                                    i18n::permission_name(model.permission_mode)
+                                },
+                            ),
+                        ],
                     ),
-                    format!(
-                        "{}: {}",
-                        i18n::tr("right.project", "项目"),
-                        model.workspace.display()
+                    (
+                        i18n::tr("right.section_usage", "累计用量"),
+                        vec![
+                            (
+                                i18n::tr("right.input_tokens", "累计输入 Token"),
+                                p.map(|p| p.input_tokens).unwrap_or(0).to_string(),
+                            ),
+                            (
+                                i18n::tr("right.output_tokens", "累计输出 Token"),
+                                p.map(|p| p.output_tokens).unwrap_or(0).to_string(),
+                            ),
+                            (i18n::tr("right.context", "上下文"), unknown),
+                        ],
                     ),
-                    format!(
-                        "{}: {}",
-                        i18n::tr("right.state", "状态"),
-                        if model.running {
-                            i18n::tr("right.running", "运行中…")
-                        } else {
-                            i18n::tr("right.idle", "空闲")
-                        }
-                    ),
-                    format!(
-                        "{}: {:?}",
-                        i18n::tr("right.kernel", "内核"),
-                        p.map(|p| p.harness).unwrap_or_default()
-                    ),
-                    format!(
-                        "{}: {}",
-                        i18n::tr("right.provider", "供应商"),
-                        if model.provider.is_empty() {
-                            unknown.as_str()
-                        } else {
-                            model.provider
-                        }
-                    ),
-                    format!(
-                        "{}: {}",
-                        i18n::tr("right.model", "模型"),
-                        if model.model.is_empty() {
-                            unknown.as_str()
-                        } else {
-                            model.model
-                        }
-                    ),
-                    format!(
-                        "{}: {}",
-                        i18n::tr("right.permission", "权限"),
-                        i18n::permission_name(model.permission_mode)
-                    ),
-                    format!(
-                        "{}: {} / {}",
-                        i18n::tr("right.tokens", "Token 输入 / 输出"),
-                        p.map(|p| p.input_tokens).unwrap_or(0),
-                        p.map(|p| p.output_tokens).unwrap_or(0)
-                    ),
-                    format!("{}: {}", i18n::tr("right.context", "上下文"), unknown),
                 ];
-                let button_y = body.bottom().saturating_sub(4);
-                let info = Rect::new(body.x, body.y, body.width, button_y.saturating_sub(body.y));
+                for (section, fields) in sections {
+                    if !lines.is_empty() {
+                        lines.push(ratatui::text::Line::default());
+                    }
+                    lines.push(ratatui::text::Line::styled(section, theme.fg(theme.rose)));
+                    for (label, value) in fields {
+                        lines.push(ratatui::text::Line::styled(
+                            label.clone(),
+                            theme.fg(theme.text_dim),
+                        ));
+                        let begin = lines.len();
+                        let (wrapped, _) =
+                            chat::draft_lines(&value, value.len(), body.width.max(1) as usize);
+                        lines.extend(
+                            wrapped.into_iter().map(|line| {
+                                ratatui::text::Line::styled(line, theme.fg(theme.text))
+                            }),
+                        );
+                        if label == "ID" {
+                            id_rows = (begin, lines.len());
+                        }
+                    }
+                }
+                let action_height = body.height.min(3);
+                let info = Rect::new(
+                    body.x,
+                    body.y,
+                    body.width,
+                    body.height.saturating_sub(action_height),
+                );
+                let max = lines.len().saturating_sub(info.height as usize);
+                self.info_max.set(max);
+                let offset = self.info_scroll.get().min(max);
+                self.info_scroll.set(offset);
                 frame.render_widget(
-                    Paragraph::new(lines.join("\n"))
-                        .scroll((self.info_scroll.min(u16::MAX as usize) as u16, 0))
-                        .wrap(Wrap { trim: false })
-                        .style(theme.fg(theme.text)),
+                    Paragraph::new(lines).scroll((offset.min(u16::MAX as usize) as u16, 0)),
                     info,
                 );
-                for (i, tab) in [Tab::Files, Tab::Terminal, Tab::Chat].iter().enumerate() {
-                    let rect = Rect::new(body.x + 1, button_y + i as u16, body.width - 2, 1);
+                for row in id_rows.0..id_rows.1 {
+                    if row >= offset && row - offset < info.height as usize {
+                        hits.insert(
+                            0,
+                            (
+                                Rect::new(info.x, info.y + (row - offset) as u16, info.width, 1),
+                                Action::ExpandId,
+                            ),
+                        );
+                    }
+                }
+                for (i, tab) in [Tab::Files, Tab::Terminal, Tab::Chat]
+                    .iter()
+                    .take(action_height as usize)
+                    .enumerate()
+                {
+                    let rect = Rect::new(body.x, info.bottom() + i as u16, body.width, 1);
                     let label = if *tab == Tab::Chat {
                         i18n::tr("right.session_title", "侧边对话")
                     } else {
                         tab.label()
                     };
-                    frame.render_widget(
-                        Paragraph::new(format!("[ {label} ]")).style(theme.fg(theme.rose)),
-                        rect,
-                    );
+                    let style = if layout::hovered(rect, model.pointer) {
+                        theme.fg(theme.rose).bg(theme.hairline)
+                    } else {
+                        theme.fg(theme.rose)
+                    };
+                    frame.render_widget(Paragraph::new(format!("[ {label} ]")).style(style), rect);
                     hits.insert(0, (rect, Action::Tab(*tab)));
                 }
             }
             Tab::Files => {
-                let back = Rect::new(body.x, body.y, body.width, 1);
+                let refresh_width = body.width.min(8);
+                let back = Rect::new(body.x, body.y, body.width.saturating_sub(refresh_width), 1);
+                let path = self
+                    .files
+                    .preview_path
+                    .as_ref()
+                    .unwrap_or(&self.files.directory);
+                let relative = path.strip_prefix(&self.files.root).unwrap_or(path);
                 frame.render_widget(
-                    Paragraph::new(format!(
-                        "‹ {}",
-                        self.files
-                            .directory
-                            .strip_prefix(&self.files.root)
-                            .unwrap_or(&self.files.directory)
-                            .display()
-                    ))
-                    .style(theme.fg(theme.rose)),
+                    Paragraph::new(format!("‹ /{}", relative.display()))
+                        .style(theme.fg(theme.rose)),
                     back,
                 );
                 hits.insert(0, (back, Action::Back));
+                let refresh = Rect::new(back.right(), body.y, refresh_width, 1);
+                frame.render_widget(
+                    Paragraph::new(i18n::tr("right.refresh", "刷新 r")).style(
+                        theme
+                            .fg(theme.rose)
+                            .bg(if layout::hovered(refresh, model.pointer) {
+                                theme.hairline
+                            } else {
+                                theme.bg
+                            }),
+                    ),
+                    refresh,
+                );
+                hits.insert(0, (refresh, Action::Refresh));
                 let content = Rect::new(
                     body.x,
                     body.y + 1,
                     body.width,
-                    body.height.saturating_sub(1),
+                    body.height.saturating_sub(2),
                 );
+                let mut position = String::new();
                 if let Some(preview) = &self.files.preview {
-                    frame.render_widget(
-                        Paragraph::new(preview.as_str())
-                            .scroll((self.files.scroll.min(u16::MAX as usize) as u16, 0)),
-                        content,
+                    let total = preview.lines().count();
+                    let max = total.saturating_sub(content.height as usize);
+                    self.files.max_scroll.set(max);
+                    let offset = self.files.scroll.min(max);
+                    let digits = total.max(1).to_string().len();
+                    let text_width = content.width.saturating_sub(digits as u16 + 1) as usize;
+                    let max_width = preview
+                        .lines()
+                        .map(unicode_width::UnicodeWidthStr::width)
+                        .max()
+                        .unwrap_or(0);
+                    self.files
+                        .max_horizontal
+                        .set(max_width.saturating_sub(text_width));
+                    let horizontal = self.files.horizontal.min(self.files.max_horizontal.get());
+                    for (row, (index, line)) in preview
+                        .lines()
+                        .enumerate()
+                        .skip(offset)
+                        .take(content.height as usize)
+                        .enumerate()
+                    {
+                        let number = Rect::new(content.x, content.y + row as u16, digits as u16, 1);
+                        frame.render_widget(
+                            Paragraph::new(format!("{:>digits$}", index + 1))
+                                .style(theme.fg(theme.text_dim)),
+                            number,
+                        );
+                        let text = Rect::new(number.right() + 1, number.y, text_width as u16, 1);
+                        frame.render_widget(
+                            Paragraph::new(line)
+                                .scroll((0, horizontal.min(u16::MAX as usize) as u16)),
+                            text,
+                        );
+                    }
+                    position = format!(
+                        "{}–{} / {} · ↔ {}",
+                        offset + 1,
+                        (offset + content.height as usize).min(total),
+                        total,
+                        horizontal
                     );
                 } else if !self.files.message.is_empty() {
                     frame.render_widget(
@@ -1021,18 +1044,31 @@ impl RightPanel {
                             entry.path.file_name().unwrap_or_default().to_string_lossy(),
                             if entry.directory { "/" } else { "" }
                         );
-                        frame.render_widget(
-                            Paragraph::new(label).style(theme.fg(
-                                if index == self.files.selected {
-                                    theme.rose
-                                } else {
-                                    theme.text
-                                },
-                            )),
-                            rect,
-                        );
+                        let style = if index == self.files.selected
+                            || layout::hovered(rect, model.pointer)
+                        {
+                            theme.fg(theme.rose).bg(theme.hairline)
+                        } else {
+                            theme.fg(theme.text)
+                        };
+                        frame.render_widget(Paragraph::new(label).style(style), rect);
                         hits.insert(0, (rect, Action::File(index)));
                     }
+                    position = format!(
+                        "{} / {}",
+                        if self.files.entries.is_empty() {
+                            0
+                        } else {
+                            self.files.selected + 1
+                        },
+                        self.files.entries.len()
+                    );
+                }
+                if body.height > 1 {
+                    frame.render_widget(
+                        Paragraph::new(position).style(theme.fg(theme.text_dim)),
+                        Rect::new(body.x, body.bottom() - 1, body.width, 1),
+                    );
                 }
             }
             Tab::Terminal => {
@@ -1054,8 +1090,39 @@ impl RightPanel {
                 } else {
                     self.terminal_workspace.display().to_string()
                 };
+                let history = self
+                    .terminal
+                    .as_ref()
+                    .map(|pane| pane.history_offset())
+                    .unwrap_or(0);
+                let restart = self
+                    .terminal
+                    .as_ref()
+                    .is_none_or(|pane| pane.exit_status().is_some() || pane.error().is_some());
+                let label = if restart {
+                    format!(
+                        "[{}] {}",
+                        i18n::tr("right.restart", "重新启动"),
+                        terminal_label
+                    )
+                } else if history > 0 {
+                    format!(
+                        "{} {} · End · {}",
+                        i18n::tr("right.history", "历史"),
+                        history,
+                        terminal_label
+                    )
+                } else {
+                    terminal_label
+                };
+                if restart {
+                    hits.insert(
+                        0,
+                        (Rect::new(body.x, body.y, body.width, 1), Action::Restart),
+                    );
+                }
                 frame.render_widget(
-                    Paragraph::new(terminal_label).style(theme.fg(theme.text_dim)),
+                    Paragraph::new(label).style(theme.fg(theme.text_dim)),
                     Rect::new(body.x, body.y, body.width, 1),
                 );
                 let content = Rect::new(
@@ -1085,7 +1152,7 @@ impl RightPanel {
                             }
                         }
                     }
-                    if self.focused && !screen.hide_cursor() {
+                    if self.focused && terminal.history_offset() == 0 && !screen.hide_cursor() {
                         let (row, col) = screen.cursor_position();
                         if row < content.height && col < content.width {
                             frame.set_cursor_position((content.x + col, content.y + row));
@@ -1100,61 +1167,109 @@ impl RightPanel {
             }
             Tab::Chat => {
                 if let Some(chat) = &self.chat {
+                    let route = chat
+                        .route
+                        .as_ref()
+                        .map(|(m, p)| format!("{p}/{m}"))
+                        .unwrap_or_else(|| i18n::tr("right.route_pending", "首次发送时固定配置"));
                     let header = format!(
-                        "{} · Blora\n{}\n{}",
-                        chat.id,
+                        "{} · Blora
+{}
+{} · {} {} · {}",
+                        layout::clip(&chat.id.to_string(), 8),
                         chat.workspace.display(),
-                        chat.status
+                        chat.status,
+                        i18n::tr("right.queued", "排队"),
+                        chat.queue.len(),
+                        route
                     );
                     frame.render_widget(
                         Paragraph::new(header).style(theme.fg(theme.text_dim)),
-                        Rect::new(body.x, body.y, body.width, 3),
+                        Rect::new(body.x, body.y, body.width, 3.min(body.height)),
+                    );
+                    let (draft_lines, (cursor_row, cursor_col)) =
+                        chat::draft_lines(&chat.draft, chat.cursor, body.width as usize);
+                    let draft_height = (draft_lines.len() as u16)
+                        .clamp(1, 5)
+                        .min(body.height.saturating_sub(5).max(1));
+                    let draft = Rect::new(
+                        body.x,
+                        body.bottom().saturating_sub(1 + draft_height),
+                        body.width,
+                        draft_height,
                     );
                     let content = Rect::new(
                         body.x,
                         body.y + 3,
                         body.width,
-                        body.height.saturating_sub(6),
+                        draft.y.saturating_sub(body.y + 3),
                     );
-                    let lines = chat
-                        .projection
-                        .transcript
-                        .iter()
-                        .map(|item| match item {
-                            TranscriptItem::User { text, .. } => format!("› {text}"),
-                            TranscriptItem::Assistant { text, .. } => text.clone(),
-                            TranscriptItem::Tool { name, status, .. } => {
-                                format!("[{name}: {status}]")
-                            }
-                            TranscriptItem::System { summary, .. } => summary.clone(),
-                            TranscriptItem::Question { question, .. } => format!("? {question}"),
-                            _ => String::new(),
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    let line_count = lines
-                        .lines()
-                        .map(|line| {
-                            unicode_width::UnicodeWidthStr::width(line)
-                                .max(1)
-                                .div_ceil(content.width.max(1) as usize)
-                        })
-                        .sum::<usize>();
-                    let wrapped = Paragraph::new(lines).wrap(Wrap { trim: false });
-                    let offset = line_count
-                        .saturating_sub(content.height as usize)
-                        .saturating_sub(chat.scroll);
+                    let lines = chat.lines(content.width as usize, &theme);
+                    let count = lines.len();
+                    let max = count.saturating_sub(content.height as usize);
+                    let distance = chat.viewport(count, content.height as usize);
                     frame.render_widget(
-                        wrapped.scroll((offset.min(u16::MAX as usize) as u16, 0)),
+                        Paragraph::new(lines)
+                            .scroll(((max - distance).min(u16::MAX as usize) as u16, 0)),
                         content,
                     );
-                    let draft = Rect::new(body.x, body.bottom().saturating_sub(3), body.width, 3);
+                    let draft_offset =
+                        cursor_row.saturating_sub(draft.height.saturating_sub(1) as usize);
                     frame.render_widget(
-                        Paragraph::new(format!("› {}", chat.draft))
-                            .wrap(Wrap { trim: false })
+                        Paragraph::new(draft_lines.join("\n"))
+                            .scroll((draft_offset.min(u16::MAX as usize) as u16, 0))
                             .style(theme.fg(theme.text)),
                         draft,
                     );
+                    if self.focused && cursor_col < draft.width as usize && draft.height > 0 {
+                        frame.set_cursor_position((
+                            draft.x + cursor_col as u16,
+                            draft.y + (cursor_row - draft_offset) as u16,
+                        ));
+                    }
+                    let controls = Rect::new(body.x, body.bottom() - 1, body.width, 1);
+                    let send = Rect::new(controls.x, controls.y, controls.width.min(8), 1);
+                    let cancel = Rect::new(
+                        send.right(),
+                        controls.y,
+                        controls.width.saturating_sub(send.width).min(8),
+                        1,
+                    );
+                    let bottom = Rect::new(
+                        cancel.right(),
+                        controls.y,
+                        controls.right().saturating_sub(cancel.right()),
+                        1,
+                    );
+                    for (rect, label, action) in [
+                        (send, i18n::tr("right.send", "发送"), Action::Send),
+                        (cancel, i18n::tr("right.cancel", "取消"), Action::Cancel),
+                        (
+                            bottom,
+                            if distance > 0 {
+                                format!(
+                                    "{} +{}",
+                                    i18n::tr("right.bottom", "到底部"),
+                                    chat.unread.get()
+                                )
+                            } else {
+                                String::new()
+                            },
+                            Action::Bottom,
+                        ),
+                    ] {
+                        frame.render_widget(
+                            Paragraph::new(label).style(theme.fg(theme.rose).bg(
+                                if layout::hovered(rect, model.pointer) {
+                                    theme.hairline
+                                } else {
+                                    theme.bg
+                                },
+                            )),
+                            rect,
+                        );
+                        hits.insert(0, (rect, action));
+                    }
                 } else {
                     frame.render_widget(Paragraph::new(self.chat_error.as_str()), body);
                 }
@@ -1570,5 +1685,370 @@ mod tests {
         assert!(files.worker.work.lock().unwrap().result.is_none());
         drop(files);
         fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn four_tabs_are_disjoint_clipped_and_leave_collapse_space() {
+        for width in [4, 12, 24, 35, 60] {
+            let inner = Rect::new(9, 2, width, 18);
+            let rects = layout::tabs(inner, 4);
+            assert_eq!(rects.len(), 4);
+            for (index, rect) in rects.iter().enumerate() {
+                assert!(rect.right() <= inner.right() - 2);
+                if index > 0 {
+                    assert_eq!(rects[index - 1].right(), rect.x);
+                }
+                for x in rect.x..rect.right() {
+                    assert_eq!(
+                        rects.iter().filter(|r| r.contains((x, 2).into())).count(),
+                        1
+                    );
+                }
+            }
+        }
+        assert_eq!(layout::clip("中文a", 3), "中");
+        assert_eq!(layout::clip("中文a", 4), "中文");
+        assert_eq!(layout::body(Rect::new(0, 0, 4, 2)).height, 0);
+        assert!(layout::hovered(Rect::new(2, 3, 4, 1), Some((5, 3))));
+        assert!(!layout::hovered(Rect::new(2, 3, 4, 1), Some((6, 3))));
+    }
+    #[test]
+    fn side_editor_utf8_delete_multiline_history_and_cursor() {
+        use crossterm::event::KeyEvent;
+        let runtime = runtime();
+        let mut panel = RightPanel::default();
+        panel.open(Tab::Chat, &runtime, Path::new("/tmp"));
+        let chat = panel.chat.as_mut().unwrap();
+        chat.insert("你🙂好");
+        chat.edit(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        chat.edit(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(chat.draft, "你好");
+        chat.edit(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+        chat.insert("ab");
+        chat.edit(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT));
+        chat.insert("第二行");
+        let saved = chat.draft.clone();
+        chat.send();
+        assert_eq!(chat.queue.front(), Some(&saved));
+        assert_eq!(chat.cursor, 0);
+        chat.insert("未发送");
+        chat.edit(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(chat.draft, saved);
+        chat.edit(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(chat.draft, "未发送");
+        assert!(chat.draft.is_char_boundary(chat.cursor));
+        let (lines, cursor) = chat::draft_lines("中文a\n你", "中文a\n你".len(), 4);
+        assert_eq!(lines, vec!["中文", "a", "你"]);
+        assert_eq!(cursor, (2, 2));
+        let (_, cursor) = chat::draft_lines("中文", "中文".len(), 4);
+        assert_eq!(cursor, (1, 0));
+    }
+    #[test]
+    fn side_scroll_direction_bounds_anchor_and_markdown_filter() {
+        let runtime = runtime();
+        let mut panel = RightPanel::default();
+        panel.open(Tab::Chat, &runtime, Path::new("/tmp"));
+        panel.sync(&runtime, Path::new("/tmp"), Rect::new(0, 0, 124, 18));
+        let area = panel.area.unwrap();
+        panel.chat.as_ref().unwrap().viewport(100, 10);
+        let mouse = |kind| {
+            Event::Mouse(crossterm::event::MouseEvent {
+                kind,
+                column: area.x + 2,
+                row: area.y + 5,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        panel.event(
+            &mouse(MouseEventKind::ScrollUp),
+            &runtime,
+            Path::new("/tmp"),
+        );
+        let chat = panel.chat.as_ref().unwrap();
+        assert_eq!(chat.scroll.get(), 3);
+        assert_eq!(chat.viewport(105, 10), 8);
+        assert_eq!(chat.unread.get(), 5);
+        assert_eq!(105 - 10 - chat.scroll.get(), 87);
+        panel.event(
+            &mouse(MouseEventKind::ScrollDown),
+            &runtime,
+            Path::new("/tmp"),
+        );
+        let chat = panel.chat.as_ref().unwrap();
+        assert_eq!(chat.scroll.get(), 5);
+        assert_eq!(chat.viewport(4, 10), 0);
+        assert_eq!(chat.unread.get(), 0);
+        panel.focused = true;
+        panel.event(
+            &Event::Mouse(crossterm::event::MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 2,
+                row: 8,
+                modifiers: KeyModifiers::NONE,
+            }),
+            &runtime,
+            Path::new("/tmp"),
+        );
+        assert!(!panel.focused);
+    }
+    fn await_files(files: &mut Files, root: &Path) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            files.sync(root);
+            if files.message != i18n::tr("right.loading", "加载中…") {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "file worker timed out"
+            );
+            thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+    #[test]
+    fn files_refresh_return_selection_and_deleted_preview_do_not_stale() {
+        let root = std::env::temp_dir().join(format!("blora-right-refresh-{}", std::process::id()));
+        fs::create_dir_all(root.join("folder")).unwrap();
+        fs::write(root.join("a"), "old").unwrap();
+        fs::write(root.join("b"), "last").unwrap();
+        let mut files = Files::new();
+        files.sync(&root);
+        await_files(&mut files, &root);
+        files.open(2);
+        await_files(&mut files, &root);
+        assert_eq!(files.preview.as_deref(), Some("last"));
+        files.back();
+        assert_eq!(files.selected, 2);
+        files.open(0);
+        await_files(&mut files, &root);
+        files.back();
+        await_files(&mut files, &root);
+        assert_eq!(files.entries[files.selected].path, root.join("folder"));
+        files.open(1);
+        await_files(&mut files, &root);
+        fs::write(root.join("a"), "new").unwrap();
+        files.refresh();
+        await_files(&mut files, &root);
+        assert_eq!(files.preview.as_deref(), Some("new"));
+        fs::remove_file(root.join("a")).unwrap();
+        files.refresh();
+        await_files(&mut files, &root);
+        assert!(files.preview.is_none());
+        assert!(!files.message.is_empty());
+        files.back();
+        await_files(&mut files, &root);
+        assert!(files.entries.iter().all(|e| e.path != root.join("a")));
+        drop(files);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[cfg(unix)]
+    #[test]
+    fn terminal_panel_history_keys_and_restart_only_after_exit() {
+        use crossterm::event::KeyEvent;
+        let runtime = runtime();
+        let mut panel = RightPanel::default();
+        panel.open(Tab::Terminal, &runtime, Path::new("/tmp"));
+        panel.sync(&runtime, Path::new("/tmp"), Rect::new(0, 0, 124, 18));
+        let pid = panel.terminal.as_ref().unwrap().process_id();
+        panel.restart_terminal();
+        assert_eq!(panel.terminal.as_ref().unwrap().process_id(), pid);
+        panel.terminal.as_mut().unwrap().input(b"stty -echo; i=0; while [ $i -lt 70 ]; do echo HISTORY_$i; i=$((i+1)); done; printf 'HISTORY_%s\\n' READY\r").unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let pane = panel.terminal.as_mut().unwrap();
+            pane.poll();
+            if pane.screen().contents().contains("HISTORY_READY") {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panel.event(
+            &Event::Key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::SHIFT)),
+            &runtime,
+            Path::new("/tmp"),
+        );
+        assert!(panel.terminal.as_ref().unwrap().history_offset() > 0);
+        panel.event(
+            &Event::Key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE)),
+            &runtime,
+            Path::new("/tmp"),
+        );
+        assert_eq!(panel.terminal.as_ref().unwrap().history_offset(), 0);
+        panel.terminal.as_mut().unwrap().input(b"exit\r").unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while panel.terminal.as_ref().unwrap().exit_status().is_none() {
+            panel.terminal.as_mut().unwrap().poll();
+            assert!(std::time::Instant::now() < deadline);
+            thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panel.restart_terminal();
+        assert!(panel.terminal.as_ref().unwrap().exit_status().is_none());
+        assert_ne!(panel.terminal.as_ref().unwrap().process_id(), pid);
+    }
+    #[test]
+    fn drawn_chat_cursor_tabs_controls_and_info_expand_hit_regions() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let runtime = runtime();
+        let mut panel = RightPanel::default();
+        panel.open(Tab::Chat, &runtime, Path::new("/tmp"));
+        panel.tabs = vec![Tab::Info, Tab::Files, Tab::Terminal, Tab::Chat];
+        panel.sync(&runtime, Path::new("/tmp"), Rect::new(0, 0, 124, 18));
+        panel.chat.as_mut().unwrap().insert("中文\n草稿");
+        let mut terminal = Terminal::new(TestBackend::new(124, 18)).unwrap();
+        let model = FrameModel {
+            dialog_stack: &[],
+            workspace: Path::new("/tmp"),
+            sessions: &[],
+            index: 0,
+            sidebar: &crate::view::SidebarState::default(),
+            right_panel: Some(&panel),
+            projection: None,
+            pending: &[],
+            input: "",
+            status: "ready",
+            notice: None,
+            paste_preview: None,
+            passport_dialog: None,
+            provider_dialog: None,
+            add_provider_dialog: None,
+            theme_dialog: None,
+            context_dialog: None,
+            settings_dialog: None,
+            harness_dialog: None,
+            permission_dialog: None,
+            tool_dialog: None,
+            tool_detail_dialog: None,
+            slash_hits: &[],
+            slash_selected: 0,
+            search: None,
+            hide_tools: false,
+            message_roles: true,
+            scroll: 0,
+            permission_mode: blora_policy::PermissionMode::Ask,
+            model: "mock",
+            provider: "mock",
+            mode_menu: None,
+            project_picker: None,
+            folder_picker: None,
+            question_dialog: None,
+            session_picker: None,
+            git_dialog: None,
+            git_status: None,
+            user_label: "you",
+            running: true,
+            tick: 0,
+            pointer: None,
+            text_selection: None,
+        };
+        terminal
+            .draw(|frame| panel.draw(frame, &model, Rect::new(0, 0, 88, 18)))
+            .unwrap();
+        let cursor = terminal.get_cursor_position().unwrap();
+        assert!(cursor.x >= 89 && cursor.x < 124);
+        assert!(cursor.y >= 13 && cursor.y < 17);
+        let hits = panel.hits.borrow();
+        assert_eq!(
+            hits.iter()
+                .filter(|(_, a)| matches!(a, Action::Close(_)))
+                .count(),
+            3
+        );
+        assert!(hits.iter().any(|(_, a)| matches!(a, Action::Send)));
+        assert!(hits.iter().any(|(_, a)| matches!(a, Action::Cancel)));
+        for (rect, _) in hits.iter() {
+            assert!(rect.right() <= 124);
+            assert!(rect.bottom() <= 18);
+        }
+        drop(hits);
+        drop(model);
+        panel.active = Tab::Info;
+        let model = FrameModel {
+            dialog_stack: &[],
+            workspace: Path::new("/tmp"),
+            sessions: &[],
+            index: 0,
+            sidebar: &crate::view::SidebarState::default(),
+            right_panel: Some(&panel),
+            projection: None,
+            pending: &[],
+            input: "",
+            status: "ready",
+            notice: None,
+            paste_preview: None,
+            passport_dialog: None,
+            provider_dialog: None,
+            add_provider_dialog: None,
+            theme_dialog: None,
+            context_dialog: None,
+            settings_dialog: None,
+            harness_dialog: None,
+            permission_dialog: None,
+            tool_dialog: None,
+            tool_detail_dialog: None,
+            slash_hits: &[],
+            slash_selected: 0,
+            search: None,
+            hide_tools: false,
+            message_roles: true,
+            scroll: 0,
+            permission_mode: blora_policy::PermissionMode::Ask,
+            model: "mock",
+            provider: "mock",
+            mode_menu: None,
+            project_picker: None,
+            folder_picker: None,
+            question_dialog: None,
+            session_picker: None,
+            git_dialog: None,
+            git_status: None,
+            user_label: "you",
+            running: true,
+            tick: 0,
+            pointer: None,
+            text_selection: None,
+        };
+        terminal
+            .draw(|frame| panel.draw(frame, &model, Rect::new(0, 0, 88, 18)))
+            .unwrap();
+        assert!(
+            panel
+                .hits
+                .borrow()
+                .iter()
+                .any(|(_, a)| matches!(a, Action::ExpandId))
+        );
+        assert_eq!(
+            panel
+                .hits
+                .borrow()
+                .iter()
+                .filter(|(_, a)| matches!(a, Action::Tab(Tab::Files | Tab::Terminal | Tab::Chat)))
+                .count(),
+            6
+        );
+    }
+    #[test]
+    fn side_markdown_preserves_code_and_hides_internal_events() {
+        let runtime = runtime();
+        let mut panel = RightPanel::default();
+        panel.open(Tab::Chat, &runtime, Path::new("/tmp"));
+        let chat = panel.chat.as_mut().unwrap();
+        chat.projection.transcript.push(TranscriptItem::System {
+            summary: "INTERNAL_ONLY".into(),
+            event_id: blora_types::EventId::generate(),
+        });
+        chat.projection.transcript.push(TranscriptItem::Assistant {
+            text: "# 标题\n\n```rust\nlet value = 1;\n```".into(),
+            event_id: blora_types::EventId::generate(),
+        });
+        let text = chat
+            .lines(35, &Theme::current())
+            .into_iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("标题"));
+        assert!(text.contains("let value = 1;"));
+        assert!(!text.contains("INTERNAL_ONLY"));
     }
 }
