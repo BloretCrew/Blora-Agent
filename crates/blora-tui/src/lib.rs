@@ -713,7 +713,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                         );
                         return;
                     }
-                    if view::canvas_regions(frame.area()).0.is_some() {
+                    if frame.area().height >= 18 {
                         sidebar.sync(&sessions, index, &active_workspace, frame.area().height);
                     }
                     hits = view::draw_animated(
@@ -2985,6 +2985,40 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     ));
                                     continue;
                                 }
+                                match hit {
+                                    Some(view::Hit::ToggleLeft) => {
+                                        sidebar.left_collapsed = !sidebar.left_collapsed;
+                                        continue;
+                                    }
+                                    Some(view::Hit::ToggleRight) => {
+                                        sidebar.right_collapsed = !sidebar.right_collapsed;
+                                        continue;
+                                    }
+                                    Some(view::Hit::SidebarProject(project)) => {
+                                        sidebar.toggle_project(&sessions, project);
+                                        continue;
+                                    }
+                                    Some(view::Hit::WorkspaceFiles | view::Hit::WorkspaceTasks) => {
+                                        let command = if hit == Some(view::Hit::WorkspaceFiles) {
+                                            "files"
+                                        } else {
+                                            "tasks"
+                                        };
+                                        let outcome = workspace_panel(
+                                            &runtime,
+                                            &active_workspace,
+                                            sessions.get(index).map(|session| &session.id),
+                                            command,
+                                        );
+                                        if let SlashOutcome::Panel { status: text, body } = outcome
+                                        {
+                                            status = text;
+                                            notice = Some(body);
+                                        }
+                                        continue;
+                                    }
+                                    _ => {}
+                                }
                                 if let Some(view::Hit::SidebarSession(target)) = hit {
                                     if target < sessions.len() {
                                         index = target;
@@ -4390,6 +4424,30 @@ fn clip_text(text: &str, max_lines: usize) -> String {
     lines.join("\n")
 }
 
+fn workspace_panel(
+    runtime: &Runtime,
+    workspace: &Path,
+    session: Option<&SessionId>,
+    command: &str,
+) -> SlashOutcome {
+    let body = if command == "files" {
+        runtime.workspace_info(workspace).map(|info| info.files)
+    } else {
+        runtime.list_tasks(session).map(|tasks| {
+            if tasks.is_empty() {
+                i18n::tr("sidebar.no_tasks", "暂无任务")
+            } else {
+                tasks
+                    .into_iter()
+                    .map(|task| format!("{}  {}  {}", task.id, task.status.as_str(), task.title))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+        })
+    };
+    panel(command, body.unwrap_or_else(|err| err.to_string()))
+}
+
 fn panel(status: impl Into<String>, body: impl Into<String>) -> SlashOutcome {
     SlashOutcome::Panel {
         status: status.into(),
@@ -4961,18 +5019,7 @@ fn slash(
             "BLORA_WORKTREE={}",
             env_flag("BLORA_WORKTREE", "0")
         )),
-        "tasks" => match runtime.list_tasks(Some(session_id)) {
-            Ok(tasks) if tasks.is_empty() => SlashOutcome::Status("no tasks".to_owned()),
-            Ok(tasks) => panel(
-                "tasks",
-                tasks
-                    .into_iter()
-                    .map(|task| format!("{}  {}  {}", task.id, task.status.as_str(), task.title))
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            ),
-            Err(err) => SlashOutcome::Status(err.to_string()),
-        },
+        "tasks" => workspace_panel(runtime, workspace, Some(session_id), "tasks"),
         "task" => queue_task(runtime, session_id, permission_mode, args, None, None),
         "cron" => queue_cron(runtime, session_id, permission_mode, args),
         "loop" => queue_loop(runtime, session_id, permission_mode, args),
@@ -5149,10 +5196,7 @@ fn slash(
             Ok(info) => panel("log", info.git_log),
             Err(err) => SlashOutcome::Status(err.to_string()),
         },
-        "files" => match runtime.workspace_info(workspace) {
-            Ok(info) => panel("files", info.files),
-            Err(err) => SlashOutcome::Status(err.to_string()),
-        },
+        "files" => workspace_panel(runtime, workspace, Some(session_id), "files"),
         "read" => {
             if args.is_empty() {
                 SlashOutcome::Status("usage: /read <path>".to_owned())
@@ -6050,6 +6094,30 @@ mod dialog_input_tests {
     }
 
     #[test]
+    fn workspace_panel_routes_files_and_empty_tasks_without_editing_input() {
+        let runtime = Runtime::new(blora_storage::SqliteStore::open_in_memory().unwrap());
+        let session = SessionId::generate();
+        let dir = std::env::temp_dir().join(format!("blora-sidebar-{session}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("sidebar-file.txt"), "test").unwrap();
+        match workspace_panel(&runtime, &dir, Some(&session), "files") {
+            SlashOutcome::Panel { status, body } => {
+                assert_eq!(status, "files");
+                assert!(body.contains("sidebar-file.txt"));
+            }
+            _ => panic!("files must open its existing result panel"),
+        }
+        match workspace_panel(&runtime, &dir, Some(&session), "tasks") {
+            SlashOutcome::Panel { status, body } => {
+                assert_eq!(status, "tasks");
+                assert!(!body.is_empty());
+            }
+            _ => panic!("empty tasks must still open a result panel"),
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn modal_hits_do_not_reach_background_or_other_dialogs() {
         for id in [
             DialogId::Project,
@@ -6077,6 +6145,15 @@ mod dialog_input_tests {
                 Some(id),
                 Some(&view::Hit::SidebarSettings)
             ));
+            for hit in [
+                view::Hit::SidebarProject(0),
+                view::Hit::ToggleLeft,
+                view::Hit::ToggleRight,
+                view::Hit::WorkspaceFiles,
+                view::Hit::WorkspaceTasks,
+            ] {
+                assert!(!dialog_accepts_hit(Some(id), Some(&hit)));
+            }
             assert!(!dialog_accepts_hit(Some(id), Some(&view::Hit::Allow)));
             assert!(!dialog_accepts_hit(Some(id), None));
             assert!(dialog_accepts_hit(Some(id), Some(&view::Hit::TrafficClose)));

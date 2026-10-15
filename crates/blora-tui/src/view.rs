@@ -584,6 +584,11 @@ pub enum Hit {
     Transcript,
     SidebarSession(usize),
     SidebarSettings,
+    SidebarProject(usize),
+    ToggleLeft,
+    ToggleRight,
+    WorkspaceFiles,
+    WorkspaceTasks,
     ToolSummary(Vec<usize>),
     ToolDetailRow(usize),
     GitStatus,
@@ -663,9 +668,8 @@ pub enum HintAction {
 #[derive(Clone, Debug, Default)]
 pub struct HitMap {
     pub sidebar: Option<Rect>,
-    pub sidebar_projects: Option<Rect>,
+    pub workspace_sidebar: Option<Rect>,
     pub sidebar_sessions: Option<Rect>,
-    pub sidebar_project_max: usize,
     pub sidebar_session_max: usize,
     pub sidebar_rows: Vec<(Rect, Hit)>,
     pub modal: bool,
@@ -997,320 +1001,9 @@ fn contains(rect: Rect, col: u16, row: u16) -> bool {
         && row < rect.y.saturating_add(rect.height)
 }
 
-#[derive(Clone, Debug, Default)]
-pub struct SidebarState {
-    pub projects: usize,
-    pub sessions: usize,
-    active: Option<String>,
-    workspace: Option<String>,
-    height: u16,
-}
-
-pub(crate) fn canvas_regions(area: Rect) -> (Option<Rect>, Rect) {
-    if area.width < 100 || area.height < 18 {
-        return (None, area);
-    }
-    (
-        Some(Rect::new(area.x, area.y, 28, area.height)),
-        Rect::new(area.x + 28, area.y, area.width - 28, area.height),
-    )
-}
-
-fn sidebar_list_heights(height: u16) -> (usize, usize) {
-    let available = height.saturating_sub(11) as usize;
-    let projects = (available / 3).clamp(1, 4);
-    (projects, available.saturating_sub(projects))
-}
-
-fn sidebar_session_indices(sessions: &[SessionSummary], workspace: &Path) -> Vec<usize> {
-    sessions
-        .iter()
-        .enumerate()
-        .filter(|(_, session)| Path::new(&session.workspace_path) == workspace)
-        .map(|(index, _)| index)
-        .collect()
-}
-
-impl SidebarState {
-    pub fn sync(
-        &mut self,
-        sessions: &[SessionSummary],
-        index: usize,
-        workspace: &Path,
-        height: u16,
-    ) {
-        let active_workspace = sessions
-            .get(index)
-            .map(|session| Path::new(&session.workspace_path))
-            .unwrap_or(workspace);
-        let active = sessions.get(index).map(|session| session.id.to_string());
-        let path = active_workspace.display().to_string();
-        let (project_height, session_height) = sidebar_list_heights(height);
-        let projects = crate::project_paths(sessions);
-        let indices = sidebar_session_indices(sessions, active_workspace);
-        if self.workspace.as_ref() != Some(&path) {
-            self.sessions = 0;
-            if let Some(position) = projects.iter().position(|project| project == &path) {
-                reveal_sidebar_row(&mut self.projects, position, project_height);
-            }
-        }
-        if self.active != active || self.workspace.as_ref() != Some(&path) || self.height != height
-        {
-            if let Some(position) = indices.iter().position(|target| *target == index) {
-                reveal_sidebar_row(&mut self.sessions, position, session_height);
-            }
-        }
-        self.projects = self
-            .projects
-            .min(projects.len().saturating_sub(project_height));
-        self.sessions = self
-            .sessions
-            .min(indices.len().saturating_sub(session_height));
-        self.height = height;
-        self.active = active;
-        self.workspace = Some(path);
-    }
-
-    pub fn scroll(&mut self, hits: &HitMap, col: u16, row: u16, up: bool) -> bool {
-        if hits.modal || !hits.sidebar.is_some_and(|rect| contains(rect, col, row)) {
-            return false;
-        }
-        let target = if hits
-            .sidebar_projects
-            .is_some_and(|rect| contains(rect, col, row))
-        {
-            Some((&mut self.projects, hits.sidebar_project_max))
-        } else if hits
-            .sidebar_sessions
-            .is_some_and(|rect| contains(rect, col, row))
-        {
-            Some((&mut self.sessions, hits.sidebar_session_max))
-        } else {
-            None
-        };
-        if let Some((offset, max)) = target {
-            *offset = if up {
-                offset.saturating_sub(3)
-            } else {
-                offset.saturating_add(3).min(max)
-            };
-        }
-        true
-    }
-}
-
-fn reveal_sidebar_row(offset: &mut usize, position: usize, height: usize) {
-    if position < *offset {
-        *offset = position;
-    } else if position >= offset.saturating_add(height) {
-        *offset = position.saturating_add(1).saturating_sub(height);
-    }
-}
-
-fn sidebar_row(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    text: &str,
-    hit: Option<Hit>,
-    selected: bool,
-    model: &FrameModel<'_>,
-    theme: &Theme,
-    hits: &mut HitMap,
-) {
-    let hovered = hit.is_some()
-        && model
-            .pointer
-            .is_some_and(|(col, row)| contains(area, col, row));
-    let style = if selected {
-        theme.rose_bold().bg(theme.bg_select)
-    } else if hovered {
-        theme.base().bg(theme.bg_select)
-    } else if hit.is_none() || matches!(hit, Some(Hit::ProjectPicker)) {
-        theme.dim().bg(theme.bg_raised)
-    } else {
-        theme.base().bg(theme.bg_raised)
-    };
-    let text = ellipsize(&sanitize_title(text), area.width.saturating_sub(3) as usize);
-    let marker = if selected { "›" } else { " " };
-    frame.render_widget(
-        Paragraph::new(format!("{marker} {text}")).style(style),
-        area,
-    );
-    if let Some(hit) = hit {
-        hits.sidebar_rows.push((area, hit));
-    }
-}
-
-fn render_sidebar(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    model: &FrameModel<'_>,
-    theme: &Theme,
-    hits: &mut HitMap,
-) {
-    hits.sidebar = Some(area);
-    frame.render_widget(
-        Block::default().style(theme.base().bg(theme.bg_raised)),
-        area,
-    );
-    for y in area.y..area.bottom() {
-        frame.render_widget(
-            Paragraph::new("│").style(theme.fg(theme.hairline)),
-            Rect::new(area.right() - 1, y, 1, 1),
-        );
-    }
-    let row = |y| Rect::new(area.x + 1, area.y + y, area.width - 3, 1);
-    frame.render_widget(
-        Paragraph::new("  ✦ Blora").style(theme.rose_bold().bg(theme.bg_raised)),
-        row(1),
-    );
-    sidebar_row(
-        frame,
-        row(3),
-        &i18n::tr("sidebar.new", "新建会话"),
-        Some(Hit::Hint(HintAction::New)),
-        false,
-        model,
-        theme,
-        hits,
-    );
-    sidebar_row(
-        frame,
-        row(4),
-        &i18n::tr("sidebar.search", "搜索会话"),
-        Some(Hit::SessionPicker),
-        false,
-        model,
-        theme,
-        hits,
-    );
-    sidebar_row(
-        frame,
-        row(6),
-        &format!("{} ›", i18n::tr("sidebar.projects", "项目")),
-        Some(Hit::ProjectPicker),
-        false,
-        model,
-        theme,
-        hits,
-    );
-    let active_workspace = model
-        .sessions
-        .get(model.index)
-        .map(|session| Path::new(&session.workspace_path))
-        .unwrap_or(model.workspace);
-    let projects = crate::project_paths(model.sessions);
-    let indices = sidebar_session_indices(model.sessions, active_workspace);
-    let (project_height, session_height) = sidebar_list_heights(area.height);
-    hits.sidebar_projects = Some(Rect::new(
-        area.x,
-        area.y + 7,
-        area.width - 1,
-        project_height as u16,
-    ));
-    hits.sidebar_sessions = Some(Rect::new(
-        area.x,
-        area.y + 9 + project_height as u16,
-        area.width - 1,
-        session_height as u16,
-    ));
-    hits.sidebar_project_max = projects.len().saturating_sub(project_height);
-    hits.sidebar_session_max = indices.len().saturating_sub(session_height);
-    for (visible, (index, path)) in projects
-        .iter()
-        .enumerate()
-        .skip(model.sidebar.projects.min(hits.sidebar_project_max))
-        .take(project_height)
-        .enumerate()
-    {
-        let name = Path::new(path)
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| path.clone());
-        sidebar_row(
-            frame,
-            row(7 + visible as u16),
-            &name,
-            Some(Hit::ProjectPickerRow(index)),
-            Path::new(path) == active_workspace,
-            model,
-            theme,
-            hits,
-        );
-    }
-    sidebar_row(
-        frame,
-        row(8 + project_height as u16),
-        &i18n::tr("sidebar.recent", "最近会话"),
-        None,
-        false,
-        model,
-        theme,
-        hits,
-    );
-    if indices.is_empty() {
-        sidebar_row(
-            frame,
-            row(9 + project_height as u16),
-            &i18n::tr("sidebar.empty", "暂无会话"),
-            None,
-            false,
-            model,
-            theme,
-            hits,
-        );
-    }
-    for (visible, index) in indices
-        .iter()
-        .skip(model.sidebar.sessions.min(hits.sidebar_session_max))
-        .take(session_height)
-        .enumerate()
-    {
-        let title = model.sessions[*index]
-            .title
-            .as_deref()
-            .map(str::trim)
-            .filter(|title| !title.is_empty() && *title != "tui")
-            .map(str::to_owned)
-            .unwrap_or_else(|| i18n::tr("session.untitled", "未命名会话"));
-        sidebar_row(
-            frame,
-            row(9 + project_height as u16 + visible as u16),
-            &title,
-            Some(Hit::SidebarSession(*index)),
-            *index == model.index,
-            model,
-            theme,
-            hits,
-        );
-    }
-    sidebar_row(
-        frame,
-        row(area.height - 2),
-        &i18n::tr("sidebar.settings", "设置"),
-        Some(Hit::SidebarSettings),
-        false,
-        model,
-        theme,
-        hits,
-    );
-    let user = if model.user_label.trim().is_empty() || model.user_label == "you" {
-        i18n::tr("sidebar.guest", "未登录")
-    } else {
-        model.user_label.to_owned()
-    };
-    sidebar_row(
-        frame,
-        row(area.height - 1),
-        &user,
-        None,
-        false,
-        model,
-        theme,
-        hits,
-    );
-}
+mod sidebar;
+pub use sidebar::SidebarState;
+use sidebar::{canvas_regions, render_sidebar, render_toggles, render_workspace};
 
 pub fn draw(
     frame: &mut Frame<'_>,
@@ -1319,7 +1012,7 @@ pub fn draw(
 ) -> HitMap {
     let theme = Theme::current();
     let terminal_area = frame.area();
-    let (sidebar, area) = canvas_regions(terminal_area);
+    let (sidebar, area, right) = canvas_regions(terminal_area, model.sidebar);
     frame.render_widget(Block::default().style(theme.base()), terminal_area);
 
     let show_slash = slash::is_open(model.input);
@@ -1396,7 +1089,19 @@ pub fn draw(
     if let Some(sidebar) = sidebar {
         render_sidebar(frame, sidebar, model, &theme, &mut hits);
     }
-    render_header(frame, header, model, &theme, &mut hits);
+    if let Some(right) = right {
+        render_workspace(frame, right, model, &theme, &mut hits);
+    }
+    let header_content = Rect::new(
+        header.x,
+        header.y,
+        header
+            .width
+            .saturating_sub(if header.width < 40 { 4 } else { 10 }),
+        header.height,
+    );
+    render_header(frame, header_content, model, &theme, &mut hits);
+    render_toggles(frame, header, model, &theme, &mut hits);
     render_rule(frame, rule, &theme);
     render_transcript(
         frame,
@@ -7966,11 +7671,14 @@ mod tests {
                 assert_eq!(hits.sidebar.unwrap().width, 28);
                 let buffer = terminal.backend().buffer();
                 assert_eq!(buffer[(3, 1)].bg, Theme::current().bg_raised);
-                let projects = hits.sidebar_projects.unwrap();
-                let recent = hits.sidebar_sessions.unwrap();
-                assert_eq!(recent.y, projects.bottom() + 2);
+                assert_eq!(hits.sidebar_sessions.unwrap().y, 7);
                 assert!(frame_text(&terminal).contains("未登录"));
-                assert!(hits.sidebar_rows.iter().all(|(rect, _)| rect.right() < 28));
+                assert!(
+                    hits.sidebar_rows
+                        .iter()
+                        .filter(|(rect, _)| rect.y > 0)
+                        .all(|(rect, _)| rect.right() < 28)
+                );
                 assert!(frame_text(&terminal).contains("暂无会话"));
                 assert_eq!(hits.hit(2, 3), Some(Hit::Hint(HintAction::New)));
                 assert_eq!(hits.hit(2, 4), Some(Hit::SessionPicker));
@@ -7980,25 +7688,23 @@ mod tests {
             }
         }
         assert_eq!(model.input, "draft 中文");
-        let (sidebar, canvas) = canvas_regions(Rect::new(5, 7, 100, 18));
+        let (sidebar, canvas, right) = canvas_regions(Rect::new(5, 7, 100, 18), &state);
+        assert!(right.is_none());
         assert_eq!(sidebar, Some(Rect::new(5, 7, 28, 18)));
         assert_eq!(canvas, Rect::new(33, 7, 72, 18));
     }
 
     #[test]
-    fn sidebar_scroll_hits_filtering_and_current_visibility() {
+    fn sidebar_tree_scroll_and_current_visibility() {
         let mut sessions = picker_sessions(30);
         sessions[0].workspace_path = "/tmp/other".into();
         sessions[29].title = Some("很长的中文会话标题".repeat(10));
         sessions[28].title = Some("tui".into());
-        let workspace = Path::new("/tmp/中文项目");
         let mut state = SidebarState::default();
-        state.sync(&sessions, 29, workspace, 18);
+        state.sync(&sessions, 29, Path::new("/tmp"), 18);
         let mut model = sidebar_model(&sessions, &state);
         model.index = 29;
-        let (terminal, hits) = sidebar_frame(100, 18, &model);
-        assert_eq!(hits.sidebar_project_max, 0);
-        assert_eq!(hits.sidebar_session_max, 24);
+        let (terminal, hits) = sidebar_frame(124, 18, &model);
         assert!(
             hits.sidebar_rows
                 .iter()
@@ -8010,76 +7716,125 @@ mod tests {
                 .iter()
                 .any(|(_, hit)| *hit == Hit::SidebarSession(0))
         );
-        let (rect, _) = hits
-            .sidebar_rows
-            .iter()
-            .find(|(_, hit)| *hit == Hit::SidebarSession(29))
-            .unwrap();
-        assert_eq!(hits.hit(rect.x, rect.y), Some(Hit::SidebarSession(29)));
         assert!(frame_text(&terminal).contains("很长的中文会话标题"));
         assert!(frame_text(&terminal).contains("…"));
         assert!(frame_text(&terminal).contains("未命名会话"));
-        assert_eq!(crate::project_paths(&sessions).len(), 2);
         let list = hits.sidebar_sessions.unwrap();
-        assert!(state.scroll(&hits, list.x + 1, list.y, true));
+        state.scroll(&hits, 2, list.y, true);
         let manual = state.sessions;
-        state.sync(&sessions, 29, workspace, 18);
+        state.sync(&sessions, 29, Path::new("/tmp"), 18);
         assert_eq!(state.sessions, manual);
-        let mut model = sidebar_model(&sessions, &state);
-        model.index = 29;
-        let (_, scrolled) = sidebar_frame(100, 18, &model);
-        assert_eq!(
-            scrolled.hit(2, list.y),
-            Some(Hit::SidebarSession(manual + 1))
-        );
         for _ in 0..100 {
-            state.scroll(&hits, list.x + 1, list.y, true);
-        }
-        assert_eq!(state.sessions, 0);
-        for _ in 0..100 {
-            state.scroll(&hits, list.x + 1, list.y, false);
+            state.scroll(&hits, 2, list.y, false);
         }
         assert_eq!(state.sessions, hits.sidebar_session_max);
         assert!(!state.scroll(&hits, 50, list.y, true));
-        state.sync(&sessions, 1, workspace, 18);
+        let projects = crate::project_paths(&sessions);
+        let other = projects
+            .iter()
+            .position(|path| path == "/tmp/other")
+            .unwrap();
+        state.toggle_project(&sessions, other);
+        state.sessions = 0;
+        let (_, hits) = sidebar_frame(124, 30, &sidebar_model(&sessions, &state));
+        assert!(
+            hits.sidebar_rows
+                .iter()
+                .any(|(_, hit)| *hit == Hit::SidebarSession(0))
+        );
+        state.toggle_project(&sessions, other);
+        state.sync(&sessions, 0, Path::new("/tmp"), 30);
+        let (_, hits) = sidebar_frame(124, 30, &sidebar_model(&sessions, &state));
+        assert!(
+            hits.sidebar_rows
+                .iter()
+                .any(|(_, hit)| *hit == Hit::SidebarSession(0))
+        );
+        sessions.clear();
+        state.sync(&sessions, 0, Path::new("/tmp"), 18);
         assert_eq!(state.sessions, 0);
-        state.sync(&sessions, 29, workspace, 30);
-        state.sync(&sessions, 29, workspace, 18);
-        assert_eq!(state.sessions, 24);
     }
 
     #[test]
-    fn sidebar_project_scroll_is_independent_and_clamped() {
-        let mut sessions = picker_sessions(20);
-        for (index, session) in sessions.iter_mut().enumerate() {
-            session.workspace_path = format!("/tmp/project-{index:02}");
-        }
+    fn dual_sidebar_thresholds_folding_and_routes() {
         let mut state = SidebarState::default();
-        state.sync(&sessions, 0, Path::new("/tmp"), 18);
-        let (_, hits) = sidebar_frame(100, 18, &sidebar_model(&sessions, &state));
-        let projects = hits.sidebar_projects.unwrap();
-        let recent = hits.sidebar_sessions.unwrap();
-        assert!(state.scroll(&hits, 2, projects.y, false));
-        assert_eq!(state.projects, 3);
-        assert_eq!(state.sessions, 0);
-        let (_, scrolled) = sidebar_frame(100, 18, &sidebar_model(&sessions, &state));
-        assert_eq!(scrolled.hit(2, projects.y), Some(Hit::ProjectPickerRow(3)));
-        assert!(state.scroll(&hits, 2, recent.y, false));
-        assert_eq!(state.projects, 3);
-        assert_eq!(state.sessions, 0);
-        for _ in 0..100 {
-            state.scroll(&hits, 2, projects.y, false);
+        for (width, height, left, right) in [
+            (160, 40, true, true),
+            (124, 18, true, true),
+            (123, 30, true, false),
+            (100, 30, true, false),
+            (99, 30, false, false),
+            (160, 17, false, false),
+            (40, 24, false, false),
+            (24, 10, false, false),
+        ] {
+            let (_, hits) = sidebar_frame(width, height, &sidebar_model(&[], &state));
+            assert_eq!(hits.sidebar.is_some(), left);
+            assert_eq!(hits.workspace_sidebar.is_some(), right);
+            assert!(
+                hits.sidebar_rows
+                    .iter()
+                    .any(|(_, hit)| *hit == Hit::ToggleLeft)
+            );
+            assert!(
+                hits.sidebar_rows
+                    .iter()
+                    .any(|(_, hit)| *hit == Hit::ToggleRight)
+            );
         }
-        assert_eq!(state.projects, 18);
-        state.sync(&sessions, 0, Path::new("/tmp"), 18);
-        assert_eq!(state.projects, 18);
-        state.sync(&sessions, 1, Path::new("/tmp"), 18);
-        assert_eq!(state.projects, 1);
-        assert!(state.scroll(&hits, 2, 1, false));
-        assert_eq!(state.projects, 1);
-        sessions.clear();
-        state.sync(&sessions, 0, Path::new("/tmp"), 18);
-        assert_eq!((state.projects, state.sessions), (0, 0));
+        state.left_collapsed = true;
+        let (_, hits) = sidebar_frame(100, 30, &sidebar_model(&[], &state));
+        assert!(hits.sidebar.is_none());
+        assert_eq!(hits.workspace_sidebar.unwrap().width, 24);
+        assert_eq!(hits.transcript.x, 2);
+        let x = hits.workspace_sidebar.unwrap().x + 2;
+        for (y, hit) in [
+            (8, Hit::GitStatus),
+            (10, Hit::WorkspaceFiles),
+            (12, Hit::ContextUsage),
+            (14, Hit::WorkspaceTasks),
+        ] {
+            assert_eq!(hits.hit(x, y), Some(hit));
+        }
+        state.right_collapsed = true;
+        let (_, hits) = sidebar_frame(160, 30, &sidebar_model(&[], &state));
+        assert!(hits.workspace_sidebar.is_none());
+        state.left_collapsed = false;
+        let (_, hits) = sidebar_frame(160, 30, &sidebar_model(&[], &state));
+        assert!(hits.sidebar.is_some());
+        assert!(hits.workspace_sidebar.is_none());
+    }
+
+    #[test]
+    fn workspace_sidebar_tracks_session_and_git_state() {
+        let mut sessions = picker_sessions(2);
+        sessions[1].workspace_path = "/tmp/another-project".into();
+        let state = SidebarState::default();
+        let mut model = sidebar_model(&sessions, &state);
+        let (terminal, _) = sidebar_frame(124, 30, &model);
+        assert!(frame_text(&terminal).contains("无 Git 状态"));
+        model.index = 1;
+        let git = GitStatusInfo {
+            branch: "feature".into(),
+            added: 3,
+            removed: 2,
+            ahead: 1,
+            behind: 0,
+            stashes: 0,
+            clean: false,
+            raw: String::new(),
+            diff: String::new(),
+            log: String::new(),
+        };
+        model.git_status = Some(&git);
+        let (terminal, hits) = sidebar_frame(124, 30, &model);
+        let text = frame_text(&terminal);
+        assert!(text.contains("another-project"));
+        assert!(text.contains("feature"));
+        assert!(text.contains("+3 −2"));
+        let mut state = SidebarState::default();
+        assert!(state.scroll(&hits, 110, 10, false));
+        assert_eq!(state.sessions, 0);
     }
 
     #[test]
@@ -8094,14 +7849,16 @@ mod tests {
         };
         model.settings_dialog = Some(&dialog);
         model.dialog_stack = &[DialogId::Settings];
-        let (modal, hits) = sidebar_frame(120, 30, &model);
+        let (modal, hits) = sidebar_frame(160, 30, &model);
         assert!(hits.modal);
         assert_eq!(hits.hit(2, 3), None);
         assert!(hits.sidebar.is_none());
+        assert!(hits.workspace_sidebar.is_none());
+        assert_eq!(hits.hit(145, 10), None);
         let rect = hits.modal_area.unwrap();
-        assert!((i32::from(rect.x) * 2 + i32::from(rect.width) - 120).abs() <= 2);
+        assert!((i32::from(rect.x) * 2 + i32::from(rect.width) - 160).abs() <= 2);
         model.dialog_stack = &[];
-        let (base, base_hits) = sidebar_frame(120, 30, &model);
+        let (base, base_hits) = sidebar_frame(160, 30, &model);
         assert_ne!(
             modal.backend().buffer()[(2, 3)].fg,
             base.backend().buffer()[(2, 3)].fg
@@ -8115,7 +7872,7 @@ mod tests {
         assert!(!state.scroll(&blocked, 2, 10, false));
     }
 
-    fn picker_sessions(count: usize) -> Vec<SessionSummary> {
+    pub(super) fn picker_sessions(count: usize) -> Vec<SessionSummary> {
         (0..count)
             .map(|index| SessionSummary {
                 id: blora_types::SessionId::generate(),
@@ -9673,7 +9430,7 @@ mod dialog_layer_tests {
             pointer: None,
             text_selection: None,
         };
-        for (width, height) in [(120, 40), (40, 12)] {
+        for (width, height) in [(160, 40), (120, 40), (40, 12)] {
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             let mut cache = TranscriptCache::default();
             let mut hits = HitMap::default();
