@@ -22,9 +22,14 @@ blora-types.workspace = true
 chrono.workspace = true
 crossterm.workspace = true
 ratatui.workspace = true
+portable-pty = "0.9"
+vt100 = "0.15"
 unicode-width.workspace = true
 ureq.workspace = true
 serde_json.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.29", features = ["fs", "signal", "process"] }
 
 [lints]
 workspace = true

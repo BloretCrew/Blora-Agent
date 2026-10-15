@@ -535,6 +535,7 @@ pub struct FrameModel<'a> {
     pub sessions: &'a [SessionSummary],
     pub index: usize,
     pub sidebar: &'a SidebarState,
+    pub right_panel: Option<&'a crate::right_panel::RightPanel>,
     pub projection: Option<&'a SessionProjection>,
     pub pending: &'a [ApprovalRecord],
     pub input: &'a str,
@@ -1319,7 +1320,12 @@ pub fn draw(
 ) -> HitMap {
     let theme = Theme::current();
     let terminal_area = frame.area();
-    let (sidebar, area) = canvas_regions(terminal_area);
+    let (main_area, _) = crate::right_panel::regions(
+        terminal_area,
+        model.right_panel.is_none_or(|panel| panel.collapsed()),
+    );
+    let (sidebar, mut area) = canvas_regions(terminal_area);
+    area.width = main_area.right().saturating_sub(area.x);
     frame.render_widget(Block::default().style(theme.base()), terminal_area);
 
     let show_slash = slash::is_open(model.input);
@@ -1421,6 +1427,9 @@ pub fn draw(
     render_composer(frame, composer, model, &theme, &mut hits);
     render_status(frame, status, model, &theme);
     render_hints(frame, hints, model, &theme, &mut hits);
+    if let Some(panel) = model.right_panel {
+        panel.draw(frame, model, area);
+    }
     dim_region(
         frame.buffer_mut(),
         terminal_area,
@@ -2175,7 +2184,11 @@ fn render_question_dialog(
     let inner = paint_dialog_frame(
         frame,
         modal,
-        &i18n::tr("question.title", "Blora 提问"),
+        &form
+            .owner_label
+            .as_ref()
+            .map(|owner| format!("{} · {owner}", i18n::tr("question.title", "Blora 提问")))
+            .unwrap_or_else(|| i18n::tr("question.title", "Blora 提问")),
         pointer,
         theme,
         &mut hits,
@@ -4462,7 +4475,15 @@ fn render_approval(
     let Some(first) = model.pending.first() else {
         return;
     };
-    let summary = ellipsize(&first.summary, inner.width.saturating_sub(22) as usize);
+    let owner = model
+        .right_panel
+        .and_then(|panel| panel.chat.as_ref())
+        .filter(|chat| chat.id == first.session_id)
+        .map(|_| i18n::tr("right.session_title", "侧边对话"));
+    let summary_text = owner
+        .map(|owner| format!("[{owner}] {}", first.summary))
+        .unwrap_or_else(|| first.summary.clone());
+    let summary = ellipsize(&summary_text, inner.width.saturating_sub(22) as usize);
     let allow_text = "y allow";
     let deny_text = "n deny";
     let mut x =
@@ -6769,6 +6790,7 @@ mod tests {
             sessions: &[],
             index: 0,
             sidebar: &SidebarState::default(),
+            right_panel: None,
             projection: Some(&projection),
             pending: &[],
             input: "",
@@ -6909,6 +6931,7 @@ mod tests {
                 sessions: &[],
                 index: 0,
                 sidebar: &SidebarState::default(),
+                right_panel: None,
                 projection: None,
                 pending: &[],
                 input: "",
@@ -6988,6 +7011,7 @@ mod tests {
             sessions: &[],
             index: 0,
             sidebar: &SidebarState::default(),
+            right_panel: None,
             projection: None,
             pending: &[],
             input: "手机终端输入一段很长的中文消息用于验证光标",
@@ -7123,6 +7147,7 @@ mod tests {
             sessions: &[],
             index: 0,
             sidebar: &SidebarState::default(),
+            right_panel: None,
             projection: None,
             pending: &[],
             input: "手机终端输入一段很长的中文消息用于验证光标",
@@ -7880,6 +7905,7 @@ mod tests {
             sessions,
             index: 0,
             sidebar,
+            right_panel: None,
             projection: None,
             pending: &[],
             input: "",
@@ -9242,6 +9268,7 @@ mod tests {
             sessions: &[],
             index: 0,
             sidebar: &SidebarState::default(),
+            right_panel: None,
             projection: None,
             pending: &[],
             input: "手机终端输入一段很长的中文消息用于验证光标",
@@ -9635,6 +9662,7 @@ mod dialog_layer_tests {
             sessions: &[],
             index: 0,
             sidebar: &SidebarState::default(),
+            right_panel: None,
             projection: None,
             pending: &[],
             input: "draft",

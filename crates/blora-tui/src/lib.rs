@@ -8,6 +8,8 @@ mod i18n;
 mod markdown;
 mod onboarding;
 mod question;
+mod right_panel;
+mod right_terminal;
 mod selection;
 mod session_picker;
 mod slash;
@@ -313,6 +315,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut confirmed_permission = permission_mode;
     let mut scroll = 0usize;
     let mut sidebar = view::SidebarState::default();
+    let mut right_panel = right_panel::RightPanel::default();
     let mut search: Option<String> = None;
     let mut hide_tools = false;
     let mut slash_selected = 0usize;
@@ -335,11 +338,13 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut cancel = CancelToken::new();
     let mut cached: Option<(SessionId, blora_session::SessionProjection)> = None;
     let result = thread::scope(|scope| -> Result<()> {
+        let _right_cancel = right_panel.cancel_guard();
         let _session_cancel = session_picker::CancelOnDrop(&session_epoch);
         let mut session_job: Option<thread::ScopedJoinHandle<'_, ()>> = None;
         let mut git_diff_job: Option<thread::ScopedJoinHandle<'_, ()>> = None;
         let mut job: Option<thread::ScopedJoinHandle<'_, Result<blora_types::RunId>>> = None;
         let mut git_generation: Option<thread::ScopedJoinHandle<'_, ()>> = None;
+        let mut side_jobs: Vec<thread::ScopedJoinHandle<'_, ()>> = Vec::new();
         let mut git_sync: Option<thread::ScopedJoinHandle<'_, ()>> = None;
         let mut git_header: Option<
             thread::ScopedJoinHandle<'_, (PathBuf, Option<view::GitStatusInfo>)>,
@@ -482,6 +487,12 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                 .get(index)
                 .map(|session| PathBuf::from(&session.workspace_path))
                 .unwrap_or_else(|| workspace.to_path_buf());
+            let size = terminal.size().map_err(blora_types::BloraError::exec)?;
+            right_panel.sync(
+                runtime,
+                &active_workspace,
+                ratatui::layout::Rect::new(0, 0, size.width, size.height),
+            );
             let session_id = sessions.get(index).map(|item| item.id.clone());
             if dialog_session != session_id {
                 git_dialog = None;
@@ -523,11 +534,19 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                 cached = None;
             }
             let projection = cached.as_ref().map(|(_, projection)| projection);
-            let question_opened = question::sync(
-                &mut question_dialog,
-                projection.and_then(|item| item.pending_input.as_ref()),
-                &active_workspace,
-            );
+            let (side_question, question_session, question_workspace, pending_question) =
+                right_panel.question_target(
+                    projection,
+                    question_dialog.as_ref(),
+                    session_id.as_ref(),
+                    &active_workspace,
+                );
+            let question_opened =
+                question::sync(&mut question_dialog, pending_question, &question_workspace);
+            if let Some(form) = question_dialog.as_mut() {
+                form.owner_label =
+                    side_question.then(|| i18n::tr("right.session_title", "侧边对话"));
+            }
             if question_opened && let Some(form) = question_dialog.as_ref() {
                 let body = form
                     .questions
@@ -556,10 +575,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                     model_override.clear();
                 }
             }
-            let pending = session_id
-                .as_ref()
-                .and_then(|id| runtime.pending_approvals(id).ok())
-                .unwrap_or_default();
+            let pending = right_panel.approvals(runtime, session_id.as_ref());
             let slash_hits = slash::matches(&input);
             if slash::command_token(&input).unwrap_or("") != last_slash_token {
                 last_slash_token = slash::command_token(&input).unwrap_or("").to_owned();
@@ -724,6 +740,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             sessions: &sessions,
                             index,
                             sidebar: &sidebar,
+                            right_panel: Some(&right_panel),
                             projection,
                             pending: &pending,
                             input: &input,
@@ -831,9 +848,47 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                     let _ = handle.join();
                 }
             }
+            let mut remaining = Vec::new();
+            for handle in side_jobs.drain(..) {
+                if handle.is_finished() {
+                    let _ = handle.join();
+                } else {
+                    remaining.push(handle);
+                }
+            }
+            side_jobs = remaining;
+            if let Some(request) = right_panel.request(
+                permission_mode,
+                if projection.is_some_and(|p| p.harness != blora_types::HarnessKind::Blora) {
+                    ""
+                } else {
+                    &model_override
+                },
+                if projection.is_some_and(|p| p.harness != blora_types::HarnessKind::Blora) {
+                    ""
+                } else {
+                    &provider_override
+                },
+                passport_user_token.clone(),
+            ) {
+                let tx = right_panel.completions();
+                side_jobs.push(scope.spawn(move || {
+                    let result = runtime.run(
+                        &request.id,
+                        &request.prompt,
+                        &request.cancel,
+                        &request.options,
+                    );
+                    let status = result
+                        .map(|_| i18n::tr("right.done", "已完成"))
+                        .unwrap_or_else(|error| error.to_string());
+                    let _ = tx.send((request.id, status));
+                }));
+            }
             let wait_ms = if dialog_visuals.active(animation_now) {
                 dialogs::ANIMATION_FRAME.as_millis() as u64
-            } else if job.is_some()
+            } else if right_panel.chat.as_ref().is_some_and(|chat| chat.running)
+                || job.is_some()
                 || git_generation.is_some()
                 || git_sync.is_some()
                 || session_job.is_some()
@@ -851,10 +906,37 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                     continue;
                 }
                 if dialog_visuals.closing_barrier() && global_quit(&event) {
+                    if right_panel.focused
+                        && matches!(&event, Event::Key(key) if key.code == KeyCode::Char('c'))
+                    {
+                        continue;
+                    }
                     cancel.cancel();
                     break Ok(());
                 }
                 let top_dialog = dialog_stack.top();
+                if top_dialog.is_none()
+                    && !dialog_visuals.active(Instant::now())
+                    && !pending.is_empty()
+                    && (if right_panel.chat_focused() {
+                        right_panel.draft_empty()
+                    } else {
+                        !right_panel.focused && input.is_empty()
+                    })
+                    && let Event::Key(key) = &event
+                    && key.modifiers.is_empty()
+                    && matches!(key.code, KeyCode::Char('y' | 'n'))
+                {
+                    let _ =
+                        runtime.resolve_approval(&pending[0].id, key.code == KeyCode::Char('y'));
+                    continue;
+                }
+                if top_dialog.is_none()
+                    && !dialog_visuals.active(Instant::now())
+                    && right_panel.event(&event, runtime, &active_workspace)
+                {
+                    continue;
+                }
                 if top_dialog == Some(DialogId::Onboarding)
                     && let Some(guide) = onboarding.as_mut()
                 {
@@ -1225,14 +1307,14 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     let request_id = form.request_id.clone();
                                     answer_question(
                                         runtime,
-                                        session_id.as_ref(),
+                                        question_session.as_ref(),
                                         &request_id,
                                         None,
                                         &mut status,
                                     );
                                 }
                             } else {
-                                let action = form.on_key(key.code, &active_workspace);
+                                let action = form.on_key(key.code, &question_workspace);
                                 if !matches!(action, question::QuestionAction::None) {
                                     let request_id = form.request_id.clone();
                                     let answer = match action {
@@ -1241,7 +1323,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     };
                                     answer_question(
                                         runtime,
-                                        session_id.as_ref(),
+                                        question_session.as_ref(),
                                         &request_id,
                                         answer,
                                         &mut status,
@@ -2539,7 +2621,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                                 let request_id = form.request_id.clone();
                                                 answer_question(
                                                     runtime,
-                                                    session_id.as_ref(),
+                                                    question_session.as_ref(),
                                                     &request_id,
                                                     None,
                                                     &mut status,
@@ -2579,7 +2661,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                             if let Some(form) = question_dialog.as_mut()
                                                 && !form.minimized
                                             {
-                                                form.click_row(row, &active_workspace);
+                                                form.click_row(row, &question_workspace);
                                             }
                                         }
                                         _ => {}

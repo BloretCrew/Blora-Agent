@@ -21,6 +21,7 @@ pub enum QuestionAction {
 #[derive(Clone, Debug)]
 pub struct QuestionForm {
     pub request_id: String,
+    pub owner_label: Option<String>,
     pub questions: Vec<AskedQuestion>,
     pub focus: usize,
     pub cursor: Vec<usize>,
@@ -49,6 +50,7 @@ impl QuestionForm {
         let count = questions.len();
         let mut form = Self {
             request_id: pending.request_id.clone(),
+            owner_label: None,
             questions,
             focus: 0,
             cursor: vec![0; count],
