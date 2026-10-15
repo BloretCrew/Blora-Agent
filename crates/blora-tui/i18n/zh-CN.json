@@ -154,14 +154,5 @@
   "sidebar.recent": "最近会话",
   "sidebar.empty": "暂无会话",
   "sidebar.settings": "设置",
-  "sidebar.guest": "未登录",
-  "sidebar.open_project": "打开项目",
-  "sidebar.workspace": "工作区",
-  "sidebar.clean": "工作区干净",
-  "sidebar.no_git": "无 Git 状态",
-  "sidebar.changes": "变更",
-  "sidebar.files": "文件",
-  "sidebar.context": "上下文",
-  "sidebar.tasks": "任务",
-  "sidebar.no_tasks": "暂无任务"
+  "sidebar.guest": "未登录"
 }

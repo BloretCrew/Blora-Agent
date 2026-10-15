@@ -154,14 +154,5 @@
   "sidebar.recent": "Recent sessions",
   "sidebar.empty": "No sessions",
   "sidebar.settings": "Settings",
-  "sidebar.guest": "Not signed in",
-  "sidebar.open_project": "Open project",
-  "sidebar.workspace": "Workspace",
-  "sidebar.clean": "Working tree clean",
-  "sidebar.no_git": "No Git status",
-  "sidebar.changes": "Changes",
-  "sidebar.files": "Files",
-  "sidebar.context": "Context",
-  "sidebar.tasks": "Tasks",
-  "sidebar.no_tasks": "No tasks"
+  "sidebar.guest": "Not signed in"
 }
