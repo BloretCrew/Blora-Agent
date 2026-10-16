@@ -580,6 +580,53 @@ pub struct FrameModel<'a> {
     pub text_selection: Option<Selection>,
 }
 
+/// Brief visual feedback for the most recent user interaction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InteractionPulse {
+    pub area: Rect,
+    pub started: std::time::Instant,
+}
+
+impl InteractionPulse {
+    pub(crate) fn weight(&self, now: std::time::Instant) -> f64 {
+        let elapsed = now.saturating_duration_since(self.started).as_secs_f64();
+        (1.0 - elapsed / 0.24).clamp(0.0, 1.0)
+    }
+
+    fn rect(&self, now: std::time::Instant, area: Rect) -> Option<(Rect, f64)> {
+        let weight = self.weight(now);
+        (weight > 0.0).then(|| (self.area.intersection(area), weight))
+    }
+}
+
+#[cfg(test)]
+mod interaction_pulse_tests {
+    use super::InteractionPulse;
+    use ratatui::layout::Rect;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn interaction_feedback_fades_to_idle() {
+        let start = Instant::now();
+        let pulse = InteractionPulse {
+            area: Rect::new(3, 4, 8, 1),
+            started: start,
+        };
+        assert_eq!(pulse.weight(start), 1.0);
+        assert_eq!(pulse.weight(start + Duration::from_millis(120)), 0.5);
+        assert_eq!(pulse.weight(start + Duration::from_millis(240)), 0.0);
+        assert_eq!(
+            pulse.rect(start, Rect::new(0, 0, 6, 5)).unwrap(),
+            (Rect::new(3, 4, 3, 1), 1.0)
+        );
+        assert!(
+            pulse
+                .rect(start + Duration::from_millis(240), Rect::new(0, 0, 20, 20))
+                .is_none()
+        );
+    }
+}
+
 /// A clickable region from the last painted frame.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Hit {
@@ -734,6 +781,164 @@ pub struct HitMap {
 }
 
 impl HitMap {
+    pub(crate) fn rect_for_point(&self, target: &Hit, col: u16, row: u16) -> Option<Rect> {
+        self.hit(col, row).filter(|hit| hit == target)?;
+        self.rect_for_hit(target)
+    }
+
+    pub(crate) fn rect_for_hit(&self, target: &Hit) -> Option<Rect> {
+        self.sidebar_rows
+            .iter()
+            .find(|(_, hit)| hit == target)
+            .map(|(rect, _)| *rect)
+            .or_else(|| match target {
+                Hit::TrafficClose => self.traffic_lights[0],
+                Hit::TrafficMinimize => self.traffic_lights[1],
+                Hit::TrafficOpenBrowser => self.traffic_lights[2],
+                Hit::GitMessage => self.git_message,
+                Hit::GitGenerate => self.git_generate,
+                Hit::GitPrimary => self.git_primary,
+                Hit::GitStatus => self.git_status,
+                Hit::Composer => Some(self.composer),
+                Hit::Transcript => Some(self.transcript),
+                Hit::PrevSession => self.prev_session,
+                Hit::NextSession => self.next_session,
+                Hit::Mode => self.mode,
+                Hit::CancelRun => self.cancel_run,
+                Hit::ToggleApprove => self.toggle_approve,
+                Hit::ProviderTarget => self.provider_target,
+                Hit::ContextUsage => self.context_usage,
+                Hit::Allow => self.allow,
+                Hit::Deny => self.deny,
+                Hit::ProjectPicker => self.project_picker,
+                Hit::FolderPickerOpen => self.folder_picker_open,
+                Hit::SessionPicker => self.session_picker,
+                Hit::SessionSearch => self.session_search,
+                Hit::Notice => self.overlay,
+                Hit::GitAction(index) => self
+                    .git_actions
+                    .iter()
+                    .find(|(_, i)| i == index)
+                    .map(|(rect, _)| *rect),
+                Hit::GitTab(index) => self
+                    .git_tabs
+                    .iter()
+                    .find(|(_, i)| i == index)
+                    .map(|(rect, _)| *rect),
+                Hit::GitFile(index) => self
+                    .git_files
+                    .iter()
+                    .find(|(_, i)| i == index)
+                    .map(|(rect, _)| *rect),
+                Hit::GitRow(index) => self
+                    .git_rows
+                    .iter()
+                    .find(|(_, i)| i == index)
+                    .map(|(rect, _)| *rect),
+                Hit::SettingsTab(index) => self
+                    .settings_tabs
+                    .iter()
+                    .find(|(_, i)| i == index)
+                    .map(|(rect, _)| *rect),
+                Hit::SettingsRow(index) => self
+                    .settings_rows
+                    .iter()
+                    .find(|(_, i)| i == index)
+                    .map(|(rect, _)| *rect),
+                Hit::ProviderModelRow(index) => self
+                    .provider_model_rows
+                    .iter()
+                    .find(|(_, i)| i == index)
+                    .map(|(rect, _)| *rect),
+                Hit::AddProviderRow(index) => self
+                    .add_provider_rows
+                    .iter()
+                    .find(|(_, i)| i == index)
+                    .map(|(rect, _)| *rect),
+                Hit::ThemeRow(index) => self
+                    .theme_rows
+                    .iter()
+                    .find(|(_, i)| i == index)
+                    .map(|(rect, _)| *rect),
+                Hit::ThemeTab(index) => self
+                    .theme_tabs
+                    .iter()
+                    .find(|(_, i)| i == index)
+                    .map(|(rect, _)| *rect),
+                Hit::HarnessRow(index) => self
+                    .harness_rows
+                    .iter()
+                    .find(|(_, i)| i == index)
+                    .map(|(rect, _)| *rect),
+                Hit::PermissionRow(index) => self
+                    .permission_rows
+                    .iter()
+                    .find(|(_, i)| i == index)
+                    .map(|(rect, _)| *rect),
+                Hit::ModeRow(index) => self
+                    .mode_rows
+                    .iter()
+                    .find(|(_, i)| i == index)
+                    .map(|(rect, _)| *rect),
+                Hit::ProjectPickerRow(index) => self
+                    .project_picker_rows
+                    .iter()
+                    .find(|(_, i)| i == index)
+                    .map(|(rect, _)| *rect),
+                Hit::QuestionTab(index) => self
+                    .question_tabs
+                    .iter()
+                    .find(|(_, i)| i == index)
+                    .map(|(rect, _)| *rect),
+                Hit::QuestionOption(question, option) => self
+                    .question_options
+                    .iter()
+                    .find(|(_, q, o)| q == question && o == option)
+                    .map(|(rect, _, _)| *rect),
+                Hit::QuestionRow(index) => self
+                    .question_rows
+                    .iter()
+                    .find(|(_, i)| i == index)
+                    .map(|(rect, _)| *rect),
+                Hit::FolderPickerRow(index) => self
+                    .folder_picker_rows
+                    .iter()
+                    .find(|(_, i)| i == index)
+                    .map(|(rect, _)| *rect),
+                Hit::ContextTab(index) => self
+                    .context_tabs
+                    .iter()
+                    .find(|(_, i)| i == index)
+                    .map(|(rect, _)| *rect),
+                Hit::ContextRange(index) => self
+                    .context_ranges
+                    .iter()
+                    .find(|(_, i)| i == index)
+                    .map(|(rect, _)| *rect),
+                Hit::ProviderRow(index) => self
+                    .provider_rows
+                    .iter()
+                    .find(|(_, i)| i == index)
+                    .map(|(rect, _)| *rect),
+                Hit::SessionPickerRow(index) => self
+                    .session_picker_rows
+                    .iter()
+                    .find(|(_, i)| i == index)
+                    .map(|(rect, _)| *rect),
+                Hit::Slash(index) => self
+                    .slash_rows
+                    .iter()
+                    .find(|(_, i)| i == index)
+                    .map(|(rect, _)| *rect),
+                Hit::Hint(action) => self
+                    .hints
+                    .iter()
+                    .find(|(_, a)| a == action)
+                    .map(|(rect, _)| *rect),
+                _ => None,
+            })
+    }
+
     #[must_use]
     pub fn hit(&self, col: u16, row: u16) -> Option<Hit> {
         if self.modal && !self.modal_area.is_some_and(|rect| contains(rect, col, row)) {
@@ -1490,6 +1695,7 @@ pub fn draw_animated(
     mut guide: Option<&mut crate::onboarding::Onboarding>,
     username: &str,
     logged_in: bool,
+    interaction: Option<&InteractionPulse>,
 ) -> HitMap {
     let theme = Theme::current();
     let area = frame.area();
@@ -1549,10 +1755,25 @@ pub fn draw_animated(
         }
         hits = layer_hits;
     }
+    if let Some((rect, weight)) = interaction.and_then(|pulse| pulse.rect(now, area)) {
+        for y in rect.y..rect.bottom() {
+            for x in rect.x..rect.right() {
+                let cell = &mut frame.buffer_mut()[(x, y)];
+                cell.set_bg(mix_color(cell.bg, theme.rose, weight * 0.28));
+            }
+        }
+    }
     hits
 }
 
-
+fn mix_color(from: Color, to: Color, amount: f64) -> Color {
+    let (Color::Rgb(fr, fg, fb), Color::Rgb(tr, tg, tb)) = (from, to) else {
+        return to;
+    };
+    let blend =
+        |a: u8, b: u8| (f64::from(a) + (f64::from(b) - f64::from(a)) * amount).round() as u8;
+    Color::Rgb(blend(fr, tr), blend(fg, tg), blend(fb, tb))
+}
 
 fn snapshot_region(source: &ratatui::buffer::Buffer, rect: Rect) -> ratatui::buffer::Buffer {
     let mut layer = ratatui::buffer::Buffer::empty(rect.intersection(source.area));

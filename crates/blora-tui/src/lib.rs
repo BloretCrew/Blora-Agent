@@ -303,6 +303,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut git_status_workspace: Option<PathBuf> = None;
     let mut notice: Option<String> = None;
     let mut tick = 0u64;
+    let mut interaction_pulse: Option<view::InteractionPulse> = None;
     let mut last_window_title = String::new();
     let mut last_routing_session: Option<SessionId> = None;
     let mut dialog_session: Option<SessionId> = None;
@@ -719,6 +720,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             onboarding.as_mut(),
                             &passport_username,
                             passport_user_token.is_some(),
+                            interaction_pulse.as_ref(),
                         );
                         return;
                     }
@@ -779,6 +781,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                         onboarding.as_mut(),
                         &passport_username,
                         passport_user_token.is_some(),
+                        interaction_pulse.as_ref(),
                     );
                 })
                 .map_err(blora_types::BloraError::exec)?;
@@ -879,7 +882,13 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                     let _ = tx.send((request.id, status));
                 }));
             }
-            let wait_ms = if dialog_visuals.active(animation_now) {
+            let interaction_animating = interaction_pulse
+                .as_ref()
+                .is_some_and(|pulse| pulse.weight(animation_now) > 0.0);
+            if !interaction_animating {
+                interaction_pulse = None;
+            }
+            let wait_ms = if dialog_visuals.active(animation_now) || interaction_animating {
                 dialogs::ANIMATION_FRAME.as_millis() as u64
             } else if right_panel.chat.as_ref().is_some_and(|chat| chat.running)
                 || job.is_some()
@@ -2679,6 +2688,21 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             }
                             MouseEventKind::Down(MouseButton::Left) => {
                                 let hit = hits.hit(mouse.column, mouse.row);
+                                if !hits.modal
+                                    || hits.modal_area.is_some_and(|rect| {
+                                        rect.contains((mouse.column, mouse.row).into())
+                                    })
+                                {
+                                    interaction_pulse = hit
+                                        .as_ref()
+                                        .and_then(|hit| {
+                                            hits.rect_for_point(hit, mouse.column, mouse.row)
+                                        })
+                                        .map(|area| view::InteractionPulse {
+                                            area,
+                                            started: Instant::now(),
+                                        });
+                                }
                                 if !dialog_accepts_hit(top_dialog, hit.as_ref()) {
                                     continue;
                                 }
