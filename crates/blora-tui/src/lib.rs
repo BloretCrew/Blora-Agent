@@ -44,6 +44,42 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
 const TOOL_SUMMARY_DOUBLE_CLICK: Duration = Duration::from_millis(500);
+const SCROLL_ANIMATION_DURATION: Duration = Duration::from_millis(180);
+
+#[derive(Default)]
+struct ScrollAnimation {
+    from: usize,
+    to: usize,
+    started: Option<Instant>,
+}
+
+impl ScrollAnimation {
+    fn set_target(&mut self, current: usize, target: usize, now: Instant) {
+        self.from = self.value(current, now);
+        self.to = target;
+        self.started = Some(now);
+    }
+
+    fn value(&self, fallback: usize, now: Instant) -> usize {
+        let Some(started) = self.started else {
+            return fallback;
+        };
+        let t = (now.saturating_duration_since(started).as_secs_f64()
+            / SCROLL_ANIMATION_DURATION.as_secs_f64())
+        .clamp(0.0, 1.0);
+        let eased = 1.0 - (1.0 - t).powi(3);
+        (self.from as f64 + (self.to as f64 - self.from as f64) * eased)
+            .round()
+            .max(0.0) as usize
+    }
+
+    fn active(&self, now: Instant) -> bool {
+        self.started.is_some_and(|started| {
+            now.saturating_duration_since(started) < SCROLL_ANIMATION_DURATION
+                && self.from != self.to
+        })
+    }
+}
 
 #[derive(Default)]
 struct ToolSummaryClick {
@@ -80,6 +116,35 @@ fn git_file_double_click(
     } else {
         *pending = Some((path.to_owned(), now));
         false
+    }
+}
+
+#[cfg(test)]
+mod scroll_animation_tests {
+    use super::{SCROLL_ANIMATION_DURATION, ScrollAnimation};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn scroll_interpolates_and_finishes_at_target() {
+        let start = Instant::now();
+        let mut animation = ScrollAnimation::default();
+        animation.set_target(0, 12, start);
+        assert_eq!(animation.value(12, start), 0);
+        assert!(animation.value(12, start + SCROLL_ANIMATION_DURATION / 2) > 0);
+        assert_eq!(animation.value(12, start + SCROLL_ANIMATION_DURATION), 12);
+        assert!(!animation.active(start + SCROLL_ANIMATION_DURATION));
+    }
+
+    #[test]
+    fn retarget_starts_from_current_interpolated_position() {
+        let start = Instant::now();
+        let mut animation = ScrollAnimation::default();
+        animation.set_target(0, 12, start);
+        let mid = start + SCROLL_ANIMATION_DURATION / 2;
+        let current = animation.value(12, mid);
+        animation.set_target(current, 0, mid);
+        assert_eq!(animation.value(0, mid), current);
+        assert!(animation.value(0, mid + Duration::from_millis(30)) < current);
     }
 }
 
@@ -290,6 +355,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut permission_mode = PermissionMode::Ask;
     let mut confirmed_permission = permission_mode;
     let mut scroll = 0usize;
+    let mut scroll_animation = ScrollAnimation::default();
     let mut sidebar = view::SidebarState::default();
     let mut right_panel = right_panel::RightPanel::default();
     let mut search: Option<String> = None;
@@ -303,7 +369,6 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut git_status_workspace: Option<PathBuf> = None;
     let mut notice: Option<String> = None;
     let mut tick = 0u64;
-    let mut interaction_pulse: Option<view::InteractionPulse> = None;
     let mut last_window_title = String::new();
     let mut last_routing_session: Option<SessionId> = None;
     let mut dialog_session: Option<SessionId> = None;
@@ -707,6 +772,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                 let _ = execute!(io::stdout(), Hide);
             }
             let animation_now = Instant::now();
+            let animated_scroll = scroll_animation.value(scroll, animation_now);
             dialog_visuals.sync(dialog_stack.as_slice(), animation_now);
             terminal
                 .draw(|frame| {
@@ -720,7 +786,6 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             onboarding.as_mut(),
                             &passport_username,
                             passport_user_token.is_some(),
-                            interaction_pulse.as_ref(),
                         );
                         return;
                     }
@@ -760,7 +825,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             search: search.as_deref(),
                             hide_tools,
                             message_roles: runtime.tui_message_roles().unwrap_or(true),
-                            scroll,
+                            scroll: animated_scroll,
                             permission_mode,
                             model,
                             provider,
@@ -781,7 +846,6 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                         onboarding.as_mut(),
                         &passport_username,
                         passport_user_token.is_some(),
-                        interaction_pulse.as_ref(),
                     );
                 })
                 .map_err(blora_types::BloraError::exec)?;
@@ -882,27 +946,22 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                     let _ = tx.send((request.id, status));
                 }));
             }
-            let interaction_animating = interaction_pulse
-                .as_ref()
-                .is_some_and(|pulse| pulse.weight(animation_now) > 0.0);
-            if !interaction_animating {
-                interaction_pulse = None;
-            }
-            let wait_ms = if dialog_visuals.active(animation_now) || interaction_animating {
-                dialogs::ANIMATION_FRAME.as_millis() as u64
-            } else if right_panel.chat.as_ref().is_some_and(|chat| chat.running)
-                || job.is_some()
-                || git_generation.is_some()
-                || git_sync.is_some()
-                || session_job.is_some()
-                || session_picker
-                    .as_ref()
-                    .is_some_and(|picker| picker.searching)
-            {
-                50
-            } else {
-                200
-            };
+            let wait_ms =
+                if dialog_visuals.active(animation_now) || scroll_animation.active(animation_now) {
+                    dialogs::ANIMATION_FRAME.as_millis() as u64
+                } else if right_panel.chat.as_ref().is_some_and(|chat| chat.running)
+                    || job.is_some()
+                    || git_generation.is_some()
+                    || git_sync.is_some()
+                    || session_job.is_some()
+                    || session_picker
+                        .as_ref()
+                        .is_some_and(|picker| picker.searching)
+                {
+                    50
+                } else {
+                    200
+                };
             if event::poll(Duration::from_millis(wait_ms)).map_err(blora_types::BloraError::exec)? {
                 let event = event::read().map_err(blora_types::BloraError::exec)?;
                 if closing_consumes_input(&dialog_visuals, &event) {
@@ -1587,19 +1646,31 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 if top_dialog.is_none()
                                     && (input.is_empty() && git_dialog.is_none()) =>
                             {
-                                scroll = scroll.saturating_add(8);
+                                scroll_animation.set_target(
+                                    scroll,
+                                    scroll.saturating_add(8),
+                                    Instant::now(),
+                                );
+                                scroll = scroll_animation.to;
                             }
                             KeyCode::PageDown
                                 if top_dialog.is_none()
                                     && (input.is_empty() && git_dialog.is_none()) =>
                             {
-                                scroll = scroll.saturating_sub(8);
+                                scroll_animation.set_target(
+                                    scroll,
+                                    scroll.saturating_sub(8),
+                                    Instant::now(),
+                                );
+                                scroll = scroll_animation.to;
                             }
                             KeyCode::Home if top_dialog.is_none() && (input.is_empty()) => {
-                                scroll = usize::MAX / 4
+                                scroll_animation.set_target(scroll, usize::MAX / 4, Instant::now());
+                                scroll = scroll_animation.to;
                             }
                             KeyCode::End if top_dialog.is_none() && (input.is_empty()) => {
-                                scroll = 0
+                                scroll_animation.set_target(scroll, 0, Instant::now());
+                                scroll = 0;
                             }
                             KeyCode::Char('y')
                                 if top_dialog.is_none()
@@ -2010,7 +2081,12 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     paste_preview = None;
                                     slash_selected = 0;
                                 } else if input.is_empty() {
-                                    scroll = scroll.saturating_add(1);
+                                    scroll_animation.set_target(
+                                        scroll,
+                                        scroll.saturating_add(1),
+                                        Instant::now(),
+                                    );
+                                    scroll = scroll_animation.to;
                                 }
                             }
                             KeyCode::Down if top_dialog.is_none() => {
@@ -2025,7 +2101,12 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     paste_preview = None;
                                     slash_selected = 0;
                                 } else if input.is_empty() {
-                                    scroll = scroll.saturating_sub(1);
+                                    scroll_animation.set_target(
+                                        scroll,
+                                        scroll.saturating_sub(1),
+                                        Instant::now(),
+                                    );
+                                    scroll = scroll_animation.to;
                                 }
                             }
                             KeyCode::Tab if top_dialog.is_none() && slash::is_open(&input) => {
@@ -2591,7 +2672,12 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 if hits.over_slash(mouse.column, mouse.row) {
                                     slash_selected = slash_selected.saturating_sub(1);
                                 } else {
-                                    scroll = scroll.saturating_add(3);
+                                    scroll_animation.set_target(
+                                        scroll,
+                                        scroll.saturating_add(3),
+                                        Instant::now(),
+                                    );
+                                    scroll = scroll_animation.to;
                                 }
                             }
                             MouseEventKind::ScrollDown => {
@@ -2599,7 +2685,12 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     slash_selected = (slash_selected + 1)
                                         .min(slash_hits.len().saturating_sub(1));
                                 } else {
-                                    scroll = scroll.saturating_sub(3);
+                                    scroll_animation.set_target(
+                                        scroll,
+                                        scroll.saturating_sub(3),
+                                        Instant::now(),
+                                    );
+                                    scroll = scroll_animation.to;
                                 }
                             }
                             MouseEventKind::Moved | MouseEventKind::Drag(MouseButton::Left) => {
@@ -2688,21 +2779,6 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             }
                             MouseEventKind::Down(MouseButton::Left) => {
                                 let hit = hits.hit(mouse.column, mouse.row);
-                                if !hits.modal
-                                    || hits.modal_area.is_some_and(|rect| {
-                                        rect.contains((mouse.column, mouse.row).into())
-                                    })
-                                {
-                                    interaction_pulse = hit
-                                        .as_ref()
-                                        .and_then(|hit| {
-                                            hits.rect_for_point(hit, mouse.column, mouse.row)
-                                        })
-                                        .map(|area| view::InteractionPulse {
-                                            area,
-                                            started: Instant::now(),
-                                        });
-                                }
                                 if !dialog_accepts_hit(top_dialog, hit.as_ref()) {
                                     continue;
                                 }
