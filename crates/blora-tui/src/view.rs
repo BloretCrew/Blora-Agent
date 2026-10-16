@@ -558,6 +558,7 @@ pub struct FrameModel<'a> {
     pub tool_detail_dialog: Option<&'a ToolDetailDialog>,
     pub slash_hits: &'a [&'static SlashCommand],
     pub slash_selected: usize,
+    pub(crate) mentions: Option<&'a crate::session_mentions::SessionMentions>,
     pub search: Option<&'a str>,
     pub hide_tools: bool,
     pub message_roles: bool,
@@ -1336,10 +1337,13 @@ pub fn draw(
     frame.render_widget(Block::default().style(theme.base()), terminal_area);
 
     let show_slash = slash::is_open(model.input);
-    let show_notice = !show_slash && model.notice.is_some();
-    let show_paste = !show_slash && model.paste_preview.is_some();
+    let mention_height = model.mentions.map_or(0, |mentions| mentions.height());
+    let show_notice = !show_slash && mention_height == 0 && model.notice.is_some();
+    let show_paste = !show_slash && mention_height == 0 && model.paste_preview.is_some();
     let extra = if show_slash {
         u16::try_from(model.slash_hits.len().clamp(1, slash::MAX_VISIBLE)).unwrap_or(1)
+    } else if mention_height > 0 {
+        mention_height
     } else if show_notice {
         u16::try_from(model.notice.map(line_count).unwrap_or(1).clamp(1, 12)).unwrap_or(1)
     } else if show_paste {
@@ -1425,6 +1429,8 @@ pub fn draw(
     if let Some(rect) = overlay {
         if show_slash {
             render_slash(frame, rect, model, &theme, &mut hits);
+        } else if let Some(mentions) = model.mentions.filter(|_| mention_height > 0) {
+            crate::conversation::render_mentions(frame, inset(rect), mentions, &theme);
         } else if let Some(body) = model.notice {
             render_notice(frame, rect, body, &theme);
         } else if let Some(body) = model.paste_preview {
@@ -6759,6 +6765,7 @@ mod tests {
             tool_detail_dialog: None,
             slash_hits: &[],
             slash_selected: 0,
+            mentions: None,
             search: None,
             hide_tools: false,
             message_roles: true,
@@ -6900,6 +6907,7 @@ mod tests {
                 tool_detail_dialog: None,
                 slash_hits: &[],
                 slash_selected: 0,
+                mentions: None,
                 search: None,
                 hide_tools: false,
                 message_roles: true,
@@ -6980,6 +6988,7 @@ mod tests {
             tool_detail_dialog: None,
             slash_hits: &[],
             slash_selected: 0,
+            mentions: None,
             search: None,
             hide_tools: false,
             message_roles: true,
@@ -7116,6 +7125,7 @@ mod tests {
             tool_detail_dialog: None,
             slash_hits: &[],
             slash_selected: 0,
+            mentions: None,
             search: None,
             hide_tools: false,
             message_roles: true,
@@ -7874,6 +7884,7 @@ mod tests {
             tool_detail_dialog: None,
             slash_hits: &[],
             slash_selected: 0,
+            mentions: None,
             search: None,
             hide_tools: false,
             message_roles: true,
@@ -9319,6 +9330,7 @@ mod tests {
             tool_detail_dialog: None,
             slash_hits: &[],
             slash_selected: 0,
+            mentions: None,
             search: None,
             hide_tools: false,
             message_roles: true,
@@ -9713,6 +9725,7 @@ mod dialog_layer_tests {
             tool_detail_dialog: None,
             slash_hits: &[],
             slash_selected: 0,
+            mentions: None,
             search: None,
             hide_tools: false,
             message_roles: true,

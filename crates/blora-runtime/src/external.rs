@@ -137,6 +137,8 @@ impl Runtime {
         if prompt.trim().is_empty() {
             return Err(BloraError::Other("prompt must not be empty".to_owned()));
         }
+        let expanded_prompt = self.expand_session_mentions(session_id, prompt)?;
+        let prompt = expanded_prompt.as_str();
         let projection = self.show_session(session_id)?;
         let session = projection
             .session
@@ -728,6 +730,34 @@ mod tests {
             assert!(invocations.contains("resume"));
             assert!(!invocations.contains("do-not-send"));
             assert_eq!(invocations.matches("first-message").count(), 1);
+            let source = session(&runtime, &root);
+            runtime
+                .emit(
+                    &source,
+                    None,
+                    None,
+                    KnownPayload::UserInput(UserInput {
+                        text: "external-reference-content".to_owned(),
+                    }),
+                )
+                .unwrap();
+            let mention = format!("compare @{{{source}}}");
+            runtime
+                .run_foreground(&id, &mention, &CancelToken::new(), &options)
+                .unwrap();
+            let invocations = std::fs::read_to_string(format!("{root}/invocations")).unwrap();
+            assert_eq!(invocations.matches("external-reference-content").count(), 1);
+            assert_eq!(invocations.matches("[Session references:").count(), 1);
+            let stored = runtime
+                .events(&id)
+                .unwrap()
+                .into_iter()
+                .filter(|event| event.event_type == "user.input")
+                .last()
+                .unwrap();
+            let text = stored.payload["text"].as_str().unwrap();
+            assert!(text.starts_with(&mention));
+            assert!(text.contains("external-reference-content"));
             runtime
                 .set_session_harness(&id, HarnessKind::Blora)
                 .unwrap();

@@ -211,5 +211,8 @@
   "right.file_binary": "只读 · 二进制文件",
   "right.file_truncated": "只读 · 仅显示前 64 KiB",
   "right.file_invalid_utf8": "只读 · 无效 UTF-8",
-  "right.file_truncated_note": "仅显示前 64 KiB"
+  "right.file_truncated_note": "仅显示前 64 KiB",
+  "mention.hint": "@ 会话 · ↑↓ 选择 · Tab/Enter 插入 · Esc 关闭",
+  "mention.empty": "没有匹配的其他会话",
+  "mention.untitled": "未命名会话"
 }

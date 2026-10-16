@@ -211,5 +211,8 @@
   "right.file_binary": "Read-only · Binary file",
   "right.file_truncated": "Read-only · First 64 KiB only",
   "right.file_invalid_utf8": "Read-only · Invalid UTF-8",
-  "right.file_truncated_note": "First 64 KiB only"
+  "right.file_truncated_note": "First 64 KiB only",
+  "mention.hint": "@ Sessions · ↑↓ Select · Tab/Enter Insert · Esc Close",
+  "mention.empty": "No matching other sessions",
+  "mention.untitled": "Untitled session"
 }

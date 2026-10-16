@@ -819,7 +819,7 @@ impl Runtime {
             })
             .unwrap_or(prompt)
             .to_owned();
-        let mut prompt = prompt.to_owned();
+        let mut prompt = self.expand_session_mentions(session_id, prompt)?;
         let submit = hooks::run(
             hooks::USER_PROMPT_SUBMIT,
             &json!({"session_id": session_id.to_string(), "prompt": prompt}),
@@ -1010,6 +1010,7 @@ impl Runtime {
             }
             // Steering messages become real user turns at this safe point.
             for steer in self.store.take_steers(session_id)? {
+                let steer = self.expand_session_mentions(session_id, &steer)?;
                 self.emit(
                     session_id,
                     Some(&run_id),
@@ -2912,6 +2913,62 @@ mod tests {
             }
             Ok(completion)
         }
+    }
+
+    #[test]
+    fn session_mention_reaches_provider_and_canonical_snapshot_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = Runtime::new(SqliteStore::open_in_memory().unwrap());
+        let source = session(&runtime, Mode::Code, dir.path().to_str().unwrap());
+        let target = session(&runtime, Mode::Code, dir.path().to_str().unwrap());
+        runtime
+            .emit(
+                &source,
+                None,
+                None,
+                KnownPayload::UserInput(UserInput {
+                    text: "recorded-source-content".to_owned(),
+                }),
+            )
+            .unwrap();
+        let recorder = Recorder::install(&runtime, vec![text_reply("done", "stop")], None);
+        let prompt = format!("compare @{{{source}}}");
+        runtime
+            .run_foreground(&target, &prompt, &CancelToken::new(), &yolo())
+            .unwrap();
+        let requests = recorder.requests.lock().unwrap();
+        let received = requests
+            .iter()
+            .flat_map(|request| &request.messages)
+            .filter(|message| message.role == "user")
+            .filter_map(|message| message.content.as_deref())
+            .find(|content| content.contains("recorded-source-content"))
+            .unwrap();
+        assert!(received.starts_with(&prompt));
+        assert_eq!(received.matches("[Session references:").count(), 1);
+        let events = runtime.events(&target).unwrap();
+        let stored = events
+            .iter()
+            .find(|event| event.event_type == "user.input")
+            .unwrap();
+        assert_eq!(stored.payload["text"], received);
+        runtime
+            .emit(
+                &source,
+                None,
+                None,
+                KnownPayload::UserInput(UserInput {
+                    text: "later-source-change".to_owned(),
+                }),
+            )
+            .unwrap();
+        let replay = blora_context::compile_transcript(&runtime.events(&target).unwrap()).unwrap();
+        assert!(
+            replay
+                .iter()
+                .any(|message| message.content.as_deref() == Some(received))
+        );
+        assert!(!received.contains("later-source-change"));
     }
 
     fn text_reply(text: &str, finish: &str) -> Completion {

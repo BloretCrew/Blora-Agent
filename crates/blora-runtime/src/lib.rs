@@ -17,6 +17,7 @@ mod memory;
 mod onboarding;
 mod plugins;
 mod preferences;
+mod session_mentions;
 mod skills;
 mod work;
 

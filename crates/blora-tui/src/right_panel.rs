@@ -79,6 +79,7 @@ pub struct SideChat {
     pub running: bool,
     draft: String,
     cursor: usize,
+    mentions: crate::session_mentions::SessionMentions,
     history: Vec<String>,
     history_index: Option<usize>,
     saved_draft: String,
@@ -234,6 +235,30 @@ impl RightPanel {
             primary
         }
     }
+    pub(crate) fn sync_mentions(&mut self, sessions: &[blora_storage::SessionSummary]) {
+        if let Some(chat) = self.chat.as_mut() {
+            chat.mentions
+                .sync(&chat.draft, chat.cursor, Some(&chat.id), sessions);
+        }
+    }
+    pub(crate) fn mention_event(&mut self, event: &Event) -> bool {
+        if self.active != Tab::Chat || self.collapsed || self.area.is_none() {
+            return false;
+        }
+        if !self.focused && !matches!(event, Event::Mouse(_)) {
+            return false;
+        }
+        if let Some(chat) = self.chat.as_mut()
+            && chat
+                .mentions
+                .event(event, &mut chat.draft, &mut chat.cursor)
+        {
+            chat.history_index = None;
+            self.focused = true;
+            return true;
+        }
+        false
+    }
     pub fn chat_focused(&self) -> bool {
         self.focused && self.active == Tab::Chat
     }
@@ -317,6 +342,7 @@ impl RightPanel {
                             running: false,
                             draft: String::new(),
                             cursor: 0,
+                            mentions: Default::default(),
                             history: vec![],
                             history_index: None,
                             saved_draft: String::new(),
@@ -1214,11 +1240,21 @@ impl RightPanel {
                         body.width,
                         height,
                     );
+                    let mention_height = chat
+                        .mentions
+                        .height()
+                        .min(draft.y.saturating_sub(body.y + 3));
+                    let mention_area = Rect::new(
+                        body.x,
+                        draft.y.saturating_sub(mention_height),
+                        body.width,
+                        mention_height,
+                    );
                     let content = Rect::new(
                         body.x,
                         body.y + 3,
                         body.width,
-                        draft.y.saturating_sub(body.y + 3),
+                        mention_area.y.saturating_sub(body.y + 3),
                     );
                     let mut side_model = model.clone();
                     side_model.projection = Some(&chat.projection);
@@ -1246,6 +1282,12 @@ impl RightPanel {
                         &side_model,
                         &theme,
                         &mut cache,
+                    );
+                    crate::conversation::render_mentions(
+                        frame,
+                        mention_area,
+                        &chat.mentions,
+                        &theme,
                     );
                     let (cursor_row, cursor_col) = crate::conversation::render_editor(
                         frame,
@@ -1742,6 +1784,53 @@ mod tests {
         assert!(!layout::hovered(Rect::new(2, 3, 4, 1), Some((6, 3))));
     }
     #[test]
+    fn side_mentions_insert_before_send_and_leave_other_tabs_untouched() {
+        use crossterm::event::KeyEvent;
+        let runtime = runtime();
+        let mut panel = RightPanel::default();
+        panel.open(Tab::Chat, &runtime, Path::new("/tmp"));
+        panel.area = Some(Rect::new(80, 0, 36, 24));
+        let owner = panel.chat.as_ref().unwrap().id.clone();
+        let target = SessionId::generate();
+        let sessions = [blora_storage::SessionSummary {
+            id: target.clone(),
+            title: Some("被引用的会话".into()),
+            workspace_path: "/another-project".into(),
+            mode: Mode::Code,
+            status: blora_types::SessionStatus::Active,
+            updated_at: chrono::Utc::now(),
+            last_sequence: 0,
+        }];
+        panel.chat.as_mut().unwrap().insert("@");
+        panel.sync_mentions(&sessions);
+        let enter = Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        for tab in [Tab::Files, Tab::Terminal, Tab::Info] {
+            panel.active = tab;
+            assert!(!panel.mention_event(&enter));
+        }
+        panel.active = Tab::Chat;
+        panel.focused = false;
+        assert!(!panel.mention_event(&enter));
+        panel.focused = true;
+        assert!(panel.mention_event(&enter));
+        let chat = panel.chat.as_mut().unwrap();
+        assert_eq!(chat.id, owner);
+        assert_eq!(chat.draft, format!("@{{{target}}} "));
+        assert!(chat.queue.is_empty());
+        panel.sync_mentions(&sessions);
+        assert!(!panel.mention_event(&enter));
+        panel
+            .chat
+            .as_mut()
+            .unwrap()
+            .edit(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            panel.chat.as_ref().unwrap().queue.front().unwrap(),
+            &format!("@{{{target}}} ")
+        );
+    }
+
+    #[test]
     fn side_editor_utf8_delete_multiline_history_and_cursor() {
         use crossterm::event::KeyEvent;
         let runtime = runtime();
@@ -1950,6 +2039,7 @@ mod tests {
             tool_detail_dialog: None,
             slash_hits: &[],
             slash_selected: 0,
+            mentions: None,
             search: None,
             hide_tools: false,
             message_roles: true,
@@ -2017,6 +2107,7 @@ mod tests {
             tool_detail_dialog: None,
             slash_hits: &[],
             slash_selected: 0,
+            mentions: None,
             search: None,
             hide_tools: false,
             message_roles: true,

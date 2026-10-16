@@ -12,6 +12,7 @@ mod question;
 mod right_panel;
 mod right_terminal;
 mod selection;
+mod session_mentions;
 mod session_picker;
 mod slash;
 mod theme;
@@ -293,6 +294,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut right_panel = right_panel::RightPanel::default();
     let mut search: Option<String> = None;
     let mut hide_tools = false;
+    let mut mentions = session_mentions::SessionMentions::default();
     let mut slash_selected = 0usize;
     let mut last_slash_token = String::new();
     let mut model_override = String::new();
@@ -551,6 +553,8 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                 }
             }
             let pending = right_panel.approvals(runtime, session_id.as_ref());
+            mentions.sync(&input, input.len(), session_id.as_ref(), &sessions);
+            right_panel.sync_mentions(&sessions);
             let slash_hits = slash::matches(&input);
             if slash::command_token(&input).unwrap_or("") != last_slash_token {
                 last_slash_token = slash::command_token(&input).unwrap_or("").to_owned();
@@ -736,6 +740,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             git_status: git_status.as_ref(),
                             slash_hits: &slash_hits,
                             slash_selected,
+                            mentions: Some(&mentions),
                             search: search.as_deref(),
                             hide_tools,
                             message_roles: runtime.tui_message_roles().unwrap_or(true),
@@ -908,6 +913,19 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                     let _ =
                         runtime.resolve_approval(&pending[0].id, key.code == KeyCode::Char('y'));
                     continue;
+                }
+                if top_dialog.is_none() && !dialog_visuals.active(Instant::now()) {
+                    if right_panel.mention_event(&event) {
+                        continue;
+                    }
+                    if !right_panel.focused || matches!(&event, Event::Mouse(_)) {
+                        let mut cursor = input.len();
+                        if mentions.event(&event, &mut input, &mut cursor) {
+                            history_index = None;
+                            right_panel.focused = false;
+                            continue;
+                        }
+                    }
                 }
                 if top_dialog.is_none()
                     && !dialog_visuals.active(Instant::now())

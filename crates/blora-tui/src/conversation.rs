@@ -267,3 +267,12 @@ mod tests {
         assert_eq!(index, None);
     }
 }
+
+pub(crate) fn render_mentions(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    mentions: &crate::session_mentions::SessionMentions,
+    theme: &Theme,
+) {
+    mentions.render(frame, area, theme);
+}
