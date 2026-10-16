@@ -479,10 +479,10 @@ impl RightPanel {
         model: &FrameModel<'_>,
         body: Rect,
         hits: &mut Vec<(Rect, Action)>,
-    ) {
+    ) -> Option<Rect> {
         let theme = Theme::current();
         if body.height == 0 || body.width == 0 {
-            return;
+            return None;
         }
         let files = &self.files;
         let save_width = body.width.min(9);
@@ -704,6 +704,7 @@ impl RightPanel {
                 );
             }
         }
+        files.editor.as_ref().map(|_| content)
     }
 }
 

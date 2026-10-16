@@ -131,6 +131,7 @@ pub struct RightPanel {
     expanded_id: bool,
     chat_error: String,
     terminal_workspace: PathBuf,
+    editor_area: std::cell::Cell<Option<Rect>>,
     done_tx: Sender<(SessionId, String)>,
     done_rx: Receiver<(SessionId, String)>,
     cancellations: std::sync::Arc<std::sync::Mutex<Vec<CancelToken>>>,
@@ -156,6 +157,7 @@ impl Default for RightPanel {
             expanded_id: false,
             chat_error: String::new(),
             terminal_workspace: PathBuf::new(),
+            editor_area: std::cell::Cell::new(None),
             done_tx,
             done_rx,
             cancellations: Default::default(),
@@ -544,6 +546,23 @@ impl RightPanel {
     pub fn event(&mut self, event: &Event, runtime: &Runtime, workspace: &Path) -> bool {
         if let Event::Mouse(mouse) = event {
             if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                if self.active == Tab::Files
+                    && self.files.editor.is_some()
+                    && self
+                        .editor_area
+                        .get()
+                        .is_some_and(|area| area.contains((mouse.column, mouse.row).into()))
+                {
+                    let area = self.editor_area.get().expect("checked editor area");
+                    self.focused = true;
+                    let row = mouse.row.saturating_sub(area.y) as usize + self.files.scroll;
+                    let column =
+                        mouse.column.saturating_sub(area.x) as usize + self.files.horizontal;
+                    if let Some(editor) = self.files.editor.as_mut() {
+                        editor.move_to_display_position(row, column);
+                    }
+                    return true;
+                }
                 if self
                     .chat_tool_rows()
                     .iter()
@@ -629,6 +648,19 @@ impl RightPanel {
                     _ => return true,
                 };
                 match self.active {
+                    Tab::Files if self.files.editor.is_some() => {
+                        if self
+                            .editor_area
+                            .get()
+                            .is_some_and(|rect| rect.contains((mouse.column, mouse.row).into()))
+                        {
+                            self.files.scroll = self
+                                .files
+                                .scroll
+                                .saturating_add_signed(delta)
+                                .min(self.files.max_scroll.get());
+                        }
+                    }
                     Tab::Info => self.info_scroll.set(
                         self.info_scroll
                             .get()
@@ -1200,7 +1232,10 @@ impl RightPanel {
                     hits.insert(0, (rect, Action::Tab(*tab)));
                 }
             }
-            Tab::Files => self.draw_files(frame, model, body, &mut hits),
+            Tab::Files => {
+                self.editor_area
+                    .set(self.draw_files(frame, model, body, &mut hits));
+            }
             Tab::Terminal => {
                 let terminal_label = if let Some(terminal) = self.terminal.as_ref() {
                     if let Some(error) = terminal.error() {
@@ -1544,6 +1579,103 @@ mod tests {
         panel.close(Tab::Info);
         assert!(panel.tabs.contains(&Tab::Info));
     }
+    #[test]
+    fn embedded_editor_mouse_click_moves_utf8_cursor_and_scrolls() {
+        use super::editor::Editor;
+        use crossterm::event::{MouseEvent, MouseEventKind};
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let runtime = runtime();
+        let mut panel = RightPanel::default();
+        panel.tabs.push(Tab::Files);
+        panel.active = Tab::Files;
+        panel.area = Some(Rect::new(80, 0, 44, 20));
+        panel.focused = true;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("test-file");
+        fs::write(&path, "中文\nsecond").unwrap();
+        let metadata = fs::metadata(&path).unwrap();
+        panel.files.editor =
+            Some(Editor::new(&path, "中文\nsecond".as_bytes().to_vec(), metadata).unwrap());
+        panel.files.preview = Some((0..40).map(|index| format!("行{index}\n")).collect());
+        panel.files.editor.as_mut().unwrap().text = panel.files.preview.clone().unwrap();
+        panel.files.max_scroll.set(30);
+        let model = FrameModel {
+            dialog_stack: &[],
+            workspace: Path::new("/tmp"),
+            sessions: &[],
+            index: 0,
+            sidebar: &crate::view::SidebarState::default(),
+            right_panel: Some(&panel),
+            projection: None,
+            pending: &[],
+            input: "",
+            status: "",
+            notice: None,
+            paste_preview: None,
+            passport_dialog: None,
+            provider_dialog: None,
+            add_provider_dialog: None,
+            theme_dialog: None,
+            context_dialog: None,
+            settings_dialog: None,
+            harness_dialog: None,
+            permission_dialog: None,
+            tool_dialog: None,
+            tool_detail_dialog: None,
+            slash_hits: &[],
+            slash_selected: 0,
+            mentions: None,
+            search: None,
+            hide_tools: false,
+            message_roles: true,
+            scroll: 0,
+            permission_mode: blora_policy::PermissionMode::Ask,
+            model: "",
+            provider: "",
+            mode_menu: None,
+            project_picker: None,
+            folder_picker: None,
+            question_dialog: None,
+            session_picker: None,
+            git_dialog: None,
+            git_status: None,
+            user_label: "you",
+            running: false,
+            tick: 0,
+            pointer: None,
+            text_selection: None,
+        };
+        let mut terminal = Terminal::new(TestBackend::new(124, 20)).unwrap();
+        terminal
+            .draw(|frame| panel.draw(frame, &model, Rect::new(0, 0, 124, 20)))
+            .unwrap();
+        let editor_area = panel.editor_area.get().unwrap();
+        assert!(panel.event(
+            &Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: editor_area.x + 2,
+                row: editor_area.y,
+                modifiers: KeyModifiers::NONE,
+            }),
+            &runtime,
+            Path::new("/tmp")
+        ));
+        assert_eq!(panel.files.editor.as_ref().unwrap().cursor, "行".len());
+        assert!(panel.focused);
+        assert!(panel.event(
+            &Event::Mouse(MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: editor_area.x,
+                row: editor_area.y,
+                modifiers: KeyModifiers::NONE,
+            }),
+            &runtime,
+            Path::new("/tmp")
+        ));
+        assert_eq!(panel.files.scroll, 3);
+    }
+
     #[test]
     fn file_boundary_and_binary_preview() {
         let root = std::env::temp_dir().join(format!("blora-right-{}", std::process::id()));

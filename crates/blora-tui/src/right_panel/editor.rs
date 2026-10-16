@@ -5,6 +5,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
 };
+use unicode_width::UnicodeWidthChar;
 
 #[derive(Clone)]
 struct Snapshot {
@@ -50,6 +51,40 @@ impl Editor {
             prefix.bytes().filter(|b| *b == b'\n').count(),
             prefix.rsplit('\n').next().unwrap_or("").chars().count(),
         )
+    }
+
+    pub(super) fn move_to_display_position(&mut self, row: usize, column: usize) {
+        let mut start = 0;
+        for (line_index, line) in self.text.split('\n').enumerate() {
+            if line_index == row {
+                let line = line.strip_suffix('\r').unwrap_or(line);
+                let mut display = 0;
+                for (byte, ch) in line.char_indices() {
+                    if display >= column {
+                        self.cursor = start + byte;
+                        self.preferred_column = None;
+                        return;
+                    }
+                    let width = if ch == '\t' {
+                        4 - display % 4
+                    } else {
+                        ch.width().unwrap_or(0)
+                    };
+                    if column < display + width {
+                        self.cursor = start + byte;
+                        self.preferred_column = None;
+                        return;
+                    }
+                    display += width;
+                }
+                self.cursor = start + line.len();
+                self.preferred_column = None;
+                return;
+            }
+            start += line.len() + 1;
+        }
+        self.cursor = self.text.len();
+        self.preferred_column = None;
     }
     fn start(&self) -> usize {
         self.text[..self.cursor].rfind('\n').map_or(0, |i| i + 1)
@@ -267,6 +302,19 @@ mod tests {
         assert_eq!(fs::read_to_string(dir.path().join("file")).unwrap(), e.text);
         assert!(!e.dirty());
     }
+    #[test]
+    fn mouse_position_maps_wide_characters_and_tabs_to_utf8_boundaries() {
+        let (_, mut e) = editor("甲🙂\tZ\nnext");
+        e.move_to_display_position(0, 2);
+        assert_eq!(&e.text[e.cursor..], "🙂\tZ\nnext");
+        e.move_to_display_position(0, 4);
+        assert_eq!(&e.text[e.cursor..], "\tZ\nnext");
+        e.move_to_display_position(0, 8);
+        assert_eq!(&e.text[e.cursor..], "Z\nnext");
+        e.move_to_display_position(1, 99);
+        assert_eq!(e.cursor, e.text.len());
+    }
+
     #[test]
     fn vertical_home_end_and_delete() {
         let (_, mut e) = editor("中文\na\nthree");
