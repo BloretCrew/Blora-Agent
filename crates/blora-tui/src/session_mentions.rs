@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 use std::{cell::RefCell, ops::Range};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use blora_storage::SessionSummary;
 use blora_types::SessionId;
@@ -38,6 +39,55 @@ fn query(input: &str, cursor: usize) -> Option<(Range<usize>, &str)> {
         .find(char::is_whitespace)
         .map_or(input.len(), |i| cursor + i);
     Some((start..end, needle))
+}
+
+fn compact_label(label: &str, id: &SessionId, width: usize) -> String {
+    let title = label
+        .rsplit_once(" · ")
+        .and_then(|(head, _)| head.rsplit_once(" · ").map(|(title, _)| title))
+        .unwrap_or(label);
+    let project = label
+        .rsplit_once(" · ")
+        .map(|(head, _)| head)
+        .and_then(|head| head.rsplit_once(" · ").map(|(_, path)| path))
+        .and_then(|path| std::path::Path::new(path).file_name())
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let short = id
+        .as_str()
+        .chars()
+        .rev()
+        .take(8)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>();
+    let suffix = if width >= 42 {
+        format!(" · {project} · {short}")
+    } else {
+        format!(" · {short}")
+    };
+    let suffix = if suffix.width() + 4 <= width {
+        suffix
+    } else {
+        String::new()
+    };
+    let budget = width.saturating_sub(suffix.width());
+    let mut text = String::new();
+    let mut used = 0;
+    for c in title.chars() {
+        let w = c.width().unwrap_or(0);
+        if used + w > budget.saturating_sub(1) {
+            break;
+        }
+        text.push(c);
+        used += w;
+    }
+    if text.len() < title.len() && budget > 0 {
+        text.push('…');
+    }
+    text.push_str(&suffix);
+    text
 }
 
 impl SessionMentions {
@@ -168,12 +218,13 @@ impl SessionMentions {
                 Rect::new(area.x, area.y + 1, area.width, 1),
             );
         }
-        for (index, (_, label)) in self.rows.iter().enumerate().skip(start).take(capacity) {
+        for (index, (id, label)) in self.rows.iter().enumerate().skip(start).take(capacity) {
             let rect = Rect::new(area.x, area.y + 1 + (index - start) as u16, area.width, 1);
+            let label = compact_label(label, id, area.width.saturating_sub(2) as usize);
             let text = format!("{} {label}", if index == self.selected { "›" } else { " " });
             frame.render_widget(
                 Paragraph::new(Line::from(text)).style(if index == self.selected {
-                    theme.rose_bold()
+                    theme.rose_bold().bg(theme.bg_select)
                 } else {
                     theme.base()
                 }),
@@ -199,6 +250,22 @@ mod tests {
             status: blora_types::SessionStatus::Active,
             updated_at: chrono::Utc::now(),
             last_sequence: 0,
+        }
+    }
+
+    #[test]
+    fn compact_candidates_reserve_identity_without_splitting_chinese() {
+        let id = SessionId::generate();
+        for width in [0, 1, 12, 24, 35, 80] {
+            let text = compact_label(
+                "很长的会话标题重复重复重复 · /data/Project · id",
+                &id,
+                width,
+            );
+            assert!(text.width() <= width);
+            if width >= 24 {
+                assert!(text.ends_with(&id.as_str()[id.as_str().len() - 8..]));
+            }
         }
     }
 

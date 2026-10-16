@@ -1314,18 +1314,31 @@ impl RightPanel {
                         ),
                         (Control::Provider, route_label),
                     ];
+                    let fixed = [row.width.min(12), row.width.saturating_sub(12).min(8)];
                     let mut x = row.x;
-                    for (control, label) in labels {
-                        let width = if control == Control::Provider {
-                            row.right().saturating_sub(x)
+                    for (index, (control, label)) in labels.into_iter().enumerate() {
+                        let width = if index < 2 {
+                            fixed[index]
                         } else {
-                            (unicode_width::UnicodeWidthStr::width(label.as_str()) as u16 + 1)
-                                .min(row.right().saturating_sub(x))
+                            row.right().saturating_sub(x)
                         };
+                        if width == 0 {
+                            continue;
+                        }
                         let rect = Rect::new(x, row.y, width, 1);
+                        let text = if control == Control::Context {
+                            i18n::tr("right.context", "上下文")
+                        } else {
+                            label
+                        };
+                        let style = if layout::hovered(rect, model.pointer) {
+                            theme.fg(theme.rose).bg(theme.bg_select)
+                        } else {
+                            theme.fg(theme.sage)
+                        };
                         frame.render_widget(
-                            Paragraph::new(layout::clip(&label, width as usize))
-                                .style(theme.fg(theme.sage)),
+                            Paragraph::new(layout::clip(&text, width.saturating_sub(1) as usize))
+                                .style(style),
                             rect,
                         );
                         self.controls.borrow_mut().push((rect, control));

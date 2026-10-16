@@ -89,7 +89,7 @@ with tempfile.TemporaryDirectory(prefix="blora-side-chat-") as directory:
         time.sleep(0.5)
         assert "自动接受编辑" in screen(), screen()
         rows = screen().splitlines()
-        control_row = next(i for i,line in enumerate(rows) if "自动接受编辑" in line[-36:] and "openai" in line[-36:])
+        control_row = next(i for i,line in enumerate(rows) if "上下文" in line[-36:] and "openai" in line[-36:])
         literal(f"\x1b[<0;174;{control_row+1}M\x1b[<0;174;{control_row+1}m")
         wait(lambda: "供应商" in screen() and "侧聊" in screen())
         keys("Escape")
