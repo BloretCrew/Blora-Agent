@@ -3,8 +3,8 @@
 
 use std::collections::HashSet;
 
-use blora_events::KnownPayload;
-use blora_types::{Actor, BloraError, Result, SessionId, Visibility};
+use blora_events::{KnownPayload, NewEvent, UserInput};
+use blora_types::{Actor, BloraError, Result, RunId, SessionId, TurnId, Visibility};
 use serde_json::{Value, json};
 
 use crate::Runtime;
@@ -58,14 +58,14 @@ fn encoded_len(value: &Value) -> usize {
 }
 
 impl Runtime {
-    pub(crate) fn expand_session_mentions(
+    pub(crate) fn session_reference_context(
         &self,
         session_id: &SessionId,
         prompt: &str,
-    ) -> Result<String> {
+    ) -> Result<Option<Value>> {
         let ids = mentions(prompt)?;
         if ids.is_empty() {
-            return Ok(prompt.to_owned());
+            return Ok(None);
         }
         let owner = self.session_user_id(session_id)?;
         // Validate all owners before reading any referenced conversation.
@@ -90,9 +90,40 @@ impl Runtime {
             remaining -= encoded_len(&snapshot) + 1;
             snapshots.push(snapshot);
         }
+        Ok(Some(json!(snapshots)))
+    }
+
+    pub(crate) fn emit_referenced_input(
+        &self,
+        session_id: &SessionId,
+        run_id: &RunId,
+        turn_id: &TurnId,
+        text: String,
+        references: Option<Value>,
+    ) -> Result<()> {
+        let mut event = NewEvent::new(
+            session_id.clone(),
+            KnownPayload::UserInput(UserInput { text }),
+        )
+        .with_run(run_id.clone())
+        .with_turn(turn_id.clone());
+        if let Some(references) = references {
+            event
+                .metadata
+                .insert("session_reference_context".to_owned(), references);
+        }
+        let stored = self.store.append(event)?;
+        self.notify(&stored);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn expand_session_mentions(&self, session_id: &SessionId, prompt: &str) -> Result<String> {
         let mut expanded = prompt.to_owned();
-        expanded.push_str(HEADER);
-        expanded.push_str(&serde_json::to_string(&snapshots).map_err(BloraError::event)?);
+        if let Some(references) = self.session_reference_context(session_id, prompt)? {
+            expanded.push_str(HEADER);
+            expanded.push_str(&references.to_string());
+        }
         Ok(expanded)
     }
 

@@ -66,9 +66,11 @@ with tempfile.TemporaryDirectory(prefix="blora-side-chat-") as directory:
         literal("SIDE_REQUEST")
         keys("Enter")
         wait(lambda: "SIDE_QUESTION" in screen())
-        assert "侧边对话" in screen(), screen()
+        assert "Fake title" in screen(), screen()
         keys("Space", "Enter")
         wait(lambda: bool(events("approval.requested")))
+        wait(lambda: "y allow" in screen())
+        time.sleep(0.3)
         keys("y")
         wait(lambda: (project / "side-approved.txt").exists())
         wait(lambda: bool(events("assistant.message.completed")))
@@ -76,8 +78,25 @@ with tempfile.TemporaryDirectory(prefix="blora-side-chat-") as directory:
         assert events("input.provided")[0][0] == question_owner
         assert events("approval.requested")[0][0] == question_owner
         assert (project / "side-approved.txt").read_text() == "SIDE_APPROVED"
+        db = next(p for p in home.glob("*.sqlite*") if not p.name.endswith(("-wal", "-shm")))
+        with sqlite3.connect(db) as connection:
+            title = connection.execute("SELECT title FROM sessions WHERE id=?", (question_owner,)).fetchone()[0]
+        assert title and title != "侧边对话", title
+        assert title in screen(), screen()
+        keys("BTab")
+        wait(lambda: "权限模式" in screen() and "侧聊" in screen())
+        keys("Down", "Enter")
+        time.sleep(0.5)
+        assert "自动接受编辑" in screen(), screen()
+        rows = screen().splitlines()
+        control_row = next(i for i,line in enumerate(rows) if "自动接受编辑" in line[-36:] and "openai" in line[-36:])
+        literal(f"\x1b[<0;174;{control_row+1}M\x1b[<0;174;{control_row+1}m")
+        wait(lambda: "供应商" in screen() and "侧聊" in screen())
+        keys("Escape")
+        time.sleep(0.5)
         keys("C-g")
         assert "MAIN_DRAFT" in screen(), screen()
+        assert "默认确认" in screen(), screen()
         keys(*(["BSpace"] * len("MAIN_DRAFT")))
         literal("MAIN_REQUEST")
         keys("Enter")

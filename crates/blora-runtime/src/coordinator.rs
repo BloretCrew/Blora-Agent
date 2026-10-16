@@ -304,7 +304,7 @@ impl Runtime {
         }
         match session.title.as_deref().map(str::trim) {
             None | Some("") => Ok(true),
-            Some("tui" | "web") => {
+            Some("tui" | "web" | "侧边对话" | "Side conversation") => {
                 // Old clients stored their interface name as the initial title.
                 // A later title event represents an intentional or generated name.
                 Ok(!self
@@ -819,7 +819,8 @@ impl Runtime {
             })
             .unwrap_or(prompt)
             .to_owned();
-        let mut prompt = self.expand_session_mentions(session_id, prompt)?;
+        let references = self.session_reference_context(session_id, prompt)?;
+        let mut prompt = prompt.to_owned();
         let submit = hooks::run(
             hooks::USER_PROMPT_SUBMIT,
             &json!({"session_id": session_id.to_string(), "prompt": prompt}),
@@ -873,14 +874,7 @@ impl Runtime {
                 model: Some(model.clone()),
             }),
         )?;
-        self.emit(
-            session_id,
-            Some(&run_id),
-            Some(&turn_id),
-            KnownPayload::UserInput(UserInput {
-                text: prompt.clone(),
-            }),
-        )?;
+        self.emit_referenced_input(session_id, &run_id, &turn_id, prompt.clone(), references)?;
         if should_generate_title {
             let title = generate_session_title(
                 providers[provider_index].as_ref(),
@@ -1010,15 +1004,8 @@ impl Runtime {
             }
             // Steering messages become real user turns at this safe point.
             for steer in self.store.take_steers(session_id)? {
-                let steer = self.expand_session_mentions(session_id, &steer)?;
-                self.emit(
-                    session_id,
-                    Some(&run_id),
-                    Some(&turn_id),
-                    KnownPayload::UserInput(UserInput {
-                        text: format!("[steer] {steer}"),
-                    }),
-                )?;
+                let references = self.session_reference_context(session_id, &steer)?;
+                self.emit_referenced_input(session_id, &run_id, &turn_id, steer, references)?;
             }
             let current = self.show_session(session_id)?;
             env.shell_cwd = current
@@ -2382,7 +2369,7 @@ mod tests {
 
     #[test]
     fn run_titles_sessions_with_existing_transcript_and_legacy_names() {
-        for initial_title in [None, Some(""), Some("tui"), Some("web")] {
+        for initial_title in [None, Some(""), Some("tui"), Some("web"), Some("侧边对话"), Some("Side conversation")] {
             let runtime = Runtime::new(SqliteStore::open_in_memory().unwrap());
             let id = runtime
                 .create_session(CreateSession {
@@ -2951,7 +2938,16 @@ mod tests {
             .iter()
             .find(|event| event.event_type == "user.input")
             .unwrap();
-        assert_eq!(stored.payload["text"], received);
+        assert_eq!(stored.payload["text"], prompt);
+        assert!(
+            stored.metadata["session_reference_context"]
+                .to_string()
+                .contains("recorded-source-content")
+        );
+        let visible = runtime.replay_session(&target).unwrap();
+        assert!(visible.transcript.iter().any(|item| matches!(item,
+            blora_session::TranscriptItem::User { text, .. } if text == &prompt
+        )));
         runtime
             .emit(
                 &source,
@@ -2969,6 +2965,63 @@ mod tests {
                 .any(|message| message.content.as_deref() == Some(received))
         );
         assert!(!received.contains("later-source-change"));
+    }
+
+    #[test]
+    fn queued_session_reference_keeps_visible_prompt_and_provider_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = Runtime::new(SqliteStore::open_in_memory().unwrap());
+        let source = session(&runtime, Mode::Code, dir.path().to_str().unwrap());
+        let target = session(&runtime, Mode::Code, dir.path().to_str().unwrap());
+        runtime
+            .emit(
+                &source,
+                None,
+                None,
+                KnownPayload::UserInput(UserInput {
+                    text: "queued-reference-content".to_owned(),
+                }),
+            )
+            .unwrap();
+        let prompt = format!("also compare @{{{source}}}");
+        runtime.queue_steer(&target, &prompt).unwrap();
+        let recorder = Recorder::install(&runtime, vec![text_reply("done", "stop")], None);
+        runtime
+            .run_foreground(&target, "start", &CancelToken::new(), &yolo())
+            .unwrap();
+        let events = runtime.events(&target).unwrap();
+        let queued = events
+            .iter()
+            .find(|event| event.payload["text"] == prompt)
+            .unwrap();
+        assert!(
+            queued.metadata["session_reference_context"]
+                .to_string()
+                .contains("queued-reference-content")
+        );
+        assert!(
+            runtime
+                .replay_session(&target)
+                .unwrap()
+                .transcript
+                .iter()
+                .any(|item| matches!(item,
+                    blora_session::TranscriptItem::User { text, .. } if text == &prompt
+                ))
+        );
+        assert!(
+            recorder
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .flat_map(|request| &request.messages)
+                .any(|message| message
+                    .content
+                    .as_deref()
+                    .is_some_and(|text| text.starts_with(&prompt)
+                        && text.contains("queued-reference-content")))
+        );
     }
 
     fn text_reply(text: &str, finish: &str) -> Completion {
@@ -3615,7 +3668,7 @@ mod tests {
             .unwrap();
         let projection = runtime.show_session(&session).unwrap();
         assert!(projection.transcript.iter().any(
-            |item| matches!(item, TranscriptItem::User { text, .. } if text.starts_with("[steer]"))
+            |item| matches!(item, TranscriptItem::User { text, .. } if text == "also check README")
         ));
         assert!(runtime.store.take_steers(&session).unwrap().is_empty());
     }

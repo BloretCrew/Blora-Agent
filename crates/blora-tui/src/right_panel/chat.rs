@@ -4,6 +4,30 @@ use super::*;
 use ratatui::text::Line;
 
 impl SideChat {
+    pub(crate) fn title(&self) -> String {
+        self.projection
+            .session
+            .as_ref()
+            .and_then(|session| session.title.as_deref())
+            .filter(|title| !title.trim().is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| i18n::tr("right.chat", "侧聊"))
+    }
+    pub(crate) fn permission(
+        &self,
+        fallback: blora_policy::PermissionMode,
+    ) -> blora_policy::PermissionMode {
+        self.permission.unwrap_or(fallback)
+    }
+    pub(crate) fn route(&self) -> Option<(&str, &str)> {
+        self.route
+            .as_ref()
+            .map(|(model, provider)| (model.as_str(), provider.as_str()))
+    }
+    pub(crate) fn set_route(&mut self, model: String, provider: String) {
+        self.route = Some((model, provider));
+    }
+
     pub(super) fn viewport(&self, count: usize, height: usize) -> usize {
         let previous = self.rendered.replace(count);
         if self.scroll.get() > 0 && count > previous {

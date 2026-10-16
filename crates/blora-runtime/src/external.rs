@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use blora_events::{
     AssistantDelta, AssistantMessageCompleted, AssistantReasoning, ExternalSessionBound,
     HarnessChanged, KnownPayload, ModelRequested, RunCompleted, RunCreated, RunFailed, RunStarted,
-    ToolCompleted, ToolOutput, ToolRequested, ToolStarted, UsageRecorded, UserInput,
+    ToolCompleted, ToolOutput, ToolRequested, ToolStarted, UsageRecorded,
 };
 use blora_harness::{HarnessError, HarnessEvent, RunRequest};
 use blora_types::{BloraError, CancelToken, HarnessKind, Mode, Result, RunId, SessionId, TurnId};
@@ -137,8 +137,12 @@ impl Runtime {
         if prompt.trim().is_empty() {
             return Err(BloraError::Other("prompt must not be empty".to_owned()));
         }
-        let expanded_prompt = self.expand_session_mentions(session_id, prompt)?;
-        let prompt = expanded_prompt.as_str();
+        let references = self.session_reference_context(session_id, prompt)?;
+        let mut provider_prompt = prompt.to_owned();
+        if let Some(references) = &references {
+            provider_prompt.push_str(blora_context::SESSION_REFERENCE_HEADER);
+            provider_prompt.push_str(&references.to_string());
+        }
         let projection = self.show_session(session_id)?;
         let session = projection
             .session
@@ -180,7 +184,7 @@ impl Runtime {
             prompt: context_prompt(
                 &self.events(session_id)?,
                 binding.map_or(0, |b| b.synced_sequence),
-                prompt,
+                &provider_prompt,
             ),
             resume_session_id: binding.map(|binding| binding.external_session_id.clone()),
             permission: options.permission_mode(),
@@ -217,9 +221,7 @@ impl Runtime {
             return self.cancel_run(session_id, &run_id, &turn_id);
         }
         emit(KnownPayload::RunStarted(RunStarted { model: None }))?;
-        emit(KnownPayload::UserInput(UserInput {
-            text: prompt.to_owned(),
-        }))?;
+        self.emit_referenced_input(session_id, &run_id, &turn_id, prompt.to_owned(), references)?;
         let mut text = String::new();
         let mut tools = HashMap::new();
         let mut warnings = Vec::new();
@@ -486,7 +488,10 @@ fn context_prompt(events: &[blora_events::EventEnvelope], after: u64, prompt: &s
                 != Some(true)
     }) {
         let content = match event.decode_payload() {
-            Ok(Some(KnownPayload::UserInput(input))) => Some(("user", input.text)),
+            Ok(Some(KnownPayload::UserInput(input))) => Some((
+                "user",
+                blora_context::user_input_with_context(event, &input.text),
+            )),
             Ok(Some(KnownPayload::AssistantMessageCompleted(message))) => {
                 Some(("assistant", message.text))
             }
@@ -532,6 +537,7 @@ fn context_prompt(events: &[blora_events::EventEnvelope], after: u64, prompt: &s
 #[cfg(test)]
 mod tests {
     use super::*;
+    use blora_events::UserInput;
     use blora_storage::{CreateSession, SqliteStore};
 
     fn session(runtime: &Runtime, cwd: &str) -> SessionId {
@@ -543,6 +549,52 @@ mod tests {
                 parent_session_id: None,
             })
             .unwrap()
+    }
+
+    #[test]
+    fn external_history_restores_reference_metadata_without_exposing_it_in_projection() {
+        let runtime = Runtime::new(SqliteStore::open_in_memory().unwrap());
+        let id = session(&runtime, ".");
+        let source = session(&runtime, ".");
+        runtime
+            .emit(
+                &source,
+                None,
+                None,
+                KnownPayload::UserInput(UserInput {
+                    text: "external-replay-reference".to_owned(),
+                }),
+            )
+            .unwrap();
+        let prompt = format!("compare @{{{source}}}");
+        let references = runtime
+            .session_reference_context(&id, &prompt)
+            .unwrap()
+            .unwrap();
+        let mut event = blora_events::NewEvent::new(
+            id.clone(),
+            KnownPayload::UserInput(UserInput {
+                text: prompt.clone(),
+            }),
+        );
+        event
+            .metadata
+            .insert("session_reference_context".to_owned(), references);
+        runtime.store.append(event).unwrap();
+        let events = runtime.events(&id).unwrap();
+        let received = context_prompt(&events, 0, "next");
+        assert!(received.contains("external-replay-reference"));
+        assert_eq!(received.matches("[Session references:").count(), 1);
+        assert!(
+            runtime
+                .replay_session(&id)
+                .unwrap()
+                .transcript
+                .iter()
+                .any(|item| matches!(item,
+                    blora_session::TranscriptItem::User { text, .. } if text == &prompt
+                ))
+        );
     }
 
     #[test]
@@ -742,8 +794,9 @@ mod tests {
                 )
                 .unwrap();
             let mention = format!("compare @{{{source}}}");
+            runtime.queue_steer(&id, &mention).unwrap();
             runtime
-                .run_foreground(&id, &mention, &CancelToken::new(), &options)
+                .run_foreground(&id, "before-reference", &CancelToken::new(), &options)
                 .unwrap();
             let invocations = std::fs::read_to_string(format!("{root}/invocations")).unwrap();
             assert_eq!(invocations.matches("external-reference-content").count(), 1);
@@ -756,8 +809,13 @@ mod tests {
                 .last()
                 .unwrap();
             let text = stored.payload["text"].as_str().unwrap();
-            assert!(text.starts_with(&mention));
-            assert!(text.contains("external-reference-content"));
+            assert_eq!(text, mention);
+            assert!(!text.contains("[Session references:"));
+            assert!(
+                stored.metadata["session_reference_context"]
+                    .to_string()
+                    .contains("external-reference-content")
+            );
             runtime
                 .set_session_harness(&id, HarnessKind::Blora)
                 .unwrap();

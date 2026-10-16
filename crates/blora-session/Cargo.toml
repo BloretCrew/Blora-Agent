@@ -12,8 +12,6 @@ blora-events.workspace = true
 blora-types.workspace = true
 chrono.workspace = true
 serde.workspace = true
-
-[dev-dependencies]
 serde_json.workspace = true
 
 [lints]

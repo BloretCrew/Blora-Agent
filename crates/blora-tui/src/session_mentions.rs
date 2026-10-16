@@ -170,15 +170,7 @@ impl SessionMentions {
         }
         for (index, (_, label)) in self.rows.iter().enumerate().skip(start).take(capacity) {
             let rect = Rect::new(area.x, area.y + 1 + (index - start) as u16, area.width, 1);
-            // Put the stable identity first so narrow side composers still disambiguate rows.
-            let (id, _) = &self.rows[index];
-            let short = id.as_str();
-            let start = short.char_indices().rev().nth(7).map_or(0, |(i, _)| i);
-            let suffix = &short[start..];
-            let text = format!(
-                "{} {suffix} · {label}",
-                if index == self.selected { "›" } else { " " }
-            );
+            let text = format!("{} {label}", if index == self.selected { "›" } else { " " });
             frame.render_widget(
                 Paragraph::new(Line::from(text)).style(if index == self.selected {
                     theme.rose_bold()

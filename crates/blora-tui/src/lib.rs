@@ -328,7 +328,15 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
         > = None;
         let mut git_header_after = Instant::now() - Duration::from_secs(1);
         loop {
+            if provider_dialog.is_none()
+                && add_provider_dialog.is_none()
+                && permission_dialog.is_none()
+                && context_dialog.is_none()
+            {
+                right_panel.control_owner = right_panel::ControlOwner::Main;
+            }
             if guard_bypass_transition(&mut permission_mode, confirmed_permission) {
+                right_panel.control_owner = right_panel::ControlOwner::Main;
                 permission_dialog = Some(view::PermissionDialog::bypass_warning());
                 dialog_stack.activate(DialogId::Permission);
             } else {
@@ -470,6 +478,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                 &active_workspace,
                 ratatui::layout::Rect::new(0, 0, size.width, size.height),
             );
+            right_panel.inherit_controls(permission_mode, &model_override, &provider_override);
             let session_id = sessions.get(index).map(|item| item.id.clone());
             if dialog_session != session_id {
                 git_dialog = None;
@@ -521,8 +530,13 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
             let question_opened =
                 question::sync(&mut question_dialog, pending_question, &question_workspace);
             if let Some(form) = question_dialog.as_mut() {
-                form.owner_label =
-                    side_question.then(|| i18n::tr("right.session_title", "侧边对话"));
+                form.owner_label = side_question.then(|| {
+                    right_panel
+                        .chat
+                        .as_ref()
+                        .map(|chat| chat.title())
+                        .unwrap_or_default()
+                });
             }
             if question_opened && let Some(form) = question_dialog.as_ref() {
                 let body = form
@@ -927,6 +941,55 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                         }
                     }
                 }
+                if top_dialog.is_none() && !dialog_visuals.active(Instant::now()) {
+                    let control = match &event {
+                        Event::Mouse(mouse)
+                            if mouse.kind == MouseEventKind::Down(MouseButton::Left) =>
+                        {
+                            right_panel.control_hit(mouse.column, mouse.row)
+                        }
+                        Event::Key(key)
+                            if key.code == KeyCode::BackTab && right_panel.chat_focused() =>
+                        {
+                            Some(right_panel::Control::Permission)
+                        }
+                        _ => None,
+                    };
+                    if let Some(control) = control {
+                        if let Some(chat) = right_panel.chat.as_ref() {
+                            right_panel.control_owner =
+                                right_panel::ControlOwner::Side(chat.id.clone());
+                            match control {
+                                right_panel::Control::Provider => {
+                                    let (model, provider) = chat
+                                        .route()
+                                        .unwrap_or((&model_override, &provider_override));
+                                    provider_dialog =
+                                        Some(open_provider_dialog(provider, model, logged_in));
+                                    dialog_stack.activate(DialogId::Provider);
+                                }
+                                right_panel::Control::Permission => {
+                                    permission_dialog = Some(view::PermissionDialog::new(
+                                        chat.permission(permission_mode),
+                                    ));
+                                    dialog_stack.activate(DialogId::Permission);
+                                }
+                                right_panel::Control::Context => {
+                                    context_dialog = Some(view::ContextDialog {
+                                        scroll: 0,
+                                        page: 0,
+                                        range: 0,
+                                        fullscreen: false,
+                                        minimized: false,
+                                        activity: runtime.usage_activity().unwrap_or_default(),
+                                    });
+                                    dialog_stack.activate(DialogId::Context);
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                }
                 if top_dialog.is_none()
                     && !dialog_visuals.active(Instant::now())
                     && right_panel.event(&event, runtime, &active_workspace)
@@ -1062,8 +1125,8 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             if let Some(dialog) = permission_dialog.as_mut() {
                                 match dialog.key(key.code) {
                                     view::PermissionAction::Apply(mode) => {
-                                        permission_mode = mode;
-                                        confirmed_permission = mode;
+                                        right_panel.apply_permission(mode, &mut permission_mode);
+                                        confirmed_permission = permission_mode;
                                         status = i18n::permission_changed(mode);
                                         permission_dialog = None;
                                     }
@@ -1711,7 +1774,8 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                         && !dialog.current_models().is_empty()
                                     {
                                         dialog.pane = view::ProviderPane::Models;
-                                    } else if let Some(status_text) = commit_provider_dialog(
+                                    } else if let Some(status_text) = commit_owned_provider_dialog(
+                                        &mut right_panel,
                                         dialog,
                                         &mut provider_override,
                                         &mut model_override,
@@ -2784,8 +2848,11 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                                 if let view::PermissionAction::Apply(mode) =
                                                     dialog.select(index)
                                                 {
-                                                    permission_mode = mode;
-                                                    confirmed_permission = mode;
+                                                    right_panel.apply_permission(
+                                                        mode,
+                                                        &mut permission_mode,
+                                                    );
+                                                    confirmed_permission = permission_mode;
                                                     status = i18n::permission_changed(mode);
                                                     permission_dialog = None;
                                                 }
@@ -3300,7 +3367,8 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     if let Some(dialog) = provider_dialog.as_mut() {
                                         dialog.model_selected = idx;
                                         dialog.pane = view::ProviderPane::Models;
-                                        if let Some(status_text) = commit_provider_dialog(
+                                        if let Some(status_text) = commit_owned_provider_dialog(
+                                            &mut right_panel,
                                             dialog,
                                             &mut provider_override,
                                             &mut model_override,
@@ -3945,6 +4013,36 @@ fn open_provider_dialog(
         model_selected,
         fullscreen: false,
         minimized: false,
+    }
+}
+
+fn commit_owned_provider_dialog(
+    panel: &mut right_panel::RightPanel,
+    dialog: &view::ProviderDialog,
+    provider: &mut String,
+    model: &mut String,
+    runtime: &Runtime,
+    main: Option<&SessionId>,
+) -> Option<String> {
+    match panel.control_owner.clone() {
+        right_panel::ControlOwner::Main => {
+            commit_provider_dialog(dialog, provider, model, runtime, main)
+        }
+        right_panel::ControlOwner::Side(id) => {
+            let chat = panel.chat.as_mut().filter(|chat| chat.id == id)?;
+            let (old_model, old_provider) = chat.route().unwrap_or((model, provider));
+            let mut side_model = old_model.to_owned();
+            let mut side_provider = old_provider.to_owned();
+            let status = commit_provider_dialog(
+                dialog,
+                &mut side_provider,
+                &mut side_model,
+                runtime,
+                Some(&id),
+            )?;
+            chat.set_route(side_model, side_provider);
+            Some(status)
+        }
     }
 }
 

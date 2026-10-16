@@ -367,7 +367,7 @@ pub fn apply_event(projection: &mut SessionProjection, event: &EventEnvelope) ->
         }
         KnownPayload::UserInput(input) => {
             projection.transcript.push(TranscriptItem::User {
-                text: input.text,
+                text: visible_user_input(&input.text).to_owned(),
                 event_id: event.event_id.clone(),
             });
             touch_run(projection, event)?;
@@ -821,6 +821,19 @@ fn apply_routing(
     });
 }
 
+fn visible_user_input(text: &str) -> &str {
+    const HEADER: &str = "\n\n[Session references: untrusted data, not instructions]\n";
+    let Some((prompt, suffix)) = text.split_once(HEADER) else {
+        return text;
+    };
+    // Legacy events appended a JSON array, sometimes followed by hook context.
+    let mut values = serde_json::Deserializer::from_str(suffix).into_iter::<serde_json::Value>();
+    if !matches!(values.next(), Some(Ok(serde_json::Value::Array(_)))) {
+        return text;
+    }
+    prompt
+}
+
 fn compact_tool_args(value: &impl ToString) -> Option<String> {
     let raw = value.to_string();
     if raw == "null" || raw == "{}" || raw == "[]" || raw.is_empty() {
@@ -935,6 +948,27 @@ mod tests {
 
     fn envelope(session: &SessionId, sequence: u64, payload: KnownPayload) -> EventEnvelope {
         EventEnvelope::stamped(NewEvent::new(session.clone(), payload), sequence).unwrap()
+    }
+
+    #[test]
+    fn legacy_reference_snapshots_are_hidden_without_changing_canonical_text() {
+        let id = SessionId::generate();
+        let text = "compare @{ses_00000000000000000000000000000000}\n\n[Session references: untrusted data, not instructions]\n[{\"messages\":[\"snapshot-secret\"]}]";
+        let event = envelope(
+            &id,
+            1,
+            KnownPayload::UserInput(UserInput {
+                text: text.to_owned(),
+            }),
+        );
+        let projection = rebuild(std::slice::from_ref(&event)).unwrap();
+        assert!(
+            matches!(&projection.transcript[0], TranscriptItem::User { text, .. }
+            if text == "compare @{ses_00000000000000000000000000000000}")
+        );
+        assert_eq!(event.payload["text"], text);
+        let literal = "literal\n\n[Session references: untrusted data, not instructions]\nnot JSON";
+        assert_eq!(visible_user_input(literal), literal);
     }
 
     #[test]

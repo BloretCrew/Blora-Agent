@@ -71,6 +71,19 @@ enum Action {
     ExpandId,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum ControlOwner {
+    #[default]
+    Main,
+    Side(SessionId),
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Control {
+    Provider,
+    Permission,
+    Context,
+}
+
 pub struct SideChat {
     pub id: SessionId,
     pub workspace: PathBuf,
@@ -90,6 +103,7 @@ pub struct SideChat {
     scroll: std::cell::Cell<usize>,
     pub status: String,
     route: Option<(String, String)>,
+    permission: Option<blora_policy::PermissionMode>,
     cache: std::cell::RefCell<crate::view::TranscriptCache>,
     tool_rows: std::cell::RefCell<Vec<(Rect, Vec<usize>)>>,
 }
@@ -100,6 +114,8 @@ pub struct RunRequest {
     pub options: RunOptions,
 }
 pub struct RightPanel {
+    pub control_owner: ControlOwner,
+    controls: std::cell::RefCell<Vec<(Rect, Control)>>,
     tabs: Vec<Tab>,
     active: Tab,
     pub focused: bool,
@@ -123,6 +139,8 @@ impl Default for RightPanel {
     fn default() -> Self {
         let (done_tx, done_rx) = mpsc::channel();
         Self {
+            control_owner: ControlOwner::Main,
+            controls: Default::default(),
             tabs: vec![Tab::Info],
             active: Tab::Info,
             focused: false,
@@ -174,6 +192,63 @@ impl Drop for CancelGuard {
     }
 }
 impl RightPanel {
+    pub fn inherit_controls(
+        &mut self,
+        permission: blora_policy::PermissionMode,
+        model: &str,
+        provider: &str,
+    ) {
+        if let Some(chat) = self.chat.as_mut() {
+            chat.permission.get_or_insert(permission);
+            chat.route.get_or_insert_with(|| {
+                (
+                    if model.is_empty() {
+                        std::env::var("BLORA_MODEL").unwrap_or_default()
+                    } else {
+                        model.to_owned()
+                    },
+                    if provider.is_empty() {
+                        std::env::var("BLORA_PROVIDER").unwrap_or_default()
+                    } else {
+                        provider.to_owned()
+                    },
+                )
+            });
+        }
+    }
+    pub fn control_hit(&self, x: u16, y: u16) -> Option<Control> {
+        if self.active != Tab::Chat || self.area.is_none() || self.collapsed {
+            return None;
+        }
+        if self.active != Tab::Chat || self.collapsed || self.area.is_none() {
+            return None;
+        }
+        self.controls
+            .borrow()
+            .iter()
+            .find(|(rect, _)| rect.contains((x, y).into()))
+            .map(|(_, control)| *control)
+    }
+    pub fn control_chat(&self) -> Option<&SideChat> {
+        match &self.control_owner {
+            ControlOwner::Main => None,
+            ControlOwner::Side(id) => self.chat.as_ref().filter(|chat| &chat.id == id),
+        }
+    }
+    pub fn apply_permission(
+        &mut self,
+        mode: blora_policy::PermissionMode,
+        main: &mut blora_policy::PermissionMode,
+    ) {
+        match &self.control_owner {
+            ControlOwner::Main => *main = mode,
+            ControlOwner::Side(id) => {
+                if let Some(chat) = self.chat.as_mut().filter(|chat| &chat.id == id) {
+                    chat.permission = Some(mode);
+                }
+            }
+        }
+    }
     pub fn cancel_guard(&self) -> CancelGuard {
         CancelGuard(self.cancellations.clone())
     }
@@ -328,7 +403,7 @@ impl RightPanel {
                     }
                 }
                 Tab::Chat => match runtime.create_session(CreateSession {
-                    title: Some(i18n::tr("right.session_title", "侧边对话")),
+                    title: None,
                     workspace_path: workspace.display().to_string(),
                     mode: Mode::Code,
                     parent_session_id: None,
@@ -353,6 +428,7 @@ impl RightPanel {
                             scroll: 0.into(),
                             status: String::new(),
                             route: None,
+                            permission: None,
                             cache: Default::default(),
                             tool_rows: Default::default(),
                         })
@@ -457,7 +533,12 @@ impl RightPanel {
             id: chat.id.clone(),
             prompt,
             cancel: chat.cancel.clone(),
-            options: crate::tui_run_options(permission, model, provider, token),
+            options: crate::tui_run_options(
+                *chat.permission.get_or_insert(permission),
+                model,
+                provider,
+                token,
+            ),
         })
     }
     pub fn event(&mut self, event: &Event, runtime: &Runtime, workspace: &Path) -> bool {
@@ -880,6 +961,7 @@ impl RightPanel {
         let theme = Theme::current();
         let mut hits = self.hits.borrow_mut();
         hits.clear();
+        self.controls.borrow_mut().clear();
         let restore = Rect::new(canvas.right().saturating_sub(4), canvas.y, 4, 1);
         if self.area.is_none() {
             frame.render_widget(
@@ -916,7 +998,14 @@ impl RightPanel {
             let reserve = if *tab == Tab::Info { 0 } else { 2 };
             frame.render_widget(
                 Paragraph::new(layout::clip(
-                    &tab.label(),
+                    &if *tab == Tab::Chat {
+                        self.chat
+                            .as_ref()
+                            .map(SideChat::title)
+                            .unwrap_or_else(|| tab.label())
+                    } else {
+                        tab.label()
+                    },
                     rect.width.saturating_sub(reserve) as usize,
                 ))
                 .style(style),
@@ -950,8 +1039,10 @@ impl RightPanel {
                 let p = model.projection;
                 let harness = p.map(|p| p.harness).unwrap_or_default();
                 let external = harness != blora_types::HarnessKind::Blora;
-                let title = session
-                    .and_then(|s| s.title.as_deref())
+                let title = p
+                    .and_then(|projection| projection.session.as_ref())
+                    .and_then(|session| session.title.as_deref())
+                    .or_else(|| session.and_then(|s| s.title.as_deref()))
                     .map(str::trim)
                     .filter(|t| !t.is_empty() && *t != "tui")
                     .map(str::to_owned)
@@ -1206,16 +1297,50 @@ impl RightPanel {
             }
             Tab::Chat => {
                 if let Some(chat) = &self.chat {
+                    self.controls.borrow_mut().clear();
+                    let row = Rect::new(body.x, body.bottom().saturating_sub(2), body.width, 1);
+                    let route_label = chat
+                        .route
+                        .as_ref()
+                        .map(|(m, p)| format!("{p}/{m}"))
+                        .unwrap_or_else(|| format!("{}/{}", model.provider, model.model));
+                    let permission_label =
+                        i18n::permission_name(chat.permission.unwrap_or(model.permission_mode));
+                    let labels = [
+                        (Control::Permission, permission_label),
+                        (
+                            Control::Context,
+                            i18n::tr("dialog.context_usage", "上下文用量"),
+                        ),
+                        (Control::Provider, route_label),
+                    ];
+                    let mut x = row.x;
+                    for (control, label) in labels {
+                        let width = if control == Control::Provider {
+                            row.right().saturating_sub(x)
+                        } else {
+                            (unicode_width::UnicodeWidthStr::width(label.as_str()) as u16 + 1)
+                                .min(row.right().saturating_sub(x))
+                        };
+                        let rect = Rect::new(x, row.y, width, 1);
+                        frame.render_widget(
+                            Paragraph::new(layout::clip(&label, width as usize))
+                                .style(theme.fg(theme.sage)),
+                            rect,
+                        );
+                        self.controls.borrow_mut().push((rect, control));
+                        x += width;
+                    }
                     let route = chat
                         .route
                         .as_ref()
                         .map(|(m, p)| format!("{p}/{m}"))
-                        .unwrap_or_else(|| i18n::tr("right.route_pending", "首次发送时固定配置"));
+                        .unwrap_or_else(|| i18n::tr("right.route_pending", "首次发送时继承配置"));
                     let header = format!(
-                        "{} · Blora
+                        "{}
 {}
 {} · {} {} · {}",
-                        layout::clip(&chat.id.to_string(), 8),
+                        chat.title(),
                         chat.workspace.display(),
                         chat.status,
                         i18n::tr("right.queued", "排队"),
@@ -1233,10 +1358,10 @@ impl RightPanel {
                     );
                     let height = (lines.len() as u16)
                         .clamp(1, 5)
-                        .min(body.height.saturating_sub(5).max(1));
+                        .min(body.height.saturating_sub(6).max(1));
                     let draft = Rect::new(
                         body.x,
-                        body.bottom().saturating_sub(1 + height),
+                        body.bottom().saturating_sub(2 + height),
                         body.width,
                         height,
                     );
@@ -1428,6 +1553,81 @@ mod tests {
     }
     fn runtime() -> Runtime {
         Runtime::new(blora_storage::SqliteStore::open_in_memory().unwrap())
+    }
+    #[test]
+    fn new_side_session_leaves_title_to_runtime_and_preserves_explicit_titles() {
+        let runtime = runtime();
+        let mut panel = RightPanel::default();
+        panel.open(Tab::Chat, &runtime, Path::new("/tmp"));
+        let chat = panel.chat.as_mut().unwrap();
+        runtime
+            .refresh_projection(&chat.id, &mut chat.projection)
+            .unwrap();
+        assert!(chat.projection.session.as_ref().unwrap().title.is_none());
+        assert_eq!(chat.title(), i18n::tr("right.chat", "侧聊"));
+        chat.projection.session.as_mut().unwrap().title = Some("明确自定义标题".into());
+        assert_eq!(chat.title(), "明确自定义标题");
+        chat.projection.session.as_mut().unwrap().title = Some("自动生成的主题".into());
+        assert_eq!(chat.title(), "自动生成的主题");
+    }
+    #[test]
+    fn control_owner_permissions_and_run_options_are_independent() {
+        use blora_policy::PermissionMode::{Ask, Plan, Yolo};
+        let runtime = runtime();
+        let mut panel = RightPanel::default();
+        panel.open(Tab::Chat, &runtime, Path::new("/tmp"));
+        panel.inherit_controls(Ask, "side-model", "mock");
+        let id = panel.chat.as_ref().unwrap().id.clone();
+        let mut main = Ask;
+        panel.control_owner = ControlOwner::Side(id.clone());
+        panel.apply_permission(Plan, &mut main);
+        assert_eq!(main, Ask);
+        assert_eq!(panel.control_chat().unwrap().permission(main), Plan);
+        panel.chat.as_mut().unwrap().queue.push_back("first".into());
+        let request = panel.request(main, "main-model", "mock", None).unwrap();
+        panel.apply_permission(Yolo, &mut main);
+        panel
+            .chat
+            .as_mut()
+            .unwrap()
+            .set_route("next-model".into(), "next-provider".into());
+        assert_eq!(request.options.permission, Some(Plan));
+        assert_eq!(request.options.model, "side-model");
+        assert_eq!(request.options.provider, "mock");
+        panel.inherit_controls(Ask, "main-changed", "main-provider");
+        assert_eq!(panel.control_chat().unwrap().permission(main), Yolo);
+        assert_eq!(
+            panel.control_chat().unwrap().route(),
+            Some(("next-model", "next-provider"))
+        );
+        panel.control_owner = ControlOwner::Main;
+        panel.apply_permission(Plan, &mut main);
+        assert_eq!(main, Plan);
+        assert!(panel.control_chat().is_none());
+        assert_eq!(panel.chat.as_ref().unwrap().permission(main), Yolo);
+        panel.control_owner = ControlOwner::Side(SessionId::generate());
+        panel.apply_permission(Ask, &mut main);
+        assert_eq!(main, Plan);
+        assert_eq!(panel.chat.as_ref().unwrap().permission(main), Yolo);
+    }
+    #[test]
+    fn side_bypass_uses_shared_explicit_confirmation() {
+        use blora_policy::PermissionMode::{Ask, Yolo};
+        let mut dialog = crate::view::PermissionDialog::new(Ask);
+        let index = blora_policy::PermissionMode::ALL
+            .iter()
+            .position(|mode| *mode == Yolo)
+            .unwrap();
+        assert_eq!(dialog.select(index), crate::view::PermissionAction::None);
+        assert!(dialog.confirm_bypass);
+        assert_eq!(
+            dialog.key(KeyCode::Enter),
+            crate::view::PermissionAction::None
+        );
+        assert_eq!(
+            dialog.key(KeyCode::Char('y')),
+            crate::view::PermissionAction::Apply(Yolo)
+        );
     }
     #[test]
     fn tabs_deduplicate_and_chat_keeps_original_project_and_history() {
@@ -2059,6 +2259,7 @@ mod tests {
             tick: 0,
             pointer: None,
             text_selection: None,
+            interaction: None,
         };
         terminal
             .draw(|frame| panel.draw(frame, &model, Rect::new(0, 0, 88, 18)))
@@ -2127,6 +2328,7 @@ mod tests {
             tick: 0,
             pointer: None,
             text_selection: None,
+            interaction: None,
         };
         terminal
             .draw(|frame| panel.draw(frame, &model, Rect::new(0, 0, 88, 18)))

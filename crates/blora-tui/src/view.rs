@@ -1276,9 +1276,12 @@ fn render_sidebar(
         .take(session_height)
         .enumerate()
     {
-        let title = model.sessions[*index]
-            .title
-            .as_deref()
+        let title = model
+            .projection
+            .filter(|_| *index == model.index)
+            .and_then(|projection| projection.session.as_ref())
+            .and_then(|session| session.title.as_deref())
+            .or(model.sessions[*index].title.as_deref())
             .map(str::trim)
             .filter(|title| !title.is_empty() && *title != "tui")
             .map(str::to_owned)
@@ -1450,6 +1453,7 @@ pub fn draw(
         model.dialog_stack.len() as f64,
         &theme,
     );
+
     for (index, id) in model.dialog_stack.iter().copied().enumerate() {
         if id == DialogId::Onboarding {
             hits = HitMap {
@@ -1547,6 +1551,8 @@ pub fn draw_animated(
     }
     hits
 }
+
+
 
 fn snapshot_region(source: &ratatui::buffer::Buffer, rect: Rect) -> ratatui::buffer::Buffer {
     let mut layer = ratatui::buffer::Buffer::empty(rect.intersection(source.area));
@@ -1830,6 +1836,19 @@ fn render_layer(
         modal: true,
         ..HitMap::default()
     };
+    let mut owned_model = model.clone();
+    let control_panel = model.right_panel;
+    let side = control_panel.and_then(|panel| panel.control_chat());
+    if matches!(
+        id,
+        DialogId::Provider | DialogId::Permission | DialogId::Context
+    ) {
+        if let Some(chat) = side {
+            owned_model.projection = Some(&chat.projection);
+            owned_model.permission_mode = chat.permission(model.permission_mode);
+        }
+    }
+    let model = &owned_model;
     if id == DialogId::Project
         && let Some(picker) = model.project_picker
     {
@@ -2177,6 +2196,26 @@ fn render_layer(
         hits.question_rows = dialog_hits.question_rows;
         hits.traffic_lights = dialog_hits.traffic_lights;
         hits.modal_area = dialog_hits.modal_area;
+    }
+    if matches!(
+        id,
+        DialogId::Provider | DialogId::Permission | DialogId::Context
+    ) {
+        if let Some(rect) = hits.modal_area {
+            let owner = side
+                .map(|chat| format!("{} · {}", i18n::tr("right.chat", "侧聊"), chat.title()))
+                .unwrap_or_else(|| i18n::tr("control.main", "主对话"));
+            frame.render_widget(
+                Paragraph::new(ellipsize(&owner, rect.width.saturating_sub(6) as usize))
+                    .style(theme.mute()),
+                Rect::new(
+                    rect.x + 3,
+                    rect.bottom().saturating_sub(1),
+                    rect.width.saturating_sub(6),
+                    1,
+                ),
+            );
+        }
     }
     hits
 }
@@ -4453,7 +4492,7 @@ fn render_approval(
         .right_panel
         .and_then(|panel| panel.chat.as_ref())
         .filter(|chat| chat.id == first.session_id)
-        .map(|_| i18n::tr("right.session_title", "侧边对话"));
+        .map(|chat| chat.title());
     let summary_text = owner
         .map(|owner| format!("[{owner}] {}", first.summary))
         .unwrap_or_else(|| first.summary.clone());
@@ -6585,10 +6624,13 @@ pub(crate) fn window_title(running: bool, tick: u64, mode: &str, label: &str) ->
 
 #[must_use]
 pub(crate) fn title_label(
-    _projection: Option<&SessionProjection>,
+    projection: Option<&SessionProjection>,
     session_title: Option<&str>,
 ) -> String {
-    session_title
+    projection
+        .and_then(|projection| projection.session.as_ref())
+        .and_then(|session| session.title.as_deref())
+        .or(session_title)
         .map(str::trim)
         .filter(|text| !text.is_empty() && *text != "tui")
         .map(|text| ellipsize(text, 32))

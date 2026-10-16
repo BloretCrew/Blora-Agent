@@ -88,6 +88,18 @@ with tempfile.TemporaryDirectory(prefix="blora-session-mentions-") as directory:
         main = next(sid for sid,p in events("user.input") if "MAIN_REFERENCE_REQUEST" in str(p))
         side = next(sid for sid,p in events("user.input") if "SIDE_REFERENCE_REQUEST" in str(p))
         assert len({source, main, side}) == 3
+        for sid, payload in events("user.input"):
+            if sid in (main, side):
+                text = payload["text"]
+                assert "Session references:" not in text, text
+                assert "SOURCE_SECRET_FACT_9472" not in text, text
+                assert "messages" not in text, text
+        keys("C-g")
+        # A full redraw must show concise references, while the provider got snapshots.
+        tmux("resize-window", "-t", "mentions", "-x", "179", "-y", "40")
+        tmux("resize-window", "-t", "mentions", "-x", "180", "-y", "40")
+        visible = screen()
+        assert "Session references:" not in visible and '\"truncated\"' not in visible, visible
         keys("C-q")
         print("PASS session mentions: main/side picker, stable reference, provider receives source transcript, independent sessions")
     finally:
