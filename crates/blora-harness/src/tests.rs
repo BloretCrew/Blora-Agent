@@ -367,6 +367,22 @@ mod unix {
     }
 
     #[test]
+    fn new_harness_commands_are_detected_independently() {
+        let dir = tempfile::tempdir().unwrap();
+        for (kind, command) in [
+            (HarnessKind::HermesAgent, "hermes"),
+            (HarnessKind::OpenClaw, "openclaw"),
+            (HarnessKind::OpenCode, "opencode"),
+            (HarnessKind::QwenCode, "qwen"),
+            (HarnessKind::DeepSeekHarness, "dsh"),
+        ] {
+            assert!(detect_in(kind, Some(dir.path().as_os_str())).is_none());
+            let path = script(dir.path(), command, "exit 0");
+            assert_eq!(detect_in(kind, Some(dir.path().as_os_str())), Some(path));
+        }
+    }
+
+    #[test]
     fn path_detection_requires_executable_and_preserves_launchers() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(detect_in(HarnessKind::Blora, None), Some(PathBuf::new()));
@@ -443,6 +459,97 @@ esac"#,
                 .contains(&req.prompt)
         );
         assert!(!dir.path().join("injected").exists());
+    }
+
+    #[test]
+    fn new_plain_and_json_transports_carry_all_document_output() {
+        let dir = tempfile::tempdir().unwrap();
+        // Hermes/DeepSeek need not force multi-line answers through a 1 MiB JSONL cap.
+        for kind in [HarnessKind::HermesAgent, HarnessKind::DeepSeekHarness] {
+            let path = script(
+                dir.path(),
+                "fake",
+                &format!("printf '%s' \"$(printf 'x%.0s' {{1..1100000}})\""),
+            );
+            let mut req = request(kind, PermissionMode::Yolo);
+            req.cwd = dir.path().into();
+            let args = invocation(&req).unwrap();
+            let mut events = Vec::new();
+            crate::process::execute(&path, &req, &args, &CancelToken::new(), |e| events.push(e))
+                .unwrap();
+            assert!(events.iter().any(|e| matches!(
+                e,
+                HarnessEvent::Text { text } if text.len() >= 1_100_000
+            )));
+        }
+    }
+
+    #[test]
+    fn new_harness_resume_ids_are_restricted_per_transport() {
+        for kind in [
+            HarnessKind::HermesAgent,
+            HarnessKind::OpenClaw,
+            HarnessKind::DeepSeekHarness,
+        ] {
+            let mut req = request(kind, PermissionMode::Yolo);
+            req.resume_session_id = Some("any".into());
+            assert!(invocation(&req).is_err());
+        }
+        let mut req = request(HarnessKind::OpenCode, PermissionMode::Ask);
+        req.resume_session_id = Some("ses_abc".into());
+        assert!(invocation(&req).is_ok());
+        for (id, valid) in [
+            ("01a10c01-7571-71c2-9f0f-62886fc7be5b", true),
+            ("title", false),
+        ] {
+            req.kind = HarnessKind::QwenCode;
+            req.resume_session_id = Some(id.into());
+            assert_eq!(invocation(&req).is_ok(), valid);
+        }
+    }
+
+    #[test]
+    fn new_document_transports_parse_only_after_success() {
+        let dir = tempfile::tempdir().unwrap();
+        for kind in [HarnessKind::HermesAgent, HarnessKind::DeepSeekHarness] {
+            let path = script(
+                dir.path(),
+                "fake",
+                "printf '%s\\n' 'answer line one' '{\"text\":\"ordinary reply\"}'",
+            );
+            let mut req = request(kind, PermissionMode::Yolo);
+            req.cwd = dir.path().into();
+            let mut events = Vec::new();
+            let args = invocation(&req).unwrap();
+            let outcome = crate::process::execute(&path, &req, &args, &CancelToken::new(), |e| {
+                events.push(e)
+            })
+            .unwrap();
+            assert!(outcome.session_id.is_none());
+            assert!(events.iter().any(|e| matches!(e, HarnessEvent::Text { text } if text.contains("answer line one") && text.contains("ordinary reply"))));
+            let bad = script(dir.path(), "bad", "printf '%s' 'partial answer'; exit 1");
+            events.clear();
+            assert!(
+                crate::process::execute(&bad, &req, &args, &CancelToken::new(), |e| events.push(e))
+                    .is_err()
+            );
+            assert!(events.is_empty());
+        }
+        let path = script(
+            dir.path(),
+            "openclaw-fake",
+            "printf '%s\\n' '{' '  \"payloads\": [{\"text\": \"local answer\"}],' '  \"meta\": {\"agentMeta\": {\"sessionId\": \"independent\", \"model\": \"m\"}}' '}'",
+        );
+        let mut req = request(HarnessKind::OpenClaw, PermissionMode::Yolo);
+        req.cwd = dir.path().into();
+        let mut events = Vec::new();
+        let out =
+            crate::process::execute(&path, &req, &[], &CancelToken::new(), |e| events.push(e))
+                .unwrap();
+        assert_eq!(out.session_id.as_deref(), Some("independent"));
+        assert!(events.contains(&HarnessEvent::Text {
+            text: "local answer".into()
+        }));
     }
 
     #[test]

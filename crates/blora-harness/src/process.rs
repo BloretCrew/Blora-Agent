@@ -37,6 +37,12 @@ pub(crate) fn execute(
     nonblocking(&stdout)?;
     nonblocking(&stderr)?;
     let mut parser = Parser::new(request.kind);
+    let document = matches!(
+        request.kind,
+        blora_types::HarnessKind::HermesAgent
+            | blora_types::HarnessKind::OpenClaw
+            | blora_types::HarnessKind::DeepSeekHarness
+    );
     let mut pending = Vec::new();
     let mut diagnostic = Vec::new();
     let mut total = 0usize;
@@ -60,6 +66,10 @@ pub(crate) fn execute(
                     total += n;
                     if total > 64 * 1024 * 1024 {
                         return Err(HarnessError::Protocol("stdout exceeded 64 MiB".into()));
+                    }
+                    if document {
+                        pending.extend_from_slice(&buffer[..n]);
+                        continue;
                     }
                     for byte in &buffer[..n] {
                         if *byte == b'\n' {
@@ -105,7 +115,7 @@ pub(crate) fn execute(
             if stdout_eof && stderr_eof
                 || ended_at.is_some_and(|t| t.elapsed() > Duration::from_millis(500))
             {
-                if !pending.is_empty() {
+                if !document && !pending.is_empty() {
                     parser.line(&pending, &mut callback)?;
                 }
                 if !status.success() {
@@ -115,6 +125,18 @@ pub(crate) fn execute(
                         request.kind,
                         diagnostic.len()
                     )));
+                }
+                if document {
+                    let value = if request.kind == blora_types::HarnessKind::OpenClaw {
+                        serde_json::from_slice(&pending).map_err(|_| {
+                            HarnessError::Protocol("invalid final JSON document".into())
+                        })?
+                    } else {
+                        serde_json::Value::String(String::from_utf8(pending).map_err(|_| {
+                            HarnessError::Protocol("invalid UTF-8 final response".into())
+                        })?)
+                    };
+                    parser.value(&value, &mut callback)?;
                 }
                 return parser.finish();
             }

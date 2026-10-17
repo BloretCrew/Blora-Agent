@@ -30,7 +30,9 @@ fn skills_root(workspace: &str, scope: &str) -> Result<PathBuf> {
             let home = std::env::var_os("BLORA_HOME")
                 .map(PathBuf::from)
                 .or_else(|| dirs::home_dir().map(|home| home.join(".blora")))
-                .ok_or_else(|| BloraError::Other("no home directory for global skills".to_owned()))?;
+                .ok_or_else(|| {
+                    BloraError::Other("no home directory for global skills".to_owned())
+                })?;
             Ok(home.join("skills"))
         }
         other => Err(BloraError::Other(format!(
@@ -41,9 +43,12 @@ fn skills_root(workspace: &str, scope: &str) -> Result<PathBuf> {
 
 /// Existing file for `name` under `root`: `<name>.md` or `<name>/SKILL.md`.
 fn existing(root: &Path, name: &str) -> Option<PathBuf> {
-    [root.join(format!("{name}.md")), root.join(name).join("SKILL.md")]
-        .into_iter()
-        .find(|path| path.is_file())
+    [
+        root.join(format!("{name}.md")),
+        root.join(name).join("SKILL.md"),
+    ]
+    .into_iter()
+    .find(|path| path.is_file())
 }
 
 impl Runtime {
@@ -111,9 +116,10 @@ impl Runtime {
                 )));
             }
         };
-        let shown = path
-            .strip_prefix(workspace)
-            .map_or_else(|_| path.display().to_string(), |rel| rel.display().to_string());
+        let shown = path.strip_prefix(workspace).map_or_else(
+            |_| path.display().to_string(),
+            |rel| rel.display().to_string(),
+        );
         self.emit(
             session_id,
             Some(run_id),

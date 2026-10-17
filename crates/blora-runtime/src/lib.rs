@@ -9,8 +9,8 @@ mod compact;
 mod coordinator;
 mod cron;
 mod external;
-mod input;
 pub mod hooks;
+mod input;
 mod market;
 mod mcp;
 mod memory;
@@ -29,8 +29,8 @@ pub use compact::{COMPACTION_BREAKER, CompactionReport};
 pub use coordinator::{DEFAULT_MAX_TURNS, MockRunOptions, RunOptions, Runtime, WorkspaceInfo};
 pub use cron::next_cron;
 pub use input::{NO_USER, format_question_answers};
-pub use skills::MAX_SKILL_BYTES;
 pub use market::{
     Marketplace, install as install_plugin, load_index, uninstall as uninstall_plugin,
 };
 pub use plugins::PluginSpec;
+pub use skills::MAX_SKILL_BYTES;

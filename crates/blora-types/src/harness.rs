@@ -15,11 +15,31 @@ pub enum HarnessKind {
     Codex,
     #[serde(rename = "grok-build")]
     GrokBuild,
+    #[serde(rename = "hermes-agent")]
+    HermesAgent,
+    #[serde(rename = "openclaw")]
+    OpenClaw,
+    #[serde(rename = "opencode")]
+    OpenCode,
+    #[serde(rename = "qwen-code")]
+    QwenCode,
+    #[serde(rename = "deepseek-harness")]
+    DeepSeekHarness,
 }
 
 impl HarnessKind {
-    pub const fn all() -> [Self; 4] {
-        [Self::Blora, Self::ClaudeCode, Self::Codex, Self::GrokBuild]
+    pub const fn all() -> [Self; 9] {
+        [
+            Self::Blora,
+            Self::ClaudeCode,
+            Self::Codex,
+            Self::GrokBuild,
+            Self::HermesAgent,
+            Self::OpenClaw,
+            Self::OpenCode,
+            Self::QwenCode,
+            Self::DeepSeekHarness,
+        ]
     }
 
     pub const fn as_str(self) -> &'static str {
@@ -28,6 +48,11 @@ impl HarnessKind {
             Self::ClaudeCode => "claude-code",
             Self::Codex => "codex",
             Self::GrokBuild => "grok-build",
+            Self::HermesAgent => "hermes-agent",
+            Self::OpenClaw => "openclaw",
+            Self::OpenCode => "opencode",
+            Self::QwenCode => "qwen-code",
+            Self::DeepSeekHarness => "deepseek-harness",
         }
     }
 
@@ -37,6 +62,11 @@ impl HarnessKind {
             Self::ClaudeCode => "Claude Code",
             Self::Codex => "Codex",
             Self::GrokBuild => "Grok Build",
+            Self::HermesAgent => "Hermes Agent",
+            Self::OpenClaw => "OpenClaw",
+            Self::OpenCode => "OpenCode",
+            Self::QwenCode => "Qwen Code",
+            Self::DeepSeekHarness => "DeepSeek Harness",
         }
     }
 }

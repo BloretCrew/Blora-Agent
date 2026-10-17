@@ -52,7 +52,7 @@ impl DialogStack {
     }
 }
 
-pub const TRANSITION_DURATION: std::time::Duration = std::time::Duration::from_millis(180);
+pub const TRANSITION_DURATION: std::time::Duration = std::time::Duration::from_millis(120);
 pub const ANIMATION_FRAME: std::time::Duration = std::time::Duration::from_millis(33);
 
 #[derive(Debug)]
@@ -154,10 +154,10 @@ mod tests {
         visuals.sync(&[Settings], start);
         assert_eq!(visuals.layers[0].weight(start), 0.0);
         assert_eq!(
-            visuals.layers[0].weight(start + Duration::from_millis(90)),
+            visuals.layers[0].weight(start + TRANSITION_DURATION / 2),
             0.5
         );
-        assert!(visuals.active(start + Duration::from_millis(179)));
+        assert!(visuals.active(start + TRANSITION_DURATION - Duration::from_millis(1)));
         assert_eq!(visuals.layers[0].weight(start + TRANSITION_DURATION), 1.0);
         assert!(!visuals.active(start + TRANSITION_DURATION));
         assert_eq!(
@@ -169,9 +169,9 @@ mod tests {
     #[test]
     fn reversing_and_repeated_sync_preserve_current_weight_and_single_layer() {
         use super::*;
-        use std::time::{Duration, Instant};
+        use std::time::Instant;
         let start = Instant::now();
-        let mid = start + Duration::from_millis(90);
+        let mid = start + TRANSITION_DURATION / 2;
         let mut visuals = DialogVisuals::default();
         visuals.sync(&[Theme], start);
         visuals.sync(&[Theme], mid);
@@ -179,7 +179,7 @@ mod tests {
         visuals.sync(&[], mid);
         assert!(visuals.closing_barrier());
         assert_eq!(visuals.layers[0].weight(mid), 0.5);
-        let reverse = mid + Duration::from_millis(90);
+        let reverse = mid + TRANSITION_DURATION / 2;
         assert_eq!(visuals.layers[0].weight(reverse), 0.25);
         visuals.sync(&[Theme], reverse);
         assert_eq!(visuals.layers.len(), 1);
@@ -191,7 +191,7 @@ mod tests {
     #[test]
     fn closing_layers_keep_order_cache_and_barrier_until_completion() {
         use super::*;
-        use std::time::{Duration, Instant};
+        use std::time::Instant;
         let start = Instant::now();
         let settled = start + TRANSITION_DURATION;
         let mut visuals = DialogVisuals::default();
@@ -206,7 +206,7 @@ mod tests {
             visuals
                 .layers
                 .iter()
-                .map(|l| l.weight(settled + Duration::from_millis(90)))
+                .map(|l| l.weight(settled + TRANSITION_DURATION / 2))
                 .sum::<f64>(),
             2.5
         );

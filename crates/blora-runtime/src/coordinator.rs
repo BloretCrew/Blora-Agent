@@ -452,6 +452,36 @@ impl Runtime {
     ) -> Result<String> {
         let backend = LocalBackend::new(Policy::new(path, true)?);
         let context = backend.git_commit_context()?;
+        self.generate_git_commit_message_from_context(&context, options)
+    }
+
+    pub fn generate_git_commit_message_selected(
+        &self,
+        path: &std::path::Path,
+        files: &[String],
+        options: &RunOptions,
+    ) -> Result<String> {
+        if files.is_empty() {
+            return Err(BloraError::Other("请选择至少一个文件".to_owned()));
+        }
+        let backend = LocalBackend::new(Policy::new(path, true)?);
+        let context = files
+            .iter()
+            .map(|file| {
+                backend
+                    .git_file_diff(file)
+                    .map(|diff| format!("File: {file}\n{diff}"))
+            })
+            .collect::<Result<Vec<_>>>()?
+            .join("\n");
+        self.generate_git_commit_message_from_context(&context, options)
+    }
+
+    fn generate_git_commit_message_from_context(
+        &self,
+        context: &str,
+        options: &RunOptions,
+    ) -> Result<String> {
         let providers = resolve_provider_chain(
             options.mock,
             &options.provider,
@@ -3327,9 +3357,20 @@ mod tests {
             .run(&session, "go", &CancelToken::new(), &yolo())
             .unwrap();
         let requests = recorder.requests.lock().unwrap();
-        let tool = requests[1].messages.iter().rev().find(|m| m.role == "tool").unwrap();
+        let tool = requests[1]
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == "tool")
+            .unwrap();
         assert_eq!(tool.content.as_deref(), Some(crate::NO_USER));
-        assert!(runtime.show_session(&session).unwrap().pending_input.is_none());
+        assert!(
+            runtime
+                .show_session(&session)
+                .unwrap()
+                .pending_input
+                .is_none()
+        );
     }
 
     #[test]
@@ -3373,7 +3414,12 @@ mod tests {
             None,
         );
         runtime
-            .run(&current, "do it like last time", &CancelToken::new(), &yolo())
+            .run(
+                &current,
+                "do it like last time",
+                &CancelToken::new(),
+                &yolo(),
+            )
             .unwrap();
         let requests = recorder.requests.lock().unwrap();
         let tools: Vec<String> = requests[3]
@@ -3387,13 +3433,20 @@ mod tests {
         assert!(tools[1].contains("skill quarterly-report created"));
         assert!(tools[2].contains("already exists"));
         let skill = dir.path().join(".blora/skills/quarterly-report.md");
-        assert!(std::fs::read_to_string(&skill).unwrap().starts_with("Build the quarterly report"));
+        assert!(
+            std::fs::read_to_string(&skill)
+                .unwrap()
+                .starts_with("Build the quarterly report")
+        );
         let events = runtime.events(&current).unwrap();
         assert!(events.iter().any(|e| e.event_type == "skill.changed"));
         // The new skill appears in the next request's context block.
         let context = requests[3].messages[1].content.as_deref().unwrap();
         assert!(context.contains("- quarterly-report: Build the quarterly report"));
-        assert!(context.contains("skill_manage"), "Agent mode offers skill_manage");
+        assert!(
+            context.contains("skill_manage"),
+            "Agent mode offers skill_manage"
+        );
     }
 
     #[test]
@@ -3409,7 +3462,13 @@ mod tests {
         let names: Vec<&str> = requests[0].tools.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"apply_patch") && names.contains(&"ask_user"));
         assert!(!names.contains(&"skill_manage") && !names.contains(&"web_search"));
-        assert!(requests[0].messages[0].content.as_deref().unwrap().contains("# Mode: Code"));
+        assert!(
+            requests[0].messages[0]
+                .content
+                .as_deref()
+                .unwrap()
+                .contains("# Mode: Code")
+        );
     }
 
     #[test]

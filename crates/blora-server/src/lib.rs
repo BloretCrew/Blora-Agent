@@ -3,6 +3,8 @@
 
 //! Local HTTP API. The Web UI only talks to this surface.
 
+mod workbench;
+
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -32,7 +34,6 @@ use tower_http::cors::CorsLayer;
 
 const INDEX_HTML: &str = include_str!("../../../web/index.html");
 const APP_JS: &str = include_str!("../../../web/app.js");
-const DIALOGS_JS: &str = include_str!("../../../web/dialogs.js");
 const ONBOARDING_JS: &str = include_str!("../../../web/onboarding.js");
 const IMAGINE_JS: &str = include_str!("../../../web/imagine.js");
 const APP_CSS: &str = include_str!("../../../web/app.css");
@@ -70,6 +71,8 @@ struct CreateBody {
 struct RunBody {
     prompt: String,
     #[serde(default)]
+    confirmed: bool,
+    #[serde(default)]
     mock: bool,
     #[serde(default)]
     auto_approve: bool,
@@ -97,6 +100,12 @@ struct SessionListItem {
 
 #[derive(Serialize)]
 struct SessionJson {
+    run_status: Option<String>,
+    harness: blora_types::HarnessKind,
+    provider: Option<String>,
+    model: Option<String>,
+    external_model: Option<String>,
+    external_sessions: serde_json::Value,
     id: String,
     title: Option<String>,
     workspace_path: String,
@@ -160,6 +169,8 @@ struct TaskBody {
     auto_approve: bool,
     #[serde(default)]
     cron: Option<String>,
+    #[serde(default)]
+    confirmed: bool,
 }
 
 pub async fn serve(
@@ -197,9 +208,9 @@ pub async fn serve(
 
 fn app(state: AppState) -> Router {
     Router::new()
+        .merge(workbench::routes())
         .route("/", get(index))
         .route("/app.js", get(app_js))
-        .route("/dialogs.js", get(dialogs_js))
         .route("/imagine.js", get(imagine_js))
         .route("/app.css", get(app_css))
         .route("/thinking-orbs-host.js", get(thinking_orbs_host))
@@ -254,7 +265,7 @@ fn app(state: AppState) -> Router {
             state.clone(),
             gateway_auth,
         ))
-        .layer(CorsLayer::permissive())
+        .layer(CorsLayer::new())
         .with_state(state)
 }
 
@@ -264,6 +275,19 @@ async fn gateway_auth(
     next: axum::middleware::Next,
 ) -> Response {
     let path = request.uri().path();
+    if path.starts_with("/api/") || path == "/ws" {
+        if let Some(origin) = request.headers().get(header::ORIGIN) {
+            let origin = origin.to_str().unwrap_or("");
+            let host = request
+                .headers()
+                .get(header::HOST)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("");
+            if origin != format!("http://{host}") && origin != format!("https://{host}") {
+                return ApiError::forbidden().into_response();
+            }
+        }
+    }
     let public_api =
         path.starts_with("/api/auth/") || path == "/api/login" || path == "/api/settings";
     if state.require_auth && ((path.starts_with("/api/") && !public_api) || path == "/ws") {
@@ -697,10 +721,6 @@ async fn app_js() -> Response {
     js(APP_JS)
 }
 
-async fn dialogs_js() -> Response {
-    js(DIALOGS_JS)
-}
-
 async fn imagine_js() -> Response {
     js(IMAGINE_JS)
 }
@@ -802,6 +822,7 @@ async fn list_sessions(
     };
     let out = sessions
         .into_iter()
+        .filter(|session| ensure_session(&state, &headers, &session.id).is_ok())
         .map(|session| SessionListItem {
             id: session.id.to_string(),
             title: session.title,
@@ -820,9 +841,10 @@ async fn create_session(
     headers: HttpHeaderMap,
     Json(body): Json<CreateBody>,
 ) -> Result<Json<SessionJson>, ApiError> {
-    let workspace = body
-        .workspace
-        .unwrap_or_else(|| state.workspace.display().to_string());
+    current_user(&state, &headers)?;
+    let workspace = workbench::bounded_path(&state, body.workspace.as_deref().unwrap_or("."))?
+        .display()
+        .to_string();
     let mode = body
         .mode
         .as_deref()
@@ -861,6 +883,7 @@ async fn set_session_mode(
 ) -> Result<Json<SessionJson>, ApiError> {
     let session_id = SessionId::parse(&id).map_err(ApiError::from)?;
     ensure_session(&state, &headers, &session_id)?;
+    workbench::idle(&state, &session_id)?;
     let mode = Mode::parse(&body.mode).map_err(ApiError::from)?;
     state
         .runtime
@@ -893,6 +916,15 @@ async fn session_image(
         .join("images")
         .join(session_id.as_str())
         .join(&name);
+    let path = path
+        .canonicalize()
+        .map_err(|_| ApiError("image not found".to_owned()))?;
+    let workspace = FsPath::new(&workspace)
+        .canonicalize()
+        .map_err(|_| ApiError::forbidden())?;
+    if !path.starts_with(workspace) {
+        return Err(ApiError::forbidden());
+    }
     let bytes = std::fs::read(&path).map_err(|_| ApiError("image not found".to_owned()))?;
     let mime = match name.rsplit('.').next() {
         Some("jpg" | "jpeg") => "image/jpeg",
@@ -951,11 +983,6 @@ async fn run_session(
     let runtime = state.runtime.clone();
     let prompt = body.prompt;
     let cancel = CancelToken::new();
-    state
-        .cancels
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(id.clone(), cancel.clone());
     let provider = body.provider.unwrap_or_default();
     let permission = match body.permission_mode.as_deref() {
         None | Some("") => None,
@@ -965,6 +992,11 @@ async fn run_session(
         ),
     };
     let auto_approve = permission.map_or(body.auto_approve, PermissionMode::auto_approve);
+    if (body.auto_approve || permission == Some(PermissionMode::Yolo)) && !body.confirmed {
+        return Err(ApiError(
+            "confirmed: true is required for bypassPermissions".to_owned(),
+        ));
+    }
     let options = RunOptions {
         mock: body.mock || blora_model::should_auto_mock(&provider, passport_user_token.as_deref()),
         auto_approve,
@@ -977,26 +1009,40 @@ async fn run_session(
         permission,
         ..RunOptions::default()
     };
-    let result =
-        tokio::task::spawn_blocking(move || runtime.run(&session_id, &prompt, &cancel, &options))
-            .await
-            .map_err(|err| ApiError(err.to_string()))?;
+    {
+        let mut active = state
+            .cancels
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if active.contains_key(&id) {
+            return Err(ApiError("session is running".to_owned()));
+        }
+        active.insert(id.clone(), cancel.clone());
+    }
+    let result = tokio::task::spawn_blocking(move || {
+        runtime.run_foreground(&session_id, &prompt, &cancel, &options)
+    })
+    .await;
     state
         .cancels
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .remove(&id);
-    result.map_err(ApiError::from)?;
+    result
+        .map_err(|err| ApiError(err.to_string()))?
+        .map_err(ApiError::from)?;
     let session_id = SessionId::parse(&id).map_err(ApiError::from)?;
     to_json(&state, &session_id).map(Json)
 }
 
 async fn session_events(
     State(state): State<AppState>,
+    headers: HttpHeaderMap,
     Path(id): Path<String>,
 ) -> Result<Sse<impl tokio_stream::Stream<Item = std::result::Result<Event, Infallible>>>, ApiError>
 {
     let session_id = SessionId::parse(&id).map_err(ApiError::from)?;
+    ensure_session(&state, &headers, &session_id)?;
     let runtime = state.runtime.clone();
     let (tx, rx) = mpsc::channel::<std::result::Result<Event, Infallible>>(64);
     // Subscribe before the initial snapshot so nothing appended in between is lost.
@@ -1076,6 +1122,7 @@ struct TaskQuery {
 
 async fn list_tasks(
     State(state): State<AppState>,
+    headers: HttpHeaderMap,
     Query(query): Query<TaskQuery>,
 ) -> Result<Json<Vec<TaskJson>>, ApiError> {
     let session_id = query.session.as_deref().map(SessionId::parse).transpose()?;
@@ -1083,17 +1130,38 @@ async fn list_tasks(
         .runtime
         .list_tasks(session_id.as_ref())
         .map_err(ApiError::from)?;
+    let tasks = tasks
+        .into_iter()
+        .filter(|row| ensure_session(&state, &headers, &row.session_id).is_ok())
+        .collect::<Vec<_>>();
     Ok(Json(tasks.into_iter().map(task_json).collect()))
 }
 
 async fn create_task(
     State(state): State<AppState>,
+    headers: HttpHeaderMap,
     Json(body): Json<TaskBody>,
 ) -> Result<Json<TaskJson>, ApiError> {
+    ensure_session(&state, &headers, &SessionId::parse(&body.session_id)?)?;
+    if body.auto_approve && !body.confirmed {
+        return Err(ApiError(
+            "confirmed: true is required for task auto approval".to_owned(),
+        ));
+    }
     let delay_until = if body.delay_seconds == 0 {
         None
     } else {
-        Some(chrono::Utc::now() + chrono::Duration::seconds(body.delay_seconds as i64))
+        Some(
+            chrono::Utc::now()
+                .checked_add_signed(
+                    chrono::Duration::try_seconds(
+                        i64::try_from(body.delay_seconds)
+                            .map_err(|_| ApiError("invalid delay_seconds".to_owned()))?,
+                    )
+                    .ok_or_else(|| ApiError("invalid delay_seconds".to_owned()))?,
+                )
+                .ok_or_else(|| ApiError("invalid delay_seconds".to_owned()))?,
+        )
     };
     let mock = body.mock
         || (std::env::var("BLORA_API_KEY").is_err() && std::env::var("OPENAI_API_KEY").is_err());
@@ -1117,8 +1185,11 @@ async fn create_task(
 
 async fn cancel_task(
     State(state): State<AppState>,
+    headers: HttpHeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let task = state.runtime.get_task(&TaskId::parse(&id)?)?;
+    ensure_session(&state, &headers, &task.session_id)?;
     state
         .runtime
         .cancel_task(&TaskId::parse(&id)?)
@@ -1163,7 +1234,11 @@ async fn answer_input(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let session_id = SessionId::parse(&id).map_err(ApiError::from)?;
     ensure_session(&state, &headers, &session_id)?;
-    if body.answer.as_deref().is_some_and(|text| text.len() > 16_000) {
+    if body
+        .answer
+        .as_deref()
+        .is_some_and(|text| text.chars().count() > 16_000)
+    {
         return Err(ApiError("answer too long".to_owned()));
     }
     let runtime = state.runtime.clone();
@@ -1177,6 +1252,9 @@ async fn answer_input(
 }
 
 async fn pump_tasks(State(state): State<AppState>) -> Result<Json<serde_json::Value>, ApiError> {
+    if state.require_auth {
+        return Err(ApiError::forbidden());
+    }
     let runtime = state.runtime.clone();
     let finished = tokio::task::spawn_blocking(move || runtime.pump())
         .await
@@ -1202,6 +1280,7 @@ struct ResolveBody {
 
 async fn list_approvals(
     State(state): State<AppState>,
+    headers: HttpHeaderMap,
     Query(query): Query<TaskQuery>,
 ) -> Result<Json<Vec<ApprovalJson>>, ApiError> {
     let rows = if let Some(session) = query.session {
@@ -1216,6 +1295,10 @@ async fn list_approvals(
             .pending_approvals_all()
             .map_err(ApiError::from)?
     };
+    let rows = rows
+        .into_iter()
+        .filter(|row| ensure_session(&state, &headers, &row.session_id).is_ok())
+        .collect::<Vec<_>>();
     Ok(Json(
         rows.into_iter()
             .map(|row| ApprovalJson {
@@ -1230,9 +1313,17 @@ async fn list_approvals(
 
 async fn resolve_approval(
     State(state): State<AppState>,
+    headers: HttpHeaderMap,
     Path(id): Path<String>,
     Json(body): Json<ResolveBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let approval = state
+        .runtime
+        .pending_approvals_all()?
+        .into_iter()
+        .find(|row| row.id.as_str() == id)
+        .ok_or_else(|| ApiError("approval not pending".to_owned()))?;
+    ensure_session(&state, &headers, &approval.session_id)?;
     state
         .runtime
         .resolve_approval(&ApprovalId::parse(&id)?, body.allow)
@@ -1244,8 +1335,10 @@ async fn resolve_approval(
 
 async fn compact_session(
     State(state): State<AppState>,
+    headers: HttpHeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    ensure_session(&state, &headers, &SessionId::parse(&id)?)?;
     let session_id = SessionId::parse(&id)?;
     let runtime = state.runtime.clone();
     let summary = tokio::task::spawn_blocking(move || runtime.compact(&session_id))
@@ -1257,19 +1350,26 @@ async fn compact_session(
 
 async fn fork_session(
     State(state): State<AppState>,
+    headers: HttpHeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<SessionJson>, ApiError> {
+    ensure_session(&state, &headers, &SessionId::parse(&id)?)?;
     let child = state
         .runtime
         .fork_session(&SessionId::parse(&id)?)
         .map_err(ApiError::from)?;
+    if let Some(user) = current_user(&state, &headers)? {
+        state.runtime.set_session_user(&child, &user.id)?;
+    }
     to_json(&state, &child).map(Json)
 }
 
 async fn export_session(
     State(state): State<AppState>,
+    headers: HttpHeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    ensure_session(&state, &headers, &SessionId::parse(&id)?)?;
     state
         .runtime
         .export_session(&SessionId::parse(&id)?)
@@ -1279,8 +1379,10 @@ async fn export_session(
 
 async fn archive_session(
     State(state): State<AppState>,
+    headers: HttpHeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    ensure_session(&state, &headers, &SessionId::parse(&id)?)?;
     state
         .runtime
         .archive_session(&SessionId::parse(&id)?)
@@ -1290,8 +1392,10 @@ async fn archive_session(
 
 async fn resume_session(
     State(state): State<AppState>,
+    headers: HttpHeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    ensure_session(&state, &headers, &SessionId::parse(&id)?)?;
     state
         .runtime
         .resume_session(&SessionId::parse(&id)?)
@@ -1301,8 +1405,11 @@ async fn resume_session(
 
 async fn pause_task(
     State(state): State<AppState>,
+    headers: HttpHeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let task = state.runtime.get_task(&TaskId::parse(&id)?)?;
+    ensure_session(&state, &headers, &task.session_id)?;
     state
         .runtime
         .pause_task(&TaskId::parse(&id)?)
@@ -1312,8 +1419,11 @@ async fn pause_task(
 
 async fn resume_task(
     State(state): State<AppState>,
+    headers: HttpHeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let task = state.runtime.get_task(&TaskId::parse(&id)?)?;
+    ensure_session(&state, &headers, &task.session_id)?;
     state
         .runtime
         .resume_task(&TaskId::parse(&id)?)
@@ -1323,10 +1433,13 @@ async fn resume_task(
 
 async fn workspace_snapshot(
     State(state): State<AppState>,
+    headers: HttpHeaderMap,
+    Query(query): Query<TaskQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let workspace = workbench::query_workspace(&state, &headers, query.session.as_deref())?;
     let info = state
         .runtime
-        .workspace_info(&state.workspace)
+        .workspace_info(&workspace)
         .map_err(ApiError::from)?;
     Ok(Json(serde_json::json!({
         "path": info.path,
@@ -1342,13 +1455,13 @@ async fn workspace_snapshot(
 #[derive(Deserialize)]
 struct FileQuery {
     path: String,
+    session: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct WorkspaceListQuery {
     #[serde(default)]
     path: String,
-    #[serde(default)]
     session: Option<String>,
 }
 
@@ -1357,21 +1470,7 @@ async fn workspace_list(
     headers: HttpHeaderMap,
     Query(query): Query<WorkspaceListQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let workspace = if let Some(id) = query.session.as_deref().filter(|value| !value.is_empty()) {
-        let session_id = SessionId::parse(id).map_err(ApiError::from)?;
-        ensure_session(&state, &headers, &session_id)?;
-        let projection = state
-            .runtime
-            .show_session(&session_id)
-            .map_err(ApiError::from)?;
-        projection
-            .session
-            .as_ref()
-            .map(|session| session.workspace_path.clone())
-            .ok_or_else(|| ApiError("session not found".to_owned()))?
-    } else {
-        state.workspace.display().to_string()
-    };
+    let workspace = workbench::query_workspace(&state, &headers, query.session.as_deref())?;
     let path = if query.path.trim().is_empty() {
         ".".to_owned()
     } else {
@@ -1379,7 +1478,7 @@ async fn workspace_list(
     };
     let entries = state
         .runtime
-        .list_workspace_entries(std::path::Path::new(&workspace), &path)
+        .list_workspace_entries(&workspace, &path)
         .map_err(ApiError::from)?;
     Ok(Json(serde_json::json!({
         "path": path,
@@ -1389,11 +1488,13 @@ async fn workspace_list(
 
 async fn workspace_file(
     State(state): State<AppState>,
+    headers: HttpHeaderMap,
     Query(query): Query<FileQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let workspace = workbench::query_workspace(&state, &headers, query.session.as_deref())?;
     let contents = state
         .runtime
-        .read_workspace_file(&state.workspace, &query.path)
+        .read_workspace_file(&workspace, &query.path)
         .map_err(ApiError::from)?;
     Ok(Json(serde_json::json!({
         "path": query.path,
@@ -1403,6 +1504,7 @@ async fn workspace_file(
 
 async fn list_artifacts(
     State(state): State<AppState>,
+    headers: HttpHeaderMap,
     Query(query): Query<TaskQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let session_id = query.session.as_deref().map(SessionId::parse).transpose()?;
@@ -1410,6 +1512,10 @@ async fn list_artifacts(
         .runtime
         .list_artifacts(session_id.as_ref())
         .map_err(ApiError::from)?;
+    let rows = rows
+        .into_iter()
+        .filter(|row| ensure_session(&state, &headers, &row.session_id).is_ok())
+        .collect::<Vec<_>>();
     Ok(Json(serde_json::json!({
         "artifacts": rows.into_iter().map(|row| serde_json::json!({
             "id": row.id.to_string(),
@@ -1430,8 +1536,10 @@ async fn list_artifacts(
 
 async fn cancel_session(
     State(state): State<AppState>,
+    headers: HttpHeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    ensure_session(&state, &headers, &SessionId::parse(&id)?)?;
     let found = state
         .cancels
         .lock()
@@ -1448,9 +1556,15 @@ async fn cancel_session(
 
 async fn usage(
     State(state): State<AppState>,
+    headers: HttpHeaderMap,
     Query(query): Query<TaskQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let session_id = query.session.as_deref().map(SessionId::parse).transpose()?;
+    if let Some(id) = &session_id {
+        ensure_session(&state, &headers, id)?;
+    } else if state.require_auth {
+        return Err(ApiError("session query is required".to_owned()));
+    }
     let totals = state
         .runtime
         .usage(session_id.as_ref())
@@ -1500,7 +1614,7 @@ async fn settings(
         "exec": std::env::var("BLORA_EXEC").unwrap_or_else(|_| "local".to_owned()),
         "max_tokens": std::env::var("BLORA_MAX_TOKENS").ok(),
         "gateway": state.require_auth,
-        "remote": std::env::var("BLORA_REMOTE").ok(),
+        "remote_configured": std::env::var_os("BLORA_REMOTE").is_some(),
         "plugins": plugins.iter().map(|plugin| plugin.name.clone()).collect::<Vec<_>>(),
     }))
 }
@@ -1559,6 +1673,16 @@ fn to_json(state: &AppState, id: &SessionId) -> Result<SessionJson, ApiError> {
         .session
         .ok_or_else(|| ApiError("session missing".to_owned()))?;
     Ok(SessionJson {
+        run_status: projection
+            .runs
+            .last()
+            .map(|run| run.status.as_str().to_owned()),
+        harness: projection.harness,
+        provider: projection.provider.clone(),
+        model: projection.model.clone(),
+        external_model: projection.external_model.clone(),
+        external_sessions: serde_json::to_value(&projection.external_sessions)
+            .map_err(|err| ApiError(err.to_string()))?,
         id: session.id.to_string(),
         title: session.title,
         workspace_path: session.workspace_path,
@@ -1720,18 +1844,17 @@ fn current_user(
             .ok_or_else(ApiError::unauthorized)?;
         return Ok(Some(user));
     }
-    if state.passport.is_some() {
-        if cookie_value(headers, "blora_passport_user").is_some() {
-            let username =
-                passport_session_username(state, headers).ok_or_else(ApiError::unauthorized)?;
-            let user = state
-                .runtime
-                .user_by_passport_username(&username)
-                .map_err(ApiError::from)?
-                .ok_or_else(ApiError::unauthorized)?;
-            return Ok(Some(user));
-        }
+    if state.passport.is_some() && cookie_value(headers, "blora_passport_user").is_some() {
+        let username =
+            passport_session_username(state, headers).ok_or_else(ApiError::unauthorized)?;
+        let user = state
+            .runtime
+            .user_by_passport_username(&username)
+            .map_err(ApiError::from)?
+            .ok_or_else(ApiError::unauthorized)?;
+        return Ok(Some(user));
     }
+
     Ok(None)
 }
 
@@ -1740,6 +1863,7 @@ fn ensure_session(
     headers: &HttpHeaderMap,
     session_id: &SessionId,
 ) -> Result<(), ApiError> {
+    workbench::session_workspace(state, session_id)?;
     let Some(user) = current_user(state, headers)? else {
         return Ok(());
     };
@@ -1749,6 +1873,7 @@ fn ensure_session(
         .map_err(ApiError::from)?
     {
         Some(owner) if owner != user.id => Err(ApiError::forbidden()),
+        None if state.require_auth => Err(ApiError::forbidden()),
         _ => Ok(()),
     }
 }
@@ -1792,6 +1917,9 @@ async fn install_market_plugin(
     State(state): State<AppState>,
     Json(body): Json<InstallBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    if state.require_auth {
+        return Err(ApiError::forbidden());
+    }
     let path =
         blora_runtime::install_plugin(&state.workspace, &body.name).map_err(ApiError::from)?;
     Ok(Json(
@@ -1799,11 +1927,15 @@ async fn install_market_plugin(
     ))
 }
 
-async fn ws_upgrade(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
-    ws.on_upgrade(move |socket| ws_loop(socket, state))
+async fn ws_upgrade(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+    headers: HttpHeaderMap,
+) -> Response {
+    ws.on_upgrade(move |socket| ws_loop(socket, state, headers))
 }
 
-async fn ws_loop(mut socket: WebSocket, state: AppState) {
+async fn ws_loop(mut socket: WebSocket, state: AppState, headers: HttpHeaderMap) {
     while let Some(Ok(message)) = socket.recv().await {
         let Message::Text(text) = message else {
             continue;
@@ -1817,6 +1949,17 @@ async fn ws_loop(mut socket: WebSocket, state: AppState) {
         let reply = match op {
             "cancel" => {
                 if let Some(id) = value.get("session_id").and_then(serde_json::Value::as_str) {
+                    let authorized = SessionId::parse(id)
+                        .ok()
+                        .is_some_and(|id| ensure_session(&state, &headers, &id).is_ok());
+                    if !authorized {
+                        let _ = socket
+                            .send(Message::Text(
+                                serde_json::json!({"error":"forbidden"}).to_string().into(),
+                            ))
+                            .await;
+                        continue;
+                    }
                     if let Some(token) = state
                         .cancels
                         .lock()
@@ -1837,6 +1980,20 @@ async fn ws_loop(mut socket: WebSocket, state: AppState) {
                     .get("allow")
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false);
+                let authorized = state
+                    .runtime
+                    .pending_approvals_all()
+                    .ok()
+                    .and_then(|rows| rows.into_iter().find(|row| row.id.as_str() == id))
+                    .is_some_and(|row| ensure_session(&state, &headers, &row.session_id).is_ok());
+                if !authorized {
+                    let _ = socket
+                        .send(Message::Text(
+                            serde_json::json!({"error":"forbidden"}).to_string().into(),
+                        ))
+                        .await;
+                    continue;
+                }
                 let runtime = state.runtime.clone();
                 let parsed = blora_types::ApprovalId::parse(id);
                 let result = tokio::task::spawn_blocking(move || {
@@ -2141,6 +2298,183 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn workbench_api_rejects_unsafe_paths_and_unconfirmed_mutations() {
+        let h = OAuthHarness::new(false).await;
+        let (status, _, created) = h
+            .request(
+                "/api/sessions",
+                "",
+                Some(serde_json::json!({"title":"api-test"})),
+                "",
+            )
+            .await;
+        assert_eq!(status, 200, "{created}");
+        let created: serde_json::Value = serde_json::from_str(&created).unwrap();
+        let id = created["id"].as_str().unwrap();
+        assert_eq!(created["harness"], "blora");
+        for route in ["context", "diagnostics", "extensions", "memory"] {
+            assert_eq!(
+                h.request(&format!("/api/sessions/{id}/{route}"), "", None, "")
+                    .await
+                    .0,
+                200
+            );
+        }
+        assert_eq!(
+            h.request("/api/directories?path=..", "", None, "").await.0,
+            403
+        );
+        assert_eq!(
+            h.request(
+                "/api/sessions",
+                "",
+                Some(serde_json::json!({"workspace":"/"})),
+                ""
+            )
+            .await
+            .0,
+            403
+        );
+        assert_eq!(h.request(&format!("/api/sessions/{id}/run"), "", Some(serde_json::json!({"prompt":"hello", "mock":true, "permission_mode":"bypassPermissions"})), "").await.0, 400);
+        assert!(h.state.cancels.lock().unwrap().is_empty());
+        assert_eq!(
+            h.request(
+                &format!("/api/sessions/{id}/memory"),
+                "",
+                Some(serde_json::json!({"action":"remember", "key":"test", "value":"value"})),
+                ""
+            )
+            .await
+            .0,
+            200
+        );
+        assert_eq!(
+            h.request(
+                &format!("/api/sessions/{id}/checkpoint"),
+                "",
+                Some(serde_json::json!({})),
+                ""
+            )
+            .await
+            .0,
+            200
+        );
+        h.state
+            .cancels
+            .lock()
+            .unwrap()
+            .insert(id.to_owned(), CancelToken::new());
+        assert_eq!(
+            h.request(
+                &format!("/api/sessions/{id}/harness"),
+                "",
+                Some(serde_json::json!({"harness":"blora"})),
+                ""
+            )
+            .await
+            .0,
+            400
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn workbench_gateway_requires_authentication() {
+        let h = OAuthHarness::new(true).await;
+        for path in [
+            "/api/providers",
+            "/api/providers/catalog",
+            "/api/harnesses",
+            "/api/directories",
+            "/api/projects",
+        ] {
+            assert_eq!(h.request(path, "", None, "").await.0, 401, "{path}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn workbench_git_requires_confirmation_and_commits_only_selected_files() {
+        let h = OAuthHarness::new(false).await;
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&h.state.workspace)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).into_owned()
+        };
+        git(&["init"]);
+        git(&["config", "user.name", "API Test"]);
+        git(&["config", "user.email", "api@example.invalid"]);
+        std::fs::write(h.state.workspace.join("中文 文件.txt"), "selected").unwrap();
+        std::fs::write(h.state.workspace.join("unselected.txt"), "not selected").unwrap();
+        let (_, _, created) = h
+            .request("/api/sessions", "", Some(serde_json::json!({})), "")
+            .await;
+        let created: serde_json::Value = serde_json::from_str(&created).unwrap();
+        let id = created["id"].as_str().unwrap();
+        let route = format!("/api/sessions/{id}/git/commit");
+        let body = serde_json::json!({"message":"selected", "files":["中文 文件.txt"]});
+        assert_eq!(h.request(&route, "", Some(body), "").await.0, 400);
+        assert_eq!(h.request(&route, "", Some(serde_json::json!({"confirmed":true,"message":"selected", "files":["../secret"]})), "").await.0, 400);
+        let result = h.request(&route, "", Some(serde_json::json!({"confirmed":true,"message":"selected", "files":["中文 文件.txt"]})), "").await;
+        assert_eq!(result.0, 200, "{}", result.2);
+        assert_eq!(
+            git(&[
+                "-c",
+                "core.quotepath=false",
+                "ls-tree",
+                "--name-only",
+                "HEAD"
+            ]),
+            "中文 文件.txt\n"
+        );
+        assert!(git(&["status", "--porcelain"]).contains("unselected.txt"));
+        git(&["mv", "中文 文件.txt", "重命名 文件.txt"]);
+        let files = h
+            .request(&format!("/api/sessions/{id}/git/files"), "", None, "")
+            .await;
+        assert_eq!(files.0, 200, "{}", files.2);
+        let files: serde_json::Value = serde_json::from_str(&files.2).unwrap();
+        assert!(
+            files["files"].as_array().unwrap().iter().any(
+                |file| file["path"] == "重命名 文件.txt" && file["old_path"] == "中文 文件.txt"
+            )
+        );
+        assert!(
+            files["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|file| file["path"] == "unselected.txt" && file["status"] == "??")
+        );
+
+        for action in ["status", "files", "diff", "log"] {
+            assert_eq!(
+                h.request(&format!("/api/sessions/{id}/git/{action}"), "", None, "")
+                    .await
+                    .0,
+                200
+            );
+        }
+        assert_eq!(
+            h.request(
+                &format!("/api/sessions/{id}/git/sync"),
+                "",
+                Some(serde_json::json!({"confirmed":true,"direction":"pull"})),
+                ""
+            )
+            .await
+            .0,
+            400
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn input_endpoint_answers_open_question_and_exposes_state() {
         let h = OAuthHarness::new(false).await;
         let (_, _, created) = h
@@ -2154,26 +2488,33 @@ mod tests {
         let run = blora_types::RunId::generate();
         let runtime = h.state.runtime.clone();
         let emit = |payload: blora_events::KnownPayload| {
-            runtime
-                .append_event(&session, Some(&run), payload)
-                .unwrap();
+            runtime.append_event(&session, Some(&run), payload).unwrap();
         };
-        emit(blora_events::KnownPayload::RunCreated(blora_events::RunCreated {
-            mode: Mode::Code,
-            model: None,
-            permission_mode: None,
-        }));
-        emit(blora_events::KnownPayload::RunStarted(blora_events::RunStarted { model: None }));
-        emit(blora_events::KnownPayload::InputRequested(blora_events::InputRequested {
-            request_id: "ask_1".to_owned(),
-            question: "Ship it?".to_owned(),
-            options: vec!["Yes".to_owned(), "No".to_owned()],
-            call_id: None,
-            questions: Vec::new(),
-        }));
-        let (_, _, body) = h.request(&format!("/api/sessions/{id}"), "", None, "").await;
+        emit(blora_events::KnownPayload::RunCreated(
+            blora_events::RunCreated {
+                mode: Mode::Code,
+                model: None,
+                permission_mode: None,
+            },
+        ));
+        emit(blora_events::KnownPayload::RunStarted(
+            blora_events::RunStarted { model: None },
+        ));
+        emit(blora_events::KnownPayload::InputRequested(
+            blora_events::InputRequested {
+                request_id: "ask_1".to_owned(),
+                question: "Ship it?".to_owned(),
+                options: vec!["Yes".to_owned(), "No".to_owned()],
+                call_id: None,
+                questions: Vec::new(),
+            },
+        ));
+        let (_, _, body) = h
+            .request(&format!("/api/sessions/{id}"), "", None, "")
+            .await;
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(json["pending_input"]["question"], "Ship it?");
+        assert_eq!(json["run_status"], "waiting_input");
         assert!(
             json["transcript"]
                 .as_array()
@@ -2183,16 +2524,289 @@ mod tests {
         );
         let route = format!("/api/sessions/{id}/input");
         let wrong = h
-            .request(&route, "", Some(serde_json::json!({"request_id":"nope","answer":"x"})), "")
+            .request(
+                &route,
+                "",
+                Some(serde_json::json!({"request_id":"nope","answer":"x"})),
+                "",
+            )
             .await;
         assert_eq!(wrong.0, 400, "{}", wrong.2);
         let ok = h
-            .request(&route, "", Some(serde_json::json!({"request_id":"ask_1","answer":"Yes"})), "")
+            .request(
+                &route,
+                "",
+                Some(serde_json::json!({"request_id":"ask_1","answer":"Yes"})),
+                "",
+            )
             .await;
         assert_eq!(ok.0, 200, "{}", ok.2);
-        let (_, _, body) = h.request(&format!("/api/sessions/{id}"), "", None, "").await;
+        let (_, _, body) = h
+            .request(&format!("/api/sessions/{id}"), "", None, "")
+            .await;
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert!(json["pending_input"].is_null());
+        assert_eq!(json["run_status"], "running");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn workbench_session_workspace_and_actions_protocol() {
+        let h = OAuthHarness::new(false).await;
+        let sub = h.state.workspace.join("project");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("文件.txt"), "project contents").unwrap();
+        let (_, _, created) = h
+            .request(
+                "/api/sessions",
+                "",
+                Some(serde_json::json!({"workspace":"project"})),
+                "",
+            )
+            .await;
+        let created: serde_json::Value = serde_json::from_str(&created).unwrap();
+        assert!(created["run_status"].is_null());
+        let id = created["id"].as_str().unwrap();
+        let snapshot = h
+            .request(&format!("/api/workspace?session={id}"), "", None, "")
+            .await;
+        assert_eq!(snapshot.0, 200, "{}", snapshot.2);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&snapshot.2).unwrap()["path"],
+            sub.to_string_lossy().as_ref()
+        );
+        let file = h
+            .request(
+                &format!("/api/workspace/file?session={id}&path=%E6%96%87%E4%BB%B6.txt"),
+                "",
+                None,
+                "",
+            )
+            .await;
+        assert_eq!(file.0, 200, "{}", file.2);
+        assert!(file.2.contains("project contents"));
+        let dirs = h
+            .request("/api/directories?path=project", "", None, "")
+            .await;
+        let dirs: serde_json::Value = serde_json::from_str(&dirs.2).unwrap();
+        assert_eq!(dirs["files"][0]["name"], "文件.txt");
+        let action_route = format!("/api/sessions/{id}/actions");
+        assert_eq!(
+            h.request(
+                &action_route,
+                "",
+                Some(serde_json::json!({"action":"init"})),
+                ""
+            )
+            .await
+            .0,
+            400
+        );
+        for action in ["init", "distill", "users"] {
+            let result = h
+                .request(
+                    &action_route,
+                    "",
+                    Some(serde_json::json!({"action":action,"confirmed":true})),
+                    "",
+                )
+                .await;
+            assert_eq!(result.0, 200, "{}", result.2);
+        }
+        std::fs::create_dir_all(sub.join(".blora/plugins")).unwrap();
+        std::fs::write(sub.join(".blora/plugins/test.json"), "{}").unwrap();
+        assert_eq!(
+            h.request(
+                &action_route,
+                "",
+                Some(serde_json::json!({"action":"uninstall","name":"test","confirmed":true})),
+                ""
+            )
+            .await
+            .0,
+            200
+        );
+        assert!(!sub.join(".blora/plugins/test.json").exists());
+        assert_eq!(
+            h.request(
+                &action_route,
+                "",
+                Some(serde_json::json!({"action":"uninstall","name":"../secret","confirmed":true})),
+                ""
+            )
+            .await
+            .0,
+            400
+        );
+        let extensions = h
+            .request(&format!("/api/sessions/{id}/extensions"), "", None, "")
+            .await;
+        let extensions: serde_json::Value = serde_json::from_str(&extensions.2).unwrap();
+        assert!(
+            extensions["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool["name"] == "read_file")
+        );
+        let mode_result = h
+            .request(
+                &format!("/api/sessions/{id}/mode"),
+                "",
+                Some(serde_json::json!({"mode":"imagine"})),
+                "",
+            )
+            .await;
+        assert_eq!(mode_result.0, 200);
+        let imagine = h
+            .request(&format!("/api/sessions/{id}/extensions"), "", None, "")
+            .await;
+        let imagine: serde_json::Value = serde_json::from_str(&imagine.2).unwrap();
+        assert_eq!(imagine["tools"].as_array().unwrap().len(), 1);
+        assert_eq!(imagine["tools"][0]["name"], "generate_image");
+        assert_eq!(
+            h.request(
+                &format!("/api/sessions/{id}/mode"),
+                "",
+                Some(serde_json::json!({"mode":"code"})),
+                ""
+            )
+            .await
+            .0,
+            200
+        );
+        let (user, token) = h.state.runtime.create_user("safe-list").unwrap();
+        let users = h
+            .request(
+                &action_route,
+                "",
+                Some(serde_json::json!({"action":"users","confirmed":true})),
+                "",
+            )
+            .await;
+        assert!(!users.2.contains(&token) && !users.2.contains(&user.token_hash));
+        assert!(!users.2.contains("token") && !users.2.contains("passport"));
+        let run = h
+            .request(
+                &format!("/api/sessions/{id}/run"),
+                "",
+                Some(serde_json::json!({"prompt":"hello","mock":true})),
+                "",
+            )
+            .await;
+        assert_eq!(run.0, 200, "{}", run.2);
+        let run: serde_json::Value = serde_json::from_str(&run.2).unwrap();
+        let projection = h
+            .state
+            .runtime
+            .show_session(&SessionId::parse(id).unwrap())
+            .unwrap();
+        assert_eq!(
+            run["run_status"],
+            projection.runs.last().unwrap().status.as_str()
+        );
+        let tools = h
+            .request(&format!("/api/sessions/{id}/tool-details"), "", None, "")
+            .await;
+        assert_eq!(tools.0, 200);
+        let tools: serde_json::Value = serde_json::from_str(&tools.2).unwrap();
+        assert_eq!(
+            tools["tools"],
+            serde_json::to_value(
+                projection
+                    .transcript
+                    .iter()
+                    .filter(|item| matches!(item, TranscriptItem::Tool { .. }))
+                    .collect::<Vec<_>>()
+            )
+            .unwrap()
+        );
+        h.state
+            .cancels
+            .lock()
+            .unwrap()
+            .insert(id.to_owned(), CancelToken::new());
+        for action in ["init", "distill", "uninstall"] {
+            assert_eq!(
+                h.request(
+                    &action_route,
+                    "",
+                    Some(serde_json::json!({"action":action,"name":"test","confirmed":true})),
+                    ""
+                )
+                .await
+                .0,
+                400
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn workspace_gateway_checks_session_owner_and_restricts_actions() {
+        let h = OAuthHarness::new(true).await;
+        let (_, token) = h.state.runtime.create_user("owner").unwrap();
+        let (_, other) = h.state.runtime.create_user("other").unwrap();
+        let (_, _, created) = h
+            .request("/api/sessions", "", Some(serde_json::json!({})), &token)
+            .await;
+        let created: serde_json::Value = serde_json::from_str(&created).unwrap();
+        let id = created["id"].as_str().unwrap();
+        for route in [
+            format!("/api/workspace?session={id}"),
+            format!("/api/workspace/file?path=missing&session={id}"),
+            format!("/api/sessions/{id}/tool-details"),
+        ] {
+            assert_eq!(h.request(&route, "", None, &other).await.0, 403, "{route}");
+        }
+        assert_eq!(h.request("/api/workspace", "", None, &token).await.0, 400);
+        for action in ["init", "uninstall", "users"] {
+            assert_eq!(
+                h.request(
+                    &format!("/api/sessions/{id}/actions"),
+                    "",
+                    Some(serde_json::json!({"action":action,"name":"test","confirmed":true})),
+                    &token
+                )
+                .await
+                .0,
+                403
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn actions_and_file_browser_reject_outside_symlinks() {
+        use std::os::unix::fs::symlink;
+        let h = OAuthHarness::new(false).await;
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret"), "outside sentinel").unwrap();
+        symlink(outside.path(), h.state.workspace.join(".blora")).unwrap();
+        symlink(
+            outside.path().join("secret"),
+            h.state.workspace.join("external-file"),
+        )
+        .unwrap();
+        let (_, _, created) = h
+            .request("/api/sessions", "", Some(serde_json::json!({})), "")
+            .await;
+        let created: serde_json::Value = serde_json::from_str(&created).unwrap();
+        let id = created["id"].as_str().unwrap();
+        for action in ["init", "distill", "uninstall"] {
+            assert_eq!(
+                h.request(
+                    &format!("/api/sessions/{id}/actions"),
+                    "",
+                    Some(serde_json::json!({"action":action,"name":"test","confirmed":true})),
+                    ""
+                )
+                .await
+                .0,
+                403
+            );
+        }
+        assert!(!outside.path().join("memory.md").exists());
+        let dirs = h.request("/api/directories", "", None, "").await;
+        assert!(!dirs.2.contains("external-file"));
     }
 
     fn success_token() -> serde_json::Value {

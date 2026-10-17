@@ -388,7 +388,7 @@ pub struct SettingsDialog {
 #[derive(Clone, Debug)]
 pub struct HarnessDialog {
     pub selected: usize,
-    pub available: [bool; 4],
+    pub available: Vec<bool>,
     pub fullscreen: bool,
     pub minimized: bool,
 }
@@ -398,7 +398,10 @@ impl HarnessDialog {
         let kinds = blora_types::HarnessKind::all();
         Self {
             selected: kinds.iter().position(|kind| *kind == current).unwrap_or(0),
-            available: kinds.map(|kind| blora_harness::detect(kind).is_some()),
+            available: kinds
+                .into_iter()
+                .map(|kind| blora_harness::detect(kind).is_some())
+                .collect(),
             fullscreen: false,
             minimized: false,
         }
@@ -409,7 +412,7 @@ impl HarnessDialog {
             return None;
         }
         self.selected = index;
-        Some(blora_types::HarnessKind::all()[index])
+        blora_types::HarnessKind::all().get(index).copied()
     }
 
     pub fn key(&mut self, key: crossterm::event::KeyCode) -> Option<blora_types::HarnessKind> {
@@ -422,7 +425,10 @@ impl HarnessDialog {
         }
         match key {
             KeyCode::Up => self.selected = self.selected.saturating_sub(1),
-            KeyCode::Down => self.selected = (self.selected + 1).min(3),
+            KeyCode::Down => {
+                self.selected = (self.selected + 1)
+                    .min(blora_types::HarnessKind::all().len().saturating_sub(1));
+            }
             KeyCode::Enter => return self.select(self.selected),
             _ => {}
         }
@@ -580,53 +586,6 @@ pub struct FrameModel<'a> {
     pub text_selection: Option<Selection>,
 }
 
-/// Brief visual feedback for the most recent user interaction.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct InteractionPulse {
-    pub area: Rect,
-    pub started: std::time::Instant,
-}
-
-impl InteractionPulse {
-    pub(crate) fn weight(&self, now: std::time::Instant) -> f64 {
-        let elapsed = now.saturating_duration_since(self.started).as_secs_f64();
-        (1.0 - elapsed / 0.24).clamp(0.0, 1.0)
-    }
-
-    fn rect(&self, now: std::time::Instant, area: Rect) -> Option<(Rect, f64)> {
-        let weight = self.weight(now);
-        (weight > 0.0).then(|| (self.area.intersection(area), weight))
-    }
-}
-
-#[cfg(test)]
-mod interaction_pulse_tests {
-    use super::InteractionPulse;
-    use ratatui::layout::Rect;
-    use std::time::{Duration, Instant};
-
-    #[test]
-    fn interaction_feedback_fades_to_idle() {
-        let start = Instant::now();
-        let pulse = InteractionPulse {
-            area: Rect::new(3, 4, 8, 1),
-            started: start,
-        };
-        assert_eq!(pulse.weight(start), 1.0);
-        assert_eq!(pulse.weight(start + Duration::from_millis(120)), 0.5);
-        assert_eq!(pulse.weight(start + Duration::from_millis(240)), 0.0);
-        assert_eq!(
-            pulse.rect(start, Rect::new(0, 0, 6, 5)).unwrap(),
-            (Rect::new(3, 4, 3, 1), 1.0)
-        );
-        assert!(
-            pulse
-                .rect(start + Duration::from_millis(240), Rect::new(0, 0, 20, 20))
-                .is_none()
-        );
-    }
-}
-
 /// A clickable region from the last painted frame.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Hit {
@@ -781,164 +740,6 @@ pub struct HitMap {
 }
 
 impl HitMap {
-    pub(crate) fn rect_for_point(&self, target: &Hit, col: u16, row: u16) -> Option<Rect> {
-        self.hit(col, row).filter(|hit| hit == target)?;
-        self.rect_for_hit(target)
-    }
-
-    pub(crate) fn rect_for_hit(&self, target: &Hit) -> Option<Rect> {
-        self.sidebar_rows
-            .iter()
-            .find(|(_, hit)| hit == target)
-            .map(|(rect, _)| *rect)
-            .or_else(|| match target {
-                Hit::TrafficClose => self.traffic_lights[0],
-                Hit::TrafficMinimize => self.traffic_lights[1],
-                Hit::TrafficOpenBrowser => self.traffic_lights[2],
-                Hit::GitMessage => self.git_message,
-                Hit::GitGenerate => self.git_generate,
-                Hit::GitPrimary => self.git_primary,
-                Hit::GitStatus => self.git_status,
-                Hit::Composer => Some(self.composer),
-                Hit::Transcript => Some(self.transcript),
-                Hit::PrevSession => self.prev_session,
-                Hit::NextSession => self.next_session,
-                Hit::Mode => self.mode,
-                Hit::CancelRun => self.cancel_run,
-                Hit::ToggleApprove => self.toggle_approve,
-                Hit::ProviderTarget => self.provider_target,
-                Hit::ContextUsage => self.context_usage,
-                Hit::Allow => self.allow,
-                Hit::Deny => self.deny,
-                Hit::ProjectPicker => self.project_picker,
-                Hit::FolderPickerOpen => self.folder_picker_open,
-                Hit::SessionPicker => self.session_picker,
-                Hit::SessionSearch => self.session_search,
-                Hit::Notice => self.overlay,
-                Hit::GitAction(index) => self
-                    .git_actions
-                    .iter()
-                    .find(|(_, i)| i == index)
-                    .map(|(rect, _)| *rect),
-                Hit::GitTab(index) => self
-                    .git_tabs
-                    .iter()
-                    .find(|(_, i)| i == index)
-                    .map(|(rect, _)| *rect),
-                Hit::GitFile(index) => self
-                    .git_files
-                    .iter()
-                    .find(|(_, i)| i == index)
-                    .map(|(rect, _)| *rect),
-                Hit::GitRow(index) => self
-                    .git_rows
-                    .iter()
-                    .find(|(_, i)| i == index)
-                    .map(|(rect, _)| *rect),
-                Hit::SettingsTab(index) => self
-                    .settings_tabs
-                    .iter()
-                    .find(|(_, i)| i == index)
-                    .map(|(rect, _)| *rect),
-                Hit::SettingsRow(index) => self
-                    .settings_rows
-                    .iter()
-                    .find(|(_, i)| i == index)
-                    .map(|(rect, _)| *rect),
-                Hit::ProviderModelRow(index) => self
-                    .provider_model_rows
-                    .iter()
-                    .find(|(_, i)| i == index)
-                    .map(|(rect, _)| *rect),
-                Hit::AddProviderRow(index) => self
-                    .add_provider_rows
-                    .iter()
-                    .find(|(_, i)| i == index)
-                    .map(|(rect, _)| *rect),
-                Hit::ThemeRow(index) => self
-                    .theme_rows
-                    .iter()
-                    .find(|(_, i)| i == index)
-                    .map(|(rect, _)| *rect),
-                Hit::ThemeTab(index) => self
-                    .theme_tabs
-                    .iter()
-                    .find(|(_, i)| i == index)
-                    .map(|(rect, _)| *rect),
-                Hit::HarnessRow(index) => self
-                    .harness_rows
-                    .iter()
-                    .find(|(_, i)| i == index)
-                    .map(|(rect, _)| *rect),
-                Hit::PermissionRow(index) => self
-                    .permission_rows
-                    .iter()
-                    .find(|(_, i)| i == index)
-                    .map(|(rect, _)| *rect),
-                Hit::ModeRow(index) => self
-                    .mode_rows
-                    .iter()
-                    .find(|(_, i)| i == index)
-                    .map(|(rect, _)| *rect),
-                Hit::ProjectPickerRow(index) => self
-                    .project_picker_rows
-                    .iter()
-                    .find(|(_, i)| i == index)
-                    .map(|(rect, _)| *rect),
-                Hit::QuestionTab(index) => self
-                    .question_tabs
-                    .iter()
-                    .find(|(_, i)| i == index)
-                    .map(|(rect, _)| *rect),
-                Hit::QuestionOption(question, option) => self
-                    .question_options
-                    .iter()
-                    .find(|(_, q, o)| q == question && o == option)
-                    .map(|(rect, _, _)| *rect),
-                Hit::QuestionRow(index) => self
-                    .question_rows
-                    .iter()
-                    .find(|(_, i)| i == index)
-                    .map(|(rect, _)| *rect),
-                Hit::FolderPickerRow(index) => self
-                    .folder_picker_rows
-                    .iter()
-                    .find(|(_, i)| i == index)
-                    .map(|(rect, _)| *rect),
-                Hit::ContextTab(index) => self
-                    .context_tabs
-                    .iter()
-                    .find(|(_, i)| i == index)
-                    .map(|(rect, _)| *rect),
-                Hit::ContextRange(index) => self
-                    .context_ranges
-                    .iter()
-                    .find(|(_, i)| i == index)
-                    .map(|(rect, _)| *rect),
-                Hit::ProviderRow(index) => self
-                    .provider_rows
-                    .iter()
-                    .find(|(_, i)| i == index)
-                    .map(|(rect, _)| *rect),
-                Hit::SessionPickerRow(index) => self
-                    .session_picker_rows
-                    .iter()
-                    .find(|(_, i)| i == index)
-                    .map(|(rect, _)| *rect),
-                Hit::Slash(index) => self
-                    .slash_rows
-                    .iter()
-                    .find(|(_, i)| i == index)
-                    .map(|(rect, _)| *rect),
-                Hit::Hint(action) => self
-                    .hints
-                    .iter()
-                    .find(|(_, a)| a == action)
-                    .map(|(rect, _)| *rect),
-                _ => None,
-            })
-    }
-
     #[must_use]
     pub fn hit(&self, col: u16, row: u16) -> Option<Hit> {
         if self.modal && !self.modal_area.is_some_and(|rect| contains(rect, col, row)) {
@@ -1658,7 +1459,6 @@ pub fn draw(
         model.dialog_stack.len() as f64,
         &theme,
     );
-
     for (index, id) in model.dialog_stack.iter().copied().enumerate() {
         if id == DialogId::Onboarding {
             hits = HitMap {
@@ -1695,7 +1495,6 @@ pub fn draw_animated(
     mut guide: Option<&mut crate::onboarding::Onboarding>,
     username: &str,
     logged_in: bool,
-    interaction: Option<&InteractionPulse>,
 ) -> HitMap {
     let theme = Theme::current();
     let area = frame.area();
@@ -1755,24 +1554,7 @@ pub fn draw_animated(
         }
         hits = layer_hits;
     }
-    if let Some((rect, weight)) = interaction.and_then(|pulse| pulse.rect(now, area)) {
-        for y in rect.y..rect.bottom() {
-            for x in rect.x..rect.right() {
-                let cell = &mut frame.buffer_mut()[(x, y)];
-                cell.set_bg(mix_color(cell.bg, theme.rose, weight * 0.28));
-            }
-        }
-    }
     hits
-}
-
-fn mix_color(from: Color, to: Color, amount: f64) -> Color {
-    let (Color::Rgb(fr, fg, fb), Color::Rgb(tr, tg, tb)) = (from, to) else {
-        return to;
-    };
-    let blend =
-        |a: u8, b: u8| (f64::from(a) + (f64::from(b) - f64::from(a)) * amount).round() as u8;
-    Color::Rgb(blend(fr, tr), blend(fg, tg), blend(fb, tb))
 }
 
 fn snapshot_region(source: &ratatui::buffer::Buffer, rect: Rect) -> ratatui::buffer::Buffer {
@@ -3334,17 +3116,21 @@ fn render_harness_dialog(
     if dialog.minimized || inner.height == 0 {
         return hits;
     }
-    let capacity = inner.height.min(4) as usize;
-    let start = dialog.selected.saturating_sub(capacity.saturating_sub(1));
+    let kinds = blora_types::HarnessKind::all();
+    let extra_rows = if inner.height as usize > kinds.len() {
+        3
+    } else {
+        0
+    };
+    let capacity = (inner.height.saturating_sub(extra_rows) as usize).min(kinds.len());
+    let start = dialog
+        .selected
+        .saturating_sub(capacity.saturating_sub(1))
+        .min(kinds.len().saturating_sub(capacity));
     let current = model.projection.map(|p| p.harness).unwrap_or_default();
-    for (index, kind) in blora_types::HarnessKind::all()
-        .iter()
-        .enumerate()
-        .skip(start)
-        .take(capacity)
-    {
+    for (index, kind) in kinds.iter().enumerate().skip(start).take(capacity) {
         let row = Rect::new(inner.x, inner.y + (index - start) as u16, inner.width, 1);
-        let available = dialog.available[index];
+        let available = dialog.available.get(index).copied().unwrap_or(false);
         let state = if !available {
             i18n::tr("harness.missing", "未安装")
         } else if *kind == current {
@@ -3352,16 +3138,21 @@ fn render_harness_dialog(
         } else {
             i18n::tr("harness.installed", "已安装")
         };
-        let text = format!(
-            "{}{} · {}",
+        let core = format!(
+            "{}{}",
             if index == dialog.selected {
                 "› "
             } else {
                 "  "
             },
-            kind.display_name(),
-            state
+            kind.display_name()
         );
+        let full = format!("{core} · {state}");
+        let text = if usize::from(row.width) >= full.width() {
+            full
+        } else {
+            core
+        };
         let style = if !available {
             theme.mute()
         } else if index == dialog.selected {
@@ -3375,8 +3166,8 @@ fn render_harness_dialog(
         );
         hits.harness_rows.push((row, index));
     }
-    if inner.height > 4 {
-        frame.render_widget(Paragraph::new(i18n::tr("harness.boundary", "仅前台会话使用所选内核。外部 CLI 使用自身登录、模型、规则、插件和权限/沙盒；不受 Blora 原生配置控制。后台任务、Git 辅助和 Imagine 保持 Blora 原生执行。运行中禁止切换；未安装项不可选。" )).wrap(ratatui::widgets::Wrap { trim: false }).style(theme.dim()), Rect::new(inner.x, inner.y + 4, inner.width, inner.height.saturating_sub(5)));
+    if inner.height as usize > capacity {
+        frame.render_widget(Paragraph::new(i18n::tr("harness.boundary", "仅前台会话使用所选内核。外部 CLI 使用自身登录、模型、规则、插件和权限/沙盒；不受 Blora 原生配置控制。后台任务、Git 辅助和 Imagine 保持 Blora 原生执行。运行中禁止切换；未安装项不可选。" )).wrap(ratatui::widgets::Wrap { trim: false }).style(theme.dim()), Rect::new(inner.x, inner.y + capacity as u16, inner.width, inner.height.saturating_sub(capacity as u16 + 1)));
         frame.render_widget(
             Paragraph::new(i18n::tr(
                 "hint.select_confirm_close",
@@ -6911,25 +6702,39 @@ mod tests {
     #[test]
     fn harness_disabled_keys_and_minimize() {
         use crossterm::event::KeyCode;
+        let kinds = blora_types::HarnessKind::all();
+        assert_eq!(kinds.len(), 9);
         let mut dialog = HarnessDialog {
             selected: 0,
-            available: [true, false, true, false],
+            available: vec![true; kinds.len()],
             fullscreen: false,
             minimized: false,
         };
-        assert_eq!(dialog.select(1), None);
-        assert_eq!(dialog.select(4), None);
+        assert_eq!(dialog.select(kinds.len()), None);
+        dialog.key(KeyCode::Up);
+        assert_eq!(dialog.selected, 0);
+        for (index, kind) in kinds.into_iter().enumerate() {
+            assert_eq!(dialog.selected, index);
+            dialog.available[index] = false;
+            assert_eq!(dialog.select(index), None);
+            assert_eq!(dialog.key(KeyCode::Enter), None);
+            dialog.available[index] = true;
+            assert_eq!(dialog.key(KeyCode::Enter), Some(kind));
+            dialog.key(KeyCode::Down);
+        }
+        assert_eq!(dialog.selected, kinds.len() - 1);
         dialog.key(KeyCode::Down);
-        assert_eq!(dialog.key(KeyCode::Enter), None);
-        dialog.key(KeyCode::Down);
-        assert_eq!(
-            dialog.key(KeyCode::Enter),
-            Some(blora_types::HarnessKind::Codex)
-        );
+        assert_eq!(dialog.selected, kinds.len() - 1);
         dialog.minimized = true;
+        assert_eq!(dialog.select(0), None);
+        dialog.key(KeyCode::Up);
         assert_eq!(dialog.key(KeyCode::Enter), None);
         assert!(!dialog.minimized);
-        assert_eq!(dialog.selected, 2);
+        assert_eq!(dialog.selected, kinds.len() - 1);
+        for index in (0..kinds.len() - 1).rev() {
+            dialog.key(KeyCode::Up);
+            assert_eq!(dialog.selected, index);
+        }
     }
 
     fn frame_text(terminal: &Terminal<TestBackend>) -> String {
@@ -7286,11 +7091,15 @@ mod tests {
             let rect = hits.harness.expect("visible harness entry");
             assert!(rect.width > 0);
             assert_eq!(hits.hit(rect.x, rect.y), Some(Hit::Harness));
-            for selected in 0..4 {
+            for selected in 0..blora_types::HarnessKind::all().len() {
                 for (minimized, fullscreen) in [(false, false), (true, false), (false, true)] {
                     let mut dialog = HarnessDialog {
                         selected,
-                        available: [true, false, true, false],
+                        available: blora_types::HarnessKind::all()
+                            .iter()
+                            .enumerate()
+                            .map(|(index, _)| index != selected && index != 1)
+                            .collect(),
                         fullscreen,
                         minimized,
                     };
@@ -7310,6 +7119,18 @@ mod tests {
                                 .iter()
                                 .any(|(_, index)| *index == selected)
                         );
+                        if width == 100 && height == 30 && !fullscreen {
+                            assert_eq!(
+                                hits.harness_rows.len(),
+                                blora_types::HarnessKind::all().len()
+                            );
+                        }
+                        if width == 24
+                            && height == 10
+                            && selected == blora_types::HarnessKind::all().len() - 1
+                        {
+                            assert!(hits.harness_rows[0].1 > 0);
+                        }
                         for (rect, index) in &hits.harness_rows {
                             assert_eq!(hits.hit(rect.x, rect.y), Some(Hit::HarnessRow(*index)));
                             if !dialog.available[*index] {
@@ -7322,6 +7143,14 @@ mod tests {
                     }
                     let disabled = dialog.select(1);
                     assert!(disabled.is_none());
+                    assert_eq!(dialog.select(selected), None);
+                    dialog.available[selected] = true;
+                    if !minimized {
+                        assert_eq!(
+                            dialog.select(selected),
+                            Some(blora_types::HarnessKind::all()[selected])
+                        );
+                    }
                 }
             }
         }
@@ -8651,7 +8480,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn imagine_transcript_lists_saved_images_and_failures() {
         let mut projection = SessionProjection::new();
         projection.session = Some(blora_session::SessionRecord {
@@ -9567,6 +9395,32 @@ mod tests {
     }
 
     #[test]
+    fn header_items_fit_mobile_columns_and_visible_hit_regions() {
+        for width in [0, 1, 12, 24, 36, 40, 60, 80, 120] {
+            let area = Rect::new(2, 1, width, 1);
+            let mut line = Line::default();
+            for text in [
+                "Code",
+                "‹ 1/42 ›",
+                "手机项目-CrewRo+19411–5171",
+                "一个很长的会话标题",
+            ] {
+                if let Some(hit) = header_item(&mut line, area, " · ", text, Style::default(), true)
+                {
+                    assert!(hit.width > 0);
+                    assert!(hit.x >= area.x);
+                    assert!(hit.right() <= area.right());
+                }
+                assert!(line.width() <= usize::from(width));
+            }
+        }
+        let area = Rect::new(0, 0, 10, 1);
+        let mut line = Line::from("Code");
+        assert!(header_item(&mut line, area, " · ", "‹ 1/42 ›", Style::default(), false).is_none());
+        assert_eq!(line.width(), 4);
+    }
+
+    #[test]
     fn mobile_canvas_keeps_controls_visible_and_slash_hits_aligned() {
         let mut model = FrameModel {
             dialog_stack: &[],
@@ -9836,7 +9690,7 @@ mod dialog_layer_tests {
             let start = Instant::now();
             visuals.sync(&[DialogId::Onboarding], start);
             let mut frames = Vec::new();
-            for elapsed in [0, 90, 180] {
+            for elapsed in [Duration::ZERO, TRANSITION_DURATION / 2, TRANSITION_DURATION] {
                 terminal
                     .draw(|frame| {
                         draw_animated(
@@ -9844,7 +9698,7 @@ mod dialog_layer_tests {
                             None,
                             &mut cache,
                             &mut visuals,
-                            start + Duration::from_millis(elapsed),
+                            start + elapsed,
                             Some(&mut guide),
                             "测试账号",
                             false,
@@ -9859,7 +9713,7 @@ mod dialog_layer_tests {
             let close = start + TRANSITION_DURATION;
             visuals.sync(&[], close);
             drop(guide);
-            for elapsed in [0, 90] {
+            for elapsed in [Duration::ZERO, TRANSITION_DURATION / 2] {
                 terminal
                     .draw(|frame| {
                         let hits = draw_animated(
@@ -9867,7 +9721,7 @@ mod dialog_layer_tests {
                             None,
                             &mut cache,
                             &mut visuals,
-                            close + Duration::from_millis(elapsed),
+                            close + elapsed,
                             None,
                             "测试账号",
                             false,
@@ -9877,7 +9731,7 @@ mod dialog_layer_tests {
                     })
                     .unwrap();
                 assert_eq!(visuals.layers[0].layer.as_ref(), Some(&raw));
-                if elapsed == 0 {
+                if elapsed.is_zero() {
                     assert_eq!(terminal.backend().buffer(), &frames[2]);
                 }
             }
@@ -10083,7 +9937,7 @@ mod dialog_layer_tests {
             assert!(hits.settings_rows.is_empty());
             assert!(hits.provider_rows.is_empty());
             assert!(hits.modal);
-            let mid = settled + std::time::Duration::from_millis(90);
+            let mid = settled + crate::dialogs::TRANSITION_DURATION / 2;
             terminal
                 .draw(|frame| {
                     draw_animated(

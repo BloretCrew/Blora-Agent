@@ -8,6 +8,8 @@ use std::collections::{HashMap, HashSet};
 
 pub(crate) struct Parser {
     kind: HarnessKind,
+    extra_code: Option<crate::extra_code::CodeParser>,
+    extra_agents: Option<crate::extra_agents::AgentsParser>,
     outcome: Outcome,
     terminal: bool,
     text_seen: bool,
@@ -25,6 +27,13 @@ impl Parser {
     pub(crate) fn new(kind: HarnessKind) -> Self {
         Self {
             kind,
+            extra_code: matches!(
+                kind,
+                HarnessKind::OpenCode | HarnessKind::QwenCode | HarnessKind::DeepSeekHarness
+            )
+            .then(|| crate::extra_code::CodeParser::new(kind)),
+            extra_agents: matches!(kind, HarnessKind::HermesAgent | HarnessKind::OpenClaw)
+                .then(|| crate::extra_agents::AgentsParser::new(kind)),
             outcome: Outcome::default(),
             terminal: false,
             text_seen: false,
@@ -49,6 +58,16 @@ impl Parser {
         }
         let v: Value = serde_json::from_slice(bytes)
             .map_err(|_| HarnessError::Protocol("invalid JSON on stdout".into()))?;
+        self.value(&v, emit)
+    }
+
+    pub(crate) fn value(&mut self, v: &Value, emit: &mut impl FnMut(HarnessEvent)) -> Result<()> {
+        if let Some(parser) = self.extra_code.as_mut() {
+            return parser.line(v, emit);
+        }
+        if let Some(parser) = self.extra_agents.as_mut() {
+            return parser.line(v, emit);
+        }
         if !v.is_object() {
             return Err(HarnessError::Protocol("expected an event object".into()));
         }
@@ -56,14 +75,20 @@ impl Parser {
             return Err(HarnessError::Protocol("event after terminal record".into()));
         }
         match self.kind {
-            HarnessKind::ClaudeCode => self.claude(&v, emit),
-            HarnessKind::Codex => self.codex(&v, emit),
-            HarnessKind::GrokBuild => self.grok(&v, emit),
-            HarnessKind::Blora => unreachable!(),
+            HarnessKind::ClaudeCode => self.claude(v, emit),
+            HarnessKind::Codex => self.codex(v, emit),
+            HarnessKind::GrokBuild => self.grok(v, emit),
+            _ => unreachable!(),
         }
     }
 
     pub(crate) fn finish(self) -> Result<Outcome> {
+        if let Some(parser) = self.extra_code {
+            return parser.finish();
+        }
+        if let Some(parser) = self.extra_agents {
+            return parser.finish();
+        }
         if !self.terminal {
             return Err(HarnessError::Protocol(
                 "missing terminal event; update CLI or check authentication".into(),

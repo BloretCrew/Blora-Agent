@@ -4,6 +4,8 @@
 //! External authentication and configuration remain owned by each CLI.
 //! Native execution is routed by runtime, never spawned by this crate.
 
+mod extra_agents;
+mod extra_code;
 mod process;
 mod protocol;
 
@@ -89,6 +91,11 @@ fn detect_in(kind: HarnessKind, path: Option<&OsStr>) -> Option<PathBuf> {
         HarnessKind::ClaudeCode => "claude",
         HarnessKind::Codex => "codex",
         HarnessKind::GrokBuild => "grok",
+        HarnessKind::HermesAgent => "hermes",
+        HarnessKind::OpenClaw => "openclaw",
+        HarnessKind::OpenCode => "opencode",
+        HarnessKind::QwenCode => "qwen",
+        HarnessKind::DeepSeekHarness => "dsh",
     };
     for dir in std::env::split_paths(path?) {
         #[cfg(not(windows))]
@@ -150,6 +157,11 @@ pub fn run(
             message: "Claude noninteractive default confirmation uses dontAsk: tools requiring approval are denied, not interactively confirmed; external pre-approved rules still apply".into(),
         });
     }
+    if request.kind == HarnessKind::OpenClaw {
+        callback(HarnessEvent::Warning {
+            message: extra_agents::OPENCLAW_WARNING.into(),
+        });
+    }
     process::execute(&path, request, &args, cancel, callback)
 }
 
@@ -160,6 +172,11 @@ fn invocation(request: &RunRequest) -> Result<Vec<OsString>> {
         return Err(HarnessError::Process(
             "Blora must use the native runtime".into(),
         ));
+    }
+    match request.kind {
+        HermesAgent | OpenClaw => return extra_agents::invocation(request),
+        OpenCode | QwenCode | DeepSeekHarness => return extra_code::invocation(request),
+        _ => {}
     }
     if let Some(id) = &request.resume_session_id {
         if id.is_empty()
@@ -241,7 +258,7 @@ fn invocation(request: &RunRequest) -> Result<Vec<OsString>> {
             .map(Into::into)
             .collect()
         }
-        Blora => unreachable!(),
+        Blora | HermesAgent | OpenClaw | OpenCode | QwenCode | DeepSeekHarness => unreachable!(),
     };
     if let Some(id) = &request.resume_session_id {
         if request.kind != Codex {

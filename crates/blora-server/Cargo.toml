@@ -10,12 +10,15 @@ description = "Local HTTP and SSE server for Blora Agent."
 [dependencies]
 axum.workspace = true
 blora-auth.workspace = true
+blora-catalog.workspace = true
+blora-harness.workspace = true
 blora-model.workspace = true
 chrono.workspace = true
 blora-runtime.workspace = true
 blora-session.workspace = true
 blora-storage.workspace = true
 blora-types.workspace = true
+blora-tools.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

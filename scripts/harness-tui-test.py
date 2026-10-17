@@ -79,7 +79,8 @@ print(json.dumps({'type':'result','subtype':'success','session_id':'01a10c01-757
             send(b"\x1b")
             # Keyboard entry, missing item rejection, input isolation and window restore.
             output = send(b"\x1b[<0;3;1M\x1b[<0;3;1m")
-            assert "ClaudeCode" in output, output
+            for name in ("Blora", "ClaudeCode", "Codex", "GrokBuild", "HermesAgent", "OpenClaw", "OpenCode", "QwenCode", "DeepSeekHarness"):
+                assert name in output, output
             assert ("未安装" if locale == "zh-CN" else "Notinstalled") in output, output
             send(b"\x1b[<0;15;8M\x1b[<0;15;8m")
             send(b"IGNORED")
@@ -103,7 +104,7 @@ print(json.dumps({'type':'result','subtype':'success','session_id':'01a10c01-757
             assert len(args) >= 2, args
             assert "--resume" in args[-1] and "01a10c01-7571-71c2-9f0f-62886fc7be5b" in args[-1], args
             assert any("FAKE_REPLY" in str(value) for value in events("assistant.message.completed"))
-            # Resize while the window is open; all four rows remain keyboard accessible.
+            # Resize while the window is open; the last of nine rows stays accessible.
             send(b"cancel-me\r", 0.4)
             send(b"/cancel\r", 0.5)
             drain(0.8)
@@ -113,7 +114,13 @@ print(json.dumps({'type':'result','subtype':'success','session_id':'01a10c01-757
                 fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", height, width, 0, 0))
                 os.killpg(proc.pid, signal.SIGWINCH)
                 drain()
-                send(b"\x1b[B\x1b[B\x1b[A\x1b[A")
+                send(b"\x1b[A" * 9)
+                output = send(b"\x1b[B" * 9)
+                assert "DeepSeek" in output, output
+                previous = events("session.harness.changed")
+                send(b"\r")
+                assert events("session.harness.changed") == previous
+                send(b"\x1b[A" * 7)
                 assert proc.poll() is None
             send(b"\x1b")
             send(b"\x11")

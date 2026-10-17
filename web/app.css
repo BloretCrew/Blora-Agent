@@ -225,7 +225,6 @@ blora-sidebar-layout {
   min-width: 0;
 }
 
-
 .ba-ask {
   display: grid;
   gap: var(--blora-space-3);
@@ -698,4 +697,302 @@ blora-sidebar-layout[hidden],
   .ba-onboarding__shell {
     margin: var(--blora-space-6) auto;
   }
+}
+
+/* Window lifecycle is application-owned; visual primitives use published tokens. */
+.ba-shell {
+  grid-template-rows: auto auto auto minmax(0, 1fr);
+}
+.ba-workbench {
+  display: flex;
+  gap: var(--blora-space-1);
+  padding: var(--blora-space-2) var(--blora-space-6);
+  overflow-x: auto;
+  flex-wrap: wrap;
+}
+.ba-workbench > button {
+  flex-shrink: 0;
+}
+.ba-window-background {
+  filter: brightness(var(--ba-window-dim, 1));
+  transition: filter var(--blora-duration-base);
+}
+#blora-window-stack {
+  position: fixed;
+  inset: 0;
+  z-index: var(--blora-z-modal, 1000);
+  background: var(--blora-color-overlay-modal);
+  isolation: isolate;
+}
+#blora-window-stack[hidden],
+.ba-window [hidden] {
+  display: none !important;
+}
+.ba-window-layer {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: var(--blora-space-5);
+  pointer-events: none;
+}
+.ba-window {
+  width: min(52rem, 100%);
+  max-height: calc(100dvh - 2 * var(--blora-space-5));
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  color: var(--blora-color-text-primary);
+  background: var(--blora-color-surface-default);
+  border: var(--blora-border-subtle);
+  border-radius: var(--blora-radius-xl);
+  box-shadow: var(--blora-shadow-4);
+  filter: brightness(var(--ba-window-dim, 1));
+  transition: filter var(--blora-duration-base);
+  overflow: hidden;
+  box-sizing: border-box;
+}
+.ba-window-layer--active .ba-window {
+  pointer-events: auto;
+}
+.ba-window--expanded {
+  width: 100%;
+  height: calc(100dvh - 2 * var(--blora-space-5));
+}
+.ba-window__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--blora-space-3);
+  padding: var(--blora-space-4) var(--blora-space-5);
+  border-bottom: var(--blora-border-subtle);
+  flex-shrink: 0;
+}
+.ba-window__header h2 {
+  margin: 0;
+  font-size: var(--blora-text-lg);
+  overflow-wrap: anywhere;
+}
+.ba-window__controls,
+.ba-window__tabs,
+.ba-window__row,
+.ba-window__grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--blora-space-2);
+  align-items: center;
+}
+.ba-window__controls {
+  flex-shrink: 0;
+}
+.ba-window__body {
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: var(--blora-space-5);
+  min-height: 0;
+  scrollbar-gutter: stable;
+}
+.ba-window__body > .blora-button,
+.ba-window__body section > .blora-button {
+  margin: var(--blora-space-1);
+}
+.ba-window__list {
+  display: grid;
+  gap: var(--blora-space-3);
+  margin-block: var(--blora-space-3);
+}
+.ba-window__row {
+  padding-block: var(--blora-space-2);
+  border-bottom: var(--blora-border-subtle);
+}
+.ba-window__field {
+  display: grid;
+  gap: var(--blora-space-2);
+  margin-block: var(--blora-space-3);
+}
+.ba-window__field textarea {
+  min-height: 8rem;
+  resize: vertical;
+}
+.ba-window__check {
+  display: flex;
+  align-items: center;
+  gap: var(--blora-space-2);
+  min-height: 44px;
+  overflow-wrap: anywhere;
+}
+.ba-window__check input {
+  accent-color: var(--blora-color-action-primary-default);
+  width: 1.15rem;
+  height: 1.15rem;
+  flex-shrink: 0;
+}
+.ba-window__note {
+  color: var(--blora-color-text-muted);
+  overflow-wrap: anywhere;
+}
+.ba-window__error {
+  color: var(--blora-color-status-danger);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.ba-window__output {
+  font-family: var(--blora-font-mono);
+  font-size: var(--blora-text-sm);
+  padding: var(--blora-space-3);
+  background: var(--blora-color-surface-sunken);
+  border-radius: var(--blora-radius-md);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 28rem;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+.ba-window__tabs {
+  margin-bottom: var(--blora-space-4);
+}
+.ba-window__tabs [aria-selected="true"] {
+  background: var(--blora-color-action-primary-tint);
+}
+.ba-window-layer--minimized {
+  align-items: end;
+}
+.ba-window-layer--minimized .ba-window {
+  height: auto;
+}
+@media (max-width: 600px) {
+  .ba-workbench {
+    padding-inline: var(--blora-space-3);
+    flex-wrap: nowrap;
+  }
+  .ba-window-layer {
+    padding: 0;
+  }
+  .ba-window {
+    width: 100%;
+    height: 100dvh;
+    max-height: 100dvh;
+    border-radius: 0;
+  }
+  .ba-window__header {
+    flex-wrap: wrap;
+    padding: max(var(--blora-space-3), env(safe-area-inset-top)) var(--blora-space-3) var(--blora-space-3);
+  }
+  .ba-window__controls {
+    margin-left: auto;
+  }
+  .ba-window__body {
+    padding: var(--blora-space-3) var(--blora-space-3) max(var(--blora-space-5), env(safe-area-inset-bottom));
+  }
+  .ba-window .blora-button {
+    min-height: 44px;
+  }
+}
+
+/* Native hidden state also applies to flex/grid application surfaces. */
+[hidden] { display: none !important; }
+
+.ba-workbench {
+  overflow: visible;
+  flex-wrap: nowrap;
+  align-items: center;
+  min-width: 0;
+}
+.ba-workbench__status {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--blora-space-1);
+  min-width: 0;
+  flex: 1;
+}
+.ba-workbench__status .blora-button {
+  max-width: 22rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ba-workbench__more {
+  position: relative;
+  flex-shrink: 0;
+}
+.ba-workbench__more summary {
+  cursor: pointer;
+  list-style: none;
+}
+.ba-workbench__more summary::-webkit-details-marker {
+  display: none;
+}
+.ba-workbench__menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + var(--blora-space-2));
+  z-index: var(--blora-z-dropdown, 100);
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  width: min(22rem, 90vw);
+  max-height: 60dvh;
+  overflow: auto;
+  padding: var(--blora-space-2);
+  background: var(--blora-color-surface-default);
+  border: var(--blora-border-subtle);
+  border-radius: var(--blora-radius-md);
+  box-shadow: var(--blora-shadow-4);
+}
+#blora-window-stack {
+  transition: background var(--blora-duration-base);
+}
+#blora-window-stack.ba-window-stack--closing {
+  background: transparent;
+}
+.ba-window {
+  transition: filter 180ms, opacity 180ms, transform 180ms;
+}
+.ba-window-layer--closing .ba-window {
+  opacity: 0;
+  transform: translateY(var(--blora-space-3)) scale(.98);
+  pointer-events: none;
+}
+.ba-git-file {
+  cursor: pointer;
+  border-radius: var(--blora-radius-md);
+  padding-inline: var(--blora-space-2);
+}
+.ba-git-file--active {
+  background: var(--blora-color-action-primary-tint);
+}
+.ba-git-diff {
+  background: var(--blora-color-surface-raised);
+  border: var(--blora-border-subtle);
+}
+.ba-git-diff > span {
+  display: block;
+  white-space: pre-wrap;
+}
+.ba-git-diff__added {
+  background: color-mix(in srgb, var(--blora-color-status-success) 14%, transparent);
+}
+.ba-git-diff__removed {
+  background: color-mix(in srgb, var(--blora-color-status-danger) 14%, transparent);
+}
+@media (max-width: 600px) {
+  .ba-workbench__status {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .ba-workbench__status .blora-button {
+    display: block;
+    min-width: 0;
+    text-align: left;
+    min-height: 36px;
+  }
+}
+
+@media (max-width: 600px) {
+  .ba-session { padding-inline: var(--blora-space-3); }
+  .ba-composer__bar { flex-wrap: wrap; justify-content: flex-start; }
+  .ba-composer__bar .ba-perm { flex: 1 1 8rem; }
+  .ba-composer__bar .ba-perm > span { white-space: nowrap; }
+  .ba-composer__bar select { min-width: 0; width: 100%; }
+  .ba-composer__bar #send { margin-left: auto; flex-shrink: 0; }
 }

@@ -319,6 +319,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.20",
+ "uuid",
 ]
 
 [[package]]
@@ -381,11 +382,14 @@ version = "0.1.0-beta.3"
 dependencies = [
  "axum",
  "blora-auth",
+ "blora-catalog",
  "blora-events",
+ "blora-harness",
  "blora-model",
  "blora-runtime",
  "blora-session",
  "blora-storage",
+ "blora-tools",
  "blora-types",
  "chrono",
  "serde",

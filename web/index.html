@@ -128,6 +128,31 @@
               <blora-spinner id="page-loading" label="加载中" hidden></blora-spinner>
             </div>
           </header>
+          <nav class="ba-workbench" aria-label="会话工作台">
+            <div class="ba-workbench__status">
+              <button type="button" class="blora-button" data-variant="ghost" data-size="sm" data-workbench="harness" data-status="harness">内核 · 未选择</button>
+              <button type="button" class="blora-button" data-variant="ghost" data-size="sm" data-workbench="model" data-status="model">模型 · 未选择</button>
+              <button type="button" class="blora-button" data-variant="ghost" data-size="sm" data-workbench="permission" data-status="permission">权限 · 询问</button>
+              <button type="button" class="blora-button" data-variant="ghost" data-size="sm" data-workbench="git" data-status="git">Git · 未选择</button>
+            </div>
+            <details class="ba-workbench__more">
+              <summary class="blora-button" data-variant="ghost" data-size="sm">更多</summary>
+              <div class="ba-workbench__menu">
+                <button type="button" class="blora-button" data-variant="ghost" data-size="sm" data-workbench="session">会话</button>
+                <button type="button" class="blora-button" data-variant="ghost" data-size="sm" data-workbench="project">项目 / 目录</button>
+                <button type="button" class="blora-button" data-variant="ghost" data-size="sm" data-workbench="mode">工作模式</button>
+                <button type="button" class="blora-button" data-variant="ghost" data-size="sm" data-workbench="provider">供应商</button>
+                <button type="button" class="blora-button" data-variant="ghost" data-size="sm" data-workbench="context">上下文</button>
+                <button type="button" class="blora-button" data-variant="ghost" data-size="sm" data-workbench="tools">工具</button>
+                <button type="button" class="blora-button" data-variant="ghost" data-size="sm" data-workbench="tasks">任务</button>
+                <button type="button" class="blora-button" data-variant="ghost" data-size="sm" data-workbench="memory">记忆</button>
+                <button type="button" class="blora-button" data-variant="ghost" data-size="sm" data-workbench="plugins">插件</button>
+                <button type="button" class="blora-button" data-variant="ghost" data-size="sm" data-workbench="diagnostics">诊断</button>
+                <button type="button" class="blora-button" data-variant="ghost" data-size="sm" data-workbench="settings">设置</button>
+                <button type="button" class="blora-button" data-variant="ghost" data-size="sm" data-workbench="help">帮助</button>
+              </div>
+            </details>
+          </nav>
           <blora-alert id="page-alert" variant="danger" hidden></blora-alert>
           <section id="view-session" class="ba-session ba-session--empty">
             <div class="ba-hero" id="session-hero">
@@ -206,10 +231,10 @@
                 <label class="ba-perm">
                   <span>权限</span>
                   <select id="permission-mode" class="blora-input">
-                    <option value="ask">询问</option>
+                    <option value="ask">默认确认</option>
                     <option value="plan">计划</option>
-                    <option value="auto-edit">自动编辑</option>
-                    <option value="yolo">全部允许</option>
+                    <option value="auto-edit">自动接受编辑</option>
+                    <option value="yolo">跳过权限确认</option>
                   </select>
                 </label>
                 <button type="submit" class="blora-button" data-variant="primary" data-icon="send" id="send">发送</button>
@@ -295,7 +320,9 @@
     <script src="/vendor/markdown.global.js"></script>
     <script src="/imagine.js"></script>
     <script src="/dialogs.js"></script>
+    <script src="/commands.js"></script>
     <script src="/app.js"></script>
+    <script src="/workbench.js"></script>
     <script src="/onboarding.js"></script>
     <script type="module" src="/thinking-orbs-host.js"></script>
   </body>

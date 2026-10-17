@@ -38,9 +38,22 @@
 
 ## 执行内核（Harness）
 
-单击左上角当前内核名称（默认 `Blora`），或输入 `/harness` 打开执行内核选择窗口。首批提供 Blora、Claude Code、Codex、Grok Build；每次打开根据 PATH 刷新安装状态，不以参考源码目录判断，也不会自动安装或验证登录。未安装项灰色显示，点击或 Enter 均不能启用。
+单击左上角当前内核名称（默认 `Blora`），或输入 `/harness` 打开执行内核选择窗口。提供 Blora、Claude Code、Codex、Grok Build、Hermes Agent、OpenClaw、OpenCode、Qwen Code、DeepSeek Harness 共九项；每次打开根据 PATH 刷新安装状态，不以参考源码目录判断，也不会自动安装或验证登录。未安装项灰色显示，点击或 Enter 均不能启用。
 
-使用 ↑/↓ 选择、Enter 确认、Esc 关闭；单击可用项立即确认。窗口复用共享栈、动画和红/黄/绿关闭、最小化、全屏控件，最小化后 Enter 只恢复，键盘和粘贴不会穿透后台。24×10 等窄屏仍保留左上入口，长名称截断，选项随选择滚动；也可随时用 `/harness` 从主界面打开。
+外部 CLI 需先按各项目的官方说明安装并完成登录，以下为 PATH 中检测的可执行命令，不是自动安装指令：
+
+| 内核 | CLI 命令 |
+|---|---|
+| Claude Code | `claude` |
+| Codex | `codex` |
+| Grok Build | `grok` |
+| Hermes Agent | `hermes` |
+| OpenClaw | `openclaw` |
+| OpenCode | `opencode` |
+| Qwen Code | `qwen` |
+| DeepSeek Harness | `dsh` |
+
+使用 ↑/↓ 选择、Enter 确认、Esc 关闭；单击可用项立即确认。窗口复用共享栈、动画和红/黄/绿关闭、最小化、全屏控件，最小化后 Enter 只恢复，键盘和粘贴不会穿透后台。24×10 等窄屏仍保留左上入口，长名称截断，全部九项均可用方向键访问，超出可见高度时选项随选择滚动；也可随时用 `/harness` 从主界面打开。
 
 选择保存在当前 Blora 会话，切换会话和重启恢复。前台运行期间不能切换，必须先取消或等待完成。键盘和鼠标发送使用同一路由；外部运行中输入与 `/steer` 只排队，在当前请求结束后送达，不表示即时插话成功。
 
@@ -53,6 +66,16 @@
 | Claude Code | `dontAsk`，拒绝未预批准操作 | `acceptEdits`，需要额外确认的操作由 CLI 拒绝 | 暂不支持可靠只读约束 | 显式 `bypassPermissions` |
 | Codex | 只读沙盒，审批策略 `never` | 暂无安全等价映射 | 只读沙盒，审批策略 `never` | 显式绕过审批及沙盒 |
 | Grok Build | `default`，无头接口拒绝无法审批的操作 | `acceptEdits` | 暂不支持已验证的只读沙盒映射 | 显式 `bypassPermissions` |
+
+新增内核的权限能力取决于对应 CLI 的已验证无头协议；不保证与 Blora 四种权限模式逐项等价，不支持或无法保证的组合会被拒绝。
+
+| Hermes Agent | 暂不支持 | 暂不支持 | 暂不支持 | oneshot 模式，仅最终文本 |
+| OpenClaw | 暂不支持 | 暂不支持 | 暂不支持 | 本地请求，核对已配置工作区后执行 |
+| OpenCode | 无头请求拒绝需要确认的操作 | 暂不支持 | 暂不支持 | `--auto`，仍遵循外部拒绝规则 |
+| Qwen Code | `default` | `auto-edit` | 暂不支持可靠只读约束 | `yolo` |
+| DeepSeek Harness | 暂不支持 | 暂不支持 | 暂不支持 | headless profile 自身权限，仅最终文本 |
+
+Hermes 和当前安装版本的 DeepSeek 每次发起独立请求，由 Blora 补充历史；这两个接口不提供工具活动、思考、用量或可绑定会话 ID。OpenClaw 使用 `--local --json` 最终响应、显式 UUID 及 Blora 会话命名空间；启动前要求其默认 agent 的已配置工作区与当前项目相同。工作区不匹配、JSON5 配置、配置 includes 或环境插值会明确拒绝，用户可通过 OpenClaw 自身配置调整。Blora 只读核对配置，不修改外部配置。OpenClaw 自动频道投递关闭，模型调用的外部工具仍可能联网或发送消息，需明确风险授权。
 
 外部 CLI 自身已有的允许/拒绝规则仍适用，单向无头接口目前不提供 Blora 内的逐工具交互审批。外部执行当前支持 Unix 平台；取消清理同进程组的后代，主动脱离进程组的进程需要另行管理。每条输入最多 32 KiB，跨内核历史同步保留最多 64 KiB 的 UTF-8 安全尾部，并标注省略；同一外部会话的连续请求使用明确会话 ID 续接。
 

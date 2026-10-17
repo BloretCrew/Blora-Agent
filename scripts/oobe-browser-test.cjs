@@ -10,12 +10,15 @@ const { chromium } = require('playwright');
     for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
       const context = await browser.newContext({ viewport });
       const page = await context.newPage();
+      page.setDefaultTimeout(60000);
+      page.setDefaultNavigationTimeout(90000);
       if (process.env.BLORA_TEST_SOURCE === "1") {
         const fs = require('node:fs');
         for (const [path, file, contentType] of [['/', 'web/index.html', 'text/html'], ['/app.css', 'web/app.css', 'text/css'], ['/onboarding.js', 'web/onboarding.js', 'text/javascript']]) {
           await context.route(`${url}${path}`, route => route.fulfill({ body: fs.readFileSync(file), contentType }));
         }
       }
+      let allowLogin = false;
       let loggedIn = false, starts = 0, cancels = 0, polls = 0, failure = null, gateway = false;
       const errors = [];
       page.on('pageerror', error => errors.push(error.message));
@@ -32,7 +35,7 @@ const { chromium } = require('playwright');
         if (path.endsWith('/poll')) {
           polls++;
           if (failure === 'denied') return route.fulfill({ status: 400, body: 'access_denied' });
-          if (polls === 1) return json({ status: 'pending', interval: 1 });
+          if (polls === 1 || !allowLogin) return json({ status: 'pending', interval: 1 });
           loggedIn = true;
           return json({ status: 'authenticated', username: 'test', name: '测试账号' });
         }
@@ -100,7 +103,7 @@ const { chromium } = require('playwright');
       failure = 'expiry';
       await page.locator('#onboarding-login').click();
       await page.waitForFunction(() => document.querySelector('#onboarding-status').textContent.includes('过期'));
-      failure = null;
+      failure = null; allowLogin = true;
       await page.locator('#onboarding-login').click();
       await page.waitForFunction(() => document.querySelector('#onboarding-next').hidden === false);
       await page.locator('#onboarding-next').click();

@@ -433,17 +433,33 @@ mod tests {
     #[test]
     fn finds_messages_across_sessions() {
         let store = SqliteStore::open_in_memory().unwrap();
-        let deploy = session(&store, "deploy", &["Configure the nginx reverse proxy for staging"]);
+        let deploy = session(
+            &store,
+            "deploy",
+            &["Configure the nginx reverse proxy for staging"],
+        );
         let other = session(&store, "notes", &["部署到预发布环境的步骤", "unrelated"]);
-        let hits = store.search_transcripts("nginx proxy", 10, None, None).unwrap();
+        let hits = store
+            .search_transcripts("nginx proxy", 10, None, None)
+            .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].session_id, deploy.as_str());
         assert_eq!(hits[0].title.as_deref(), Some("deploy"));
         assert!(hits[0].snippet.contains("nginx"));
         let cjk = store.search_transcripts("预发布", 10, None, None).unwrap();
         assert_eq!(cjk[0].session_id, other.as_str());
-        assert!(store.search_transcripts("nginx", 10, Some(&deploy), None).unwrap().is_empty());
-        assert!(store.search_transcripts("\"", 10, None, None).unwrap().is_empty());
+        assert!(
+            store
+                .search_transcripts("nginx", 10, Some(&deploy), None)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .search_transcripts("\"", 10, None, None)
+                .unwrap()
+                .is_empty()
+        );
         let short = store.search_transcripts("ng", 10, None, None).unwrap();
         assert!(!short.is_empty(), "short terms fall back to LIKE");
     }
