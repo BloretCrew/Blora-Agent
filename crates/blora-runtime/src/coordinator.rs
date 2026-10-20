@@ -2399,7 +2399,14 @@ mod tests {
 
     #[test]
     fn run_titles_sessions_with_existing_transcript_and_legacy_names() {
-        for initial_title in [None, Some(""), Some("tui"), Some("web"), Some("侧边对话"), Some("Side conversation")] {
+        for initial_title in [
+            None,
+            Some(""),
+            Some("tui"),
+            Some("web"),
+            Some("侧边对话"),
+            Some("Side conversation"),
+        ] {
             let runtime = Runtime::new(SqliteStore::open_in_memory().unwrap());
             let id = runtime
                 .create_session(CreateSession {

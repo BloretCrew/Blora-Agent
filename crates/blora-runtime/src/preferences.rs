@@ -5,6 +5,12 @@ use crate::Runtime;
 use blora_types::Result;
 
 impl Runtime {
+    pub fn tui_reduce_motion(&self) -> Result<bool> {
+        self.store.tui_reduce_motion()
+    }
+    pub fn set_tui_reduce_motion(&self, enabled: bool) -> Result<()> {
+        self.store.set_tui_reduce_motion(enabled)
+    }
     pub fn tui_message_roles(&self) -> Result<bool> {
         self.store.tui_message_roles()
     }

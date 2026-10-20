@@ -25,12 +25,7 @@ pub enum DocumentKind {
 impl DocumentKind {
     #[must_use]
     pub fn from_path(path: &Path) -> Option<Self> {
-        match path
-            .extension()?
-            .to_str()?
-            .to_ascii_lowercase()
-            .as_str()
-        {
+        match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
             "pdf" => Some(Self::Pdf),
             "docx" => Some(Self::Docx),
             "xlsx" => Some(Self::Xlsx),
@@ -272,7 +267,10 @@ impl Zip {
         let mut at = u32_at(&data, eocd + 16).ok_or_else(bad)?;
         let mut entries = Vec::with_capacity(count);
         for _ in 0..count {
-            if !data.get(at..).is_some_and(|rest| rest.starts_with(&[0x50, 0x4b, 0x01, 0x02])) {
+            if !data
+                .get(at..)
+                .is_some_and(|rest| rest.starts_with(&[0x50, 0x4b, 0x01, 0x02]))
+            {
                 return Err(bad());
             }
             let method = u16_at(&data, at + 10).ok_or_else(bad)?;
@@ -307,7 +305,9 @@ impl Zip {
             .ok_or_else(|| BloraError::Other(format!("document part {name} is missing")))?;
         let bad = || BloraError::Other(format!("document part {name} is corrupt"));
         if entry.size > MAX_PART_BYTES {
-            return Err(BloraError::Other(format!("document part {name} is too large")));
+            return Err(BloraError::Other(format!(
+                "document part {name} is too large"
+            )));
         }
         let at = entry.local_offset;
         let name_len = u16_at(&self.data, at + 26).ok_or_else(bad)? as usize;
@@ -401,8 +401,14 @@ mod tests {
             dir.path(),
             "b.xlsx",
             &zip(&[
-                ("xl/workbook.xml", r#"<workbook><sheets><sheet name="Budget" sheetId="1"/></sheets></workbook>"#),
-                ("xl/sharedStrings.xml", "<sst><si><t>Item</t></si><si><t>Cost</t></si></sst>"),
+                (
+                    "xl/workbook.xml",
+                    r#"<workbook><sheets><sheet name="Budget" sheetId="1"/></sheets></workbook>"#,
+                ),
+                (
+                    "xl/sharedStrings.xml",
+                    "<sst><si><t>Item</t></si><si><t>Cost</t></si></sst>",
+                ),
                 (
                     "xl/worksheets/sheet1.xml",
                     r#"<worksheet><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>Pens</t></is></c><c r="B2"><v>3.5</v></c></row></sheetData></worksheet>"#,
@@ -423,7 +429,10 @@ mod tests {
         let path = write(
             dir.path(),
             "c.pptx",
-            &zip(&[("ppt/slides/slide10.xml", &ten), ("ppt/slides/slide2.xml", &two)]),
+            &zip(&[
+                ("ppt/slides/slide10.xml", &ten),
+                ("ppt/slides/slide2.xml", &two),
+            ]),
         );
         assert_eq!(
             read_document(&path).unwrap(),
@@ -441,7 +450,11 @@ mod tests {
 
     #[test]
     fn reads_pdf_when_pdftotext_exists() {
-        if std::process::Command::new("pdftotext").arg("-v").output().is_err() {
+        if std::process::Command::new("pdftotext")
+            .arg("-v")
+            .output()
+            .is_err()
+        {
             return;
         }
         let dir = tempfile::tempdir().unwrap();

@@ -127,11 +127,19 @@ pub fn search(config: &SearchConfig, query: &str, limit: usize) -> Result<Vec<Se
         .timeout(Duration::from_secs(20))
         .user_agent(concat!("BloraAgent/", env!("CARGO_PKG_VERSION")))
         .build();
-    let endpoint = |default: &str| config.endpoint.clone().unwrap_or_else(|| default.to_owned());
+    let endpoint = |default: &str| {
+        config
+            .endpoint
+            .clone()
+            .unwrap_or_else(|| default.to_owned())
+    };
     let limit_text = limit.to_string();
     let result = match config.backend {
         SearchBackend::Searxng => {
-            let base = config.endpoint.clone().unwrap_or_else(|| config.credential.clone());
+            let base = config
+                .endpoint
+                .clone()
+                .unwrap_or_else(|| config.credential.clone());
             agent
                 .get(&format!("{}/search", base.trim_end_matches('/')))
                 .query("q", query)
@@ -260,7 +268,12 @@ mod tests {
             .iter()
             .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
             .collect();
-        move |name| pairs.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone())
+        move |name| {
+            pairs
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.clone())
+        }
     }
 
     #[test]
@@ -282,9 +295,7 @@ mod tests {
         ]))
         .unwrap();
         assert_eq!(forced.backend, SearchBackend::Exa);
-        assert!(
-            SearchConfig::from_lookup(lookup(&[("BLORA_SEARCH_BACKEND", "brave")])).is_err()
-        );
+        assert!(SearchConfig::from_lookup(lookup(&[("BLORA_SEARCH_BACKEND", "brave")])).is_err());
     }
 
     #[test]
@@ -305,7 +316,10 @@ mod tests {
     #[test]
     fn queries_searxng_over_http() {
         let base = serve(1, |request| {
-            assert!(request.starts_with("GET /search?q=rust+agents&format=json"), "{request}");
+            assert!(
+                request.starts_with("GET /search?q=rust+agents&format=json"),
+                "{request}"
+            );
             http(
                 "200 OK",
                 "application/json",
@@ -325,7 +339,13 @@ mod tests {
 
     #[test]
     fn reports_vendor_errors() {
-        let base = serve(1, |_| http("401 Unauthorized", "application/json", "{\"error\":\"bad key\"}"));
+        let base = serve(1, |_| {
+            http(
+                "401 Unauthorized",
+                "application/json",
+                "{\"error\":\"bad key\"}",
+            )
+        });
         let config = SearchConfig {
             backend: SearchBackend::Tavily,
             credential: "x".to_owned(),

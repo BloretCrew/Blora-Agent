@@ -542,6 +542,8 @@ pub struct FrameModel<'a> {
     pub index: usize,
     pub sidebar: &'a SidebarState,
     pub right_panel: Option<&'a crate::right_panel::RightPanel>,
+    pub mobile_drawer: MobileDrawer,
+    pub drawer_progress: f64,
     pub projection: Option<&'a SessionProjection>,
     pub pending: &'a [ApprovalRecord],
     pub input: &'a str,
@@ -590,8 +592,16 @@ pub struct FrameModel<'a> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Hit {
     Transcript,
+    MobileLeftToggle,
+    MobileRightToggle,
+    MobileDrawerDismiss,
+    MobileDrawerClose,
+    MobilePanelTab(crate::right_panel::Tab),
+    MobilePanelClose(crate::right_panel::Tab),
+    MobilePanelAction,
     SidebarSession(usize),
     SidebarSettings,
+    SidebarToggle,
     ToolSummary(Vec<usize>),
     SideToolSummary(blora_types::SessionId, Vec<usize>),
     ToolDetailRow(usize),
@@ -672,6 +682,14 @@ pub enum HintAction {
 #[derive(Clone, Debug, Default)]
 pub struct HitMap {
     pub sidebar: Option<Rect>,
+    pub sidebar_divider: Option<Rect>,
+    pub mobile_drawer_active: bool,
+    pub mobile_left_toggle: Option<Rect>,
+    pub mobile_right_toggle: Option<Rect>,
+    pub mobile_drawer_dismiss: Option<Rect>,
+    pub mobile_drawer_close: Option<Rect>,
+    pub mobile_drawer_actions: Vec<(Rect, crate::right_panel::Action)>,
+    pub mobile_left_rows: Vec<(Rect, Hit)>,
     pub sidebar_projects: Option<Rect>,
     pub sidebar_sessions: Option<Rect>,
     pub sidebar_project_max: usize,
@@ -744,6 +762,52 @@ impl HitMap {
     pub fn hit(&self, col: u16, row: u16) -> Option<Hit> {
         if self.modal && !self.modal_area.is_some_and(|rect| contains(rect, col, row)) {
             return None;
+        }
+        if self.mobile_drawer_active {
+            if self
+                .mobile_drawer_close
+                .is_some_and(|rect| contains(rect, col, row))
+            {
+                return Some(Hit::MobileDrawerClose);
+            }
+            if self
+                .mobile_drawer_dismiss
+                .is_some_and(|rect| contains(rect, col, row))
+            {
+                return Some(Hit::MobileDrawerDismiss);
+            }
+            if let Some((_, hit)) = self
+                .mobile_left_rows
+                .iter()
+                .find(|(rect, _)| contains(*rect, col, row))
+            {
+                return Some(hit.clone());
+            }
+            if let Some((_, action)) = self
+                .mobile_drawer_actions
+                .iter()
+                .find(|(rect, _)| contains(*rect, col, row))
+            {
+                return Some(match action {
+                    crate::right_panel::Action::Tab(tab) => Hit::MobilePanelTab(*tab),
+                    crate::right_panel::Action::Close(tab) => Hit::MobilePanelClose(*tab),
+                    crate::right_panel::Action::Collapse => Hit::MobileDrawerClose,
+                    _ => Hit::MobilePanelAction,
+                });
+            }
+            return None;
+        }
+        if self
+            .mobile_left_toggle
+            .is_some_and(|rect| contains(rect, col, row))
+        {
+            return Some(Hit::MobileLeftToggle);
+        }
+        if self
+            .mobile_right_toggle
+            .is_some_and(|rect| contains(rect, col, row))
+        {
+            return Some(Hit::MobileRightToggle);
         }
         for (rect, hit) in &self.sidebar_rows {
             if contains(*rect, col, row) {
@@ -1012,13 +1076,41 @@ fn contains(rect: Rect, col: u16, row: u16) -> bool {
         && row < rect.y.saturating_add(rect.height)
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Debug, Default)]
 pub struct SidebarState {
     pub projects: usize,
     pub sessions: usize,
+    pub collapsed: bool,
+    width: Option<u16>,
     active: Option<String>,
     workspace: Option<String>,
     height: u16,
+    drawer: std::cell::Cell<MobileDrawer>,
+    drawer_progress: std::cell::Cell<f64>,
+}
+
+impl Clone for SidebarState {
+    fn clone(&self) -> Self {
+        Self {
+            projects: self.projects,
+            sessions: self.sessions,
+            collapsed: self.collapsed,
+            width: self.width,
+            active: self.active.clone(),
+            workspace: self.workspace.clone(),
+            height: self.height,
+            drawer: std::cell::Cell::new(self.drawer.get()),
+            drawer_progress: std::cell::Cell::new(self.drawer_progress.get()),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MobileDrawer {
+    #[default]
+    None,
+    Left,
+    Right,
 }
 
 pub(crate) fn canvas_regions(area: Rect) -> (Option<Rect>, Rect) {
@@ -1047,6 +1139,44 @@ fn sidebar_session_indices(sessions: &[SessionSummary], workspace: &Path) -> Vec
 }
 
 impl SidebarState {
+    pub fn regions(&self, area: Rect) -> (Option<Rect>, Rect) {
+        if area.width < 58 || area.height < 18 {
+            return (None, area);
+        }
+        let width = if self.collapsed {
+            3
+        } else {
+            self.width
+                .unwrap_or(28)
+                .clamp(18, area.width.saturating_sub(40).max(18))
+        };
+        (
+            (!self.collapsed).then_some(Rect::new(area.x, area.y, width, area.height)),
+            Rect::new(area.x + width, area.y, area.width - width, area.height),
+        )
+    }
+
+    pub fn resize(&mut self, area: Rect, column: u16) {
+        self.width = Some(
+            column
+                .saturating_sub(area.x)
+                .saturating_add(1)
+                .clamp(18, area.width.saturating_sub(40).max(18)),
+        );
+    }
+
+    pub fn drawer(&self) -> MobileDrawer {
+        self.drawer.get()
+    }
+    pub fn set_drawer(&self, drawer: MobileDrawer) {
+        self.drawer.set(drawer);
+    }
+    pub fn drawer_progress(&self) -> f64 {
+        self.drawer_progress.get()
+    }
+    pub fn set_drawer_progress(&self, progress: f64) {
+        self.drawer_progress.set(progress);
+    }
     pub fn sync(
         &mut self,
         sessions: &[SessionSummary],
@@ -1330,6 +1460,88 @@ fn render_sidebar(
     );
 }
 
+fn render_mobile_drawer(
+    frame: &mut Frame<'_>,
+    terminal: Rect,
+    model: &FrameModel<'_>,
+    drawer: MobileDrawer,
+    progress: f64,
+    theme: &Theme,
+    hits: &mut HitMap,
+) {
+    let Some(side) = (drawer != MobileDrawer::None).then_some(drawer) else {
+        return;
+    };
+    let progress = progress.clamp(0.0, 1.0);
+    dim_region(frame.buffer_mut(), terminal, (1.0 - progress) * 0.68, theme);
+    let width = ((terminal.width as f64 * progress).round() as u16).clamp(1, terminal.width.max(1));
+    let area = match side {
+        MobileDrawer::Left => Rect::new(terminal.x, terminal.y, width, terminal.height),
+        MobileDrawer::Right => Rect::new(
+            terminal.right().saturating_sub(width),
+            terminal.y,
+            width,
+            terminal.height,
+        ),
+        MobileDrawer::None => return,
+    };
+    if progress >= 0.75 {
+        let close = Rect::new(area.x, area.y, 1, 1);
+        hits.mobile_drawer_close = Some(close);
+        hits.mobile_drawer_dismiss = match side {
+            MobileDrawer::Left => Some(Rect::new(
+                area.right().saturating_sub(1),
+                area.y,
+                terminal
+                    .right()
+                    .saturating_sub(area.right().saturating_sub(1)),
+                area.height,
+            )),
+            MobileDrawer::Right => Some(Rect::new(
+                terminal.x,
+                terminal.y,
+                area.x.saturating_sub(terminal.x),
+                terminal.height,
+            )),
+            MobileDrawer::None => None,
+        };
+    }
+    if side == MobileDrawer::Left {
+        if progress >= 0.75 {
+            hits.mobile_left_rows.clear();
+            let sidebar_area = area;
+            let mut left_hits = HitMap::default();
+            frame.render_widget(
+                Block::default().style(theme.base().bg(theme.bg_raised)),
+                area,
+            );
+            render_sidebar(frame, sidebar_area, model, theme, &mut left_hits);
+            hits.mobile_left_rows = left_hits.sidebar_rows;
+            let close = Rect::new(area.x, area.y, 1, 1);
+            frame.render_widget(Paragraph::new("×").style(theme.fg(theme.rose)), close);
+            hits.mobile_drawer_close = Some(close);
+            hits.mobile_drawer_dismiss = Some(Rect::new(
+                area.right().saturating_sub(1),
+                area.y,
+                terminal
+                    .right()
+                    .saturating_sub(area.right().saturating_sub(1)),
+                area.height,
+            ));
+        }
+    } else if progress >= 0.75 {
+        let close = Rect::new(area.x, area.y, 1, 1);
+        frame.render_widget(Paragraph::new("×").style(theme.fg(theme.rose)), close);
+        hits.mobile_drawer_close = Some(close);
+        hits.mobile_drawer_dismiss = Some(Rect::new(
+            terminal.x,
+            terminal.y,
+            area.x.saturating_sub(terminal.x),
+            terminal.height,
+        ));
+    }
+}
+
 pub fn draw(
     frame: &mut Frame<'_>,
     model: &FrameModel<'_>,
@@ -1337,11 +1549,21 @@ pub fn draw(
 ) -> HitMap {
     let theme = Theme::current();
     let terminal_area = frame.area();
-    let (main_area, _) = crate::right_panel::regions(
-        terminal_area,
-        model.right_panel.is_none_or(|panel| panel.collapsed()),
-    );
-    let (sidebar, mut area) = canvas_regions(terminal_area);
+    let narrow = terminal_area.width < 100 || terminal_area.height < 18;
+    let right_narrow = terminal_area.width < 124 || terminal_area.height < 18;
+    let drawer = match model.mobile_drawer {
+        MobileDrawer::Left if narrow => MobileDrawer::Left,
+        MobileDrawer::Right if right_narrow => MobileDrawer::Right,
+        _ => MobileDrawer::None,
+    };
+    let (main_area, _) = model
+        .right_panel
+        .map_or((terminal_area, None), |panel| panel.regions(terminal_area));
+    let (sidebar, mut area) = if narrow {
+        (None, terminal_area)
+    } else {
+        model.sidebar.regions(main_area)
+    };
     area.width = main_area.right().saturating_sub(area.x);
     frame.render_widget(Block::default().style(theme.base()), terminal_area);
 
@@ -1361,37 +1583,58 @@ pub fn draw(
         0
     };
     let show_approval = !model.pending.is_empty();
-    let compact = area.height < 14;
-    let chrome_height = if compact { 5 } else { 6 };
-    let extra = extra.min(
-        area.height
-            .saturating_sub(chrome_height + u16::from(show_approval) + 3),
-    );
+    let compact = area.height < 14 || terminal_area.width < 60;
+    let tiny = area.height < 11;
+    let chrome_height = if tiny {
+        2
+    } else if compact {
+        4
+    } else {
+        6
+    };
+    let keep_approval = show_approval && !tiny;
+    let minimum_overlay = u16::from(show_slash || mention_height > 0);
+    let extra = if tiny {
+        minimum_overlay.min(1)
+    } else {
+        extra
+            .min(area.height.saturating_sub(
+                chrome_height + u16::from(keep_approval) + if compact { 3 } else { 4 },
+            ))
+            .max(minimum_overlay)
+    };
 
-    let mut constraints = vec![
-        Constraint::Length(1),
-        Constraint::Length(u16::from(!compact)),
-        Constraint::Min(1),
-    ];
-    if show_approval {
+    let mut constraints = vec![Constraint::Length(1)]; // header
+    if !tiny {
+        constraints.push(Constraint::Length(1));
+    } // rule
+    constraints.push(Constraint::Min(1)); // transcript
+    if keep_approval {
         constraints.push(Constraint::Length(1));
     }
     if extra > 0 {
         constraints.push(Constraint::Length(extra));
     }
-    constraints.push(Constraint::Length(2));
-    constraints.push(Constraint::Length(1));
-    constraints.push(Constraint::Length(1));
+    constraints.push(Constraint::Length(2)); // composer
+    if !tiny {
+        constraints.push(Constraint::Length(1));
+    } // status
+    constraints.push(Constraint::Length(1)); // compact actions
 
     let chunks = Layout::vertical(constraints).split(area);
     let mut i = 0;
     let header = chunks[i];
     i += 1;
-    let rule = chunks[i];
-    i += 1;
+    let rule = if tiny {
+        Rect::new(area.x, area.y, 0, 0)
+    } else {
+        let rect = chunks[i];
+        i += 1;
+        rect
+    };
     let transcript = chunks[i];
     i += 1;
-    let approval = if show_approval {
+    let approval = if keep_approval {
         let rect = chunks[i];
         i += 1;
         Some(rect)
@@ -1407,8 +1650,13 @@ pub fn draw(
     };
     let composer = chunks[i];
     i += 1;
-    let status = chunks[i];
-    i += 1;
+    let status = if tiny {
+        Rect::new(area.x, area.bottom(), 0, 0)
+    } else {
+        let rect = chunks[i];
+        i += 1;
+        rect
+    };
     let hints = chunks[i];
 
     let mut hits = HitMap {
@@ -1417,13 +1665,36 @@ pub fn draw(
         overlay: overlay.map(inset),
         notice: show_notice,
         slash_open: show_slash,
+        mobile_drawer_active: drawer != MobileDrawer::None,
         ..HitMap::default()
     };
     if let Some(sidebar) = sidebar {
         render_sidebar(frame, sidebar, model, &theme, &mut hits);
     }
     render_header(frame, header, model, &theme, &mut hits);
-    render_rule(frame, rule, &theme);
+    if !narrow {
+        let button = Rect::new(
+            sidebar.map_or(terminal_area.x, |rect| rect.right().saturating_sub(4)),
+            terminal_area.y + 1,
+            3,
+            1,
+        );
+        frame.render_widget(
+            Paragraph::new(if model.sidebar.collapsed {
+                " › "
+            } else {
+                " ‹ "
+            })
+            .style(theme.rose_bold().bg(theme.bg_raised)),
+            button,
+        );
+        hits.sidebar_rows.push((button, Hit::SidebarToggle));
+        hits.sidebar_divider =
+            sidebar.map(|rect| Rect::new(rect.right() - 1, rect.y, 1, rect.height));
+    }
+    if !tiny {
+        render_rule(frame, rule, &theme);
+    }
     render_transcript(
         frame,
         transcript,
@@ -1447,11 +1718,83 @@ pub fn draw(
         }
     }
     render_composer(frame, composer, model, &theme, &mut hits);
-    render_status(frame, status, model, &theme);
-    render_hints(frame, hints, model, &theme, &mut hits);
+    if !tiny {
+        render_status(frame, status, model, &theme);
+    }
+    if !tiny {
+        render_hints(frame, hints, model, &theme, &mut hits);
+    } else {
+        render_hints(frame, hints, model, &theme, &mut hits);
+    }
     if let Some(panel) = model.right_panel {
-        panel.draw(frame, model, area);
+        if drawer == MobileDrawer::Right {
+            let progress = model.drawer_progress.clamp(0.0, 1.0);
+            let width = (terminal_area.width as f64 * progress)
+                .round()
+                .clamp(0.0, f64::from(terminal_area.width)) as u16;
+            let panel_area = Rect::new(
+                terminal_area.right().saturating_sub(width),
+                terminal_area.y,
+                width,
+                terminal_area.height,
+            );
+            panel.set_mobile_area(Some(panel_area));
+            panel.draw(frame, model, panel_area);
+            let close = Rect::new(panel_area.x, panel_area.y, 1, 1);
+            frame.render_widget(Paragraph::new("×").style(theme.fg(theme.rose)), close);
+            hits.mobile_drawer_close = Some(close);
+            hits.mobile_drawer_actions = panel.mobile_hits();
+            hits.mobile_drawer_dismiss = Some(Rect::new(
+                terminal_area.x,
+                terminal_area.y,
+                panel_area.x.saturating_sub(terminal_area.x),
+                terminal_area.height,
+            ));
+        } else if !right_narrow {
+            panel.set_mobile_area(None);
+            panel.draw(frame, model, area);
+        } else {
+            panel.set_mobile_area(None);
+        }
         hits.side_tool_summary_rows = panel.chat_tool_rows();
+    } else if drawer == MobileDrawer::Right {
+        let close = Rect::new(
+            terminal_area.right().saturating_sub(1),
+            terminal_area.y,
+            1,
+            1,
+        );
+        frame.render_widget(Paragraph::new("×").style(theme.fg(theme.rose)), close);
+        hits.mobile_drawer_close = Some(close);
+        hits.mobile_drawer_dismiss = Some(Rect::new(
+            terminal_area.x,
+            terminal_area.y,
+            terminal_area.width.saturating_sub(1),
+            terminal_area.height,
+        ));
+    }
+    if drawer == MobileDrawer::None {
+        if narrow {
+            let toggle = Rect::new(header.x, header.y, 1, 1);
+            frame.render_widget(Paragraph::new("≡").style(theme.fg(theme.rose)), toggle);
+            hits.mobile_left_toggle = Some(toggle);
+        }
+        if right_narrow {
+            let toggle = Rect::new(header.right().saturating_sub(1), header.y, 1, 1);
+            frame.render_widget(Paragraph::new("◧").style(theme.fg(theme.rose)), toggle);
+            hits.mobile_right_toggle = Some(toggle);
+        }
+    }
+    if drawer != MobileDrawer::None {
+        render_mobile_drawer(
+            frame,
+            terminal_area,
+            model,
+            drawer,
+            model.drawer_progress,
+            &theme,
+            &mut hits,
+        );
     }
     dim_region(
         frame.buffer_mut(),
@@ -3365,7 +3708,14 @@ fn render_settings_dialog(
         1 => &[
             ("主题", model.theme_name()),
             ("配色模式", theme::scheme().as_str()),
-            ("动画效果", "启用"),
+            (
+                "减少编辑器动画",
+                if model.right_panel.is_some_and(|panel| panel.reduce_motion) {
+                    "开启"
+                } else {
+                    "关闭"
+                },
+            ),
             ("界面语言", "简体中文"),
             (
                 "消息角色标记",
@@ -4640,7 +4990,7 @@ fn slash_label(cmd: &SlashCommand) -> String {
     }
 }
 
-fn render_notice(frame: &mut Frame<'_>, area: Rect, body: &str, theme: &Theme) {
+pub(crate) fn render_notice(frame: &mut Frame<'_>, area: Rect, body: &str, theme: &Theme) {
     let inner = inset(area);
     let lines: Vec<Line> = body
         .lines()
@@ -6649,7 +6999,7 @@ pub(crate) fn title_label(
         .unwrap_or_default()
 }
 
-fn line_count(text: &str) -> usize {
+pub(crate) fn line_count(text: &str) -> usize {
     text.lines().count().max(1)
 }
 
@@ -6815,6 +7165,8 @@ mod tests {
             index: 0,
             sidebar: &SidebarState::default(),
             right_panel: None,
+            mobile_drawer: MobileDrawer::None,
+            drawer_progress: 0.0,
             projection: Some(&projection),
             pending: &[],
             input: "",
@@ -6957,6 +7309,8 @@ mod tests {
                 index: 0,
                 sidebar: &SidebarState::default(),
                 right_panel: None,
+                mobile_drawer: MobileDrawer::None,
+                drawer_progress: 0.0,
                 projection: None,
                 pending: &[],
                 input: "",
@@ -7038,6 +7392,8 @@ mod tests {
             index: 0,
             sidebar: &SidebarState::default(),
             right_panel: None,
+            mobile_drawer: MobileDrawer::None,
+            drawer_progress: 0.0,
             projection: None,
             pending: &[],
             input: "手机终端输入一段很长的中文消息用于验证光标",
@@ -7199,6 +7555,8 @@ mod tests {
             index: 0,
             sidebar: &SidebarState::default(),
             right_panel: None,
+            mobile_drawer: MobileDrawer::None,
+            drawer_progress: 0.0,
             projection: None,
             pending: &[],
             input: "手机终端输入一段很长的中文消息用于验证光标",
@@ -7958,6 +8316,8 @@ mod tests {
             index: 0,
             sidebar,
             right_panel: None,
+            mobile_drawer: MobileDrawer::None,
+            drawer_progress: 0.0,
             projection: None,
             pending: &[],
             input: "",
@@ -8062,6 +8422,180 @@ mod tests {
         let (sidebar, canvas) = canvas_regions(Rect::new(5, 7, 100, 18));
         assert_eq!(sidebar, Some(Rect::new(5, 7, 28, 18)));
         assert_eq!(canvas, Rect::new(33, 7, 72, 18));
+    }
+
+    #[test]
+    fn sidebar_resize_clamps_and_restores_width_after_collapse() {
+        let area = Rect::new(5, 7, 100, 24);
+        let mut sidebar = SidebarState::default();
+        sidebar.resize(area, 44);
+        assert_eq!(sidebar.regions(area).0.unwrap().width, 40);
+        sidebar.collapsed = true;
+        assert_eq!(sidebar.regions(area), (None, Rect::new(8, 7, 97, 24)));
+        sidebar.collapsed = false;
+        assert_eq!(sidebar.regions(area).0.unwrap().width, 40);
+        sidebar.resize(area, 0);
+        assert_eq!(sidebar.regions(area).0.unwrap().width, 18);
+        sidebar.resize(area, u16::MAX);
+        assert_eq!(sidebar.regions(area).1.width, 40);
+    }
+
+    #[test]
+    fn sidebar_buttons_and_divider_follow_resized_layout() {
+        let mut sidebar = SidebarState::default();
+        sidebar.resize(Rect::new(0, 0, 120, 30), 39);
+        let model = sidebar_model(&[], &sidebar);
+        let (_, hits) = sidebar_frame(120, 30, &model);
+        assert_eq!(hits.sidebar.unwrap().width, 40);
+        assert_eq!(hits.sidebar_divider, Some(Rect::new(39, 0, 1, 30)));
+        assert_eq!(hits.hit(36, 1), Some(Hit::SidebarToggle));
+        sidebar.collapsed = true;
+        let model = sidebar_model(&[], &sidebar);
+        let (_, hits) = sidebar_frame(120, 30, &model);
+        assert!(hits.sidebar.is_none());
+        assert!(hits.sidebar_divider.is_none());
+        assert_eq!(hits.hit(1, 1), Some(Hit::SidebarToggle));
+        assert_eq!(hits.transcript.x, inset(Rect::new(3, 0, 117, 30)).x);
+    }
+
+    #[test]
+    fn right_drawer_is_reachable_at_every_hidden_panel_size() {
+        let sidebar = SidebarState::default();
+        let mut model = sidebar_model(&[], &sidebar);
+        for (width, height) in [
+            (40, 24),
+            (60, 24),
+            (80, 24),
+            (99, 24),
+            (100, 24),
+            (120, 24),
+            (123, 24),
+            (160, 17),
+        ] {
+            model.mobile_drawer = MobileDrawer::None;
+            let (_, hits) = sidebar_frame(width, height, &model);
+            let toggle = hits
+                .mobile_right_toggle
+                .expect("hidden right panel has a drawer entry");
+            assert_eq!(hits.hit(toggle.x, toggle.y), Some(Hit::MobileRightToggle));
+            assert_eq!(
+                hits.mobile_left_toggle.is_some(),
+                width < 100 || height < 18
+            );
+            model.mobile_drawer = MobileDrawer::Right;
+            model.drawer_progress = 1.0;
+            let (_, hits) = sidebar_frame(width, height, &model);
+            assert!(hits.mobile_drawer_active, "{width}x{height}");
+            assert!(hits.mobile_drawer_close.is_some());
+        }
+        model.mobile_drawer = MobileDrawer::None;
+        let (_, hits) = sidebar_frame(124, 24, &model);
+        assert!(hits.mobile_right_toggle.is_none());
+    }
+
+    #[test]
+    fn mobile_drawers_cover_canvas_and_capture_background_hits() {
+        let sidebar = SidebarState::default();
+        let mut model = sidebar_model(&[], &sidebar);
+        let mut terminal = Terminal::new(TestBackend::new(40, 24)).unwrap();
+        let mut hits = HitMap::default();
+        model.mobile_drawer = MobileDrawer::Left;
+        model.drawer_progress = 1.0;
+        terminal
+            .draw(|frame| hits = draw(frame, &model, &mut TranscriptCache::default()))
+            .unwrap();
+        assert_eq!(hits.hit(0, 0), Some(Hit::MobileDrawerClose));
+        assert_eq!(hits.hit(39, 12), Some(Hit::MobileDrawerDismiss));
+        assert_eq!(hits.hit(20, 10), None);
+
+        model.mobile_drawer = MobileDrawer::Right;
+        model.drawer_progress = 1.0;
+        terminal
+            .draw(|frame| hits = draw(frame, &model, &mut TranscriptCache::default()))
+            .unwrap();
+        assert_eq!(hits.hit(0, 0), Some(Hit::MobileDrawerClose));
+        assert_eq!(hits.hit(0, 12), None);
+
+        model.mobile_drawer = MobileDrawer::None;
+        terminal
+            .draw(|frame| hits = draw(frame, &model, &mut TranscriptCache::default()))
+            .unwrap();
+        assert!(hits.mobile_left_toggle.is_some());
+        assert!(hits.mobile_right_toggle.is_some());
+        assert_eq!(
+            hits.hit(hits.mobile_left_toggle.unwrap().x, 0),
+            Some(Hit::MobileLeftToggle)
+        );
+        assert_eq!(
+            hits.hit(hits.mobile_right_toggle.unwrap().x, 0),
+            Some(Hit::MobileRightToggle)
+        );
+    }
+
+    #[test]
+    fn tiny_mobile_canvas_keeps_composer_and_actions_inside_terminal() {
+        let mut model = FrameModel {
+            dialog_stack: &[],
+            workspace: Path::new("/tmp"),
+            sessions: &[],
+            index: 0,
+            sidebar: &SidebarState::default(),
+            right_panel: None,
+            mobile_drawer: MobileDrawer::None,
+            drawer_progress: 0.0,
+            projection: None,
+            pending: &[],
+            input: "输入中文",
+            status: "ready",
+            notice: None,
+            paste_preview: None,
+            passport_dialog: None,
+            provider_dialog: None,
+            add_provider_dialog: None,
+            theme_dialog: None,
+            context_dialog: None,
+            settings_dialog: None,
+            harness_dialog: None,
+            permission_dialog: None,
+            tool_dialog: None,
+            tool_detail_dialog: None,
+            slash_hits: &[],
+            slash_selected: 0,
+            mentions: None,
+            search: None,
+            hide_tools: false,
+            message_roles: true,
+            scroll: 0,
+            permission_mode: PermissionMode::Ask,
+            model: "model",
+            provider: "provider",
+            mode_menu: None,
+            project_picker: None,
+            folder_picker: None,
+            question_dialog: None,
+            session_picker: None,
+            git_dialog: None,
+            git_status: None,
+            user_label: "you",
+            running: false,
+            tick: 0,
+            pointer: None,
+            text_selection: None,
+        };
+        for (width, height) in [(20, 10), (24, 10), (32, 12), (40, 14), (60, 16), (80, 18)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            let mut hits = HitMap::default();
+            terminal
+                .draw(|frame| hits = draw(frame, &model, &mut TranscriptCache::default()))
+                .unwrap();
+            assert!(hits.composer.width > 0 && hits.composer.height >= 2);
+            assert!(hits.composer.right() <= width && hits.composer.bottom() <= height);
+            assert!(hits.transcript.width > 0);
+            for (rect, _) in hits.hints {
+                assert!(rect.right() <= width && rect.bottom() <= height);
+            }
+            model.input = "/";
+        }
     }
 
     #[test]
@@ -9429,6 +9963,8 @@ mod tests {
             index: 0,
             sidebar: &SidebarState::default(),
             right_panel: None,
+            mobile_drawer: MobileDrawer::None,
+            drawer_progress: 0.0,
             projection: None,
             pending: &[],
             input: "手机终端输入一段很长的中文消息用于验证光标",
@@ -9487,7 +10023,14 @@ mod tests {
                     })
                     .unwrap();
                 assert!(hits.composer.height >= 2);
-                assert!(hits.transcript.height >= 3);
+                assert!(
+                    hits.transcript.height
+                        >= if height <= 10 || width <= 40 && height < 14 {
+                            0
+                        } else {
+                            3
+                        }
+                );
                 for rect in hits
                     .hints
                     .iter()
@@ -9824,6 +10367,8 @@ mod dialog_layer_tests {
             index: 0,
             sidebar: &SidebarState::default(),
             right_panel: None,
+            mobile_drawer: MobileDrawer::None,
+            drawer_progress: 0.0,
             projection: None,
             pending: &[],
             input: "draft",

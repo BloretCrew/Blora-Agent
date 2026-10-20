@@ -52,16 +52,22 @@ impl Tab {
     }
 }
 #[derive(Clone, Debug)]
-enum Action {
+pub(crate) enum Action {
     Tab(Tab),
     Close(Tab),
     Collapse,
     Restore,
     File(usize),
+    Document(PathBuf),
+    CloseDocument(PathBuf),
     FileSave,
+    CompareKeep,
+    CompareReload,
     FileConfirm(bool),
     FileCancel,
     Back,
+    Explorer,
+    DocumentCycle(bool),
     Focus,
     Refresh,
     Restart,
@@ -83,6 +89,12 @@ pub enum Control {
     Permission,
     Context,
 }
+#[derive(Clone, Copy, Debug, Default)]
+pub enum PanelMotion {
+    #[default]
+    Full,
+    Reduced,
+}
 
 pub struct SideChat {
     pub id: SessionId,
@@ -93,9 +105,13 @@ pub struct SideChat {
     draft: String,
     cursor: usize,
     mentions: crate::session_mentions::SessionMentions,
+    paste_preview: Option<String>,
     history: Vec<String>,
     history_index: Option<usize>,
     saved_draft: String,
+    slash_selected: usize,
+    slash_notice: Option<String>,
+    slash_dismissed: bool,
     rendered: std::cell::Cell<usize>,
     max_scroll: std::cell::Cell<usize>,
     unread: std::cell::Cell<usize>,
@@ -120,7 +136,9 @@ pub struct RightPanel {
     active: Tab,
     pub focused: bool,
     collapsed: bool,
-    area: Option<Rect>,
+    preferred_width: u16,
+    area: std::cell::Cell<Option<Rect>>,
+    mobile_drawer: std::cell::Cell<bool>,
     hits: std::cell::RefCell<Vec<(Rect, Action)>>,
     files: Files,
     pub chat: Option<SideChat>,
@@ -132,6 +150,14 @@ pub struct RightPanel {
     chat_error: String,
     terminal_workspace: PathBuf,
     editor_area: std::cell::Cell<Option<Rect>>,
+    editor_dragging: bool,
+    explorer_focused: bool,
+    explorer_area: std::cell::Cell<Option<Rect>>,
+    pub editor_focus: bool,
+    pub reduce_motion: bool,
+    editor_progress: std::cell::Cell<f64>,
+    editor_transition_at: std::cell::Cell<Option<std::time::Instant>>,
+    editor_transition_from: std::cell::Cell<f64>,
     done_tx: Sender<(SessionId, String)>,
     done_rx: Receiver<(SessionId, String)>,
     cancellations: std::sync::Arc<std::sync::Mutex<Vec<CancelToken>>>,
@@ -146,7 +172,9 @@ impl Default for RightPanel {
             active: Tab::Info,
             focused: false,
             collapsed: false,
-            area: None,
+            preferred_width: 36,
+            area: None.into(),
+            mobile_drawer: false.into(),
             hits: std::cell::RefCell::new(vec![]),
             files: Files::new(),
             chat: None,
@@ -158,6 +186,14 @@ impl Default for RightPanel {
             chat_error: String::new(),
             terminal_workspace: PathBuf::new(),
             editor_area: std::cell::Cell::new(None),
+            editor_dragging: false,
+            explorer_focused: false,
+            explorer_area: None.into(),
+            editor_focus: false,
+            reduce_motion: false,
+            editor_progress: 0.0.into(),
+            editor_transition_at: std::cell::Cell::new(None),
+            editor_transition_from: 0.0.into(),
             done_tx,
             done_rx,
             cancellations: Default::default(),
@@ -165,10 +201,14 @@ impl Default for RightPanel {
     }
 }
 pub fn regions(area: Rect, collapsed: bool) -> (Rect, Option<Rect>) {
+    regions_with_width(area, collapsed, 36)
+}
+fn regions_with_width(area: Rect, collapsed: bool, preferred_width: u16) -> (Rect, Option<Rect>) {
     if !collapsed && area.width >= 124 && area.height >= 18 {
+        let width = preferred_width.clamp(24, area.width.saturating_sub(88));
         (
-            Rect::new(area.x, area.y, area.width - 36, area.height),
-            Some(Rect::new(area.right() - 36, area.y, 36, area.height)),
+            Rect::new(area.x, area.y, area.width - width, area.height),
+            Some(Rect::new(area.right() - width, area.y, width, area.height)),
         )
     } else {
         (area, None)
@@ -194,6 +234,65 @@ impl Drop for CancelGuard {
     }
 }
 impl RightPanel {
+    pub(crate) fn regions(&self, area: Rect) -> (Rect, Option<Rect>) {
+        regions_with_width(area, self.collapsed, self.preferred_width)
+    }
+    pub(crate) fn resize(&mut self, terminal: Rect, column: u16) {
+        self.preferred_width = terminal
+            .right()
+            .saturating_sub(column)
+            .clamp(24, terminal.width.saturating_sub(88).max(24));
+    }
+    pub(crate) fn resize_hit(&self, column: u16, row: u16) -> bool {
+        !self.mobile_drawer.get()
+            && !self.editor_focus
+            && !self.collapsed
+            && self
+                .area
+                .get()
+                .is_some_and(|area| column == area.x && row >= area.y && row < area.bottom())
+    }
+    pub(crate) fn motion_active(&self, now: std::time::Instant) -> bool {
+        self.editor_transition_at.get().is_some_and(|at| {
+            now.saturating_duration_since(at) < std::time::Duration::from_millis(240)
+        })
+    }
+    fn editor_motion_value(&self, now: std::time::Instant) -> f64 {
+        if self.reduce_motion {
+            return f64::from(self.editor_focus);
+        }
+        let Some(start) = self.editor_transition_at.get() else {
+            return f64::from(self.editor_focus);
+        };
+        let t = (now.saturating_duration_since(start).as_secs_f64() / 0.24).clamp(0.0, 1.0);
+        let eased = t * t * (3.0 - 2.0 * t);
+        let from = self.editor_transition_from.get();
+        let to = f64::from(self.editor_focus);
+        from + (to - from) * eased
+    }
+    pub(crate) fn set_mobile_area(&self, area: Option<Rect>) {
+        if area.is_some() || self.mobile_drawer.get() {
+            self.area.set(area);
+        }
+        self.mobile_drawer.set(area.is_some());
+    }
+    pub(crate) fn mobile_hits(&self) -> Vec<(Rect, Action)> {
+        self.hits.borrow().clone()
+    }
+    pub(crate) fn sync_mobile_area(&mut self, terminal: Rect, drawer_open: bool) {
+        if drawer_open && regions(terminal, false).1.is_none() {
+            let area = Rect::new(
+                terminal.right().saturating_sub(terminal.width),
+                terminal.y,
+                terminal.width,
+                terminal.height,
+            );
+            self.area.set(Some(area));
+        } else if terminal.width < 100 || terminal.height < 18 {
+            self.area.set(None);
+            self.focused = false;
+        }
+    }
     pub fn inherit_controls(
         &mut self,
         permission: blora_policy::PermissionMode,
@@ -219,10 +318,10 @@ impl RightPanel {
         }
     }
     pub fn control_hit(&self, x: u16, y: u16) -> Option<Control> {
-        if self.active != Tab::Chat || self.area.is_none() || self.collapsed {
+        if self.active != Tab::Chat || self.area.get().is_none() || self.collapsed {
             return None;
         }
-        if self.active != Tab::Chat || self.collapsed || self.area.is_none() {
+        if self.active != Tab::Chat || self.collapsed || self.area.get().is_none() {
             return None;
         }
         self.controls
@@ -319,7 +418,7 @@ impl RightPanel {
         }
     }
     pub(crate) fn mention_event(&mut self, event: &Event) -> bool {
-        if self.active != Tab::Chat || self.collapsed || self.area.is_none() {
+        if self.active != Tab::Chat || self.collapsed || self.area.get().is_none() {
             return false;
         }
         if !self.focused && !matches!(event, Event::Mouse(_)) {
@@ -340,7 +439,7 @@ impl RightPanel {
         self.focused && self.active == Tab::Chat
     }
     pub fn chat_tool_rows(&self) -> Vec<(Rect, SessionId, Vec<usize>)> {
-        if self.active != Tab::Chat || self.collapsed || self.area.is_none() {
+        if self.active != Tab::Chat || self.collapsed || self.area.get().is_none() {
             return Vec::new();
         }
         self.chat
@@ -364,12 +463,17 @@ impl RightPanel {
         self.done_tx.clone()
     }
     pub fn sync(&mut self, runtime: &Runtime, workspace: &Path, area: Rect) {
-        self.area = regions(area, self.collapsed).1;
-        if self.area.is_none() {
+        self.mobile_drawer.set(false);
+        self.area.set(self.regions(area).1);
+        if self.area.get().is_none() {
             self.focused = false;
         }
         if self.tabs.contains(&Tab::Files) {
             self.files.sync(workspace);
+            if self.files.preview_path.is_some() && self.files.editor.is_some() {
+                let path = self.files.preview_path.clone().unwrap();
+                self.files.register_active_document(path);
+            }
             if matches!(self.files.pending_leave, Some(Leave::Project(_))) {
                 self.active = Tab::Files;
                 self.focused = true;
@@ -377,7 +481,7 @@ impl RightPanel {
         }
         if let Some(terminal) = self.terminal.as_mut() {
             terminal.poll();
-            if let Some(area) = self.area {
+            if let Some(area) = self.area.get() {
                 let _ =
                     terminal.resize(area.width.saturating_sub(1), area.height.saturating_sub(4));
             }
@@ -420,9 +524,13 @@ impl RightPanel {
                             draft: String::new(),
                             cursor: 0,
                             mentions: Default::default(),
+                            paste_preview: None,
                             history: vec![],
                             history_index: None,
                             saved_draft: String::new(),
+                            slash_selected: 0,
+                            slash_notice: None,
+                            slash_dismissed: false,
                             rendered: 0.into(),
                             max_scroll: 0.into(),
                             unread: 0.into(),
@@ -441,6 +549,9 @@ impl RightPanel {
             }
         }
         self.active = tab;
+        if tab == Tab::Files {
+            self.editor_focus = false;
+        }
         self.focused = true;
     }
     fn restart_terminal(&mut self) {
@@ -455,6 +566,7 @@ impl RightPanel {
         self.terminal_error.clear();
         let area = self
             .area
+            .get()
             .map(|area| layout::body(Rect::new(area.x + 1, area.y, area.width - 1, area.height)));
         let (cols, rows) = area
             .map(|r| (r.width, r.height.saturating_sub(1)))
@@ -544,8 +656,162 @@ impl RightPanel {
         })
     }
     pub fn event(&mut self, event: &Event, runtime: &Runtime, workspace: &Path) -> bool {
+        if self.active == Tab::Files && self.files.comparison.is_some() {
+            if let Event::Mouse(mouse) = event {
+                if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                    let action = self
+                        .hits
+                        .borrow()
+                        .iter()
+                        .find(|(area, _)| area.contains((mouse.column, mouse.row).into()))
+                        .map(|(_, action)| action.clone());
+                    match action {
+                        Some(Action::CompareKeep) => {
+                            self.files.comparison = None;
+                            return true;
+                        }
+                        Some(Action::CompareReload) => {
+                            self.files.reload_compared();
+                            return true;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            match event {
+                Event::Key(key)
+                    if self.focused
+                        && matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
+                {
+                    match key.code {
+                        KeyCode::Esc => self.files.comparison = None,
+                        KeyCode::Char('r') => self.files.reload_compared(),
+                        KeyCode::Down | KeyCode::PageDown => {
+                            let comparison = self.files.comparison.as_mut().unwrap();
+                            comparison.scroll = (comparison.scroll
+                                + if key.code == KeyCode::Down { 1 } else { 10 })
+                            .min(comparison.lines.len().saturating_sub(1));
+                        }
+                        KeyCode::Up | KeyCode::PageUp => {
+                            let comparison = self.files.comparison.as_mut().unwrap();
+                            comparison.scroll = comparison
+                                .scroll
+                                .saturating_sub(if key.code == KeyCode::Up { 1 } else { 10 });
+                        }
+                        _ => {}
+                    }
+                    return true;
+                }
+                Event::Mouse(mouse)
+                    if self
+                        .area
+                        .get()
+                        .is_some_and(|area| area.contains((mouse.column, mouse.row).into())) =>
+                {
+                    if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                        self.focused = true;
+                    }
+                    let comparison = self.files.comparison.as_mut().unwrap();
+                    match mouse.kind {
+                        MouseEventKind::ScrollDown => {
+                            comparison.scroll = (comparison.scroll + 3)
+                                .min(comparison.lines.len().saturating_sub(1))
+                        }
+                        MouseEventKind::ScrollUp => {
+                            comparison.scroll = comparison.scroll.saturating_sub(3)
+                        }
+                        _ => {}
+                    }
+                    return true;
+                }
+                Event::Paste(_) if self.focused => return true,
+                _ => {}
+            }
+        }
         if let Event::Mouse(mouse) = event {
+            if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left)) {
+                self.editor_dragging = false;
+            }
+            if self.editor_dragging
+                && matches!(mouse.kind, MouseEventKind::Drag(MouseButton::Left))
+                && self.active == Tab::Files
+                && self.files.pending_leave.is_none()
+            {
+                if let (Some(area), Some(editor)) =
+                    (self.editor_area.get(), self.files.editor.as_mut())
+                {
+                    if area.width > 0 && area.height > 0 {
+                        if mouse.row < area.y {
+                            self.files.scroll = self.files.scroll.saturating_sub(1);
+                        }
+                        if mouse.row >= area.bottom() {
+                            self.files.scroll =
+                                (self.files.scroll + 1).min(self.files.max_scroll.get());
+                        }
+                        if mouse.column < area.x {
+                            self.files.horizontal = self.files.horizontal.saturating_sub(1);
+                        }
+                        if mouse.column >= area.right() {
+                            self.files.horizontal =
+                                (self.files.horizontal + 1).min(self.files.max_horizontal.get());
+                        }
+                        let row = mouse.row.clamp(area.y, area.bottom() - 1) - area.y;
+                        let col = mouse.column.clamp(area.x, area.right() - 1) - area.x;
+                        editor.move_to_display_position(
+                            self.files.scroll + row as usize,
+                            self.files.horizontal + col as usize,
+                        );
+                    }
+                }
+                return true;
+            }
             if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                self.editor_dragging = false;
+                if self.active == Tab::Files && self.files.pending_leave.is_some() {
+                    let allowed = self
+                        .hits
+                        .borrow()
+                        .iter()
+                        .find(|(rect, _)| rect.contains((mouse.column, mouse.row).into()))
+                        .is_some_and(|(_, action)| {
+                            matches!(action, Action::FileConfirm(_) | Action::FileCancel)
+                        });
+                    if !allowed {
+                        return true;
+                    }
+                }
+                if self.active == Tab::Files {
+                    let clicked = self
+                        .hits
+                        .borrow()
+                        .iter()
+                        .find(|(rect, _)| rect.contains((mouse.column, mouse.row).into()))
+                        .map(|(_, action)| action.clone());
+                    match clicked {
+                        Some(Action::Document(path)) => {
+                            self.files.activate_path(&path);
+                            self.explorer_focused = false;
+                            self.focused = true;
+                            return true;
+                        }
+                        Some(Action::CloseDocument(path)) => {
+                            if self.files.documents.iter().any(|d| {
+                                d.path == path
+                                    && d.editor
+                                        .as_ref()
+                                        .is_some_and(crate::right_panel::editor::Editor::dirty)
+                            }) {
+                                self.files.pending_leave = Some(Leave::CloseDocument(path));
+                            } else if let Some(i) =
+                                self.files.documents.iter().position(|d| d.path == path)
+                            {
+                                self.files.close_document(i);
+                            }
+                            return true;
+                        }
+                        _ => {}
+                    }
+                }
                 if self.active == Tab::Files
                     && self.files.editor.is_some()
                     && self
@@ -555,11 +821,17 @@ impl RightPanel {
                 {
                     let area = self.editor_area.get().expect("checked editor area");
                     self.focused = true;
+                    self.explorer_focused = false;
                     let row = mouse.row.saturating_sub(area.y) as usize + self.files.scroll;
                     let column =
                         mouse.column.saturating_sub(area.x) as usize + self.files.horizontal;
                     if let Some(editor) = self.files.editor.as_mut() {
-                        editor.move_to_display_position(row, column);
+                        editor.begin_mouse_selection(
+                            row,
+                            column,
+                            mouse.modifiers.contains(KeyModifiers::SHIFT),
+                        );
+                        self.editor_dragging = true;
                     }
                     return true;
                 }
@@ -601,14 +873,45 @@ impl RightPanel {
                         Action::Restore => self.collapsed = false,
                         Action::File(index) => {
                             self.focused = true;
-                            self.files.open(index);
+                            if self.explorer_area.get().is_some() {
+                                self.explorer_focused = self
+                                    .files
+                                    .entries
+                                    .get(index)
+                                    .is_some_and(|entry| entry.directory);
+                                self.files.open_in_explorer(index);
+                            } else {
+                                self.explorer_focused = false;
+                                self.files.open(index);
+                            }
+                        }
+                        Action::Document(path) => {
+                            self.files.activate_path(&path);
+                        }
+                        Action::CloseDocument(path) => {
+                            if self.files.documents.iter().any(|d| {
+                                d.path == path
+                                    && d.editor
+                                        .as_ref()
+                                        .is_some_and(crate::right_panel::editor::Editor::dirty)
+                            }) {
+                                self.files.pending_leave = Some(Leave::CloseDocument(path));
+                            } else if let Some(i) =
+                                self.files.documents.iter().position(|d| d.path == path)
+                            {
+                                self.files.close_document(i);
+                            }
                         }
                         Action::FileSave => {
                             self.files.save();
                         }
+                        Action::CompareKeep => self.files.comparison = None,
+                        Action::CompareReload => self.files.reload_compared(),
                         Action::FileConfirm(save) => self.confirm_file_leave(save),
                         Action::FileCancel => self.files.cancel_leave(),
                         Action::Back => self.files.back(),
+                        Action::Explorer => self.files.show_explorer(),
+                        Action::DocumentCycle(backwards) => self.files.cycle_document(backwards),
                         Action::Focus => self.focused = true,
                         Action::Refresh => self.files.refresh(),
                         Action::Restart => self.restart_terminal(),
@@ -640,6 +943,7 @@ impl RightPanel {
             }
             if self
                 .area
+                .get()
                 .is_some_and(|rect| rect.contains((mouse.column, mouse.row).into()))
             {
                 let delta = match mouse.kind {
@@ -648,6 +952,17 @@ impl RightPanel {
                     _ => return true,
                 };
                 match self.active {
+                    Tab::Files
+                        if self.explorer_area.get().is_some_and(|rect| {
+                            rect.contains((mouse.column, mouse.row).into())
+                        }) =>
+                    {
+                        self.files.selected = self
+                            .files
+                            .selected
+                            .saturating_add_signed(delta)
+                            .min(self.files.entries.len().saturating_sub(1));
+                    }
                     Tab::Files if self.files.editor.is_some() => {
                         if self
                             .editor_area
@@ -684,17 +999,12 @@ impl RightPanel {
                     }
                     Tab::Chat => {
                         if let Some(chat) = self.chat.as_mut() {
-                            chat.scroll.set(
-                                chat.scroll
-                                    .get()
-                                    .saturating_add_signed(-delta)
-                                    .min(chat.max_scroll.get()),
-                            );
+                            chat.scroll_page(delta > 0, delta.unsigned_abs() as usize);
                         }
                     }
                     Tab::Terminal => {
                         if let Some(terminal) = self.terminal.as_mut() {
-                            let content = self.area.map(|area| {
+                            let content = self.area.get().map(|area| {
                                 let inner =
                                     Rect::new(area.x + 1, area.y, area.width - 1, area.height);
                                 let body = layout::body(inner);
@@ -747,7 +1057,7 @@ impl RightPanel {
             }
             return false;
         }
-        if !self.focused || self.area.is_none() {
+        if !self.focused || self.area.get().is_none() {
             return false;
         }
         if self.active == Tab::Files && self.files.pending_leave.is_some() {
@@ -763,8 +1073,173 @@ impl RightPanel {
             }
             return true;
         }
+        if self.active == Tab::Files && self.files.editor.as_ref().is_some_and(|e| e.search_active)
+        {
+            if let (Some(editor), Event::Key(key)) = (self.files.editor.as_mut(), event) {
+                if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                    return true;
+                }
+                match key.code {
+                    KeyCode::Esc => {
+                        editor.search_active = false;
+                        editor.goto_mode = false;
+                        return true;
+                    }
+                    KeyCode::Enter if editor.goto_mode => match editor.search.parse::<usize>() {
+                        Ok(line) if line > 0 => {
+                            editor.goto_line(line);
+                            self.files.scroll = editor.position().0;
+                            editor.search_active = false;
+                            editor.goto_mode = false;
+                        }
+                        _ => self.files.message = "请输入大于 0 的行号".into(),
+                    },
+                    KeyCode::Enter if editor.replace_mode => {
+                        if editor.replacement_focused {
+                            let replacement = editor.replacement.clone();
+                            let count = if key.modifiers.contains(KeyModifiers::CONTROL) {
+                                editor.replace_all(&replacement)
+                            } else {
+                                usize::from(editor.replace_current(&replacement))
+                            };
+                            self.files.message = format!("已替换 {count} 处");
+                            self.files.scroll = editor.position().0;
+                            editor.search_active = true;
+                        } else {
+                            editor.replacement_focused = true;
+                        }
+                    }
+                    KeyCode::Tab if editor.replace_mode => {
+                        editor.replacement_focused = !editor.replacement_focused;
+                    }
+                    KeyCode::Enter => {
+                        let found = editor.find_next(key.modifiers.contains(KeyModifiers::SHIFT));
+                        self.files.message = if found {
+                            String::new()
+                        } else {
+                            "未找到匹配项".into()
+                        };
+                        if found {
+                            self.files.scroll = editor.position().0;
+                        }
+                        editor.search_active = true;
+                    }
+                    KeyCode::Backspace => {
+                        if editor.replacement_focused {
+                            editor.replacement.pop();
+                        } else {
+                            editor.search.pop();
+                        }
+                    }
+                    KeyCode::Char(c)
+                        if !key
+                            .modifiers
+                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                    {
+                        if editor.replacement_focused {
+                            editor.replacement.push(c);
+                        } else {
+                            editor.search.push(c);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if let (Some(editor), Event::Paste(text)) = (self.files.editor.as_mut(), event) {
+                if editor.replacement_focused {
+                    editor.replacement.push_str(text);
+                } else {
+                    editor.search.push_str(text);
+                }
+            }
+            return true;
+        }
         if let Event::Key(key) = event {
             if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                return true;
+            }
+            if self.active == Tab::Files && key.code == KeyCode::F(5) && self.files.editor.is_some()
+            {
+                self.files.compare_disk();
+                return true;
+            }
+            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                if self.active == Tab::Files
+                    && matches!(
+                        key.code,
+                        KeyCode::Char('p') | KeyCode::Tab | KeyCode::BackTab
+                    )
+                    && !self.files.documents.is_empty()
+                {
+                    let n = self.files.documents.len();
+                    let i = self.files.active_document.unwrap_or(0);
+                    let next = if key.modifiers.contains(KeyModifiers::SHIFT)
+                        || key.code == KeyCode::BackTab
+                    {
+                        (i + n - 1) % n
+                    } else {
+                        (i + 1) % n
+                    };
+                    self.files.activate_document(next);
+                    return true;
+                }
+                if self.active == Tab::Files
+                    && key.code == KeyCode::Char('g')
+                    && self.files.editor.is_some()
+                {
+                    self.files.editor.as_mut().unwrap().key(*key);
+                    return true;
+                }
+            }
+            if self.active == Tab::Files && key.code == KeyCode::F(11) {
+                self.editor_transition_from
+                    .set(self.editor_motion_value(std::time::Instant::now()));
+                self.editor_focus = !self.editor_focus;
+                if !self.reduce_motion {
+                    self.editor_transition_at
+                        .set(Some(std::time::Instant::now()));
+                }
+                return true;
+            }
+            if self.active == Tab::Files && key.code == KeyCode::F(6) {
+                if self.explorer_area.get().is_some() {
+                    self.explorer_focused = !self.explorer_focused;
+                } else {
+                    self.files.show_explorer();
+                }
+                return true;
+            }
+            if self.active == Tab::Files && self.explorer_focused {
+                // Resizing can remove the split explorer between key events.
+                if self.explorer_area.get().is_none() {
+                    self.explorer_focused = false;
+                }
+            }
+            if self.active == Tab::Files && self.explorer_focused {
+                match key.code {
+                    KeyCode::Left => self.files.tree_horizontal(false),
+                    KeyCode::Right => self.files.tree_horizontal(true),
+                    KeyCode::Home => self.files.selected = 0,
+                    KeyCode::End => {
+                        self.files.selected = self.files.entries.len().saturating_sub(1)
+                    }
+                    KeyCode::Up => self.files.selected = self.files.selected.saturating_sub(1),
+                    KeyCode::Down => {
+                        self.files.selected = (self.files.selected + 1)
+                            .min(self.files.entries.len().saturating_sub(1))
+                    }
+                    KeyCode::Enter => {
+                        let directory = self
+                            .files
+                            .entries
+                            .get(self.files.selected)
+                            .is_some_and(|entry| entry.directory);
+                        self.files.open_in_explorer(self.files.selected);
+                        self.explorer_focused = directory;
+                    }
+                    KeyCode::Esc => self.explorer_focused = false,
+                    _ => {}
+                }
                 return true;
             }
             if key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -805,6 +1280,20 @@ impl RightPanel {
                 return true;
             }
         }
+        if self.active == Tab::Chat {
+            if let Event::Key(key) = event {
+                if let KeyCode::Char(c) = key.code
+                    && !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                {
+                    if let Some(chat) = self.chat.as_mut() {
+                        chat.insert(&c.to_string());
+                        return true;
+                    }
+                }
+            }
+        }
         match self.active {
             Tab::Terminal => {
                 if let Some(terminal) = self.terminal.as_mut() {
@@ -819,6 +1308,7 @@ impl RightPanel {
                         {
                             let page = self
                                 .area
+                                .get()
                                 .map(|area| area.height.saturating_sub(5) as isize)
                                 .unwrap_or(10);
                             terminal.scroll_history(if key.code == KeyCode::PageUp {
@@ -852,10 +1342,50 @@ impl RightPanel {
                         self.files.back();
                         return true;
                     }
+                    if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && key.code == KeyCode::Char('c')
+                    {
+                        if let Some(text) =
+                            self.files.editor.as_ref().and_then(|e| e.selected_text())
+                        {
+                            crate::copy_text_to_clipboard(text);
+                        }
+                        return true;
+                    }
+                    if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && key.code == KeyCode::Char('x')
+                    {
+                        if let Some(editor) = self.files.editor.as_mut() {
+                            if let Some(text) = editor.cut() {
+                                crate::copy_text_to_clipboard(&text);
+                                self.files.preview = Some(editor.text.clone());
+                            }
+                        }
+                        return true;
+                    }
+                    if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && key.code == KeyCode::Char('v')
+                    {
+                        if let Some(text) = crate::read_clipboard_text() {
+                            if let Some(editor) = self.files.editor.as_mut() {
+                                editor.insert(&text);
+                                self.files.preview = Some(editor.text.clone());
+                            }
+                        }
+                        return true;
+                    }
+                    if key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT) {
+                        if let Some(e) = self.files.editor.as_mut() {
+                            e.indent_lines(true);
+                        }
+                        return true;
+                    }
                 }
                 if let Some(editor) = self.files.editor.as_mut() {
                     match event {
-                        Event::Paste(text) => editor.insert(text),
+                        Event::Paste(text) => {
+                            editor.insert(text);
+                        }
                         Event::Key(key) => editor.key(*key),
                         _ => {}
                     }
@@ -863,6 +1393,7 @@ impl RightPanel {
                     let (row, _) = editor.position();
                     let page = self
                         .area
+                        .get()
                         .map_or(10, |r| r.height.saturating_sub(7) as usize)
                         .max(1);
                     if row < self.files.scroll {
@@ -881,6 +1412,7 @@ impl RightPanel {
                     );
                     let width = self
                         .area
+                        .get()
                         .map_or(24, |r| r.width.saturating_sub(8) as usize)
                         .max(1);
                     if column < self.files.horizontal {
@@ -893,6 +1425,7 @@ impl RightPanel {
                     if let Event::Key(key) = event {
                         let page = self
                             .area
+                            .get()
                             .map(|r| r.height.saturating_sub(6) as usize)
                             .unwrap_or(10)
                             .max(1);
@@ -951,13 +1484,136 @@ impl RightPanel {
             }
             Tab::Chat => {
                 if let Some(chat) = self.chat.as_mut() {
+                    if let Event::Key(key) = event
+                        && !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+                    {
+                        return true;
+                    }
                     match event {
-                        Event::Paste(text) => chat.insert(text),
-                        Event::Key(key) if key.code == KeyCode::PageUp => chat
-                            .scroll
-                            .set((chat.scroll.get() + 10).min(chat.max_scroll.get())),
+                        Event::Paste(text) => {
+                            let tail = chat.draft.split_off(chat.cursor);
+                            crate::insert_pasted_text(
+                                &mut chat.draft,
+                                &mut chat.paste_preview,
+                                &text,
+                            );
+                            if chat.paste_preview.is_some() {
+                                chat.draft.push_str(&tail);
+                                chat.cursor = chat.draft.len();
+                            } else {
+                                chat.cursor = chat.draft.len();
+                                chat.draft.push_str(&tail);
+                            }
+                            chat.history_index = None;
+                            chat.slash_dismissed = false;
+                            chat.slash_notice = None;
+                        }
+                        Event::Key(key) if key.code == KeyCode::Insert => {
+                            let tail = chat.draft.split_off(chat.cursor);
+                            crate::paste_clipboard(&mut chat.draft, &mut chat.paste_preview);
+                            if chat.paste_preview.is_some() {
+                                chat.draft.push_str(&tail);
+                                chat.cursor = chat.draft.len();
+                            } else {
+                                chat.cursor = chat.draft.len();
+                                chat.draft.push_str(&tail);
+                            }
+                            chat.history_index = None;
+                            chat.slash_dismissed = false;
+                            chat.slash_notice = None;
+                        }
+                        Event::Key(key)
+                            if key.code == KeyCode::Char('v')
+                                && key.modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
+                            let tail = chat.draft.split_off(chat.cursor);
+                            crate::paste_clipboard(&mut chat.draft, &mut chat.paste_preview);
+                            if chat.paste_preview.is_some() {
+                                chat.draft.push_str(&tail);
+                                chat.cursor = chat.draft.len();
+                            } else {
+                                chat.cursor = chat.draft.len();
+                                chat.draft.push_str(&tail);
+                            }
+                            chat.history_index = None;
+                            chat.slash_dismissed = false;
+                            chat.slash_notice = None;
+                        }
+                        Event::Key(key) if key.code == KeyCode::PageUp => {
+                            chat.scroll_page(false, 8)
+                        }
                         Event::Key(key) if key.code == KeyCode::PageDown => {
-                            chat.scroll.set(chat.scroll.get().saturating_sub(10))
+                            chat.scroll_page(true, 8)
+                        }
+                        Event::Key(key) if key.code == KeyCode::Home => {
+                            chat.scroll.set(chat.max_scroll.get());
+                            chat.unread.set(0);
+                        }
+                        Event::Key(key) if key.code == KeyCode::End => {
+                            chat.scroll.set(0);
+                            chat.unread.set(0);
+                        }
+                        Event::Key(key)
+                            if crate::slash::is_open(&chat.draft) && key.code == KeyCode::Up =>
+                        {
+                            chat.slash_selected = chat.slash_selected.saturating_sub(1);
+                        }
+                        Event::Key(key)
+                            if crate::slash::is_open(&chat.draft) && key.code == KeyCode::Down =>
+                        {
+                            let count = crate::slash::matches(&chat.draft).len();
+                            if count > 0 {
+                                chat.slash_selected = (chat.slash_selected + 1).min(count - 1);
+                            }
+                        }
+                        Event::Key(key)
+                            if crate::slash::is_open(&chat.draft) && key.code == KeyCode::Tab =>
+                        {
+                            if let Some(command) =
+                                crate::slash::matches(&chat.draft).get(chat.slash_selected)
+                            {
+                                chat.draft = crate::slash::complete(command);
+                                chat.cursor = chat.draft.len();
+                                chat.slash_selected = 0;
+                                chat.slash_notice = None;
+                            }
+                        }
+                        Event::Key(key)
+                            if key.code == KeyCode::Esc && crate::slash::is_open(&chat.draft) =>
+                        {
+                            chat.slash_notice = None;
+                            chat.slash_selected = 0;
+                            // Keep the draft, but suppress this query until it changes.
+                            chat.slash_dismissed = true;
+                        }
+                        Event::Key(key)
+                            if key.code == KeyCode::Enter && crate::slash::is_open(&chat.draft) =>
+                        {
+                            let hits = crate::slash::matches(&chat.draft);
+                            if let Some(command) = hits.get(chat.slash_selected) {
+                                if crate::slash::needs_args(command) {
+                                    chat.draft = crate::slash::complete(command);
+                                    chat.cursor = chat.draft.len();
+                                    chat.slash_selected = 0;
+                                } else {
+                                    chat.run_command(runtime, &format!("/{}", command.name));
+                                }
+                            } else {
+                                chat.slash_notice = Some("没有匹配的侧聊命令".to_owned());
+                            }
+                        }
+                        Event::Key(key)
+                            if key.code == KeyCode::Enter && chat.draft.starts_with('/') =>
+                        {
+                            chat.run_command(runtime, &chat.draft.clone());
+                        }
+                        Event::Key(key)
+                            if key.code == KeyCode::Esc
+                                && (chat.paste_preview.is_some()
+                                    || chat.slash_notice.is_some()) =>
+                        {
+                            chat.paste_preview = None;
+                            chat.slash_notice = None;
                         }
                         Event::Key(key) => chat.edit(*key),
                         _ => {}
@@ -987,6 +1643,7 @@ impl RightPanel {
             Leave::Refresh => self.files.refresh(),
             Leave::Close => self.close(Tab::Files),
             Leave::Project(root) => self.files.sync(&root),
+            Leave::CloseDocument(_) => {}
         }
     }
     pub fn draw(&self, frame: &mut Frame<'_>, model: &FrameModel<'_>, canvas: Rect) {
@@ -995,7 +1652,7 @@ impl RightPanel {
         hits.clear();
         self.controls.borrow_mut().clear();
         let restore = Rect::new(canvas.right().saturating_sub(4), canvas.y, 4, 1);
-        if self.area.is_none() {
+        if self.area.get().is_none() {
             frame.render_widget(
                 Paragraph::new("[◧]").style(theme.fg(theme.text_dim)),
                 restore,
@@ -1003,22 +1660,78 @@ impl RightPanel {
             hits.push((restore, Action::Restore));
             return;
         }
-        let area = self.area.unwrap();
-        frame.render_widget(
-            Block::default()
-                .borders(Borders::LEFT)
-                .border_style(theme.fg(theme.hairline))
-                .style(theme.base()),
-            area,
-        );
-        let inner = Rect::new(area.x + 1, area.y, area.width - 1, area.height);
-        for (tab, rect) in self.tabs.iter().zip(layout::tabs(inner, self.tabs.len())) {
+        let area = self.area.get().unwrap();
+        let motion = self.editor_motion_value(std::time::Instant::now());
+        let full_editor = self.editor_focus && self.active == Tab::Files;
+        let editor_area = if self.active == Tab::Files
+            && !self.reduce_motion
+            && self.editor_transition_at.get().is_some()
+        {
+            let width = (f64::from(area.width) * (1.0 - motion) + f64::from(canvas.width) * motion)
+                .round()
+                .clamp(1.0, f64::from(canvas.width)) as u16;
+            self.editor_progress.set(motion);
+            if self
+                .editor_transition_at
+                .get()
+                .is_some_and(|at| at.elapsed() >= std::time::Duration::from_millis(240))
+            {
+                self.editor_transition_at.set(None);
+            }
+            Rect::new(
+                canvas.right().saturating_sub(width),
+                area.y,
+                width,
+                area.height,
+            )
+        } else {
+            if full_editor {
+                Rect::new(canvas.x, area.y, canvas.width, area.height)
+            } else {
+                area
+            }
+        };
+        if !full_editor {
+            frame.render_widget(
+                Block::default()
+                    .borders(Borders::LEFT)
+                    .border_style(theme.fg(theme.hairline))
+                    .style(theme.base()),
+                editor_area,
+            );
+        }
+        let mobile = self.mobile_drawer.get();
+        let inner = if full_editor {
+            editor_area
+        } else if mobile {
+            editor_area
+        } else {
+            Rect::new(
+                editor_area.x + 1,
+                editor_area.y,
+                editor_area.width.saturating_sub(1),
+                editor_area.height,
+            )
+        };
+        let tab_inner = if full_editor {
+            Rect::new(inner.x, inner.y, 0, 0)
+        } else if mobile {
+            Rect::new(inner.x, inner.y, 0, 0)
+        } else {
+            inner
+        };
+        let tab_rects = if full_editor || mobile {
+            Vec::new()
+        } else {
+            layout::tabs(tab_inner, self.tabs.len())
+        };
+        for (tab, rect) in self.tabs.iter().zip(tab_rects) {
             let selected = *tab == self.active;
-            let style = if selected || layout::hovered(rect, model.pointer) {
-                theme
-                    .fg(theme.rose)
-                    .bg(theme.hairline)
-                    .add_modifier(ratatui::style::Modifier::UNDERLINED)
+            let hovered = layout::hovered(rect, model.pointer);
+            let style = if selected {
+                theme.fg(theme.rose).bg(theme.hairline)
+            } else if hovered {
+                theme.fg(theme.text).bg(theme.bg_raised)
             } else {
                 theme.fg(theme.text_dim)
             };
@@ -1044,25 +1757,49 @@ impl RightPanel {
                 rect,
             );
             hits.push((rect, Action::Tab(*tab)));
-            if *tab != Tab::Info && rect.width >= 2 {
+            if mobile {
+                let close = Rect::new(rect.right().saturating_sub(1), rect.y, 1, 1);
+                frame.render_widget(Paragraph::new("×").style(style), close);
+                hits.insert(0, (close, Action::Close(*tab)));
+            } else if *tab != Tab::Info && (selected || hovered) && rect.width >= 2 {
                 let close = Rect::new(rect.right() - 1, rect.y, 1, 1);
                 frame.render_widget(Paragraph::new("×").style(style), close);
                 hits.insert(0, (close, Action::Close(*tab)));
             }
         }
-        let collapse = Rect::new(inner.right() - 2, inner.y, 2, 1);
-        frame.render_widget(Paragraph::new("›"), collapse);
-        hits.insert(0, (collapse, Action::Collapse));
+        if !full_editor && !mobile {
+            let collapse = Rect::new(inner.right() - 2, inner.y, 2, 1);
+            frame.render_widget(
+                Paragraph::new("›").style(theme.fg(theme.text_dim)),
+                collapse,
+            );
+            hits.insert(0, (collapse, Action::Collapse));
+        }
         let hint = if self.focused {
             i18n::tr("right.focused", "● 焦点 · Ctrl+G 返回 · Ctrl+W 关闭")
         } else {
             i18n::tr("right.focus", "点击聚焦 · Ctrl+Q 退出")
         };
-        frame.render_widget(
-            Paragraph::new(hint).style(theme.fg(theme.text_mute)),
-            Rect::new(inner.x, inner.bottom() - 1, inner.width, 1),
-        );
-        let body = layout::body(inner);
+        if !full_editor {
+            frame.render_widget(
+                Paragraph::new(hint).style(theme.fg(theme.text_mute)),
+                Rect::new(inner.x, inner.bottom() - 1, inner.width, 1),
+            );
+        }
+        let body = if full_editor || mobile {
+            inner
+        } else {
+            layout::body(inner)
+        };
+        if mobile && body.height > 0 {
+            let title = Rect::new(body.x, body.y, body.width, 1);
+            frame.render_widget(
+                Paragraph::new(format!("{}  ×", self.active.label()))
+                    .style(theme.fg(theme.rose).bg(theme.hairline)),
+                title,
+            );
+            hits.push((title, Action::Collapse));
+        }
         hits.push((body, Action::Focus));
         match self.active {
             Tab::Info => {
@@ -1233,8 +1970,13 @@ impl RightPanel {
                 }
             }
             Tab::Files => {
-                self.editor_area
-                    .set(self.draw_files(frame, model, body, &mut hits));
+                self.editor_area.set(self.draw_files(
+                    frame,
+                    model.pointer,
+                    body,
+                    &mut hits,
+                    self.editor_focus,
+                ));
             }
             Tab::Terminal => {
                 let terminal_label = if let Some(terminal) = self.terminal.as_ref() {
@@ -1413,16 +2155,114 @@ impl RightPanel {
                         body.width,
                         height,
                     );
-                    let mention_height = chat
-                        .mentions
-                        .height()
-                        .min(draft.y.saturating_sub(body.y + 3));
+                    let mut slash_hits = crate::slash::matches(&chat.draft);
+                    slash_hits.retain(|command| {
+                        matches!(
+                            command.name,
+                            "id" | "status"
+                                | "context"
+                                | "compact"
+                                | "checkpoint"
+                                | "cancel"
+                                | "resume"
+                                | "archive"
+                                | "usage"
+                                | "approvals"
+                                | "steer"
+                                | "mode"
+                        )
+                    });
+                    let slash_open = crate::slash::is_open(&chat.draft)
+                        && !chat.slash_dismissed
+                        && chat.paste_preview.is_none();
+                    let slash_height = if slash_open {
+                        (slash_hits.len().clamp(1, crate::slash::MAX_VISIBLE))
+                            .min(draft.y.saturating_sub(body.y + 3) as usize)
+                            as u16
+                    } else {
+                        0
+                    };
+                    let paste_height = if !slash_open
+                        && chat.mentions.height() == 0
+                        && chat.paste_preview.is_some()
+                    {
+                        chat.paste_preview
+                            .as_deref()
+                            .map(str::lines)
+                            .map(Iterator::count)
+                            .unwrap_or(1)
+                            .clamp(1, 6) as u16
+                    } else {
+                        0
+                    };
+                    let notice_height = if !slash_open
+                        && chat.mentions.height() == 0
+                        && paste_height == 0
+                        && chat.slash_notice.is_some()
+                    {
+                        chat.slash_notice
+                            .as_deref()
+                            .map(str::lines)
+                            .map(Iterator::count)
+                            .unwrap_or(1)
+                            .clamp(1, 4) as u16
+                    } else {
+                        0
+                    };
+                    let overlay_height = paste_height.max(notice_height);
+                    let mention_height = chat.mentions.height().min(
+                        draft
+                            .y
+                            .saturating_sub(body.y + 3 + slash_height + overlay_height),
+                    );
+                    let mention_height = if slash_open { 0 } else { mention_height };
                     let mention_area = Rect::new(
                         body.x,
                         draft.y.saturating_sub(mention_height),
                         body.width,
                         mention_height,
                     );
+                    if slash_height > 0 {
+                        let menu = Rect::new(
+                            body.x,
+                            mention_area.y.saturating_sub(slash_height),
+                            body.width,
+                            slash_height,
+                        );
+                        for (row, command) in
+                            slash_hits.iter().take(slash_height as usize).enumerate()
+                        {
+                            let selected = row == chat.slash_selected;
+                            let label = format!("/{:<12} {}", command.name, command.about);
+                            frame.render_widget(
+                                Paragraph::new(crate::right_panel::layout::clip(
+                                    &label,
+                                    menu.width as usize,
+                                ))
+                                .style(if selected {
+                                    theme.fg(theme.rose).bg(theme.bg_select)
+                                } else {
+                                    theme.fg(theme.text_dim)
+                                }),
+                                Rect::new(menu.x, menu.y + row as u16, menu.width, 1),
+                            );
+                        }
+                    }
+                    if overlay_height > 0 {
+                        let overlay = Rect::new(
+                            body.x,
+                            mention_area.y.saturating_sub(overlay_height),
+                            body.width,
+                            overlay_height,
+                        );
+                        if let Some(preview) =
+                            chat.paste_preview.as_deref().filter(|_| paste_height > 0)
+                        {
+                            crate::view::render_notice(frame, overlay, preview, &theme);
+                        } else if let Some(notice) = chat.slash_notice.as_deref() {
+                            crate::view::render_notice(frame, overlay, notice, &theme);
+                        }
+                    }
                     let content = Rect::new(
                         body.x,
                         body.y + 3,
@@ -1569,6 +2409,44 @@ mod tests {
         assert!(regions(Rect::new(0, 0, 160, 40), true).1.is_none());
     }
     #[test]
+    fn dragging_separator_changes_width_and_restores_after_terminal_resize() {
+        let terminal = Rect::new(0, 0, 180, 40);
+        let mut panel = RightPanel::default();
+        panel.area.set(panel.regions(terminal).1);
+        assert!(!panel.resize_hit(150, 10));
+        assert!(panel.resize_hit(144, 10));
+        panel.resize(terminal, 120);
+        assert_eq!(panel.regions(terminal).1.unwrap().width, 60);
+        assert_eq!(panel.regions(Rect::new(0, 0, 124, 40)).1.unwrap().width, 36);
+        panel.collapsed = true;
+        assert!(panel.regions(terminal).1.is_none());
+        panel.collapsed = false;
+        assert_eq!(panel.regions(terminal).1.unwrap().width, 60);
+    }
+    #[test]
+    fn sidebar_width_limits_and_mobile_separator_is_not_draggable() {
+        let terminal = Rect::new(7, 2, 160, 40);
+        let (main, panel) = regions_with_width(terminal, false, u16::MAX);
+        assert_eq!(main.width, 88);
+        assert_eq!(panel.unwrap().width, 72);
+        assert_eq!(regions_with_width(terminal, false, 1).1.unwrap().width, 24);
+        let panel = RightPanel::default();
+        panel.set_mobile_area(Some(terminal));
+        assert!(!panel.resize_hit(terminal.x, 10));
+    }
+    #[test]
+    fn mobile_drawer_returns_to_desktop_region_on_sync() {
+        let runtime = runtime();
+        let mut panel = RightPanel::default();
+        panel.set_mobile_area(Some(Rect::new(0, 0, 80, 24)));
+        panel.sync(&runtime, Path::new("/tmp"), Rect::new(0, 0, 160, 40));
+        panel.sync_mobile_area(Rect::new(0, 0, 160, 40), true);
+        panel.set_mobile_area(None);
+        assert_eq!(panel.area.get(), Some(Rect::new(124, 0, 36, 40)));
+        assert!(!panel.mobile_drawer.get());
+    }
+
+    #[test]
     fn closes_only_requested_tab_and_preserves_info() {
         let mut panel = RightPanel::default();
         panel.tabs.extend([Tab::Files, Tab::Chat]);
@@ -1589,7 +2467,7 @@ mod tests {
         let mut panel = RightPanel::default();
         panel.tabs.push(Tab::Files);
         panel.active = Tab::Files;
-        panel.area = Some(Rect::new(80, 0, 44, 20));
+        panel.area.set(Some(Rect::new(80, 0, 44, 20)));
         panel.focused = true;
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("test-file");
@@ -1607,6 +2485,8 @@ mod tests {
             index: 0,
             sidebar: &crate::view::SidebarState::default(),
             right_panel: Some(&panel),
+            mobile_drawer: crate::view::MobileDrawer::None,
+            drawer_progress: 0.0,
             projection: None,
             pending: &[],
             input: "",
@@ -1651,6 +2531,8 @@ mod tests {
             .draw(|frame| panel.draw(frame, &model, Rect::new(0, 0, 124, 20)))
             .unwrap();
         let editor_area = panel.editor_area.get().unwrap();
+        // Returning from explorer focus by clicking code must restore typing.
+        panel.explorer_focused = true;
         assert!(panel.event(
             &Event::Mouse(MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
@@ -1663,6 +2545,7 @@ mod tests {
         ));
         assert_eq!(panel.files.editor.as_ref().unwrap().cursor, "行".len());
         assert!(panel.focused);
+        assert!(!panel.explorer_focused);
         assert!(panel.event(
             &Event::Mouse(MouseEvent {
                 kind: MouseEventKind::ScrollDown,
@@ -1676,6 +2559,45 @@ mod tests {
         assert_eq!(panel.files.scroll, 3);
     }
 
+    #[test]
+    fn explorer_focus_and_wheel_do_not_move_code_viewport() {
+        use crossterm::event::{KeyEvent, MouseEvent};
+
+        let runtime = runtime();
+        let workspace = Path::new("/tmp");
+        let mut panel = RightPanel::default();
+        panel.tabs.push(Tab::Files);
+        panel.active = Tab::Files;
+        panel.focused = true;
+        panel.area.set(Some(Rect::new(0, 0, 100, 30)));
+        panel.explorer_area.set(Some(Rect::new(0, 0, 24, 30)));
+        panel.files.entries = (0..10)
+            .map(|index| FileEntry {
+                path: workspace.join(format!("file-{index}")),
+                directory: false,
+            })
+            .collect();
+        panel.files.scroll = 7;
+        let key = |code| Event::Key(KeyEvent::new(code, KeyModifiers::NONE));
+        panel.event(&key(KeyCode::F(6)), &runtime, workspace);
+        assert!(panel.explorer_focused);
+        panel.event(&key(KeyCode::Down), &runtime, workspace);
+        assert_eq!(panel.files.selected, 1);
+        panel.event(
+            &Event::Mouse(MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: 2,
+                row: 4,
+                modifiers: KeyModifiers::NONE,
+            }),
+            &runtime,
+            workspace,
+        );
+        assert_eq!(panel.files.selected, 4);
+        assert_eq!(panel.files.scroll, 7);
+        panel.event(&key(KeyCode::F(6)), &runtime, workspace);
+        assert!(!panel.explorer_focused);
+    }
     #[test]
     fn file_boundary_and_binary_preview() {
         let root = std::env::temp_dir().join(format!("blora-right-{}", std::process::id()));
@@ -2110,7 +3032,11 @@ mod tests {
             let rects = layout::tabs(inner, 4);
             assert_eq!(rects.len(), 4);
             for (index, rect) in rects.iter().enumerate() {
-                assert!(rect.right() <= inner.right() - 2);
+                if width >= 12 {
+                    assert!(rect.right() <= inner.right() - 2);
+                } else {
+                    assert!(rect.right() <= inner.right());
+                }
                 if index > 0 {
                     assert_eq!(rects[index - 1].right(), rect.x);
                 }
@@ -2123,6 +3049,13 @@ mod tests {
             }
         }
         assert_eq!(layout::clip("中文a", 3), "中");
+        let inner = Rect::new(0, 0, 36, 20);
+        let tabs = layout::tabs(inner, 4);
+        assert_eq!(
+            tabs.iter().map(|rect| rect.width).collect::<Vec<_>>(),
+            [8, 8, 8, 10]
+        );
+        assert_eq!(tabs.last().unwrap().right(), inner.right() - 2);
         assert_eq!(layout::clip("中文a", 4), "中文");
         assert_eq!(layout::body(Rect::new(0, 0, 4, 2)).height, 0);
         assert!(layout::hovered(Rect::new(2, 3, 4, 1), Some((5, 3))));
@@ -2134,7 +3067,7 @@ mod tests {
         let runtime = runtime();
         let mut panel = RightPanel::default();
         panel.open(Tab::Chat, &runtime, Path::new("/tmp"));
-        panel.area = Some(Rect::new(80, 0, 36, 24));
+        panel.area.set(Some(Rect::new(80, 0, 36, 24)));
         let owner = panel.chat.as_ref().unwrap().id.clone();
         let target = SessionId::generate();
         let sessions = [blora_storage::SessionSummary {
@@ -2207,12 +3140,47 @@ mod tests {
         assert_eq!(cursor, (1, 0));
     }
     #[test]
+    fn side_commands_are_session_scoped_and_global_commands_are_blocked() {
+        let runtime = runtime();
+        let mut panel = RightPanel::default();
+        panel.open(Tab::Chat, &runtime, Path::new("/tmp"));
+        let chat = panel.chat.as_mut().unwrap();
+        let id = chat.id.clone();
+        chat.run_command(&runtime, "/id");
+        assert_eq!(chat.slash_notice.as_deref(), Some(id.to_string().as_str()));
+        chat.run_command(&runtime, "/new");
+        assert!(chat.slash_notice.as_deref().unwrap().contains("暂不支持"));
+        assert_eq!(chat.id, id);
+        chat.queue.push_back("queued".into());
+        chat.run_command(&runtime, "/cancel");
+        assert!(chat.queue.is_empty());
+        assert!(chat.cancel.is_cancelled());
+    }
+    #[test]
+    fn side_scroll_pages_and_returns_to_bottom() {
+        let runtime = runtime();
+        let mut panel = RightPanel::default();
+        panel.open(Tab::Chat, &runtime, Path::new("/tmp"));
+        let chat = panel.chat.as_ref().unwrap();
+        chat.viewport(100, 10);
+        chat.scroll_page(false, 8);
+        assert_eq!(chat.scroll.get(), 8);
+        chat.viewport(104, 10);
+        assert_eq!(chat.scroll.get(), 12);
+        assert_eq!(chat.unread.get(), 4);
+        chat.scroll_page(true, 8);
+        assert_eq!(chat.scroll.get(), 4);
+        chat.scroll.set(0);
+        assert_eq!(chat.viewport(104, 10), 0);
+        assert_eq!(chat.unread.get(), 0);
+    }
+    #[test]
     fn side_scroll_direction_bounds_anchor_and_markdown_filter() {
         let runtime = runtime();
         let mut panel = RightPanel::default();
         panel.open(Tab::Chat, &runtime, Path::new("/tmp"));
         panel.sync(&runtime, Path::new("/tmp"), Rect::new(0, 0, 124, 18));
-        let area = panel.area.unwrap();
+        let area = panel.area.get().unwrap();
         panel.chat.as_ref().unwrap().viewport(100, 10);
         let mouse = |kind| {
             Event::Mouse(crossterm::event::MouseEvent {
@@ -2357,6 +3325,8 @@ mod tests {
         panel.open(Tab::Chat, &runtime, Path::new("/tmp"));
         panel.tabs = vec![Tab::Info, Tab::Files, Tab::Terminal, Tab::Chat];
         panel.sync(&runtime, Path::new("/tmp"), Rect::new(0, 0, 124, 18));
+        panel.area.set(Some(Rect::new(88, 0, 36, 18)));
+        panel.active = Tab::Chat;
         panel.chat.as_mut().unwrap().insert("中文\n草稿");
         let mut terminal = Terminal::new(TestBackend::new(124, 18)).unwrap();
         let model = FrameModel {
@@ -2366,6 +3336,8 @@ mod tests {
             index: 0,
             sidebar: &crate::view::SidebarState::default(),
             right_panel: Some(&panel),
+            mobile_drawer: crate::view::MobileDrawer::None,
+            drawer_progress: 0.0,
             projection: None,
             pending: &[],
             input: "",
@@ -2404,21 +3376,34 @@ mod tests {
             tick: 0,
             pointer: None,
             text_selection: None,
-            interaction: None,
         };
-        terminal
-            .draw(|frame| panel.draw(frame, &model, Rect::new(0, 0, 88, 18)))
-            .unwrap();
+        for _ in 0..2 {
+            terminal
+                .draw(|frame| {
+                    crate::view::draw(frame, &model, &mut crate::view::TranscriptCache::default());
+                })
+                .unwrap();
+            assert_eq!(panel.area.get(), regions(Rect::new(0, 0, 124, 18), false).1);
+            assert!(!panel.mobile_drawer.get());
+        }
         let cursor = terminal.get_cursor_position().unwrap();
         assert!(cursor.x >= 89 && cursor.x < 124);
         assert!(cursor.y >= 13 && cursor.y < 17);
         let hits = panel.hits.borrow();
-        assert_eq!(
-            hits.iter()
-                .filter(|(_, a)| matches!(a, Action::Close(_)))
-                .count(),
-            3
-        );
+        let closes: Vec<_> = hits
+            .iter()
+            .filter_map(|(rect, action)| matches!(action, Action::Close(_)).then_some(*rect))
+            .collect();
+        assert_eq!(closes.len(), 1);
+        assert!(closes.windows(2).all(|pair| pair[0].right() <= pair[1].x));
+        let tab_cells = terminal.backend().buffer();
+        for x in 88..124 {
+            assert!(
+                !tab_cells[(x, 0)]
+                    .modifier
+                    .contains(ratatui::style::Modifier::UNDERLINED)
+            );
+        }
         assert!(hits.iter().any(|(_, a)| matches!(a, Action::Send)));
         assert!(hits.iter().any(|(_, a)| matches!(a, Action::Cancel)));
         for (rect, _) in hits.iter() {
@@ -2428,6 +3413,7 @@ mod tests {
         drop(hits);
         drop(model);
         panel.active = Tab::Info;
+        panel.tabs = vec![Tab::Info, Tab::Files, Tab::Terminal, Tab::Chat];
         let model = FrameModel {
             dialog_stack: &[],
             workspace: Path::new("/tmp"),
@@ -2435,6 +3421,8 @@ mod tests {
             index: 0,
             sidebar: &crate::view::SidebarState::default(),
             right_panel: Some(&panel),
+            mobile_drawer: crate::view::MobileDrawer::None,
+            drawer_progress: 0.0,
             projection: None,
             pending: &[],
             input: "",
@@ -2473,7 +3461,6 @@ mod tests {
             tick: 0,
             pointer: None,
             text_selection: None,
-            interaction: None,
         };
         terminal
             .draw(|frame| panel.draw(frame, &model, Rect::new(0, 0, 88, 18)))

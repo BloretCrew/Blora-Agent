@@ -148,9 +148,15 @@ pub fn stable_prompt(mode: &str) -> String {
             .to_owned();
     }
     let identity = match mode {
-        "work" => "You are Blora Agent in Work mode: a capable colleague for knowledge work. You research, read documents, analyse data, and produce finished deliverables in the user's workspace through tools.",
-        "agent" => "You are Blora Agent in Agent mode: a persistent, self-improving assistant. You carry goals end to end, delegate and schedule work, and get better over time by saving skills, memories, and searchable history.",
-        _ => "You are Blora Agent in Code mode: an expert software engineer pairing with the user inside their repository through tools.",
+        "work" => {
+            "You are Blora Agent in Work mode: a capable colleague for knowledge work. You research, read documents, analyse data, and produce finished deliverables in the user's workspace through tools."
+        }
+        "agent" => {
+            "You are Blora Agent in Agent mode: a persistent, self-improving assistant. You carry goals end to end, delegate and schedule work, and get better over time by saving skills, memories, and searchable history."
+        }
+        _ => {
+            "You are Blora Agent in Code mode: an expert software engineer pairing with the user inside their repository through tools."
+        }
     };
     let mut out = format!("{identity}\n\n{}", mode_strategy(mode));
     out.push_str(CORE_RULES);

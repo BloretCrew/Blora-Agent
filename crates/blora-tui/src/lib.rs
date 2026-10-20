@@ -45,12 +45,43 @@ use ratatui::backend::CrosstermBackend;
 
 const TOOL_SUMMARY_DOUBLE_CLICK: Duration = Duration::from_millis(500);
 const SCROLL_ANIMATION_DURATION: Duration = Duration::from_millis(180);
+const DRAWER_ANIMATION_DURATION: Duration = Duration::from_millis(280);
 
 #[derive(Default)]
 struct ScrollAnimation {
     from: usize,
     to: usize,
     started: Option<Instant>,
+}
+
+#[derive(Default)]
+struct DrawerAnimation {
+    from: f64,
+    to: f64,
+    started: Option<Instant>,
+}
+
+impl DrawerAnimation {
+    fn set(&mut self, target: f64, now: Instant) {
+        self.from = self.value(now);
+        self.to = target;
+        self.started = Some(now);
+    }
+    fn value(&self, now: Instant) -> f64 {
+        let Some(started) = self.started else {
+            return self.to;
+        };
+        let t = now.saturating_duration_since(started).as_secs_f64()
+            / DRAWER_ANIMATION_DURATION.as_secs_f64();
+        let t = t.clamp(0.0, 1.0);
+        let eased = t * t * (3.0 - 2.0 * t);
+        self.from + (self.to - self.from) * eased
+    }
+    fn active(&self, now: Instant) -> bool {
+        self.started.is_some_and(|at| {
+            now.saturating_duration_since(at) < DRAWER_ANIMATION_DURATION && self.from != self.to
+        })
+    }
 }
 
 impl ScrollAnimation {
@@ -357,6 +388,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut scroll = 0usize;
     let mut scroll_animation = ScrollAnimation::default();
     let mut sidebar = view::SidebarState::default();
+    let mut drawer_animation = DrawerAnimation::default();
     let mut right_panel = right_panel::RightPanel::default();
     let mut search: Option<String> = None;
     let mut hide_tools = false;
@@ -375,6 +407,8 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
     let mut pointer: Option<(u16, u16)> = None;
     let mut text_selection: Option<selection::Selection> = None;
     let mut selecting_text = false;
+    // True selects the left divider; false selects the right divider.
+    let mut resizing_sidebar: Option<bool> = None;
     let mut tool_summary_click = ToolSummaryClick::default();
     let mut hits = view::HitMap::default();
     let mut transcript_cache = view::TranscriptCache::default();
@@ -539,12 +573,26 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                 .map(|session| PathBuf::from(&session.workspace_path))
                 .unwrap_or_else(|| workspace.to_path_buf());
             let size = terminal.size().map_err(blora_types::BloraError::exec)?;
+            let drawer_available = match sidebar.drawer() {
+                view::MobileDrawer::Left => size.width < 100 || size.height < 18,
+                view::MobileDrawer::Right => size.width < 124 || size.height < 18,
+                view::MobileDrawer::None => true,
+            };
+            if !drawer_available {
+                sidebar.set_drawer(view::MobileDrawer::None);
+                drawer_animation.set(0.0, Instant::now());
+            }
             right_panel.sync(
                 runtime,
                 &active_workspace,
                 ratatui::layout::Rect::new(0, 0, size.width, size.height),
             );
+            right_panel.sync_mobile_area(
+                ratatui::layout::Rect::new(0, 0, size.width, size.height),
+                sidebar.drawer() == view::MobileDrawer::Right,
+            );
             right_panel.inherit_controls(permission_mode, &model_override, &provider_override);
+            right_panel.reduce_motion = runtime.tui_reduce_motion().unwrap_or(false);
             let session_id = sessions.get(index).map(|item| item.id.clone());
             if dialog_session != session_id {
                 git_dialog = None;
@@ -773,6 +821,13 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
             }
             let animation_now = Instant::now();
             let animated_scroll = scroll_animation.value(scroll, animation_now);
+            sidebar.set_drawer_progress(drawer_animation.value(animation_now));
+            if sidebar.drawer() != view::MobileDrawer::None
+                && !drawer_animation.active(animation_now)
+                && drawer_animation.to == 0.0
+            {
+                sidebar.set_drawer(view::MobileDrawer::None);
+            }
             dialog_visuals.sync(dialog_stack.as_slice(), animation_now);
             terminal
                 .draw(|frame| {
@@ -801,6 +856,8 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             index,
                             sidebar: &sidebar,
                             right_panel: Some(&right_panel),
+                            mobile_drawer: sidebar.drawer(),
+                            drawer_progress: sidebar.drawer_progress(),
                             projection,
                             pending: &pending,
                             input: &input,
@@ -946,24 +1003,153 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                     let _ = tx.send((request.id, status));
                 }));
             }
-            let wait_ms =
-                if dialog_visuals.active(animation_now) || scroll_animation.active(animation_now) {
-                    dialogs::ANIMATION_FRAME.as_millis() as u64
-                } else if right_panel.chat.as_ref().is_some_and(|chat| chat.running)
-                    || job.is_some()
-                    || git_generation.is_some()
-                    || git_sync.is_some()
-                    || session_job.is_some()
-                    || session_picker
-                        .as_ref()
-                        .is_some_and(|picker| picker.searching)
-                {
-                    50
-                } else {
-                    200
-                };
+            let wait_ms = if dialog_visuals.active(animation_now)
+                || scroll_animation.active(animation_now)
+                || drawer_animation.active(animation_now)
+                || right_panel.motion_active(animation_now)
+            {
+                dialogs::ANIMATION_FRAME.as_millis() as u64
+            } else if right_panel.chat.as_ref().is_some_and(|chat| chat.running)
+                || job.is_some()
+                || git_generation.is_some()
+                || git_sync.is_some()
+                || session_job.is_some()
+                || session_picker
+                    .as_ref()
+                    .is_some_and(|picker| picker.searching)
+            {
+                50
+            } else {
+                200
+            };
             if event::poll(Duration::from_millis(wait_ms)).map_err(blora_types::BloraError::exec)? {
                 let event = event::read().map_err(blora_types::BloraError::exec)?;
+                let top_dialog = dialog_stack.top();
+                if top_dialog.is_some()
+                    || dialog_visuals.active(Instant::now())
+                    || matches!(&event, Event::Resize(_, _))
+                {
+                    resizing_sidebar = None;
+                }
+                if let Event::Mouse(mouse) = &event {
+                    if mouse.kind == MouseEventKind::Up(MouseButton::Left)
+                        && resizing_sidebar.take().is_some()
+                    {
+                        continue;
+                    }
+                    if top_dialog.is_none()
+                        && !dialog_visuals.active(Instant::now())
+                        && sidebar.drawer() == view::MobileDrawer::None
+                    {
+                        if mouse.kind == MouseEventKind::Drag(MouseButton::Left)
+                            && let Some(left) = resizing_sidebar
+                        {
+                            let screen = terminal.size().map_err(blora_types::BloraError::exec)?;
+                            let screen =
+                                ratatui::layout::Rect::new(0, 0, screen.width, screen.height);
+                            if left {
+                                sidebar.resize(right_panel.regions(screen).0, mouse.column);
+                            } else {
+                                right_panel.resize(screen, mouse.column);
+                            }
+                            continue;
+                        }
+                        if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                            let point = (mouse.column, mouse.row).into();
+                            if hits
+                                .sidebar_divider
+                                .is_some_and(|rect| rect.contains(point))
+                            {
+                                resizing_sidebar = Some(true);
+                                selecting_text = false;
+                                continue;
+                            }
+                            if right_panel.resize_hit(mouse.column, mouse.row) {
+                                resizing_sidebar = Some(false);
+                                selecting_text = false;
+                                continue;
+                            }
+                            if hits.hit(mouse.column, mouse.row) == Some(view::Hit::SidebarToggle) {
+                                sidebar.collapsed = !sidebar.collapsed;
+                                continue;
+                            }
+                        }
+                    }
+                }
+                if top_dialog.is_none() && !dialog_visuals.active(Instant::now()) {
+                    if let Event::Key(key) = &event {
+                        if key.kind == KeyEventKind::Press
+                            && key.code == KeyCode::Esc
+                            && sidebar.drawer() != view::MobileDrawer::None
+                        {
+                            sidebar.set_drawer(view::MobileDrawer::None);
+                            drawer_animation.set(0.0, Instant::now());
+                            continue;
+                        }
+                    }
+                    if let Event::Mouse(mouse) = &event {
+                        if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                            let hit = hits.hit(mouse.column, mouse.row);
+                            match hit.as_ref() {
+                                Some(
+                                    view::Hit::MobileDrawerDismiss | view::Hit::MobileDrawerClose,
+                                ) => {
+                                    drawer_animation.set(0.0, Instant::now());
+                                    continue;
+                                }
+                                Some(view::Hit::MobileLeftToggle) => {
+                                    sidebar.set_drawer(view::MobileDrawer::Left);
+                                    drawer_animation.set(1.0, Instant::now());
+                                    continue;
+                                }
+                                Some(view::Hit::MobileRightToggle) => {
+                                    sidebar.set_drawer(view::MobileDrawer::Right);
+                                    drawer_animation.set(1.0, Instant::now());
+                                    continue;
+                                }
+                                Some(view::Hit::MobilePanelTab(_)) => {
+                                    right_panel.event(&event, runtime, &active_workspace);
+                                    drawer_animation.set(0.0, Instant::now());
+                                    continue;
+                                }
+                                _ => {}
+                            }
+                            if sidebar.drawer() == view::MobileDrawer::Left {
+                                match hit {
+                                    Some(view::Hit::SidebarSession(target)) => {
+                                        if target < sessions.len() {
+                                            index = target;
+                                            cached = None;
+                                        }
+                                        drawer_animation.set(0.0, Instant::now());
+                                    }
+                                    Some(
+                                        view::Hit::Hint(view::HintAction::New)
+                                        | view::Hit::SessionPicker
+                                        | view::Hit::ProjectPicker
+                                        | view::Hit::SidebarSettings,
+                                    ) => {
+                                        // The regular handlers below open these controls.
+                                    }
+                                    _ => {}
+                                }
+                                continue;
+                            }
+                            if sidebar.drawer() == view::MobileDrawer::Right {
+                                if matches!(
+                                    hit,
+                                    Some(
+                                        view::Hit::MobilePanelClose(_)
+                                            | view::Hit::MobilePanelAction
+                                    )
+                                ) {
+                                    right_panel.event(&event, runtime, &active_workspace);
+                                }
+                                continue;
+                            }
+                        }
+                    }
+                }
                 if closing_consumes_input(&dialog_visuals, &event) {
                     continue;
                 }
@@ -979,7 +1165,6 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                     cancel.cancel();
                     break Ok(());
                 }
-                let top_dialog = dialog_stack.top();
                 if top_dialog.is_none()
                     && !dialog_visuals.active(Instant::now())
                     && !pending.is_empty()
@@ -1057,6 +1242,16 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                         }
                         continue;
                     }
+                }
+                if top_dialog.is_none()
+                    && !dialog_visuals.active(Instant::now())
+                    && right_panel.chat_focused()
+                    && matches!(&event, Event::Key(key) if key.code == KeyCode::Insert || (key.code == KeyCode::Char('v') && key.modifiers.contains(KeyModifiers::CONTROL)))
+                {
+                    if let Some(text) = read_clipboard_text() {
+                        right_panel.event(&Event::Paste(text), runtime, &active_workspace);
+                    }
+                    continue;
                 }
                 if top_dialog.is_none()
                     && !dialog_visuals.active(Instant::now())
@@ -2540,6 +2735,12 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     refresh_context_activity(runtime, dialog);
                                 }
                             }
+                            KeyCode::Esc
+                                if top_dialog.is_none()
+                                    && sidebar.drawer() != view::MobileDrawer::None =>
+                            {
+                                drawer_animation.set(0.0, Instant::now());
+                            }
                             KeyCode::Esc if top_dialog.is_none() && notice.is_some() => {
                                 notice = None;
                             }
@@ -2668,6 +2869,8 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     mouse.row,
                                     mouse.kind == MouseEventKind::ScrollUp,
                                 ) => {}
+                            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                                if sidebar.drawer() != view::MobileDrawer::None => {}
                             MouseEventKind::ScrollUp => {
                                 if hits.over_slash(mouse.column, mouse.row) {
                                     slash_selected = slash_selected.saturating_sub(1);
@@ -2694,6 +2897,9 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 }
                             }
                             MouseEventKind::Moved | MouseEventKind::Drag(MouseButton::Left) => {
+                                if sidebar.drawer() != view::MobileDrawer::None {
+                                    continue;
+                                }
                                 if top_dialog.is_none()
                                     && selecting_text
                                     && let Some(selection) = text_selection.as_mut()
@@ -2703,6 +2909,31 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 let hit = hits.hit(mouse.column, mouse.row);
                                 if !dialog_accepts_hit(top_dialog, hit.as_ref()) {
                                     continue;
+                                }
+                                match hit.as_ref() {
+                                    Some(view::Hit::MobileLeftToggle) => {
+                                        sidebar.set_drawer(view::MobileDrawer::Left);
+                                        drawer_animation.set(1.0, Instant::now());
+                                        continue;
+                                    }
+                                    Some(view::Hit::MobileRightToggle) => {
+                                        sidebar.set_drawer(view::MobileDrawer::Right);
+                                        drawer_animation.set(1.0, Instant::now());
+                                        continue;
+                                    }
+                                    Some(
+                                        view::Hit::MobileDrawerDismiss
+                                        | view::Hit::MobileDrawerClose,
+                                    ) => {
+                                        drawer_animation.set(0.0, Instant::now());
+                                        continue;
+                                    }
+                                    Some(view::Hit::MobilePanelTab(_)) => {
+                                        right_panel.event(&event, runtime, &active_workspace);
+                                        drawer_animation.set(0.0, Instant::now());
+                                        continue;
+                                    }
+                                    _ => {}
                                 }
                                 match hit {
                                     Some(view::Hit::PermissionRow(index)) => {
@@ -2758,6 +2989,10 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                 }
                             }
                             MouseEventKind::Up(MouseButton::Left) => {
+                                if sidebar.drawer() != view::MobileDrawer::None {
+                                    selecting_text = false;
+                                    continue;
+                                }
                                 if let Some(selection) = text_selection
                                     && selecting_text
                                     && top_dialog.is_none()
@@ -2779,8 +3014,84 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                             }
                             MouseEventKind::Down(MouseButton::Left) => {
                                 let hit = hits.hit(mouse.column, mouse.row);
+                                if sidebar.drawer() != view::MobileDrawer::None
+                                    && !matches!(
+                                        hit,
+                                        Some(
+                                            view::Hit::MobileDrawerDismiss
+                                                | view::Hit::MobileDrawerClose
+                                                | view::Hit::MobilePanelTab(_)
+                                                | view::Hit::MobilePanelClose(_)
+                                                | view::Hit::MobilePanelAction
+                                                | view::Hit::SidebarSession(_)
+                                                | view::Hit::SessionPicker
+                                                | view::Hit::ProjectPicker
+                                                | view::Hit::SidebarSettings
+                                                | view::Hit::Hint(view::HintAction::New)
+                                        )
+                                    )
+                                {
+                                    continue;
+                                }
                                 if !dialog_accepts_hit(top_dialog, hit.as_ref()) {
                                     continue;
+                                }
+                                match hit.as_ref() {
+                                    Some(view::Hit::MobileLeftToggle) => {
+                                        sidebar.set_drawer(view::MobileDrawer::Left);
+                                        drawer_animation.set(1.0, Instant::now());
+                                        continue;
+                                    }
+                                    Some(view::Hit::MobileRightToggle) => {
+                                        sidebar.set_drawer(view::MobileDrawer::Right);
+                                        drawer_animation.set(1.0, Instant::now());
+                                        continue;
+                                    }
+                                    Some(
+                                        view::Hit::MobileDrawerDismiss
+                                        | view::Hit::MobileDrawerClose,
+                                    ) => {
+                                        drawer_animation.set(0.0, Instant::now());
+                                        continue;
+                                    }
+                                    Some(view::Hit::MobilePanelTab(_)) => {
+                                        right_panel.event(&event, runtime, &active_workspace);
+                                        drawer_animation.set(0.0, Instant::now());
+                                        continue;
+                                    }
+                                    Some(view::Hit::MobilePanelClose(_)) => {
+                                        right_panel.event(&event, runtime, &active_workspace);
+                                        drawer_animation.set(0.0, Instant::now());
+                                        continue;
+                                    }
+                                    Some(view::Hit::MobilePanelAction) => {
+                                        right_panel.event(&event, runtime, &active_workspace);
+                                        continue;
+                                    }
+                                    _ => {}
+                                }
+                                if sidebar.drawer() == view::MobileDrawer::Left {
+                                    match hit.as_ref() {
+                                        Some(view::Hit::SidebarSession(target)) => {
+                                            if *target < sessions.len() {
+                                                index = *target;
+                                                cached = None;
+                                            }
+                                            drawer_animation.set(0.0, Instant::now());
+                                            continue;
+                                        }
+                                        Some(view::Hit::Hint(view::HintAction::New)) => {
+                                            drawer_animation.set(0.0, Instant::now());
+                                        }
+                                        Some(
+                                            view::Hit::SessionPicker
+                                            | view::Hit::ProjectPicker
+                                            | view::Hit::SidebarSettings,
+                                        ) => {
+                                            drawer_animation.set(0.0, Instant::now());
+                                        }
+                                        _ => {}
+                                    }
                                 }
                                 let open_tool_summary =
                                     if tool_dialog.is_none() && tool_detail_dialog.is_none() {
@@ -3266,6 +3577,10 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                         index = target;
                                         cached = None;
                                     }
+                                    if sidebar.drawer() == view::MobileDrawer::Left {
+                                        sidebar.set_drawer(view::MobileDrawer::None);
+                                        drawer_animation.set(0.0, Instant::now());
+                                    }
                                     continue;
                                 }
                                 if hit == Some(view::Hit::SidebarSettings) {
@@ -3300,6 +3615,10 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     if project_index < projects.len() {
                                         project_picker = None;
                                     }
+                                    if sidebar.drawer() == view::MobileDrawer::Left {
+                                        sidebar.set_drawer(view::MobileDrawer::None);
+                                        drawer_animation.set(0.0, Instant::now());
+                                    }
                                     continue;
                                 }
                                 if !modal_open
@@ -3313,6 +3632,10 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     continue;
                                 }
                                 if matches!(hit, Some(view::Hit::ProjectPicker)) {
+                                    if sidebar.drawer() == view::MobileDrawer::Left {
+                                        sidebar.set_drawer(view::MobileDrawer::None);
+                                        drawer_animation.set(0.0, Instant::now());
+                                    }
                                     dialog_stack.activate(DialogId::Project);
                                     project_picker = Some(view::ProjectPicker {
                                         selected: 0,
@@ -3332,9 +3655,17 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
                                     }
                                     session_picker = None;
                                     cached = None;
+                                    if sidebar.drawer() == view::MobileDrawer::Left {
+                                        sidebar.set_drawer(view::MobileDrawer::None);
+                                        drawer_animation.set(0.0, Instant::now());
+                                    }
                                     continue;
                                 }
                                 if matches!(hit, Some(view::Hit::SessionPicker)) {
+                                    if sidebar.drawer() == view::MobileDrawer::Left {
+                                        sidebar.set_drawer(view::MobileDrawer::None);
+                                        drawer_animation.set(0.0, Instant::now());
+                                    }
                                     session_generation += 1;
                                     session_epoch.store(
                                         session_generation,
@@ -4769,6 +5100,10 @@ fn apply_settings_row(
                 scheme: schemes[next],
             });
         }
+        (1, 2) => {
+            let enabled = runtime.tui_reduce_motion()?;
+            runtime.set_tui_reduce_motion(!enabled)?;
+        }
         (1, 4) => {
             let enabled = runtime.tui_message_roles()?;
             runtime.set_tui_message_roles(!enabled)?;
@@ -4806,6 +5141,7 @@ fn apply_settings(
             "settings",
             settings_text(
                 runtime.tui_message_roles().unwrap_or(true),
+                runtime.tui_reduce_motion().unwrap_or(false),
                 *permission_mode,
                 *hide_tools,
                 model,
@@ -4814,7 +5150,7 @@ fn apply_settings(
         );
     }
     let Some((key, value)) = args.split_once('=') else {
-        return SlashOutcome::Status("用法：/settings [theme=珊瑚|scheme=dark|permission=default|auto-approve=on|hide-tools=on|message-roles=off|provider=名称|model=名称]".to_owned());
+        return SlashOutcome::Status("用法：/settings [theme=珊瑚|scheme=dark|permission=default|auto-approve=on|hide-tools=on|message-roles=off|reduce-motion=on|provider=名称|model=名称]".to_owned());
     };
     let key = key.trim().to_ascii_lowercase();
     let value = value.trim();
@@ -4861,6 +5197,13 @@ fn apply_settings(
             }
             None => SlashOutcome::Status("布尔设置使用 on 或 off".to_owned()),
         },
+        "reduce-motion" => match parse_setting_bool(value) {
+            Some(enabled) => match runtime.set_tui_reduce_motion(enabled) {
+                Ok(()) => SlashOutcome::Status(format!("reduce-motion={enabled}")),
+                Err(err) => SlashOutcome::Status(format!("保存动画设置失败：{err}")),
+            },
+            None => SlashOutcome::Status("布尔设置使用 on 或 off".to_owned()),
+        },
         "message-roles" => match parse_setting_bool(value) {
             Some(enabled) => match runtime.set_tui_message_roles(enabled) {
                 Ok(()) => SlashOutcome::Status(format!("message-roles={enabled}")),
@@ -4890,13 +5233,14 @@ fn parse_setting_bool(value: &str) -> Option<bool> {
 
 fn settings_text(
     message_roles: bool,
+    reduce_motion: bool,
     permission_mode: PermissionMode,
     hide_tools: bool,
     model: &str,
     provider: &str,
 ) -> String {
     format!(
-        "当前设置\ntheme={}\nscheme={}\npermission={permission_mode}\nhide-tools={hide_tools}\nmessage-roles={message_roles}\nprovider={}\nmodel={}\n\n修改示例：/settings theme=indigo、/settings permission=acceptEdits",
+        "当前设置\ntheme={}\nscheme={}\npermission={permission_mode}\nhide-tools={hide_tools}\nmessage-roles={message_roles}\nreduce-motion={reduce_motion}\nprovider={}\nmodel={}\n\n修改示例：/settings theme=indigo、/settings permission=acceptEdits",
         theme::palette().as_str(),
         theme::scheme().as_str(),
         if provider.is_empty() {
@@ -6642,7 +6986,7 @@ fn handle_traffic_light(
     }
 }
 
-fn paste_clipboard(input: &mut String, preview: &mut Option<String>) {
+pub(crate) fn paste_clipboard(input: &mut String, preview: &mut Option<String>) {
     if let Some((image_preview, bytes)) = read_clipboard_image_preview() {
         input.push_str(&format!("[图片 {}]", format_bytes(bytes)));
         *preview = Some(format!(
@@ -6657,7 +7001,7 @@ fn paste_clipboard(input: &mut String, preview: &mut Option<String>) {
     }
 }
 
-fn insert_pasted_text(input: &mut String, preview: &mut Option<String>, text: &str) {
+pub(crate) fn insert_pasted_text(input: &mut String, preview: &mut Option<String>, text: &str) {
     if let Some((image_preview, bytes)) = read_clipboard_image_preview() {
         input.push_str(&format!("[图片 {}]", format_bytes(bytes)));
         *preview = Some(format!(
@@ -6796,7 +7140,7 @@ fn ascii_image_preview(text: &str) -> String {
         .join("\n")
 }
 
-fn read_clipboard_text() -> Option<String> {
+pub(crate) fn read_clipboard_text() -> Option<String> {
     #[cfg(windows)]
     if let Some(text) = clipboard_output(
         "powershell.exe",
@@ -6817,7 +7161,7 @@ fn read_clipboard_text() -> Option<String> {
     None
 }
 
-fn copy_text_to_clipboard(text: &str) -> String {
+pub(crate) fn copy_text_to_clipboard(text: &str) -> String {
     if write_clipboard(text) {
         return format!("copied {} chars", text.chars().count());
     }

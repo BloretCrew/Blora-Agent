@@ -16,12 +16,22 @@ pub(super) fn clip(text: &str, width: usize) -> String {
     out
 }
 pub(super) fn tabs(inner: Rect, count: usize) -> Vec<Rect> {
+    if count == 0 || inner.width == 0 {
+        return Vec::new();
+    }
+    // Reserve a dedicated final cell for the collapse control. Divide the
+    // remaining width evenly so no tab's close hitbox overlaps its neighbor.
     let available = inner.width.saturating_sub(2);
+    let width = (available / count as u16).max(1);
     (0..count)
         .map(|i| {
-            let left = available as usize * i / count;
-            let right = available as usize * (i + 1) / count;
-            Rect::new(inner.x + left as u16, inner.y, (right - left) as u16, 1)
+            let x = inner.x.saturating_add((i as u16).saturating_mul(width));
+            let right = if i + 1 == count {
+                inner.right().saturating_sub(2)
+            } else {
+                x.saturating_add(width)
+            };
+            Rect::new(x, inner.y, right.saturating_sub(x), 1)
         })
         .collect()
 }
