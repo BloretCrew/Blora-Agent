@@ -17,7 +17,7 @@
 - Mock Provider 与 OpenAI Chat / Responses / Anthropic 流式接口
 - CLI、TUI、本地 Web UI（Blora Design；会话 / 任务 / 审批 / 工作区 / 设置）
 - Work 模式：延迟任务、cron、暂停/恢复、`blora task pump`
-- Agent 模式：`delegate` / `handoff`，深度/并发预算；research/review/plan 只读
+- Agent 模式：`delegate` / `handoff`，深度 2 / 并发 3、同批并行、独立取消与插话；research/review/plan 只读，自定义角色读 `.blora/agents/{role}.md`
 - TUI/Web 交互审批、Git 工具、worktree 执行、上下文压缩、checkpoint、artifact
 - Provider：`openai` / `responses` / `anthropic` / `mock`，逗号分隔回退
 - `blora session fork|export|archive`、MCP（`BLORA_MCP_COMMAND`）、`blora acp`、`BLORA_HOOKS_DIR`

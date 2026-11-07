@@ -43,6 +43,8 @@ const SLASH = [
   ["install", "安装市场插件"],
   ["read", "读取工作区文件"],
   ["steer", "向运行中的回合插话"],
+  ["steer-agent", "向运行中的子代理插话"],
+  ["cancel-agent", "取消单个子代理"],
   ["theme", "打开主题设置"],
 ];
 
@@ -1174,11 +1176,57 @@ function renderSubagents(items) {
   subagents.hidden = false;
   subagents.replaceChildren();
   for (const item of items) {
+    const row = document.createElement("div");
+    row.className = "ba-subagent";
     const tag = document.createElement("span");
     tag.className = "blora-tag";
-    tag.dataset.variant = item.status === "completed" ? "success" : "primary";
+    tag.dataset.variant =
+      item.status === "completed" ? "success" : item.status === "failed" || item.status === "cancelled" ? "danger" : "primary";
     tag.textContent = `子代理 ${item.role} · ${item.status}`;
-    subagents.append(tag);
+    row.append(tag);
+    if (item.summary) {
+      const summary = document.createElement("span");
+      summary.className = "ba-subagent__summary";
+      summary.textContent = item.summary;
+      row.append(summary);
+    }
+    if (item.status === "running" && item.id) {
+      const steer = document.createElement("button");
+      steer.type = "button";
+      steer.className = "blora-button";
+      steer.dataset.variant = "ghost";
+      steer.dataset.size = "sm";
+      steer.textContent = "插话";
+      steer.addEventListener("click", async () => {
+        const message = window.prompt(`向子代理 ${item.role} 插话`);
+        if (!message || !message.trim()) {
+          return;
+        }
+        try {
+          await api(`/api/agents/${encodeURIComponent(item.id)}/steer`, {
+            method: "POST",
+            body: JSON.stringify({ message: message.trim() }),
+          });
+        } catch (error) {
+          showAlert(error.message || String(error));
+        }
+      });
+      const stop = document.createElement("button");
+      stop.type = "button";
+      stop.className = "blora-button";
+      stop.dataset.variant = "ghost";
+      stop.dataset.size = "sm";
+      stop.textContent = "取消";
+      stop.addEventListener("click", async () => {
+        try {
+          await api(`/api/agents/${encodeURIComponent(item.id)}/cancel`, { method: "POST", body: "{}" });
+        } catch (error) {
+          showAlert(error.message || String(error));
+        }
+      });
+      row.append(steer, stop);
+    }
+    subagents.append(row);
   }
 }
 
@@ -1905,7 +1953,7 @@ async function runSlash(raw) {
     showNotice(`已安装 ${rest}`, "info", "插件");
     return;
   }
-  if (!state.sessionId && ["compact", "fork", "cancel", "archive", "resume", "export", "steer"].includes(name)) {
+  if (!state.sessionId && ["compact", "fork", "cancel", "archive", "resume", "export", "steer", "steer-agent", "cancel-agent"].includes(name)) {
     showAlert("先打开一个会话");
     return;
   }
@@ -1946,6 +1994,29 @@ async function runSlash(raw) {
       method: "POST",
       body: JSON.stringify({ message: rest }),
     });
+    return;
+  }
+  if (name === "steer-agent") {
+    const parts = rest.trim().split(/\s+/);
+    const agentId = parts[0];
+    const message = parts.slice(1).join(" ").trim();
+    if (!agentId || !message) {
+      showAlert("用法：/steer-agent <id> 要补充的话");
+      return;
+    }
+    await api(`/api/agents/${encodeURIComponent(agentId)}/steer`, {
+      method: "POST",
+      body: JSON.stringify({ message }),
+    });
+    return;
+  }
+  if (name === "cancel-agent") {
+    const agentId = rest.trim().split(/\s+/)[0];
+    if (!agentId) {
+      showAlert("用法：/cancel-agent <id>");
+      return;
+    }
+    await api(`/api/agents/${encodeURIComponent(agentId)}/cancel`, { method: "POST", body: "{}" });
     return;
   }
   showAlert(`未知命令 /${name}。输入 /help 查看。`);

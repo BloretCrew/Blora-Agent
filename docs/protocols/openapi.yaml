@@ -86,6 +86,52 @@ paths:
           schema: { type: string }
       responses:
         "200": { description: Cancelled }
+  /api/sessions/{id}/steer:
+    post:
+      summary: Queue a steering message for the running session
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message]
+              properties:
+                message: { type: string }
+      responses:
+        "200": { description: Queued }
+  /api/agents/{id}/steer:
+    post:
+      summary: Queue a steering message for a running subagent
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message]
+              properties:
+                message: { type: string }
+      responses:
+        "200": { description: Queued }
+  /api/agents/{id}/cancel:
+    post:
+      summary: Cancel one running subagent without stopping the parent run
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: Cancelled }
   /api/tasks:
     get:
       summary: List tasks

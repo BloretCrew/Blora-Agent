@@ -201,11 +201,14 @@ impl ToolRegistry {
             },
             ToolSpec {
                 name: "delegate",
-                description: "Spawn a child agent with a small turn budget and return its final report. The child cannot see this conversation, so the prompt must be a complete brief: goal, relevant paths, constraints, and what to report. Roles: research, review, plan (read-only), code (may edit).",
+                description: "Spawn a child agent with a small turn budget and return its final report. The child cannot see this conversation, so the prompt must be a complete brief: goal, relevant paths, constraints, and what to report. Built-in roles: research, review, plan (read-only), code (may edit). Other names load `.blora/agents/{role}.md` when present. Multiple delegate calls in one batch run in parallel (up to 3).",
                 parameters: json!({
                     "type": "object",
                     "properties": {
-                        "role": {"type": "string", "enum": ["research", "review", "plan", "code"]},
+                        "role": {
+                            "type": "string",
+                            "description": "Built-in research|review|plan|code, or a custom role name matching `.blora/agents/{role}.md`"
+                        },
                         "prompt": {"type": "string", "description": "Self-contained task brief for the child agent"}
                     },
                     "required": ["prompt"]
@@ -250,7 +253,7 @@ impl ToolRegistry {
             },
             ToolSpec {
                 name: "handoff",
-                description: "Return a structured summary to the parent agent.",
+                description: "Return a structured summary to the parent agent. Prefer this as the last action of a subagent; the parent uses the summary as the child report.",
                 parameters: json!({
                     "type": "object",
                     "properties": {

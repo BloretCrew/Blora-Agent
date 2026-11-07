@@ -2,7 +2,7 @@
 
 ## 交付范围与实现状态
 
-`web/commands.js` 提供 `window.BloraCommands`，目录对齐 `crates/blora-tui/src/slash.rs` 的全部 79 个命令及别名，说明为中文。目录收录不等于功能已经实现。下面区分模块执行、复用原 app、依赖 Workbench 与尚未提供的功能；没有声称整体验收或浏览器测试通过。
+`web/commands.js` 提供 `window.BloraCommands`，目录对齐 `crates/blora-tui/src/slash.rs` 的全部 82 个命令及别名，说明为中文。目录收录不等于功能已经实现。下面区分模块执行、复用原 app、依赖 Workbench 与尚未提供的功能；没有声称整体验收或浏览器测试通过。
 
 命令模块与 app 的加载、执行桥接及以 `/` 开头的补全输入集成已完成；窗口与服务端由主任务集成。本次修订仅修改命令模块、本说明，并新增 `scripts/web-commands.test.cjs`，没有修改 Rust、UI 或 app。主任务负责浏览器验收，本子任务不把接口集成完成等同于浏览器测试通过。
 
@@ -62,6 +62,8 @@ bridge 必需函数：`api(path, options)`、`getState()`、`stored(key, fallbac
 | uninstall | 风险确认后卸载指定插件 | actions 请求 action=uninstall、name、confirmed=true，显示 output |
 | skills、mcp、hooks | 模块显示技能及配置标志 | GET /api/sessions/:id/extensions；不返回真实 MCP 命令 / Hook 路径，与 CLI 原始环境值不同 |
 | agents | 模块展示会话子代理 | 会话 JSON subagents |
+| steer-agent | 模块向运行中的子代理排队插话 | POST /api/agents/:id/steer，`{message}`；需当前会话 |
+| cancel-agent | 模块取消单个子代理 | POST /api/agents/:id/cancel；不停止父运行 |
 | git | 委托 Git 工作台 | 新会话 Git 协议由工作台实现；提交、选择文件、说明生成、push/pull、Git 图未在命令模块实现或验收 |
 | diff、log | 模块展示原工作区 diff / log | GET /api/workspace?session=当前ID；无会话时使用默认工作区；需新服务端 session query 支持 |
 | files | 委托 folder 窗口 | 工作台目录浏览协议与新服务端 /api/directories 尚需核对 |

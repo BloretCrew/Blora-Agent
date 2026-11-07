@@ -20,8 +20,9 @@ use blora_policy::{PermissionMode, Policy};
 use blora_session::SessionProjection;
 use blora_storage::{CreateSession, CreateTask, SessionSummary, SqliteStore};
 use blora_tools::ToolRegistry;
-use blora_types::{BloraError, CancelToken, Mode, Result, RunId, SessionId, TurnId};
+use blora_types::{AgentId, BloraError, CancelToken, Mode, Result, RunId, SessionId, TurnId};
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 
@@ -136,6 +137,12 @@ pub struct Runtime {
     subscribers: Mutex<Vec<SyncSender<EventEnvelope>>>,
     /// Answers to open `ask_user` questions, keyed by request id. `None` is a dismissal.
     pub(crate) input_answers: Mutex<std::collections::HashMap<String, Option<String>>>,
+    /// Per-subagent cancel tokens so `cancel_subagent` can interrupt one child
+    /// without stopping the parent run.
+    pub(crate) subagent_cancels: Mutex<HashMap<AgentId, CancelToken>>,
+    /// Structured `handoff` reports keyed by child session, preferred over the
+    /// last assistant message when the parent collects a subagent result.
+    pub(crate) subagent_handoffs: Mutex<HashMap<SessionId, String>>,
     /// Scripted provider used by unit tests in place of the resolved chain.
     #[cfg(test)]
     pub(crate) test_provider: Mutex<Option<std::sync::Arc<dyn Provider>>>,
@@ -149,6 +156,8 @@ impl Runtime {
             foreground_sessions: Mutex::new(std::collections::HashSet::new()),
             subscribers: Mutex::new(Vec::new()),
             input_answers: Mutex::new(std::collections::HashMap::new()),
+            subagent_cancels: Mutex::new(HashMap::new()),
+            subagent_handoffs: Mutex::new(HashMap::new()),
             #[cfg(test)]
             test_provider: Mutex::new(None),
         }
@@ -1140,9 +1149,10 @@ impl Runtime {
                     Some(&run_id),
                     Some(&turn_id),
                     KnownPayload::AssistantMessageCompleted(AssistantMessageCompleted {
-                        text: assistant_text,
+                        text: assistant_text.clone(),
                     }),
                 )?;
+                let _ = self.relay_subagent_progress(session_id, &assistant_text);
             }
 
             self.emit(
@@ -1460,6 +1470,9 @@ impl Runtime {
             && calls
                 .iter()
                 .all(|call| ToolRegistry::is_read_only(&call.name));
+        let parallel_delegates = calls.len() > 1
+            && std::env::var_os("BLORA_HOOKS_DIR").is_none()
+            && calls.iter().all(|call| call.name == "delegate");
         let precomputed: Vec<Option<Result<String>>> = if all_read_only {
             std::thread::scope(|scope| {
                 let handles: Vec<_> = calls
@@ -1494,6 +1507,37 @@ impl Runtime {
                         handle.map(|handle| {
                             handle.join().unwrap_or_else(|_| {
                                 Err(BloraError::Other("tool thread panicked".to_owned()))
+                            })
+                        })
+                    })
+                    .collect()
+            })
+        } else if parallel_delegates {
+            std::thread::scope(|scope| {
+                let handles: Vec<_> = calls
+                    .iter()
+                    .map(|call| {
+                        Some(scope.spawn(move || {
+                            let arguments: Value = serde_json::from_str(&call.arguments)
+                                .unwrap_or_else(|_| json!({ "raw": call.arguments }));
+                            let prompt = arguments
+                                .get("prompt")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default();
+                            let role = arguments
+                                .get("role")
+                                .and_then(Value::as_str)
+                                .unwrap_or("worker");
+                            self.spawn_subagent(session_id, role, prompt, options, cancel)
+                        }))
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|handle| {
+                        handle.map(|handle| {
+                            handle.join().unwrap_or_else(|_| {
+                                Err(BloraError::Other("subagent thread panicked".to_owned()))
                             })
                         })
                     })
@@ -1661,6 +1705,7 @@ impl Runtime {
                     .unwrap_or("worker");
                 self.spawn_subagent(session_id, role, prompt, options, cancel)
             }
+            "handoff" => self.record_subagent_handoff(session_id, &arguments),
             "schedule_task" => {
                 let title = arguments
                     .get("title")
@@ -2159,7 +2204,13 @@ impl Provider for SharedProvider {
 fn runtime_handled_tool(name: &str) -> bool {
     matches!(
         name,
-        "recall" | "update_plan" | "shell" | "ask_user" | "session_search"
+        "recall"
+            | "update_plan"
+            | "shell"
+            | "ask_user"
+            | "session_search"
+            | "delegate"
+            | "handoff"
     )
 }
 
@@ -2696,6 +2747,170 @@ mod tests {
             projection.transcript.iter().any(
                 |item| matches!(item, TranscriptItem::Tool { name, .. } if name == "delegate")
             )
+        );
+    }
+
+    #[test]
+    fn parallel_delegate_batch_runs_two_children() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("hello.txt"), "hi").unwrap();
+        let runtime = Runtime::new(SqliteStore::open_in_memory().unwrap());
+        let session = session(&runtime, Mode::Code, dir.path().to_str().unwrap());
+        Recorder::install(
+            &runtime,
+            vec![
+                Completion {
+                    tool_calls: vec![
+                        ToolCall {
+                            id: "d1".to_owned(),
+                            name: "delegate".to_owned(),
+                            arguments: json!({
+                                "role": "research",
+                                "prompt": "list files in the workspace"
+                            })
+                            .to_string(),
+                        },
+                        ToolCall {
+                            id: "d2".to_owned(),
+                            name: "delegate".to_owned(),
+                            arguments: json!({
+                                "role": "review",
+                                "prompt": "summarise hello.txt"
+                            })
+                            .to_string(),
+                        },
+                    ],
+                    finish_reason: "tool_calls".to_owned(),
+                    ..Completion::default()
+                },
+                text_reply("both children finished", "stop"),
+            ],
+            None,
+        );
+        runtime
+            .run(
+                &session,
+                "delegate two listings",
+                &CancelToken::new(),
+                &RunOptions {
+                    mock: true,
+                    auto_approve: true,
+                    ..RunOptions::default()
+                },
+            )
+            .unwrap();
+        let projection = runtime.show_session(&session).unwrap();
+        assert_eq!(projection.subagents.len(), 2);
+        assert!(
+            projection
+                .subagents
+                .iter()
+                .all(|agent| agent.status == "completed")
+        );
+        let delegates = projection
+            .transcript
+            .iter()
+            .filter(|item| matches!(item, TranscriptItem::Tool { name, .. } if name == "delegate"))
+            .count();
+        assert_eq!(delegates, 2);
+    }
+
+    #[test]
+    fn subagent_handoff_is_the_parent_report() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("hello.txt"), "hi").unwrap();
+        let runtime = Runtime::new(SqliteStore::open_in_memory().unwrap());
+        let session = session(&runtime, Mode::Code, dir.path().to_str().unwrap());
+
+        struct HandoffScript;
+        impl Provider for HandoffScript {
+            fn name(&self) -> &str {
+                "mock"
+            }
+
+            fn complete(
+                &self,
+                request: &CompletionRequest,
+                _cancel: &CancelToken,
+                on_event: &mut dyn FnMut(StreamEvent) -> Result<()>,
+            ) -> Result<Completion> {
+                let last_role = request.messages.last().map(|message| message.role.as_str());
+                let is_child = request.messages.iter().any(|message| {
+                    message
+                        .content
+                        .as_deref()
+                        .is_some_and(|text| text.contains("[subagent:"))
+                });
+                let completion = if is_child && last_role != Some("tool") {
+                    tool_reply(
+                        "h1",
+                        "handoff",
+                        &json!({
+                            "summary": "workspace has hello.txt",
+                            "files": "hello.txt"
+                        })
+                        .to_string(),
+                    )
+                } else if is_child {
+                    text_reply("child chatter after handoff", "stop")
+                } else if last_role != Some("tool") {
+                    tool_reply(
+                        "d1",
+                        "delegate",
+                        &json!({
+                            "role": "research",
+                            "prompt": "report with handoff"
+                        })
+                        .to_string(),
+                    )
+                } else {
+                    text_reply("parent saw the child", "stop")
+                };
+                if !completion.text.is_empty() {
+                    on_event(StreamEvent::TextDelta(completion.text.clone()))?;
+                }
+                for call in &completion.tool_calls {
+                    on_event(StreamEvent::ToolCall(call.clone()))?;
+                }
+                Ok(completion)
+            }
+        }
+
+        *runtime.test_provider.lock().unwrap() = Some(std::sync::Arc::new(HandoffScript));
+        runtime
+            .run(
+                &session,
+                "delegate a workspace listing",
+                &CancelToken::new(),
+                &RunOptions {
+                    mock: true,
+                    auto_approve: true,
+                    ..RunOptions::default()
+                },
+            )
+            .unwrap();
+        let projection = runtime.show_session(&session).unwrap();
+        assert_eq!(projection.subagents[0].status, "completed");
+        assert!(
+            projection.subagents[0]
+                .summary
+                .as_deref()
+                .is_some_and(|text| text.contains("workspace has hello.txt")
+                    && !text.contains("child chatter")),
+            "{:?}",
+            projection.subagents[0].summary
+        );
+        assert!(projection.transcript.iter().any(|item| matches!(
+            item,
+            TranscriptItem::Tool { name, output, .. }
+                if name == "delegate"
+                    && output.as_deref().is_some_and(|text| text.contains("workspace has hello.txt"))
+        )));
+        let events = runtime.events(&session).unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == "subagent.message")
         );
     }
 

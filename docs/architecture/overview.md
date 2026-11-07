@@ -27,7 +27,7 @@ Blora Agent 是从零实现的本地优先 harness。第一阶段是单用户模
 - Mock Provider 与 OpenAI 兼容流式 adapter
 - CLI、TUI、本地 Web UI（Blora Design）
 - Work：后台任务表、延迟调度、失败重试、session wakeup
-- Agent：`delegate` 子代理，深度 2 / 并发 3 / 子代理 6 turn 预算
+- Agent：`delegate` 子代理，深度 2 / 并发 3 / 同批并行、独立取消、自定义角色、handoff 交付
 - 交互审批（TUI y/n，Web 允许/拒绝）
 - Git 只读工具、apply_patch、上下文压缩、checkpoint、provider 重试与工具死循环检测
 - Provider：Chat Completions、Responses、Anthropic；`BLORA_PROVIDER` 可用逗号做回退链
@@ -42,7 +42,7 @@ Blora Agent 是从零实现的本地优先 harness。第一阶段是单用户模
 - 多用户 Gateway（`blora gateway` + `blora user add`）、WebSocket 控制、插件市场、自动记忆蒸馏
 - 请求层：稳定/上下文/易失三层提示与缓存断点、模型驱动压缩（85% 阈值、逐字尾部、三次熔断）、指数退避重试与流空闲看门狗、cached token 计量
 - 工具层：唯一匹配的 apply_patch、只读工具批次并发、工具结果截断与 microcompact、三态 hooks（allow/block/ask）
-- Work/Agent：cron 至多一次语义与失活恢复、任务退避重试与 180s 硬上限、子代理深度与用量回写、运行中 steer
+- Work/Agent：cron 至多一次语义与失活恢复、任务退避重试与 180s 硬上限、子代理深度与用量回写、运行中 steer（含按 agent_id 干预）
 - 权限：四档 `PermissionMode`（plan / default / acceptEdits / bypassPermissions），shell 命令按段分级（只读 / 改动 / 危险），`run.created.permission_mode` 与 `<environment_context>` 告知模型；`update_plan` 清单工具与 `plan.updated` 事件
 - 工具与上下文：`glob` 工具、`search` 的 include/max_results、超长结果落盘到 `.blora/tool-output/`、规则文件从仓库根逐级发现并叠加全局 `~/.blora/rules.md`
 - 会话 shell 工作目录（`cwd` 参数或单独的 `cd`，记在 `session.cwd.changed`，不离开工作区）、技能只在上下文里列名字、用 `skill` 按需加载全文、非 UTF-8 文件（含 PNG/JPEG/GIF/WEBP）以类型和尺寸描述返回

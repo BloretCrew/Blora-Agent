@@ -604,6 +604,15 @@ pub fn apply_event(projection: &mut SessionProjection, event: &EventEnvelope) ->
                 event_id: event.event_id.clone(),
             });
         }
+        KnownPayload::SubagentMessage(message) => {
+            if let Some(view) = projection
+                .subagents
+                .iter_mut()
+                .find(|item| item.id == message.agent_id)
+            {
+                view.summary = Some(message.text.clone());
+            }
+        }
         KnownPayload::SubagentCompleted(done) => {
             if let Some(view) = projection
                 .subagents
@@ -657,16 +666,25 @@ pub fn apply_event(projection: &mut SessionProjection, event: &EventEnvelope) ->
             touch_run(projection, event)?;
         }
         KnownPayload::SubagentFailed(failed) => {
+            let cancelled = failed.error == "cancelled";
             if let Some(view) = projection
                 .subagents
                 .iter_mut()
                 .find(|item| item.id == failed.agent_id)
             {
-                view.status = "failed".to_owned();
+                view.status = if cancelled {
+                    "cancelled".to_owned()
+                } else {
+                    "failed".to_owned()
+                };
                 view.summary = Some(failed.error.clone());
             }
             projection.transcript.push(TranscriptItem::System {
-                summary: format!("subagent failed: {}", failed.error),
+                summary: format!(
+                    "subagent {}: {}",
+                    if cancelled { "cancelled" } else { "failed" },
+                    failed.error
+                ),
                 event_id: event.event_id.clone(),
             });
         }
@@ -1198,5 +1216,60 @@ mod tests {
         assert!(notice.contains("供应商 blora 从这里切换为 crewrouter"));
         assert!(notice.contains("模型 blora 从这里切换为 claude-fable-5"));
         assert!(notice.contains("接下来的消息将使用新的供应商与模型"));
+    }
+
+    #[test]
+    fn subagent_progress_and_cancel_update_view() {
+        let session_id = SessionId::generate();
+        let created = envelope(
+            &session_id,
+            1,
+            KnownPayload::SessionCreated(SessionCreated {
+                title: None,
+                workspace_path: "/tmp/ws".to_owned(),
+                mode: Mode::Code,
+                parent_session_id: None,
+            }),
+        );
+        let agent_id = AgentId::generate();
+        let spawned = envelope(
+            &session_id,
+            2,
+            KnownPayload::SubagentSpawned(blora_events::SubagentSpawned {
+                agent_id: agent_id.clone(),
+                role: "research".to_owned(),
+                child_session_id: Some(SessionId::generate()),
+                prompt: Some("look around".to_owned()),
+                depth: 1,
+            }),
+        );
+        let progress = envelope(
+            &session_id,
+            3,
+            KnownPayload::SubagentMessage(blora_events::SubagentMessage {
+                agent_id: agent_id.clone(),
+                text: "found README".to_owned(),
+            }),
+        );
+        let failed = envelope(
+            &session_id,
+            4,
+            KnownPayload::SubagentFailed(blora_events::SubagentFailed {
+                agent_id,
+                error: "cancelled".to_owned(),
+            }),
+        );
+        let projection = rebuild(&[created, spawned, progress, failed]).unwrap();
+        assert_eq!(projection.subagents[0].status, "cancelled");
+        assert_eq!(
+            projection.subagents[0].summary.as_deref(),
+            Some("cancelled")
+        );
+        assert!(
+            projection
+                .transcript
+                .iter()
+                .any(|item| matches!(item, TranscriptItem::System { summary, .. } if summary.contains("subagent cancelled")))
+        );
     }
 }

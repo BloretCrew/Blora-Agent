@@ -25,7 +25,7 @@ use blora_auth::PassportConfig;
 use blora_runtime::{CancelToken, PermissionMode, RunOptions, Runtime};
 use blora_session::{TranscriptItem, format_routing_switch, relative_zh};
 use blora_storage::{CreateSession, CreateTask};
-use blora_types::{ApprovalId, Mode, SessionId, TaskId};
+use blora_types::{AgentId, ApprovalId, Mode, SessionId, TaskId};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
@@ -241,6 +241,8 @@ fn app(state: AppState) -> Router {
         .route("/api/sessions/{id}/cancel", post(cancel_session))
         .route("/api/sessions/{id}/steer", post(steer_session))
         .route("/api/sessions/{id}/input", post(answer_input))
+        .route("/api/agents/{id}/steer", post(steer_agent))
+        .route("/api/agents/{id}/cancel", post(cancel_agent))
         .route("/api/usage", get(usage))
         .route("/api/plugins", get(plugins))
         .route("/api/artifacts", get(list_artifacts))
@@ -1215,6 +1217,45 @@ async fn steer_session(
         .queue_steer(&session_id, &body.message)
         .map_err(ApiError::from)?;
     Ok(Json(serde_json::json!({ "queued": true })))
+}
+
+fn ensure_agent(
+    state: &AppState,
+    headers: &HttpHeaderMap,
+    agent_id: &AgentId,
+) -> Result<blora_storage::AgentRecord, ApiError> {
+    let agent = state.runtime.get_subagent(agent_id).map_err(ApiError::from)?;
+    ensure_session(state, headers, &agent.parent_session_id)?;
+    Ok(agent)
+}
+
+async fn steer_agent(
+    State(state): State<AppState>,
+    headers: HttpHeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<SteerBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let agent_id = AgentId::parse(&id).map_err(ApiError::from)?;
+    ensure_agent(&state, &headers, &agent_id)?;
+    state
+        .runtime
+        .steer_subagent(&agent_id, &body.message)
+        .map_err(ApiError::from)?;
+    Ok(Json(serde_json::json!({ "queued": true, "agent_id": id })))
+}
+
+async fn cancel_agent(
+    State(state): State<AppState>,
+    headers: HttpHeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let agent_id = AgentId::parse(&id).map_err(ApiError::from)?;
+    ensure_agent(&state, &headers, &agent_id)?;
+    state
+        .runtime
+        .cancel_subagent(&agent_id)
+        .map_err(ApiError::from)?;
+    Ok(Json(serde_json::json!({ "cancelled": id })))
 }
 
 #[derive(Deserialize)]

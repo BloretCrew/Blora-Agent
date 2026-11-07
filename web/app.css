@@ -178,6 +178,22 @@ blora-sidebar-layout {
   padding-bottom: var(--blora-space-3);
 }
 
+.ba-subagent {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--blora-space-2);
+}
+
+.ba-subagent__summary {
+  color: var(--blora-color-text-muted);
+  font-size: 0.85em;
+  max-width: 28rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .ba-plan {
   padding-bottom: var(--blora-space-3);
 }

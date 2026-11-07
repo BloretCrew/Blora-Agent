@@ -18,7 +18,7 @@
 
 `shell` 的工作目录按会话记住。省略 `cwd` 时从上次的目录开始（默认工作区根）。传入 `cwd`，或成功执行一条单独的 `cd`（可带一个路径），都会把新目录写成 `session.cwd.changed`。`cd` 和 `cd ~` 回到工作区根，不进入账户家目录；目标必须是工作区里已存在的目录。带 `&&`、管道或其他命令的 `cd` 不会被改写，也不更新会话目录。投影字段是 `shell_cwd`，Web 会话 JSON 同样带上它。
 
-只读工具（read_file、list_dir、glob、search、git 只读、recall、handoff、update_plan）在同一批次内并发执行；只读角色的子代理只能看到只读工具。工具结果超过 24k 字符时头尾截断并在事件里标记 `truncated`，同时把全文写到 `{workspace}/.blora/tool-output/{call_id}.txt`（最多保留 50 份），截断文本末尾告诉模型可用 `read_file` 的 offset/limit 分页读取。
+只读工具（read_file、list_dir、glob、search、git 只读、recall、handoff、update_plan）在同一批次内并发执行；同一批全是 `delegate` 时子代理也并行（同一父会话最多 3 个 running）。只读角色的子代理只能看到只读工具，并固定为 `plan` 权限。工具结果超过 24k 字符时头尾截断并在事件里标记 `truncated`，同时把全文写到 `{workspace}/.blora/tool-output/{call_id}.txt`（最多保留 50 份），截断文本末尾告诉模型可用 `read_file` 的 offset/limit 分页读取。
 
 `update_plan` 让模型维护一份清单（`steps[{title,status}]`，status 为 `pending` / `in_progress` / `done`，可附 `note`）。每次调用整体替换，落为 `plan.updated` 事件；投影里保留最新一份（`projection.plan` / `plan_note`），CLI `session show` 打印，Web API 的会话 JSON 带 `plan` / `plan_note`。
 

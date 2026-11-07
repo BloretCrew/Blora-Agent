@@ -30,7 +30,7 @@ use blora_policy::PermissionMode;
 use blora_runtime::{CancelToken, RunOptions, Runtime};
 use blora_session::TranscriptItem;
 use blora_storage::{CreateSession, CreateTask};
-use blora_types::{Mode, Result, SessionId, TaskId};
+use blora_types::{AgentId, Mode, Result, SessionId, TaskId};
 use crossterm::cursor::{Hide, Show};
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
@@ -5791,12 +5791,48 @@ fn slash(
             Ok(rows) => panel(
                 "agents",
                 rows.into_iter()
-                    .map(|row| format!("{}  {}  {}", row.id, row.role, row.status))
+                    .map(|row| {
+                        let summary = row
+                            .summary
+                            .as_deref()
+                            .filter(|text| !text.is_empty())
+                            .unwrap_or("-");
+                        format!("{}  {}  {}  {}", row.id, row.role, row.status, summary)
+                    })
                     .collect::<Vec<_>>()
                     .join("\n"),
             ),
             Err(err) => SlashOutcome::Status(err.to_string()),
         },
+        "steer-agent" => {
+            let Some((id, message)) = args.split_once(char::is_whitespace) else {
+                return SlashOutcome::Status("usage: /steer-agent <id> <message>".to_owned());
+            };
+            match AgentId::parse(id.trim()) {
+                Ok(agent_id) => SlashOutcome::Status(
+                    runtime
+                        .steer_subagent(&agent_id, message.trim())
+                        .map(|()| format!("queued for {agent_id}"))
+                        .unwrap_or_else(|err| err.to_string()),
+                ),
+                Err(err) => SlashOutcome::Status(err.to_string()),
+            }
+        }
+        "cancel-agent" => {
+            if args.is_empty() {
+                SlashOutcome::Status("usage: /cancel-agent <id>".to_owned())
+            } else {
+                match AgentId::parse(args.split_whitespace().next().unwrap_or_default()) {
+                    Ok(agent_id) => SlashOutcome::Status(
+                        runtime
+                            .cancel_subagent(&agent_id)
+                            .map(|()| format!("cancel requested for {agent_id}"))
+                            .unwrap_or_else(|err| err.to_string()),
+                    ),
+                    Err(err) => SlashOutcome::Status(err.to_string()),
+                }
+            }
+        }
         "git" => match runtime.workspace_info(workspace) {
             Ok(info) => panel("git", format!("{}\n{}", info.git_branch, info.git_status)),
             Err(err) => SlashOutcome::Status(err.to_string()),

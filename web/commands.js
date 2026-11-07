@@ -69,6 +69,8 @@
     {"name": "skills", "aliases": [], "hint": "", "about": "列出工作区技能", "group": "plugins"},
     {"name": "mcp", "aliases": ["mcps"], "hint": "", "about": "查看服务端 MCP 配置", "group": "plugins"},
     {"name": "agents", "aliases": ["subagents"], "hint": "", "about": "查看当前会话子代理", "group": "work"},
+    {"name": "steer-agent", "aliases": ["steer-subagent"], "hint": "<id> <message>", "about": "向运行中的子代理插话", "group": "work"},
+    {"name": "cancel-agent", "aliases": ["stop-agent"], "hint": "<id>", "about": "取消单个子代理，不停止父运行", "group": "work"},
     {"name": "git", "aliases": [], "hint": "", "about": "打开 Git 工作台", "group": "git"},
     {"name": "diff", "aliases": [], "hint": "", "about": "查看 Git 差异", "group": "git"},
     {"name": "log", "aliases": [], "hint": "", "about": "查看 Git 日志", "group": "git"},
@@ -307,6 +309,19 @@
           if (!window.navigator?.clipboard?.writeText) throw new Error("浏览器剪贴板不可用，请在安全上下文中使用或手动复制");
           await window.navigator.clipboard.writeText(reply.text);
           notice("已复制最后一条助手回复");
+        }
+      } else if (name === "steer-agent" || name === "cancel-agent") {
+        const parts = args.trim().split(/\s+/);
+        const agentId = parts[0];
+        if (!agentId) throw new Error(name === "steer-agent" ? "用法：/steer-agent <id> <message>" : "用法：/cancel-agent <id>");
+        if (name === "steer-agent") {
+          const message = parts.slice(1).join(" ").trim();
+          if (!message) throw new Error("用法：/steer-agent <id> <message>");
+          await bridge.api(`/api/agents/${encodeURIComponent(agentId)}/steer`, { method: "POST", body: JSON.stringify({ message }) });
+          notice(`已向 ${agentId} 排队插话`, "子代理");
+        } else {
+          await bridge.api(`/api/agents/${encodeURIComponent(agentId)}/cancel`, { method: "POST", body: "{}" });
+          notice(`已请求取消 ${agentId}`, "子代理");
         }
       } else if (["task", "cron", "loop"].includes(name)) {
         sessionId();

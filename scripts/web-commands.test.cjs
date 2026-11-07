@@ -70,7 +70,7 @@ function harness() {
 
 test('catalog matches every CLI name, alias, hint, group and display order', () => {
   const { commands } = harness();
-  assert.equal(cli.length, 80);
+  assert.equal(cli.length, 82);
   assert.deepEqual(plain(commands.catalog).map(({ name, aliases, hint, group }) => ({ name, aliases, hint, group })), cli);
   for (const row of cli) {
     assert.equal(commands.resolve(` /${row.name.toUpperCase()} `).name, row.name);
@@ -277,4 +277,16 @@ test('mode parameters create sessions; model aliases use routing; search and too
   assert.equal(h.prefs.get('blora-hide-tools'), 'on');
   await h.execute('/tools');
   assert.equal(h.prefs.get('blora-hide-tools'), 'off');
+});
+
+test('steer-agent and cancel-agent call the agent control API', async () => {
+  const h = harness();
+  await h.execute('/steer-subagent agt_test 补充路径');
+  assert.deepEqual(h.requests()[0], {
+    kind: 'api',
+    url: '/api/agents/agt_test/steer',
+    body: { message: '补充路径' },
+  });
+  await h.execute('/stop-agent agt_test');
+  assert.equal(h.requests()[1].url, '/api/agents/agt_test/cancel');
 });

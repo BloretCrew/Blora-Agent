@@ -661,7 +661,13 @@ fn print_projection(
         );
     }
     for agent in &projection.subagents {
-        println!("  subagent {}  {}  {}", agent.id, agent.role, agent.status);
+        println!(
+            "  subagent {}  {}  {}  {}",
+            agent.id,
+            agent.role,
+            agent.status,
+            agent.summary.as_deref().unwrap_or("-")
+        );
     }
     for run in projection.runs {
         println!(

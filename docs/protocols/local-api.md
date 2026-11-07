@@ -16,6 +16,8 @@ POST   /api/sessions/:id/resume
 POST   /api/sessions/:id/compact
 POST   /api/sessions/:id/cancel
 POST   /api/sessions/:id/steer        {"message": "..."} — delivered at the next turn boundary
+POST   /api/agents/:id/steer          {"message": "..."} — queue a message for a running subagent
+POST   /api/agents/:id/cancel         interrupt one running subagent without cancelling the parent run
 POST   /api/sessions/:id/input        {"request_id": "...", "answer": "..." | null} — answer or dismiss the open ask_user question; answer is at most 16000 characters
 GET    /api/workspace/list?path=&session=  one directory inside the session workspace: {"path", "entries"}; directory names end with /
 GET    /api/tasks

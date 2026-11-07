@@ -645,26 +645,27 @@ impl SqliteStore {
 
     pub fn insert_agent(&self, record: &AgentRecord) -> Result<()> {
         let conn = self.lock();
-        conn.execute(
-            "INSERT INTO agents (
-                id, parent_session_id, child_session_id, role, depth, status,
-                budget_turns, summary, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            params![
-                record.id.as_str(),
-                record.parent_session_id.as_str(),
-                record.child_session_id.as_str(),
-                record.role,
-                record.depth as i64,
-                record.status,
-                record.budget_turns as i64,
-                record.summary,
-                record.created_at.to_rfc3339(),
-                record.updated_at.to_rfc3339(),
-            ],
-        )
-        .map_err(BloraError::storage)?;
-        Ok(())
+        insert_agent_row(&conn, record)
+    }
+
+    /// Insert a running child if this parent is under `max_running`. The store
+    /// mutex serialises concurrent `delegate` calls so the cap is not racy.
+    pub fn try_insert_running_agent(&self, record: &AgentRecord, max_running: u32) -> Result<()> {
+        let conn = self.lock();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM agents WHERE parent_session_id = ?1 AND status = 'running'",
+                params![record.parent_session_id.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(BloraError::storage)?;
+        let running = u32::try_from(count).unwrap_or(0);
+        if running >= max_running {
+            return Err(BloraError::Policy(format!(
+                "too many running subagents ({running}/{max_running})"
+            )));
+        }
+        insert_agent_row(&conn, record)
     }
 
     pub fn update_agent(
@@ -701,6 +702,49 @@ impl SqliteStore {
             .into_iter()
             .next()
             .ok_or_else(|| BloraError::Other(format!("agent not found: {agent_id}")))
+    }
+
+    pub fn agent_for_child_session(&self, child: &SessionId) -> Result<Option<AgentRecord>> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, parent_session_id, child_session_id, role, depth, status,
+                        budget_turns, summary, created_at, updated_at
+                 FROM agents WHERE child_session_id = ?1 LIMIT 1",
+            )
+            .map_err(BloraError::storage)?;
+        let row = stmt
+            .query_row(params![child.as_str()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, String>(9)?,
+                ))
+            })
+            .optional()
+            .map_err(BloraError::storage)?;
+        row.map(|(id, parent_id, child, role, depth, status, budget, summary, created, updated)| {
+            Ok(AgentRecord {
+                id: AgentId::parse(&id)?,
+                parent_session_id: SessionId::parse(&parent_id)?,
+                child_session_id: SessionId::parse(&child)?,
+                role,
+                depth: u32::try_from(depth).unwrap_or(0),
+                status,
+                budget_turns: u32::try_from(budget).unwrap_or(0),
+                summary,
+                created_at: parse_time(&created)?,
+                updated_at: parse_time(&updated)?,
+            })
+        })
+        .transpose()
     }
 
     pub fn archive_session(&self, session_id: &SessionId, now: DateTime<Utc>) -> Result<()> {
@@ -996,6 +1040,29 @@ impl SqliteStore {
     pub fn list_agents(&self, parent: &SessionId) -> Result<Vec<AgentRecord>> {
         self.list_agents_filtered(None, Some(parent))
     }
+}
+
+fn insert_agent_row(conn: &Connection, record: &AgentRecord) -> Result<()> {
+    conn.execute(
+        "INSERT INTO agents (
+            id, parent_session_id, child_session_id, role, depth, status,
+            budget_turns, summary, created_at, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![
+            record.id.as_str(),
+            record.parent_session_id.as_str(),
+            record.child_session_id.as_str(),
+            record.role,
+            record.depth as i64,
+            record.status,
+            record.budget_turns as i64,
+            record.summary,
+            record.created_at.to_rfc3339(),
+            record.updated_at.to_rfc3339(),
+        ],
+    )
+    .map_err(BloraError::storage)?;
+    Ok(())
 }
 
 type TaskRow = (
