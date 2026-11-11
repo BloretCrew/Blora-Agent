@@ -390,6 +390,28 @@ impl ToolRegistry {
                 read_only: true,
             },
             ToolSpec {
+                name: "enter_plan_mode",
+                description: "Switch the session to plan mode: research only, no workspace writes except .blora/plan.md. Use it before making a multi-step plan that needs user approval.",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {"reason": {"type": "string", "description": "Why plan mode is needed"}}
+                }),
+                read_only: false,
+            },
+            ToolSpec {
+                name: "exit_plan_mode",
+                description: "Write the plan to .blora/plan.md and leave plan mode. In interactive runs this asks for approval; non-interactive runs must pass approve=true.",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "plan": {"type": "string", "description": "Full Markdown plan"},
+                        "approve": {"type": "boolean", "description": "Required for non-interactive runs"}
+                    },
+                    "required": ["plan"]
+                }),
+                read_only: false,
+            },
+            ToolSpec {
                 name: "ask_user",
                 description: "Ask the user one or more questions and wait for the answers. Use it only when you cannot proceed responsibly without their decision. Put every independent question in one call (1-6). Do not add an Other option: single, multi, and boolean questions get one automatically, and choosing it opens a text field. Put the recommended option first and append \"(Recommended)\" to its label. Types: single (2-6 options, one answer), multi (2-6 options, several answers), boolean (yes/no, do not send options), text (a short written answer), folder (a workspace directory), file (a workspace file). Do not ask for permission for routine steps.",
                 parameters: json!({

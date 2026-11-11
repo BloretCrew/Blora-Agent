@@ -19,6 +19,7 @@ Blora 的 Code、Work、Agent 三种模式共用一个 Runtime 和同一套事�
 | 文件、shell、Git、`apply_patch`、`update_plan`、`tool_search`、`skill`、`delegate`、记忆工具 | ✓ | ✓ | ✓ |
 | `view_image`；`read_file` 对图片文件直接返回图像 | ✓ | ✓ | ✓ |
 | `ask_user` | ✓ | ✓ | ✓ |
+| `enter_plan_mode` / `exit_plan_mode`（会话级 plan mode） | ✓ | ✓ | ✓ |
 | `web_search`、`web_fetch`、`read_document` | ✓ | ✓ | ✓ |
 | `schedule_task` | | ✓ | ✓ |
 | `skill_manage`、`session_search` | | | ✓ |

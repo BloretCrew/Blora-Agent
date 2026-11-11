@@ -9,11 +9,11 @@ use blora_context::{
 use blora_events::{
     AssistantDelta, AssistantMessageCompleted, AssistantReasoning, ContextSnapshotCreated,
     EventEnvelope, HookCompleted, KnownPayload, ModeChanged, ModelRequested,
-    ModelResponseCompleted, NewEvent, PlanStep, PlanUpdated, ProviderChanged, RetryStarted,
-    RoutingChanged, RunCancelRequested, RunCancelled, RunCompleted, RunCreated, RunFailed,
-    RunStarted, SessionArchived, SessionCwdChanged, SessionResumed, SessionTitleChanged,
-    ToolCompleted, ToolDiscovered, ToolFailed, ToolOutput, ToolRequested, ToolStarted,
-    UsageRecorded, UserInput,
+    ModelResponseCompleted, NewEvent, PermissionChanged, PlanModeChanged, PlanStep, PlanUpdated,
+    ProviderChanged, RetryStarted, RoutingChanged, RunCancelRequested, RunCancelled, RunCompleted,
+    RunCreated, RunFailed, RunStarted, SessionArchived, SessionCwdChanged, SessionResumed,
+    SessionTitleChanged, ToolCompleted, ToolDiscovered, ToolFailed, ToolOutput, ToolRequested,
+    ToolStarted, UsageRecorded, UserInput,
 };
 use blora_exec::{Isolation, LocalBackend, ShellKind, WorktreeHandle, shell_cwd_after};
 use blora_model::retry::{self, RetryClass};
@@ -255,6 +255,44 @@ impl Runtime {
             None,
             None,
             KnownPayload::ModeChanged(ModeChanged { from, to }),
+        )
+    }
+
+    /// Persist a permission-mode switch for the session.
+    pub fn set_permission_mode(
+        &self,
+        session_id: &SessionId,
+        to: PermissionMode,
+        source: &str,
+    ) -> Result<()> {
+        let from = self
+            .store
+            .get_session_setting(session_id, "permission_mode")?
+            .and_then(|value| PermissionMode::parse(&value))
+            .unwrap_or(PermissionMode::Ask);
+        if from == to {
+            return Ok(());
+        }
+        self.store
+            .set_session_setting(session_id, "permission_mode", to.as_str())?;
+        self.emit(
+            session_id,
+            None,
+            None,
+            KnownPayload::PermissionChanged(PermissionChanged {
+                from: Some(from.as_str().to_owned()),
+                to: to.as_str().to_owned(),
+                source: Some(source.to_owned()),
+            }),
+        )?;
+        self.emit(
+            session_id,
+            None,
+            None,
+            KnownPayload::PlanModeChanged(PlanModeChanged {
+                entered: to == PermissionMode::Plan,
+                reason: None,
+            }),
         )
     }
 
@@ -824,7 +862,25 @@ impl Runtime {
         if token_budget_exceeded(used) {
             return Err(BloraError::Other(format!("token budget exceeded ({used})")));
         }
-        let permission_mode = options.permission_mode();
+        let permission_mode = options
+            .permission
+            .or_else(|| {
+                self.store
+                    .get_session_setting(session_id, "permission_mode")
+                    .ok()
+                    .flatten()
+                    .and_then(|value| PermissionMode::parse(&value))
+            })
+            .unwrap_or_else(|| options.permission_mode());
+        let mut permission_mode = permission_mode;
+        if let Some(explicit) = options.permission {
+            let _ =
+                self.store
+                    .set_session_setting(session_id, "permission_mode", explicit.as_str());
+        }
+        let mut effective_options = options.clone();
+        effective_options.permission = Some(permission_mode);
+        let options = &effective_options;
         let policy = Policy::with_mode(&exec_root, permission_mode)?;
         let backend = LocalBackend::new(policy).with_isolation(Isolation::from_env());
         let requested_provider = if options.provider.trim().is_empty() {
@@ -951,16 +1007,9 @@ impl Runtime {
 
         let mcp = crate::mcp::McpManager::load(std::path::Path::new(&exec_root));
         let imagine = mode == Mode::Imagine;
-        let base_tools = ToolRegistry::specs_for(mode)
-            .into_iter()
-            .filter(|spec| !options.read_only || spec.read_only)
-            .map(|spec| ToolDeclaration {
-                name: spec.name.to_owned(),
-                description: spec.description.to_owned(),
-                parameters: spec.parameters,
-            })
-            .collect::<Vec<_>>();
-        let mcp_tools: Vec<ToolDeclaration> = if imagine {
+        let mut plan_mode = permission_mode == PermissionMode::Plan;
+        let mut base_tools = declared_tools(mode, options.read_only, plan_mode);
+        let mcp_tools: Vec<ToolDeclaration> = if imagine || plan_mode {
             Vec::new()
         } else {
             mcp.as_ref()
@@ -968,7 +1017,7 @@ impl Runtime {
                 .unwrap_or_default()
         };
         let plugins = crate::plugins::load(std::path::Path::new(&exec_root));
-        let plugin_tools: Vec<ToolDeclaration> = if options.read_only || imagine {
+        let plugin_tools: Vec<ToolDeclaration> = if options.read_only || imagine || plan_mode {
             Vec::new()
         } else {
             plugins
@@ -1086,28 +1135,41 @@ impl Runtime {
                 .unwrap_or_else(|| ".".to_owned());
             env.plan = render_plan(&current);
             env.compactions = current.compaction_count;
+            let current_permission = self
+                .store
+                .get_session_setting(session_id, "permission_mode")?
+                .and_then(|value| PermissionMode::parse(&value))
+                .unwrap_or(permission_mode);
+            if current_permission != permission_mode {
+                permission_mode = current_permission;
+                plan_mode = permission_mode == PermissionMode::Plan;
+                env.permission_mode = permission_mode.as_str().to_owned();
+                base_tools = declared_tools(mode, options.read_only, plan_mode);
+            }
             let enabled: std::collections::HashSet<String> = self
                 .store
                 .list_session_tools(session_id)?
                 .into_iter()
                 .collect();
             tools = base_tools.clone();
-            if defer_external {
-                tools.extend(
-                    mcp_tools
-                        .iter()
-                        .filter(|tool| enabled.contains(&tool.name))
-                        .cloned(),
-                );
-                tools.extend(
-                    plugin_tools
-                        .iter()
-                        .filter(|tool| enabled.contains(&tool.name))
-                        .cloned(),
-                );
-            } else {
-                tools.extend(mcp_tools.clone());
-                tools.extend(plugin_tools.clone());
+            if !plan_mode {
+                if defer_external {
+                    tools.extend(
+                        mcp_tools
+                            .iter()
+                            .filter(|tool| enabled.contains(&tool.name))
+                            .cloned(),
+                    );
+                    tools.extend(
+                        plugin_tools
+                            .iter()
+                            .filter(|tool| enabled.contains(&tool.name))
+                            .cloned(),
+                    );
+                } else {
+                    tools.extend(mcp_tools.clone());
+                    tools.extend(plugin_tools.clone());
+                }
             }
             tool_names = tools.iter().map(|tool| tool.name.clone()).collect();
             let mut events = self.store.load_events(session_id)?;
@@ -1523,6 +1585,155 @@ impl Runtime {
         }
     }
 
+    fn session_permission_mode(
+        &self,
+        session_id: &SessionId,
+        fallback: PermissionMode,
+    ) -> Result<PermissionMode> {
+        Ok(self
+            .store
+            .get_session_setting(session_id, "permission_mode")?
+            .and_then(|value| PermissionMode::parse(&value))
+            .unwrap_or(fallback))
+    }
+
+    fn backend_for_permission(
+        &self,
+        session_id: &SessionId,
+        backend: &LocalBackend,
+    ) -> Result<LocalBackend> {
+        let mode = self.session_permission_mode(session_id, backend.policy().mode())?;
+        Ok(
+            LocalBackend::new(Policy::with_mode(backend.policy().workspace(), mode)?)
+                .with_isolation(backend.isolation()),
+        )
+    }
+
+    fn enter_plan_mode(
+        &self,
+        session_id: &SessionId,
+        run_id: &RunId,
+        turn_id: &TurnId,
+        arguments: &Value,
+        options: &RunOptions,
+    ) -> Result<String> {
+        let current = self.session_permission_mode(session_id, options.permission_mode())?;
+        if current == PermissionMode::Plan {
+            return Ok("already in plan mode; only .blora/plan.md is writable".to_owned());
+        }
+        self.store
+            .set_session_setting(session_id, "permission.before_plan", current.as_str())?;
+        self.store.set_session_setting(
+            session_id,
+            "permission_mode",
+            PermissionMode::Plan.as_str(),
+        )?;
+        let reason = arguments.get("reason").and_then(Value::as_str);
+        self.emit(
+            session_id,
+            Some(run_id),
+            Some(turn_id),
+            KnownPayload::PermissionChanged(PermissionChanged {
+                from: Some(current.as_str().to_owned()),
+                to: PermissionMode::Plan.as_str().to_owned(),
+                source: Some("tool".to_owned()),
+            }),
+        )?;
+        self.emit(
+            session_id,
+            Some(run_id),
+            Some(turn_id),
+            KnownPayload::PlanModeChanged(PlanModeChanged {
+                entered: true,
+                reason: reason.map(str::to_owned),
+            }),
+        )?;
+        Ok(format!(
+            "plan mode entered. Research only; write the plan to .blora/plan.md, then call exit_plan_mode.{}",
+            reason
+                .map(|reason| format!(" Reason: {reason}"))
+                .unwrap_or_default()
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn exit_plan_mode(
+        &self,
+        session_id: &SessionId,
+        run_id: &RunId,
+        turn_id: &TurnId,
+        arguments: &Value,
+        backend: &LocalBackend,
+        options: &RunOptions,
+        cancel: &CancelToken,
+    ) -> Result<String> {
+        if self.session_permission_mode(session_id, options.permission_mode())?
+            != PermissionMode::Plan
+        {
+            return Err(BloraError::Other(
+                "exit_plan_mode is only available in plan mode".to_owned(),
+            ));
+        }
+        let plan = arguments
+            .get("plan")
+            .and_then(Value::as_str)
+            .filter(|plan| !plan.trim().is_empty())
+            .ok_or_else(|| BloraError::Other("exit_plan_mode needs a plan".to_owned()))?;
+        let approve = arguments
+            .get("approve")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if options.interactive && !approve {
+            let summary = "leave plan mode and write .blora/plan.md";
+            if !self.await_approval(
+                session_id,
+                run_id,
+                turn_id,
+                "exit_plan_mode",
+                summary,
+                cancel,
+            )? {
+                return Err(BloraError::Policy("plan not approved".to_owned()));
+            }
+        } else if !approve {
+            return Err(BloraError::Other(
+                "non-interactive exit_plan_mode requires approve=true".to_owned(),
+            ));
+        }
+        let plan: String = plan.chars().take(200_000).collect();
+        backend.write_file(".blora/plan.md", &plan)?;
+        let restore = self
+            .store
+            .get_session_setting(session_id, "permission.before_plan")?
+            .and_then(|value| PermissionMode::parse(&value))
+            .unwrap_or(PermissionMode::Ask);
+        self.store
+            .set_session_setting(session_id, "permission_mode", restore.as_str())?;
+        self.emit(
+            session_id,
+            Some(run_id),
+            Some(turn_id),
+            KnownPayload::PermissionChanged(PermissionChanged {
+                from: Some(PermissionMode::Plan.as_str().to_owned()),
+                to: restore.as_str().to_owned(),
+                source: Some("tool".to_owned()),
+            }),
+        )?;
+        self.emit(
+            session_id,
+            Some(run_id),
+            Some(turn_id),
+            KnownPayload::PlanModeChanged(PlanModeChanged {
+                entered: false,
+                reason: None,
+            }),
+        )?;
+        Ok(format!(
+            "exited plan mode; restored {}; plan saved to .blora/plan.md",
+            restore.as_str()
+        ))
+    }
+
     /// Search deferred tools and enable matches for the next model turn.
     #[allow(clippy::too_many_arguments)]
     fn tool_search(
@@ -1539,7 +1750,8 @@ impl Runtime {
         let mcp_tools = mcp
             .map(crate::mcp::McpManager::tool_declarations)
             .unwrap_or_default();
-        let entries = catalog::entries(mode, options.read_only, &mcp_tools, plugins);
+        let plan_mode = options.permission_mode() == PermissionMode::Plan;
+        let entries = catalog::entries(mode, options.read_only || plan_mode, &mcp_tools, plugins);
         let query = arguments.get("query").and_then(Value::as_str);
         let select = arguments
             .get("select")
@@ -1691,6 +1903,8 @@ impl Runtime {
         precomputed: Option<Result<ToolOutcome>>,
         nudge: bool,
     ) -> Result<()> {
+        let effective_backend = self.backend_for_permission(session_id, backend)?;
+        let backend = &effective_backend;
         let arguments: Value = match parse_tool_arguments(&call.arguments) {
             Ok(value) => value,
             Err(message) => {
@@ -1842,6 +2056,12 @@ impl Runtime {
                     })
                     .map(|id| format!("queued {id}"))
                 }
+                "enter_plan_mode" => {
+                    self.enter_plan_mode(session_id, run_id, turn_id, &arguments, options)
+                }
+                "exit_plan_mode" => self.exit_plan_mode(
+                    session_id, run_id, turn_id, &arguments, backend, options, cancel,
+                ),
                 "mcp_list_resources" => {
                     let manager = mcp
                         .ok_or_else(|| BloraError::Other("no MCP servers configured".to_owned()))?;
@@ -2368,6 +2588,23 @@ impl Provider for SharedProvider {
     }
 }
 
+fn declared_tools(mode: Mode, read_only: bool, plan_mode: bool) -> Vec<ToolDeclaration> {
+    ToolRegistry::specs_for(mode)
+        .into_iter()
+        .filter(|spec| {
+            (!read_only || spec.read_only)
+                && (!plan_mode
+                    || spec.read_only
+                    || matches!(spec.name, "exit_plan_mode" | "ask_user"))
+        })
+        .map(|spec| ToolDeclaration {
+            name: spec.name.to_owned(),
+            description: spec.description.to_owned(),
+            parameters: spec.parameters,
+        })
+        .collect()
+}
+
 fn runtime_handled_tool(name: &str) -> bool {
     matches!(
         name,
@@ -2381,6 +2618,8 @@ fn runtime_handled_tool(name: &str) -> bool {
             | "mcp_read_resource"
             | "mcp_list_prompts"
             | "mcp_get_prompt"
+            | "enter_plan_mode"
+            | "exit_plan_mode"
     )
 }
 
@@ -3707,6 +3946,62 @@ mod tests {
                 .as_deref()
                 .unwrap()
                 .contains("# Mode: Code")
+        );
+    }
+
+    #[test]
+    fn plan_mode_switches_tools_and_restores_permission() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = Runtime::new(SqliteStore::open_in_memory().unwrap());
+        let session = session(&runtime, Mode::Code, dir.path().to_str().unwrap());
+        let recorder = Recorder::install(
+            &runtime,
+            vec![
+                tool_reply("e", "enter_plan_mode", r#"{"reason":"design the change"}"#),
+                tool_reply(
+                    "w",
+                    "write_file",
+                    r#"{"path":"blocked.txt","contents":"x"}"#,
+                ),
+                tool_reply(
+                    "x",
+                    "exit_plan_mode",
+                    r##"{"plan":"# Plan\nDo it","approve":true}"##,
+                ),
+                text_reply("done", "stop"),
+            ],
+            None,
+        );
+        runtime
+            .run(&session, "plan it", &CancelToken::new(), &yolo())
+            .unwrap();
+        let requests = recorder.requests.lock().unwrap();
+        let plan_tools: Vec<&str> = requests[1]
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect();
+        assert!(!plan_tools.contains(&"write_file"));
+        assert!(plan_tools.contains(&"exit_plan_mode"));
+        assert!(plan_tools.contains(&"read_file"));
+        let restored: Vec<&str> = requests[3]
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect();
+        assert!(restored.contains(&"write_file"));
+        assert!(!dir.path().join("blocked.txt").exists());
+        assert!(dir.path().join(".blora/plan.md").exists());
+        let events = runtime.events(&session).unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == "permission.changed")
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == "plan.mode.changed")
         );
     }
 

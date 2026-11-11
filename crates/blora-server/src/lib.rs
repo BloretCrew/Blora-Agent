@@ -27,6 +27,7 @@ use blora_session::{TranscriptItem, format_routing_switch, relative_zh};
 use blora_storage::{CreateSession, CreateTask};
 use blora_types::{ApprovalId, Mode, SessionId, TaskId};
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -235,6 +236,7 @@ fn app(state: AppState) -> Router {
         .route("/api/sessions", get(list_sessions).post(create_session))
         .route("/api/sessions/{id}", get(show_session))
         .route("/api/sessions/{id}/mode", post(set_session_mode))
+        .route("/api/sessions/{id}/permission", post(set_permission))
         .route("/api/sessions/{id}/images/{name}", get(session_image))
         .route("/api/sessions/{id}/attachments", post(upload_attachment))
         .route(
@@ -883,6 +885,28 @@ async fn create_session(
 #[derive(Deserialize)]
 struct ModeBody {
     mode: String,
+}
+
+#[derive(Deserialize)]
+struct PermissionBody {
+    permission_mode: String,
+}
+
+async fn set_permission(
+    State(state): State<AppState>,
+    headers: HttpHeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<PermissionBody>,
+) -> Result<Json<Value>, ApiError> {
+    let session_id = SessionId::parse(&id).map_err(ApiError::from)?;
+    ensure_session(&state, &headers, &session_id)?;
+    let mode = PermissionMode::parse(&body.permission_mode)
+        .ok_or_else(|| ApiError(format!("unknown permission_mode: {}", body.permission_mode)))?;
+    state
+        .runtime
+        .set_permission_mode(&session_id, mode, "user")
+        .map_err(ApiError::from)?;
+    Ok(Json(json!({"permission_mode": mode.as_str()})))
 }
 
 async fn set_session_mode(
