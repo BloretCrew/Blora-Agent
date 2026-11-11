@@ -480,6 +480,9 @@ pub fn keymap_text() -> String {
         "y / n  approve or deny when the prompt is empty",
         "Ctrl+N new session",
         "Ctrl+C request cancel and quit",
+        "Right file editor: Ctrl+F find, Ctrl+H replace, Alt+G go to line",
+        "Right file editor: Ctrl+C/X/V copy/cut/paste, Ctrl+PageUp/PageDown switch file",
+        "Right file editor: Alt+Up/Down move line, Alt+W close file, Ctrl+S save",
     ]
     .join("\n")
 }

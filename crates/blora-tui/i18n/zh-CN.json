@@ -209,10 +209,16 @@
   "right.file_confirm_discard": "[D 放弃]",
   "right.file_confirm_cancel": "[C 取消]",
   "right.file_binary": "只读 · 二进制文件",
-  "right.file_truncated": "只读 · 仅显示前 64 KiB",
+  "right.file_truncated": "只读 · 文件过大，仅显示前 1 MiB",
   "right.file_invalid_utf8": "只读 · 无效 UTF-8",
-  "right.file_truncated_note": "仅显示前 64 KiB",
+  "right.file_truncated_note": "仅显示文件前 1 MiB",
   "mention.hint": "@ 会话 · ↑↓ 选择 · Tab/Enter 插入 · Esc 关闭",
   "mention.empty": "没有匹配的其他会话",
-  "mention.untitled": "未命名会话"
+  "mention.untitled": "未命名会话",
+  "right.goto_prompt": "跳转行:",
+  "right.find_prompt": "查找:",
+  "right.replace_prompt": "替换:",
+  "right.copied": "已复制",
+  "right.copied_internal": "已复制到内部剪贴板",
+  "right.clipboard_empty": "剪贴板为空"
 }

@@ -448,6 +448,7 @@ dependencies = [
 name = "blora-tui"
 version = "0.1.0-beta.3"
 dependencies = [
+ "base64",
  "blora-auth",
  "blora-catalog",
  "blora-context",
@@ -461,9 +462,11 @@ dependencies = [
  "blora-types",
  "chrono",
  "crossterm",
+ "memchr",
  "nix 0.29.0",
  "portable-pty",
  "ratatui",
+ "regex",
  "serde_json",
  "syntect",
  "tempfile",

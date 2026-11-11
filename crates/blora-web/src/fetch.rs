@@ -178,10 +178,7 @@ pub(crate) mod tests {
     use std::net::TcpListener;
 
     /// Serve canned responses on 127.0.0.1; `handler` maps the request line to a response.
-    pub(crate) fn serve(
-        count: usize,
-        handler: impl Fn(&str) -> String + Send + 'static,
-    ) -> String {
+    pub(crate) fn serve(count: usize, handler: impl Fn(&str) -> String + Send + 'static) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         std::thread::spawn(move || {
@@ -212,7 +209,18 @@ pub(crate) mod tests {
 
     #[test]
     fn classifies_public_addresses() {
-        for private in ["127.0.0.1", "10.1.2.3", "192.168.0.1", "169.254.169.254", "100.64.0.1", "::1", "fd00::1", "fe80::1", "::ffff:127.0.0.1", "0.0.0.0"] {
+        for private in [
+            "127.0.0.1",
+            "10.1.2.3",
+            "192.168.0.1",
+            "169.254.169.254",
+            "100.64.0.1",
+            "::1",
+            "fd00::1",
+            "fe80::1",
+            "::ffff:127.0.0.1",
+            "0.0.0.0",
+        ] {
             assert!(!is_public(private.parse().unwrap()), "{private}");
         }
         for public in ["1.1.1.1", "8.8.8.8", "2606:4700:4700::1111"] {
@@ -257,6 +265,11 @@ pub(crate) mod tests {
     fn rejects_other_schemes_and_reports_status() {
         assert!(fetch("file:///etc/passwd", &local()).is_err());
         let base = serve(1, |_| http("404 Not Found", "text/plain", "no"));
-        assert!(fetch(&base, &local()).unwrap_err().to_string().contains("404"));
+        assert!(
+            fetch(&base, &local())
+                .unwrap_err()
+                .to_string()
+                .contains("404")
+        );
     }
 }

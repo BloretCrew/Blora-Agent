@@ -566,7 +566,9 @@ impl ToolRegistry {
             }
             "generate_image" => generate_image(backend, session_id, arguments),
             "web_search" => {
-                backend.policy().require(backend.policy().network(), "web_search")?;
+                backend
+                    .policy()
+                    .require(backend.policy().network(), "web_search")?;
                 let config = blora_web::SearchConfig::from_env()?;
                 let query = required_str(arguments, "query")?;
                 let limit = arguments
@@ -587,7 +589,11 @@ impl ToolRegistry {
                     "<web_page url=\"{}\" content_type=\"{}\"{}>\n{body}\n</web_page>",
                     page.url,
                     page.content_type,
-                    if page.truncated { " truncated=\"true\"" } else { "" }
+                    if page.truncated {
+                        " truncated=\"true\""
+                    } else {
+                        ""
+                    }
                 ))
             }
             "read_document" => {
@@ -735,7 +741,14 @@ mod tests {
         let code = names(Mode::Code);
         let work = names(Mode::Work);
         let agent = names(Mode::Agent);
-        for name in ["read_file", "apply_patch", "shell", "ask_user", "delegate", "update_plan"] {
+        for name in [
+            "read_file",
+            "apply_patch",
+            "shell",
+            "ask_user",
+            "delegate",
+            "update_plan",
+        ] {
             assert!(code.contains(&name) && work.contains(&name) && agent.contains(&name));
         }
         assert!(!code.contains(&"web_search") && !code.contains(&"skill_manage"));
@@ -752,8 +765,12 @@ mod tests {
         let backend = LocalBackend::new(blora_policy::Policy::new(dir.path(), true).unwrap());
         // BLORA_NETWORK is unset in tests, so the network is denied.
         if std::env::var_os("BLORA_NETWORK").is_none() {
-            let err = ToolRegistry::execute(&backend, "web_fetch", &json!({"url": "https://example.com"}))
-                .unwrap_err();
+            let err = ToolRegistry::execute(
+                &backend,
+                "web_fetch",
+                &json!({"url": "https://example.com"}),
+            )
+            .unwrap_err();
             assert!(err.to_string().contains("web_fetch"), "{err}");
         }
         assert!(

@@ -18,6 +18,8 @@ def check(root, locale):
     source = project / "sample.py"
     original = "# 中文注释\nprint('original')\n"
     source.write_text(original)
+    long_file = project / "long.rs"
+    long_file.write_text("\n".join(f"let value_{i} = {i};" for i in range(5000)) + "\n")
     (project / "raw.bin").write_bytes(b"\x00\xff\x01")
     env = dict(os.environ, BLORA_HOME=str(home), BLORA_PROVIDER="mock", BLORA_LOCALE=locale,
                BLORA_TRANSLATION_BASE_URL="http://127.0.0.1:1", TERM="xterm-256color")
@@ -64,7 +66,38 @@ def check(root, locale):
         assert source.read_text() == original
         keys("C-s")
         wait(lambda: "EDITED_MARKER" in source.read_text())
-        saved = source.read_text()
+        # Long file: Ctrl+End typing, find-select, and go-to-line stay responsive.
+        keys("Escape")
+        wait(lambda: "long.rs" in screen())
+        click("long.rs")
+        wait(lambda: "value_0" in screen())
+        keys("C-End")
+        literal(" // END_MARKER")
+        keys("C-s")
+        wait(lambda: "END_MARKER" in long_file.read_text())
+        keys("C-f")
+        literal("value_4321")
+        keys("Enter")
+        keys("Escape")
+        wait(lambda: "Find:" not in screen() and "查找:" not in screen())
+        literal("REPLACED")
+        keys("C-s")
+        wait(lambda: "REPLACED" in long_file.read_text())
+        assert "value_4321" not in long_file.read_text()
+        keys("M-g")
+        literal("10")
+        keys("Enter")
+        literal(" // GOTO_MARKER")
+        keys("C-s")
+        wait(lambda: "GOTO_MARKER" in long_file.read_text().splitlines()[9])
+        # Two buffers are open; switching must not lose either file.
+        keys("C-PPage")
+        wait(lambda: "sample.py" in screen())
+        keys("C-NPage")
+        wait(lambda: "long.rs" in screen())
+        keys("Escape")
+        click("sample.py")
+        wait(lambda: "original" in screen())
         literal(" UNSAVED_MARKER")
         # External modifications must never be silently overwritten.
         source.write_text("# EXTERNAL_CHANGE\n")

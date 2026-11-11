@@ -27,6 +27,9 @@ vt100 = "0.15"
 unicode-width.workspace = true
 tempfile.workspace = true
 syntect = { version = "5.3", default-features = false, features = ["default-fancy"] }
+regex.workspace = true
+memchr = "2"
+base64 = "0.22"
 ureq.workspace = true
 serde_json.workspace = true
 

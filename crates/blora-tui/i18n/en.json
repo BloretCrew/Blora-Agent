@@ -209,10 +209,16 @@
   "right.file_confirm_discard": "[D Discard]",
   "right.file_confirm_cancel": "[C Cancel]",
   "right.file_binary": "Read-only · Binary file",
-  "right.file_truncated": "Read-only · First 64 KiB only",
+  "right.file_truncated": "Read-only · file too large, showing the first 1 MiB",
   "right.file_invalid_utf8": "Read-only · Invalid UTF-8",
-  "right.file_truncated_note": "First 64 KiB only",
+  "right.file_truncated_note": "Only the first 1 MiB is shown",
   "mention.hint": "@ Sessions · ↑↓ Select · Tab/Enter Insert · Esc Close",
   "mention.empty": "No matching other sessions",
-  "mention.untitled": "Untitled session"
+  "mention.untitled": "Untitled session",
+  "right.goto_prompt": "Go to line:",
+  "right.find_prompt": "Find:",
+  "right.replace_prompt": "Replace:",
+  "right.copied": "Copied",
+  "right.copied_internal": "Copied to internal clipboard",
+  "right.clipboard_empty": "Clipboard is empty"
 }

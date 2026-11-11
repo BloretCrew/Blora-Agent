@@ -6858,7 +6858,7 @@ fn clipboard_output(program: &str, args: &[&str]) -> Option<String> {
         .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-fn write_clipboard(text: &str) -> bool {
+pub(crate) fn write_clipboard(text: &str) -> bool {
     let mut commands: Vec<(&str, &[&str])> = Vec::new();
     #[cfg(windows)]
     commands.push(("clip", &[] as &[&str]));

@@ -760,7 +760,10 @@ pub fn apply_event(projection: &mut SessionProjection, event: &EventEnvelope) ->
         }
         KnownPayload::SkillChanged(changed) => {
             projection.transcript.push(TranscriptItem::System {
-                summary: format!("skill.{}: {} ({})", changed.action, changed.name, changed.scope),
+                summary: format!(
+                    "skill.{}: {} ({})",
+                    changed.action, changed.name, changed.scope
+                ),
                 event_id: event.event_id.clone(),
             });
         }

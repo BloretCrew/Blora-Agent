@@ -6,8 +6,8 @@
 mod chat;
 mod editor;
 mod files;
-mod highlight;
 mod layout;
+use editor::Editor;
 use files::*;
 
 use crate::{i18n, theme::Theme, view::FrameModel};
@@ -58,6 +58,7 @@ enum Action {
     Collapse,
     Restore,
     File(usize),
+    Buffer(usize),
     FileSave,
     FileConfirm(bool),
     FileCancel,
@@ -135,6 +136,7 @@ pub struct RightPanel {
     done_tx: Sender<(SessionId, String)>,
     done_rx: Receiver<(SessionId, String)>,
     cancellations: std::sync::Arc<std::sync::Mutex<Vec<CancelToken>>>,
+    clipboard: String,
 }
 impl Default for RightPanel {
     fn default() -> Self {
@@ -161,6 +163,7 @@ impl Default for RightPanel {
             done_tx,
             done_rx,
             cancellations: Default::default(),
+            clipboard: String::new(),
         }
     }
 }
@@ -468,7 +471,7 @@ impl RightPanel {
         if tab == Tab::Info {
             return;
         }
-        if tab == Tab::Files && self.files.dirty() {
+        if tab == Tab::Files && self.files.any_dirty() {
             self.files.pending_leave = Some(Leave::Close);
             self.active = Tab::Files;
             self.focused = true;
@@ -543,24 +546,159 @@ impl RightPanel {
             ),
         })
     }
+    fn copy_text(&mut self, text: String) {
+        if text.is_empty() {
+            return;
+        }
+        self.clipboard = text.clone();
+        let copied = crate::write_clipboard(&text) || osc52_copy(&text);
+        self.files.message = if copied {
+            i18n::tr("right.copied", "已复制").to_owned()
+        } else {
+            i18n::tr("right.copied_internal", "已复制到内部剪贴板").to_owned()
+        };
+    }
+
+    fn paste_clipboard(&mut self) {
+        let text = self.clipboard.clone();
+        if text.is_empty() {
+            self.files.message = i18n::tr("right.clipboard_empty", "剪贴板为空").to_owned();
+            return;
+        }
+        if let Some(editor) = self.files.editor_mut() {
+            editor.insert(&text);
+        }
+        self.scroll_to_cursor();
+    }
+
+    fn scroll_to_cursor(&mut self) {
+        let Some((row, column)) = self
+            .files
+            .editor()
+            .map(|editor| (editor.position().0, editor.display_column(editor.cursor())))
+        else {
+            return;
+        };
+        let rows = self.files.viewport_rows.get().max(1);
+        if row < self.files.scroll {
+            self.files.scroll = row;
+        }
+        if row >= self.files.scroll.saturating_add(rows) {
+            self.files.scroll = row + 1 - rows;
+        }
+        self.files.scroll = self.files.scroll.min(self.files.max_scroll.get());
+        let text_width = self
+            .editor_area
+            .get()
+            .map_or(24, |area| {
+                area.width
+                    .saturating_sub(self.files.gutter_width.get() as u16)
+                    .saturating_sub(1) as usize
+            })
+            .max(1);
+        if column < self.files.horizontal {
+            self.files.horizontal = column;
+        }
+        if column >= self.files.horizontal.saturating_add(text_width) {
+            self.files.horizontal = column + 1 - text_width;
+        }
+        self.files.horizontal = self
+            .files
+            .horizontal
+            .min(self.files.max_horizontal.get() + 1);
+    }
+
     pub fn event(&mut self, event: &Event, runtime: &Runtime, workspace: &Path) -> bool {
         if let Event::Mouse(mouse) = event {
+            if matches!(mouse.kind, MouseEventKind::Drag(MouseButton::Left))
+                && self.active == Tab::Files
+                && self.files.pending_leave.is_none()
+                && self.files.drag_anchor.is_some()
+                && let Some(area) = self.editor_area.get()
+            {
+                self.focused = true;
+                if mouse.row < area.y {
+                    self.files.scroll = self.files.scroll.saturating_sub(1);
+                } else if mouse.row >= area.y.saturating_add(area.height) {
+                    self.files.scroll = (self.files.scroll + 1).min(self.files.max_scroll.get());
+                }
+                let gutter = self.files.gutter_width.get() as u16;
+                let row = mouse.row.saturating_sub(area.y) as usize + self.files.scroll;
+                let column = mouse.column.saturating_sub(area.x.saturating_add(gutter)) as usize
+                    + self.files.horizontal;
+                let anchor = self.files.drag_anchor;
+                if let Some(editor) = self.files.editor_mut() {
+                    let row = row.min(editor.line_count().saturating_sub(1));
+                    let byte = editor.byte_at_display_position(row, column);
+                    if let Some(anchor) = anchor {
+                        editor.select(anchor, byte);
+                    }
+                }
+                self.files.dragging = true;
+                return true;
+            }
+            if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left))
+                && self.active == Tab::Files
+                && (self.files.drag_anchor.is_some() || self.files.dragging)
+            {
+                self.files.drag_anchor = None;
+                self.files.dragging = false;
+                return true;
+            }
             if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
                 if self.active == Tab::Files
-                    && self.files.editor.is_some()
+                    && self.files.showing_editor()
+                    && self.files.pending_leave.is_none()
                     && self
                         .editor_area
                         .get()
                         .is_some_and(|area| area.contains((mouse.column, mouse.row).into()))
                 {
-                    let area = self.editor_area.get().expect("checked editor area");
                     self.focused = true;
+                    let area = self.editor_area.get().expect("checked editor area");
+                    let gutter = self.files.gutter_width.get() as u16;
+                    let gutter_click = mouse.column < area.x.saturating_add(gutter);
                     let row = mouse.row.saturating_sub(area.y) as usize + self.files.scroll;
-                    let column =
-                        mouse.column.saturating_sub(area.x) as usize + self.files.horizontal;
-                    if let Some(editor) = self.files.editor.as_mut() {
-                        editor.move_to_display_position(row, column);
+                    let column = if gutter_click {
+                        0
+                    } else {
+                        mouse.column.saturating_sub(area.x.saturating_add(gutter)) as usize
+                            + self.files.horizontal
+                    };
+                    let now = std::time::Instant::now();
+                    let repeated = self.files.click.is_some_and(|(at, x, y)| {
+                        now.saturating_duration_since(at) <= std::time::Duration::from_millis(500)
+                            && x == mouse.column
+                            && y == mouse.row
+                    });
+                    let count = if repeated {
+                        (self.files.click_count + 1).min(3)
+                    } else {
+                        1
+                    };
+                    self.files.click = Some((now, mouse.column, mouse.row));
+                    self.files.click_count = count;
+                    if let Some(editor) = self.files.editor_mut() {
+                        let row = row.min(editor.line_count().saturating_sub(1));
+                        if gutter_click || count >= 3 {
+                            let start = editor.line_start(row);
+                            let (start, end) = editor.line_bounds_at(start);
+                            editor.select(start, end);
+                        } else {
+                            editor.move_to_display_position(row, column);
+                            if count == 2
+                                && let Some((start, end)) = editor.word_at(editor.cursor())
+                            {
+                                editor.select(start, end);
+                            }
+                        }
+                        self.files.drag_anchor = Some(
+                            editor
+                                .selection()
+                                .map_or(editor.cursor(), |(start, _)| start),
+                        );
                     }
+                    self.files.dragging = false;
                     return true;
                 }
                 if self
@@ -602,6 +740,10 @@ impl RightPanel {
                         Action::File(index) => {
                             self.focused = true;
                             self.files.open(index);
+                        }
+                        Action::Buffer(index) => {
+                            self.focused = true;
+                            self.files.switch_to(index);
                         }
                         Action::FileSave => {
                             self.files.save();
@@ -648,7 +790,7 @@ impl RightPanel {
                     _ => return true,
                 };
                 match self.active {
-                    Tab::Files if self.files.editor.is_some() => {
+                    Tab::Files if self.files.showing_editor() => {
                         if self
                             .editor_area
                             .get()
@@ -773,7 +915,7 @@ impl RightPanel {
                         self.focused = false;
                         return true;
                     }
-                    KeyCode::Char('q') if self.files.dirty() => {
+                    KeyCode::Char('q') if self.files.any_dirty() => {
                         self.guard_file_leave();
                         return true;
                     }
@@ -793,7 +935,7 @@ impl RightPanel {
                 }
             }
             if key.code == KeyCode::Tab
-                && !(self.active == Tab::Files && self.files.editor.is_some())
+                && !(self.active == Tab::Files && self.files.showing_editor())
                 && (self.active != Tab::Terminal || key.modifiers.contains(KeyModifiers::CONTROL))
             {
                 let index = self
@@ -841,62 +983,148 @@ impl RightPanel {
                 }
             }
             Tab::Files => {
-                if let Event::Key(key) = event {
-                    if key.modifiers.contains(KeyModifiers::CONTROL)
-                        && key.code == KeyCode::Char('s')
-                    {
-                        self.files.save();
-                        return true;
-                    }
-                    if key.code == KeyCode::Esc {
-                        self.files.back();
-                        return true;
-                    }
+                if let Event::Key(key) = event
+                    && key.modifiers.contains(KeyModifiers::CONTROL)
+                    && key.code == KeyCode::Char('s')
+                {
+                    self.files.save();
+                    return true;
                 }
-                if let Some(editor) = self.files.editor.as_mut() {
-                    match event {
-                        Event::Paste(text) => editor.insert(text),
-                        Event::Key(key) => editor.key(*key),
-                        _ => {}
+                if self.files.showing_editor() {
+                    if let Event::Paste(text) = event
+                        && let Some(editor) = self.files.editor_mut()
+                    {
+                        if editor.goto_view().is_some() {
+                            editor.goto_paste(text);
+                            return true;
+                        }
+                        if editor.find_view().is_some() {
+                            editor.find_paste(text);
+                            return true;
+                        }
                     }
-                    self.files.preview = Some(editor.text.clone());
-                    let (row, _) = editor.position();
-                    let page = self
-                        .area
-                        .map_or(10, |r| r.height.saturating_sub(7) as usize)
-                        .max(1);
-                    if row < self.files.scroll {
-                        self.files.scroll = row;
+                    if let Event::Key(key) = event {
+                        if key.modifiers.contains(KeyModifiers::CONTROL)
+                            && matches!(key.code, KeyCode::PageUp | KeyCode::PageDown)
+                        {
+                            self.files.switch_buffer(key.code == KeyCode::PageDown);
+                            return true;
+                        }
+                        if key.modifiers.contains(KeyModifiers::ALT) {
+                            match key.code {
+                                KeyCode::Char('w') => {
+                                    self.files.close_buffer();
+                                    return true;
+                                }
+                                KeyCode::Char('g') => {
+                                    if let Some(editor) = self.files.editor_mut() {
+                                        editor.goto_open();
+                                    }
+                                    return true;
+                                }
+                                KeyCode::Char('c') => {
+                                    if let Some(editor) = self.files.editor_mut() {
+                                        editor.find_toggle_case();
+                                    }
+                                    return true;
+                                }
+                                _ => {}
+                            }
+                        }
+                        if self
+                            .files
+                            .editor()
+                            .is_some_and(|editor| editor.goto_view().is_some())
+                        {
+                            if let Some(editor) = self.files.editor_mut()
+                                && editor.goto_key(*key) == editor::GotoAction::Jump
+                            {
+                                self.scroll_to_cursor();
+                            }
+                            return true;
+                        }
+                        if self
+                            .files
+                            .editor()
+                            .is_some_and(|editor| editor.find_view().is_some())
+                        {
+                            if let Some(editor) = self.files.editor_mut()
+                                && editor.find_key(*key) != editor::FindAction::Handled
+                            {
+                                self.scroll_to_cursor();
+                            }
+                            return true;
+                        }
+                        match key.code {
+                            KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                if let Some(editor) = self.files.editor_mut() {
+                                    editor.find_open(false);
+                                }
+                                self.scroll_to_cursor();
+                                return true;
+                            }
+                            KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                if let Some(editor) = self.files.editor_mut() {
+                                    editor.find_open(true);
+                                }
+                                self.scroll_to_cursor();
+                                return true;
+                            }
+                            KeyCode::F(3) => {
+                                let forward = !key.modifiers.contains(KeyModifiers::SHIFT);
+                                if let Some(editor) = self.files.editor_mut() {
+                                    editor.find_step(forward);
+                                }
+                                self.scroll_to_cursor();
+                                return true;
+                            }
+                            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                let text = self
+                                    .files
+                                    .editor()
+                                    .map(Editor::copy_text)
+                                    .unwrap_or_default();
+                                self.copy_text(text);
+                                return true;
+                            }
+                            KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                let text =
+                                    self.files.editor_mut().map(Editor::cut).unwrap_or_default();
+                                self.copy_text(text);
+                                self.scroll_to_cursor();
+                                return true;
+                            }
+                            KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                self.paste_clipboard();
+                                return true;
+                            }
+                            KeyCode::Esc => {
+                                self.files.back();
+                                return true;
+                            }
+                            _ => {}
+                        }
                     }
-                    if row >= self.files.scroll + page {
-                        self.files.scroll = row + 1 - page;
+                    let paste = match event {
+                        Event::Paste(text) => Some(text.clone()),
+                        _ => None,
+                    };
+                    if let Some(editor) = self.files.editor_mut() {
+                        if let Some(text) = paste {
+                            editor.insert(&text);
+                        } else if let Event::Key(key) = event {
+                            editor.key(*key);
+                        }
                     }
-                    let column = unicode_width::UnicodeWidthStr::width(
-                        editor.text[..editor.cursor]
-                            .rsplit('\n')
-                            .next()
-                            .unwrap_or("")
-                            .replace('\t', "    ")
-                            .as_str(),
-                    );
-                    let width = self
-                        .area
-                        .map_or(24, |r| r.width.saturating_sub(8) as usize)
-                        .max(1);
-                    if column < self.files.horizontal {
-                        self.files.horizontal = column;
-                    }
-                    if column >= self.files.horizontal + width {
-                        self.files.horizontal = column + 1 - width;
-                    }
-                } else {
+                    self.scroll_to_cursor();
+                    return true;
+                }
+                if self.files.showing_preview() {
                     if let Event::Key(key) = event {
                         let page = self
                             .area
-                            .map(|r| r.height.saturating_sub(6) as usize)
-                            .unwrap_or(10)
+                            .map_or(10, |area| area.height.saturating_sub(5) as usize)
                             .max(1);
-                        let preview = self.files.preview_path.is_some();
                         let delta = match key.code {
                             KeyCode::Up => -1,
                             KeyCode::Down => 1,
@@ -904,48 +1132,57 @@ impl RightPanel {
                             KeyCode::PageDown => page as isize,
                             _ => 0,
                         };
-                        if preview {
-                            self.files.scroll = self
-                                .files
-                                .scroll
-                                .saturating_add_signed(delta)
-                                .min(self.files.max_scroll.get());
-                        } else {
-                            self.files.selected = self
-                                .files
-                                .selected
-                                .saturating_add_signed(delta)
-                                .min(self.files.entries.len().saturating_sub(1));
-                        }
+                        self.files.scroll = self
+                            .files
+                            .scroll
+                            .saturating_add_signed(delta)
+                            .min(self.files.max_scroll.get());
                         match key.code {
                             KeyCode::Home => {
-                                if preview {
-                                    self.files.scroll = 0;
-                                    self.files.horizontal = 0;
-                                } else {
-                                    self.files.selected = 0;
-                                }
+                                self.files.scroll = 0;
+                                self.files.horizontal = 0;
                             }
-                            KeyCode::End => {
-                                if preview {
-                                    self.files.scroll = self.files.max_scroll.get();
-                                } else {
-                                    self.files.selected =
-                                        self.files.entries.len().saturating_sub(1);
-                                }
+                            KeyCode::End => self.files.scroll = self.files.max_scroll.get(),
+                            KeyCode::Left => {
+                                self.files.horizontal = self.files.horizontal.saturating_sub(4);
                             }
-                            KeyCode::Left if preview => {
-                                self.files.horizontal = self.files.horizontal.saturating_sub(4)
-                            }
-                            KeyCode::Right if preview => {
-                                self.files.horizontal =
-                                    (self.files.horizontal + 4).min(self.files.max_horizontal.get())
+                            KeyCode::Right => {
+                                self.files.horizontal = (self.files.horizontal + 4)
+                                    .min(self.files.max_horizontal.get());
                             }
                             KeyCode::Char('r') => self.files.refresh(),
-                            KeyCode::Enter if !preview => self.files.open(self.files.selected),
                             KeyCode::Backspace | KeyCode::Esc => self.files.back(),
                             _ => {}
                         }
+                    }
+                    return true;
+                }
+                if let Event::Key(key) = event {
+                    let page = self
+                        .area
+                        .map_or(10, |area| area.height.saturating_sub(6) as usize)
+                        .max(1);
+                    let delta = match key.code {
+                        KeyCode::Up => -1,
+                        KeyCode::Down => 1,
+                        KeyCode::PageUp => -(page as isize),
+                        KeyCode::PageDown => page as isize,
+                        _ => 0,
+                    };
+                    self.files.selected = self
+                        .files
+                        .selected
+                        .saturating_add_signed(delta)
+                        .min(self.files.entries.len().saturating_sub(1));
+                    match key.code {
+                        KeyCode::Home => self.files.selected = 0,
+                        KeyCode::End => {
+                            self.files.selected = self.files.entries.len().saturating_sub(1)
+                        }
+                        KeyCode::Char('r') => self.files.refresh(),
+                        KeyCode::Enter => self.files.open(self.files.selected),
+                        KeyCode::Backspace | KeyCode::Esc => self.files.back(),
+                        _ => {}
                     }
                 }
             }
@@ -969,7 +1206,7 @@ impl RightPanel {
         true
     }
     pub fn guard_file_leave(&mut self) -> bool {
-        if !self.files.dirty() {
+        if !self.files.any_dirty() {
             return true;
         }
         self.files.pending_leave = Some(Leave::Close);
@@ -986,6 +1223,7 @@ impl RightPanel {
             Leave::Back => self.files.back(),
             Leave::Refresh => self.files.refresh(),
             Leave::Close => self.close(Tab::Files),
+            Leave::CloseBuffer(index) => self.files.remove_buffer(index),
             Leave::Project(root) => self.files.sync(&root),
         }
     }
@@ -1548,6 +1786,16 @@ fn terminal_style(cell: &vt100::Cell, theme: &Theme) -> Style {
     style
 }
 
+fn osc52_copy(text: &str) -> bool {
+    use base64::Engine;
+    use std::io::Write;
+    let payload = base64::engine::general_purpose::STANDARD.encode(text);
+    let mut out = std::io::stdout();
+    out.write_all(format!("\x1b]52;c;{payload}\x07").as_bytes())
+        .is_ok()
+        && out.flush().is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1592,13 +1840,13 @@ mod tests {
         panel.area = Some(Rect::new(80, 0, 44, 20));
         panel.focused = true;
         let directory = tempfile::tempdir().unwrap();
+        let text: String = (0..40).map(|index| format!("行{index}\n")).collect();
         let path = directory.path().join("test-file");
-        fs::write(&path, "中文\nsecond").unwrap();
+        fs::write(&path, &text).unwrap();
         let metadata = fs::metadata(&path).unwrap();
-        panel.files.editor =
-            Some(Editor::new(&path, "中文\nsecond".as_bytes().to_vec(), metadata).unwrap());
-        panel.files.preview = Some((0..40).map(|index| format!("行{index}\n")).collect());
-        panel.files.editor.as_mut().unwrap().text = panel.files.preview.clone().unwrap();
+        let editor = Editor::new(&path, text.as_bytes().to_vec(), metadata).unwrap();
+        panel.files.buffers = vec![editor];
+        panel.files.active = Some(0);
         panel.files.max_scroll.set(30);
         let model = FrameModel {
             dialog_stack: &[],
@@ -1654,15 +1902,64 @@ mod tests {
         assert!(panel.event(
             &Event::Mouse(MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
-                column: editor_area.x + 2,
+                column: editor_area.x + panel.files.gutter_width.get() as u16 + 2,
                 row: editor_area.y,
                 modifiers: KeyModifiers::NONE,
             }),
             &runtime,
             Path::new("/tmp")
         ));
-        assert_eq!(panel.files.editor.as_ref().unwrap().cursor, "行".len());
+        assert_eq!(panel.files.editor().unwrap().cursor(), "行".len());
         assert!(panel.focused);
+        let mouse = |kind, column, row| {
+            Event::Mouse(MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        let text_x = editor_area.x + panel.files.gutter_width.get() as u16;
+        assert!(panel.event(
+            &mouse(
+                MouseEventKind::Drag(MouseButton::Left),
+                text_x + 5,
+                editor_area.y
+            ),
+            &runtime,
+            Path::new("/tmp")
+        ));
+        assert!(panel.files.editor().unwrap().selection().is_some());
+        panel.event(
+            &mouse(
+                MouseEventKind::Up(MouseButton::Left),
+                text_x + 5,
+                editor_area.y,
+            ),
+            &runtime,
+            Path::new("/tmp"),
+        );
+        panel.files.click = None;
+        panel.files.click_count = 0;
+        panel.event(
+            &mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                text_x + 2,
+                editor_area.y,
+            ),
+            &runtime,
+            Path::new("/tmp"),
+        );
+        panel.event(
+            &mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                text_x + 2,
+                editor_area.y,
+            ),
+            &runtime,
+            Path::new("/tmp"),
+        );
+        assert!(panel.files.editor().unwrap().selection().is_some());
         assert!(panel.event(
             &Event::Mouse(MouseEvent {
                 kind: MouseEventKind::ScrollDown,
@@ -1681,7 +1978,10 @@ mod tests {
         let root = std::env::temp_dir().join(format!("blora-right-{}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
         fs::write(root.join("binary"), [0, 1, 2]).unwrap();
-        assert!(read_file_data(&root, &root.join("binary"), true).is_err());
+        assert!(matches!(
+            read_file_data(&root, &root.join("binary"), true),
+            Ok(FileData::Document { editor: None, .. })
+        ));
         assert!(read_file_data(&root, &root.join(".."), false).is_err());
         fs::remove_dir_all(root).unwrap();
     }
@@ -1691,7 +1991,12 @@ mod tests {
         files.generation = 2;
         files.worker.work.lock().unwrap().result = Some(FileResult {
             generation: 1,
-            result: Ok(FileData::Preview("stale".into())),
+            path: PathBuf::from("/stale"),
+            result: Ok(FileData::Document {
+                preview: Some("stale".into()),
+                editor: None,
+                reason: String::new(),
+            }),
         });
         files.sync(Path::new(""));
         assert!(files.preview.is_none());
@@ -1953,22 +2258,33 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
-    fn preview_is_bounded_and_empty_files_are_explicit() {
+    fn large_files_are_read_only_and_empty_files_are_editable() {
         let root = std::env::temp_dir().join(format!("blora-right-size-{}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
-        fs::write(root.join("large"), vec![b'x'; 70000]).unwrap();
+        fs::write(
+            root.join("large"),
+            vec![b'x'; MAX_EDITABLE_BYTES as usize + 1],
+        )
+        .unwrap();
         fs::write(root.join("empty"), []).unwrap();
-        let FileData::Preview(text) = read_file_data(&root, &root.join("large"), true).unwrap()
+        let FileData::Document {
+            preview: Some(text),
+            editor: None,
+            ..
+        } = read_file_data(&root, &root.join("large"), true).unwrap()
         else {
             panic!("expected preview")
         };
-        assert!(text.len() < 66000);
-        assert!(text.starts_with(&"x".repeat(65536)));
-        let FileData::Preview(text) = read_file_data(&root, &root.join("empty"), true).unwrap()
+        assert!(text.len() <= MAX_PREVIEW_BYTES as usize + 64);
+        assert!(text.starts_with(&"x".repeat(1024)));
+        let FileData::Document {
+            editor: Some(editor),
+            ..
+        } = read_file_data(&root, &root.join("empty"), true).unwrap()
         else {
-            panic!("expected preview")
+            panic!("expected editor")
         };
-        assert!(!text.is_empty());
+        assert_eq!(editor.text(), "");
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
@@ -2089,11 +2405,11 @@ mod tests {
         }
         files.load(root.join("last"), true);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while files.preview.is_none() && std::time::Instant::now() < deadline {
+        while files.editor().is_none() && std::time::Instant::now() < deadline {
             files.sync(&root);
             thread::sleep(std::time::Duration::from_millis(2));
         }
-        assert_eq!(files.preview.as_deref(), Some("latest preview"));
+        assert_eq!(files.editor().map(Editor::text), Some("latest preview"));
         files.load(root.clone(), false);
         let active_cancel = files.cancel.clone();
         files.close();
@@ -2279,7 +2595,7 @@ mod tests {
         await_files(&mut files, &root);
         files.open(2);
         await_files(&mut files, &root);
-        assert_eq!(files.preview.as_deref(), Some("last"));
+        assert_eq!(files.editor().map(Editor::text), Some("last"));
         files.back();
         assert_eq!(files.selected, 2);
         files.open(0);
@@ -2292,10 +2608,11 @@ mod tests {
         fs::write(root.join("a"), "new").unwrap();
         files.refresh();
         await_files(&mut files, &root);
-        assert_eq!(files.preview.as_deref(), Some("new"));
+        assert_eq!(files.editor().map(Editor::text), Some("new"));
         fs::remove_file(root.join("a")).unwrap();
         files.refresh();
         await_files(&mut files, &root);
+        assert!(files.editor().is_none());
         assert!(files.preview.is_none());
         assert!(!files.message.is_empty());
         files.back();
@@ -2404,7 +2721,6 @@ mod tests {
             tick: 0,
             pointer: None,
             text_selection: None,
-            interaction: None,
         };
         terminal
             .draw(|frame| panel.draw(frame, &model, Rect::new(0, 0, 88, 18)))
@@ -2473,7 +2789,6 @@ mod tests {
             tick: 0,
             pointer: None,
             text_selection: None,
-            interaction: None,
         };
         terminal
             .draw(|frame| panel.draw(frame, &model, Rect::new(0, 0, 88, 18)))

@@ -212,7 +212,11 @@ pub fn context_limit(model: &str) -> Option<u64> {
     cached_catalog()
         .iter()
         .find_map(|entry| from_list(&entry.models))
-        .or_else(|| load_saved().iter().find_map(|saved| from_list(&saved.models)))
+        .or_else(|| {
+            load_saved()
+                .iter()
+                .find_map(|saved| from_list(&saved.models))
+        })
         .or_else(|| family_context(bare))
 }
 

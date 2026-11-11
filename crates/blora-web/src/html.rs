@@ -10,9 +10,36 @@ const SKIP: &[&str] = &[
 ];
 /// Elements that start a new line.
 const BLOCK: &[&str] = &[
-    "p", "div", "section", "article", "main", "header", "footer", "nav", "aside", "br", "hr",
-    "tr", "table", "ul", "ol", "dl", "dt", "dd", "pre", "blockquote", "figure", "figcaption",
-    "form", "h1", "h2", "h3", "h4", "h5", "h6", "li",
+    "p",
+    "div",
+    "section",
+    "article",
+    "main",
+    "header",
+    "footer",
+    "nav",
+    "aside",
+    "br",
+    "hr",
+    "tr",
+    "table",
+    "ul",
+    "ol",
+    "dl",
+    "dt",
+    "dd",
+    "pre",
+    "blockquote",
+    "figure",
+    "figcaption",
+    "form",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "li",
 ];
 
 /// Convert an HTML document to plain text. The `<title>` becomes the first line.
@@ -32,7 +59,14 @@ pub fn html_to_text(html: &str) -> String {
     let mut rest = html;
     while !rest.is_empty() {
         let Some(lt) = rest.find('<') else {
-            push_text(&mut out, &mut link_text, link.is_some(), rest, pre > 0, &skip_depth);
+            push_text(
+                &mut out,
+                &mut link_text,
+                link.is_some(),
+                rest,
+                pre > 0,
+                &skip_depth,
+            );
             break;
         };
         push_text(
@@ -303,7 +337,10 @@ mod tests {
 
     #[test]
     fn decodes_numeric_entities() {
-        assert_eq!(decode_entities("&#20320;&#x597D; &amp; &bogus;"), "你好 & &bogus;");
+        assert_eq!(
+            decode_entities("&#20320;&#x597D; &amp; &bogus;"),
+            "你好 & &bogus;"
+        );
     }
 }
 
