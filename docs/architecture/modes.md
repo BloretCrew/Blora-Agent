@@ -16,13 +16,14 @@ Blora 的 Code、Work、Agent 三种模式共用一个 Runtime 和同一套事�
 
 | 工具 | Code | Work | Agent |
 |---|---|---|---|
-| 文件、shell、Git、`apply_patch`、`update_plan`、`skill`、`delegate`、记忆工具 | ✓ | ✓ | ✓ |
+| 文件、shell、Git、`apply_patch`、`update_plan`、`tool_search`、`skill`、`delegate`、记忆工具 | ✓ | ✓ | ✓ |
 | `view_image`；`read_file` 对图片文件直接返回图像 | ✓ | ✓ | ✓ |
 | `ask_user` | ✓ | ✓ | ✓ |
-| `web_search`、`web_fetch`、`read_document`、`schedule_task` | | ✓ | ✓ |
+| `web_search`、`web_fetch`、`read_document` | ✓ | ✓ | ✓ |
+| `schedule_task` | | ✓ | ✓ |
 | `skill_manage`、`session_search` | | | ✓ |
 
-子代理沿用父会话的模式。例如 Work 会话派出的 research 子代理也能联网。只读角色（research、review、plan）只拿到只读工具。
+子代理沿用父会话的模式。例如 Code 或 Work 会话派出的 research 子代理也能联网。只读角色（research、review、plan）只拿到只读工具。
 
 ## 提示词
 
@@ -41,7 +42,7 @@ Blora 的 Code、Work、Agent 三种模式共用一个 Runtime 和同一套事�
 - **记忆**：`remember`、`forget` 会立即改写 `.blora/memory.md`；回复里以 `Remember:` 开头的行也会保存为记忆。会话摘要不再写入记忆，以免上下文越积越大。
 - **历史检索**：`session_search` 查询 SQLite FTS5 全文索引（trigram 分词，支持中文）。索引覆盖用户消息、助手回复、问答和压缩摘要，不包括当前会话和子会话；登录用户只能检索自己的会话。
 
-## 联网与文档（Work、Agent）
+## 联网与文档（Code、Work、Agent）
 
 - `web_search` 根据环境变量自动选择后端：`SEARXNG_URL`、`BRAVE_SEARCH_API_KEY`、`TAVILY_API_KEY`、`EXA_API_KEY`，按此顺序选第一个已配置的。也可以用 `BLORA_SEARCH_BACKEND` 强制指定后端。
   - Blora 直接调用各服务公开的 HTTP 接口，没有引入任何 SDK。

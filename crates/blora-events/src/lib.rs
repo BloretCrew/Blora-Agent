@@ -19,6 +19,6 @@ pub use payload::{
     RunFailed, RunPaused, RunStarted, SessionArchived, SessionCreated, SessionCwdChanged,
     SessionForked, SessionResumed, SessionTitleChanged, SkillChanged, SubagentCompleted,
     SubagentFailed, SubagentMessage, SubagentSpawned, TaskCompleted, TaskCreated, TaskFailed,
-    TaskProgress, TaskStarted, TaskWakeup, ToolCompleted, ToolFailed, ToolOutput, ToolRequested,
-    ToolStarted, UsageRecorded, UserInput,
+    TaskProgress, TaskStarted, TaskWakeup, ToolCompleted, ToolDiscovered, ToolFailed, ToolOutput,
+    ToolRequested, ToolStarted, UsageRecorded, UserInput,
 };

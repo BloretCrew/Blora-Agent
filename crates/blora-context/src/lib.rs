@@ -204,6 +204,7 @@ fn mode_strategy(mode: &str) -> &'static str {
              - Make the smallest change that fully solves the problem. Fix root causes; do not silence errors, skip tests, or weaken checks to make something pass.\n\
              - Do not add dependencies, rename public APIs, or reformat unrelated code unless asked. Keep comments for non-obvious constraints.\n\
              - For a bug, reproduce or locate it first, then fix it, then add or update a test that would have caught it when the project has tests.\n\
+             - When you need current documentation, an external API, or a document that is not in the repo, use web_search, web_fetch, and read_document. Network policy still applies.\n\
              ## Verification\n\
              - After a change, run the narrowest relevant build, test, lint, or type check you can find (look at package scripts, Makefile, Cargo.toml, CI config). Fix what you broke. Review your diff with git_diff before finishing.\n\
              ## Git\n\

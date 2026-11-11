@@ -36,6 +36,7 @@
 - `skill.changed {name, action, scope, path, previous}`：Agent 创建、更新或删除技能；`previous` 保存修改前的内容。
 - `permission.changed {from, to, source}`：会话级权限模式变化；`source` 为 `runtime`、`user` 或 `tool`。
 - `plan.mode.changed {entered, reason}`：进入或退出 plan mode。
+- `tool.discovered {query, tools, source}`：`tool_search` 启用了额外工具，下一轮请求会声明它们。
 
 ## 多模态附件
 

@@ -509,6 +509,17 @@ pub struct InputProvided {
     pub answer: Option<String>,
 }
 
+/// A tool search made additional tools available to the session.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ToolDiscovered {
+    #[serde(default)]
+    pub query: Option<String>,
+    #[serde(default)]
+    pub tools: Vec<String>,
+    #[serde(default)]
+    pub source: Option<String>,
+}
+
 /// A skill file was created, updated, or deleted by the agent.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SkillChanged {
@@ -551,6 +562,7 @@ pub enum KnownPayload {
     ModelResponseCompleted(ModelResponseCompleted),
     ToolRequested(ToolRequested),
     ToolStarted(ToolStarted),
+    ToolDiscovered(ToolDiscovered),
     ToolOutput(ToolOutput),
     ToolCompleted(ToolCompleted),
     ToolFailed(ToolFailed),
@@ -615,6 +627,7 @@ impl KnownPayload {
             Self::ModelResponseCompleted(_) => "model.response.completed",
             Self::ToolRequested(_) => "tool.requested",
             Self::ToolStarted(_) => "tool.started",
+            Self::ToolDiscovered(_) => "tool.discovered",
             Self::ToolOutput(_) => "tool.output",
             Self::ToolCompleted(_) => "tool.completed",
             Self::ToolFailed(_) => "tool.failed",
@@ -668,6 +681,7 @@ impl KnownPayload {
             | Self::ToolOutput(_)
             | Self::ToolCompleted(_)
             | Self::ToolFailed(_) => Actor::Tool,
+            Self::ToolDiscovered(_) => Actor::System,
             Self::TaskCreated(_)
             | Self::TaskStarted(_)
             | Self::TaskProgress(_)
@@ -709,6 +723,7 @@ impl KnownPayload {
             Self::ModelResponseCompleted(v) => serde_json::to_value(v),
             Self::ToolRequested(v) => serde_json::to_value(v),
             Self::ToolStarted(v) => serde_json::to_value(v),
+            Self::ToolDiscovered(v) => serde_json::to_value(v),
             Self::ToolOutput(v) => serde_json::to_value(v),
             Self::ToolCompleted(v) => serde_json::to_value(v),
             Self::ToolFailed(v) => serde_json::to_value(v),
@@ -774,6 +789,7 @@ impl KnownPayload {
             "model.response.completed" => Self::ModelResponseCompleted(from_value(value)?),
             "tool.requested" => Self::ToolRequested(from_value(value)?),
             "tool.started" => Self::ToolStarted(from_value(value)?),
+            "tool.discovered" => Self::ToolDiscovered(from_value(value)?),
             "tool.output" => Self::ToolOutput(from_value(value)?),
             "tool.completed" => Self::ToolCompleted(from_value(value)?),
             "tool.failed" => Self::ToolFailed(from_value(value)?),

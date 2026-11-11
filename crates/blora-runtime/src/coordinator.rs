@@ -12,7 +12,8 @@ use blora_events::{
     ModelResponseCompleted, NewEvent, PlanStep, PlanUpdated, ProviderChanged, RetryStarted,
     RoutingChanged, RunCancelRequested, RunCancelled, RunCompleted, RunCreated, RunFailed,
     RunStarted, SessionArchived, SessionCwdChanged, SessionResumed, SessionTitleChanged,
-    ToolCompleted, ToolFailed, ToolOutput, ToolRequested, ToolStarted, UsageRecorded, UserInput,
+    ToolCompleted, ToolDiscovered, ToolFailed, ToolOutput, ToolRequested, ToolStarted,
+    UsageRecorded, UserInput,
 };
 use blora_exec::{Isolation, LocalBackend, ShellKind, WorktreeHandle, shell_cwd_after};
 use blora_model::retry::{self, RetryClass};
@@ -29,6 +30,7 @@ use serde_json::{Value, json};
 use std::sync::Mutex;
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 
+use crate::catalog;
 use crate::hooks::{self, HookDecision};
 
 /// Tool results larger than this are head/tail truncated before entering the log.
@@ -951,7 +953,7 @@ impl Runtime {
             .ok()
             .and_then(|command| crate::mcp::McpClient::connect(&command).ok());
         let imagine = mode == Mode::Imagine;
-        let mut tools = ToolRegistry::specs_for(mode)
+        let base_tools = ToolRegistry::specs_for(mode)
             .into_iter()
             .filter(|spec| !options.read_only || spec.read_only)
             .map(|spec| ToolDeclaration {
@@ -960,20 +962,33 @@ impl Runtime {
                 parameters: spec.parameters,
             })
             .collect::<Vec<_>>();
-        if !imagine {
-            if let Some(client) = &mcp {
-                if let Ok(extra) = client.list_tools() {
-                    tools.extend(extra);
-                }
-            }
-        }
+        let mcp_tools: Vec<ToolDeclaration> = if imagine {
+            Vec::new()
+        } else {
+            mcp.as_ref()
+                .and_then(|client| client.list_tools().ok())
+                .unwrap_or_default()
+        };
         let plugins = crate::plugins::load(std::path::Path::new(&exec_root));
-        if !options.read_only && !imagine {
-            tools.extend(plugins.iter().map(crate::plugins::PluginSpec::declaration));
+        let plugin_tools: Vec<ToolDeclaration> = if options.read_only || imagine {
+            Vec::new()
+        } else {
+            plugins
+                .iter()
+                .map(crate::plugins::PluginSpec::declaration)
+                .collect()
+        };
+        // MCP and plugin tools are deferred until `tool_search` enables them.
+        // `BLORA_TOOL_SEARCH=0` restores eager declaration for compatibility.
+        let defer_external = std::env::var("BLORA_TOOL_SEARCH").map_or(true, |value| value != "0");
+        let mut tools = base_tools.clone();
+        if !defer_external {
+            tools.extend(mcp_tools.clone());
+            tools.extend(plugin_tools.clone());
         }
         let attachments = blora_exec::AttachmentStore::new(backend.policy().workspace());
         let attachments: &dyn blora_content::AttachmentResolver = &attachments;
-        let tool_names: Vec<String> = tools.iter().map(|tool| tool.name.clone()).collect();
+        let mut tool_names: Vec<String> = tools.iter().map(|tool| tool.name.clone()).collect();
         let window = blora_context::context_window_for(blora_catalog::context_limit(&model));
         let compact_at = window * blora_context::compact_threshold_pct() / 100;
         let mut last_fingerprint: Option<String> = None;
@@ -1073,6 +1088,30 @@ impl Runtime {
                 .unwrap_or_else(|| ".".to_owned());
             env.plan = render_plan(&current);
             env.compactions = current.compaction_count;
+            let enabled: std::collections::HashSet<String> = self
+                .store
+                .list_session_tools(session_id)?
+                .into_iter()
+                .collect();
+            tools = base_tools.clone();
+            if defer_external {
+                tools.extend(
+                    mcp_tools
+                        .iter()
+                        .filter(|tool| enabled.contains(&tool.name))
+                        .cloned(),
+                );
+                tools.extend(
+                    plugin_tools
+                        .iter()
+                        .filter(|tool| enabled.contains(&tool.name))
+                        .cloned(),
+                );
+            } else {
+                tools.extend(mcp_tools.clone());
+                tools.extend(plugin_tools.clone());
+            }
+            tool_names = tools.iter().map(|tool| tool.name.clone()).collect();
             let mut events = self.store.load_events(session_id)?;
             let mut messages = compile_messages_with_tools_and_resolver(
                 &events,
@@ -1486,6 +1525,63 @@ impl Runtime {
         }
     }
 
+    /// Search deferred tools and enable matches for the next model turn.
+    #[allow(clippy::too_many_arguments)]
+    fn tool_search(
+        &self,
+        session_id: &SessionId,
+        run_id: &RunId,
+        turn_id: &TurnId,
+        arguments: &Value,
+        mode: Mode,
+        options: &RunOptions,
+        mcp: Option<&crate::mcp::McpClient>,
+        plugins: &[crate::plugins::PluginSpec],
+    ) -> Result<String> {
+        let mcp_tools = mcp
+            .and_then(|client| client.list_tools().ok())
+            .unwrap_or_default();
+        let entries = catalog::entries(mode, options.read_only, &mcp_tools, plugins);
+        let query = arguments.get("query").and_then(Value::as_str);
+        let select = arguments
+            .get("select")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let source = arguments.get("source").and_then(Value::as_str);
+        let limit = arguments
+            .get("limit")
+            .and_then(Value::as_u64)
+            .map_or(20, |value| value as usize);
+        let matches = catalog::search(&entries, query, &select, source, limit);
+        for entry in &matches {
+            self.store
+                .enable_session_tool(session_id, &entry.name, entry.source.as_str())?;
+        }
+        if !matches.is_empty() {
+            self.emit(
+                session_id,
+                Some(run_id),
+                Some(turn_id),
+                KnownPayload::ToolDiscovered(ToolDiscovered {
+                    query: query.map(str::to_owned),
+                    tools: matches.iter().map(|entry| entry.name.clone()).collect(),
+                    source: source.map(str::to_owned),
+                }),
+            )?;
+        }
+        Ok(format!(
+            "These tools are enabled for the next turn:\n{}",
+            catalog::format_matches(&matches)
+        ))
+    }
+
     /// Execute a batch of tool calls. Read-only batches run concurrently; the
     /// results are still recorded in call order so replay is deterministic.
     #[allow(clippy::too_many_arguments)]
@@ -1842,6 +1938,9 @@ impl Runtime {
                         .get("limit")
                         .and_then(Value::as_u64)
                         .map_or(8, |n| n as usize),
+                ),
+                "tool_search" => self.tool_search(
+                    session_id, run_id, turn_id, &arguments, mode, options, mcp, plugins,
                 ),
                 "update_plan" => {
                     let steps: Vec<PlanStep> = arguments
@@ -2226,7 +2325,7 @@ impl Provider for SharedProvider {
 fn runtime_handled_tool(name: &str) -> bool {
     matches!(
         name,
-        "recall" | "update_plan" | "shell" | "ask_user" | "session_search"
+        "recall" | "update_plan" | "shell" | "ask_user" | "session_search" | "tool_search"
     )
 }
 
@@ -3530,7 +3629,7 @@ mod tests {
     }
 
     #[test]
-    fn code_mode_does_not_offer_agent_or_web_tools() {
+    fn code_mode_offers_web_but_not_agent_tools() {
         let dir = tempfile::tempdir().unwrap();
         let runtime = Runtime::new(SqliteStore::open_in_memory().unwrap());
         let session = session(&runtime, Mode::Code, dir.path().to_str().unwrap());
@@ -3541,13 +3640,55 @@ mod tests {
         let requests = recorder.requests.lock().unwrap();
         let names: Vec<&str> = requests[0].tools.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"apply_patch") && names.contains(&"ask_user"));
-        assert!(!names.contains(&"skill_manage") && !names.contains(&"web_search"));
+        assert!(
+            names.contains(&"web_search")
+                && names.contains(&"web_fetch")
+                && names.contains(&"read_document")
+        );
+        assert!(!names.contains(&"skill_manage") && !names.contains(&"session_search"));
         assert!(
             requests[0].messages[0]
                 .content
                 .as_deref()
                 .unwrap()
                 .contains("# Mode: Code")
+        );
+    }
+
+    #[test]
+    fn tool_search_enables_deferred_plugin_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".blora/plugins")).unwrap();
+        std::fs::write(
+            dir.path().join(".blora/plugins/echo.json"),
+            r#"{"name":"echo","description":"Echo a value","command":"printf '%s' {value}","parameters":{"type":"object","properties":{"value":{"type":"string"}},"required":["value"]}}"#,
+        )
+        .unwrap();
+        let runtime = Runtime::new(SqliteStore::open_in_memory().unwrap());
+        let session = session(&runtime, Mode::Code, dir.path().to_str().unwrap());
+        let recorder = Recorder::install(
+            &runtime,
+            vec![
+                tool_reply("t", "tool_search", r#"{"select":["plugin__echo"]}"#),
+                tool_reply("p", "plugin__echo", r#"{"value":"hi"}"#),
+                text_reply("done", "stop"),
+            ],
+            None,
+        );
+        runtime
+            .run(&session, "hello", &CancelToken::new(), &yolo())
+            .unwrap();
+        let requests = recorder.requests.lock().unwrap();
+        let first: Vec<&str> = requests[0].tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(!first.contains(&"plugin__echo"));
+        assert!(first.contains(&"tool_search"));
+        let second: Vec<&str> = requests[1].tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(second.contains(&"plugin__echo"));
+        let events = runtime.events(&session).unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == "tool.discovered")
         );
     }
 

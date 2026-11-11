@@ -16,6 +16,7 @@
 - 工具结果累计超过 60k 字符后，除最近 5 条外全部替换为占位符（microcompact）。用户与助手文本不受影响。
 - 图片附件不参与字符截断；编译时由 `AttachmentResolver` 读取 `.blora/attachments/` 下的文件，转成 `ContentPart::Image`。支持视觉的模型收到 base64/URL 图像块，非视觉模型收到文本占位。
 - 历史图片默认只保留最近 4 张，避免每轮重复放大上下文。
+- MCP 与插件工具默认不进入工具声明；模型先用 `tool_search` 搜索，命中的工具写入 `session_tools`，下一轮才声明完整 schema。设置 `BLORA_TOOL_SEARCH=0` 可恢复一次性声明。
 
 ## 压缩
 

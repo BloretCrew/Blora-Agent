@@ -106,6 +106,20 @@ impl ToolRegistry {
                 read_only: true,
             },
             ToolSpec {
+                name: "tool_search",
+                description: "Search tools that are available but not currently declared (MCP servers, plugins, and deferred built-ins). Returns compact matches; matched tools become callable on the next turn. Use select for exact names, query to search names/descriptions, and source to filter.",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Words to match against tool names and descriptions"},
+                        "select": {"type": "array", "items": {"type": "string"}, "description": "Exact tool names to enable"},
+                        "source": {"type": "string", "enum": ["builtin", "mcp", "plugin"]},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 50}
+                    }
+                }),
+                read_only: true,
+            },
+            ToolSpec {
                 name: "shell",
                 description: "Run a shell command. The session remembers a working directory inside the workspace: pass cwd to set it, or use a bare cd. timeout_seconds caps foreground commands (default 30, max 600).",
                 parameters: json!({
@@ -187,12 +201,18 @@ impl ToolRegistry {
             },
             ToolSpec {
                 name: "process",
-                description: "List or kill background processes started by Blora.",
+                description: "Manage background processes started by Blora. action=list shows tracked processes; output returns new output after cursor; wait blocks until exit or timeout; stdin writes to the process; kill terminates it. process_id is the proc_* id returned by a background shell, or pass pid.",
                 parameters: json!({
                     "type": "object",
                     "properties": {
-                        "action": {"type": "string", "enum": ["list", "kill"]},
-                        "pid": {"type": "integer"}
+                        "action": {"type": "string", "enum": ["list", "output", "wait", "stdin", "kill"]},
+                        "process_id": {"type": "string"},
+                        "pid": {"type": "integer"},
+                        "cursor": {"type": "integer", "minimum": 0, "description": "Byte offset returned by the previous output call"},
+                        "max_bytes": {"type": "integer", "minimum": 1, "maximum": 262144},
+                        "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600},
+                        "data": {"type": "string"},
+                        "close_stdin": {"type": "boolean"}
                     },
                     "required": ["action"]
                 }),
@@ -457,13 +477,7 @@ impl ToolRegistry {
             Mode::Imagine => name == "generate_image",
             Mode::Code => !matches!(
                 name,
-                "generate_image"
-                    | "web_search"
-                    | "web_fetch"
-                    | "read_document"
-                    | "schedule_task"
-                    | "skill_manage"
-                    | "session_search"
+                "generate_image" | "schedule_task" | "skill_manage" | "session_search"
             ),
             Mode::Work => !matches!(name, "generate_image" | "skill_manage" | "session_search"),
             Mode::Agent => name != "generate_image",
@@ -591,16 +605,43 @@ impl ToolRegistry {
                 optional_str(arguments, "action").unwrap_or("list"),
                 optional_str(arguments, "path"),
             ),
-            "process" => match optional_str(arguments, "action").unwrap_or("list") {
-                "kill" => {
-                    let pid = arguments
-                        .get("pid")
-                        .and_then(Value::as_u64)
-                        .ok_or_else(|| BloraError::Other("process kill needs pid".to_owned()))?;
-                    backend.process_kill(u32::try_from(pid).unwrap_or(0))
+            "process" => {
+                let action = optional_str(arguments, "action").unwrap_or("list");
+                if action == "list" {
+                    return backend.process_list();
                 }
-                _ => backend.process_list(),
-            },
+                let key = process_key(arguments)?;
+                match action {
+                    "kill" => backend.process_kill(&key),
+                    "output" => {
+                        let cursor = arguments
+                            .get("cursor")
+                            .and_then(Value::as_u64)
+                            .map_or(0, |value| value as usize);
+                        let max_bytes = arguments
+                            .get("max_bytes")
+                            .and_then(Value::as_u64)
+                            .map_or(64 * 1024, |value| value as usize);
+                        let (text, next, _) = backend.process_output(&key, cursor, max_bytes)?;
+                        Ok(format!("{text}\n[next cursor {next}]"))
+                    }
+                    "wait" => {
+                        let timeout = arguments
+                            .get("timeout_seconds")
+                            .and_then(Value::as_u64)
+                            .map_or(60, |value| value.clamp(1, 600));
+                        backend.process_wait(&key, std::time::Duration::from_secs(timeout))
+                    }
+                    "stdin" => {
+                        let data = optional_str(arguments, "data").unwrap_or_default();
+                        let close = optional_bool(arguments, "close_stdin");
+                        backend.process_stdin(&key, data, close)
+                    }
+                    other => Err(BloraError::Other(format!(
+                        "unknown process action: {other}"
+                    ))),
+                }
+            }
             "handoff" => {
                 let summary = required_str(arguments, "summary")?;
                 let files = optional_str(arguments, "files").unwrap_or("");
@@ -778,6 +819,18 @@ fn optional_bool(value: &Value, key: &str) -> bool {
     value.get(key).and_then(Value::as_bool).unwrap_or(false)
 }
 
+fn process_key(arguments: &Value) -> Result<String> {
+    if let Some(id) = optional_str(arguments, "process_id") {
+        return Ok(id.to_owned());
+    }
+    if let Some(pid) = arguments.get("pid").and_then(Value::as_u64) {
+        return Ok(pid.to_string());
+    }
+    Err(BloraError::Other(
+        "process action needs process_id or pid".to_owned(),
+    ))
+}
+
 fn optional_str<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     value.get(key).and_then(Value::as_str)
 }
@@ -834,10 +887,14 @@ mod tests {
         ] {
             assert!(code.contains(&name) && work.contains(&name) && agent.contains(&name));
         }
-        assert!(!code.contains(&"web_search") && !code.contains(&"skill_manage"));
-        for name in ["web_search", "web_fetch", "read_document", "schedule_task"] {
-            assert!(work.contains(&name) && agent.contains(&name), "{name}");
+        assert!(!code.contains(&"skill_manage"));
+        for name in ["web_search", "web_fetch", "read_document"] {
+            assert!(
+                code.contains(&name) && work.contains(&name) && agent.contains(&name),
+                "{name}"
+            );
         }
+        assert!(work.contains(&"schedule_task") && agent.contains(&"schedule_task"));
         assert!(!work.contains(&"skill_manage"));
         assert!(agent.contains(&"skill_manage") && agent.contains(&"session_search"));
     }

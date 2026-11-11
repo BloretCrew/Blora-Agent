@@ -5,6 +5,7 @@
 
 mod agents;
 mod approvals;
+mod catalog;
 mod compact;
 mod coordinator;
 mod cron;

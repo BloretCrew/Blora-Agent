@@ -46,6 +46,7 @@ Blora Agent 是从零实现的本地优先 harness。第一阶段是单用户模
 - 权限：四档 `PermissionMode`（plan / default / acceptEdits / bypassPermissions），shell 命令按段分级（只读 / 改动 / 危险），`run.created.permission_mode` 与 `<environment_context>` 告知模型；`update_plan` 清单工具与 `plan.updated` 事件
 - 工具与上下文：`glob` 工具、`search` 的 include/max_results、超长结果落盘到 `.blora/tool-output/`、规则文件从仓库根逐级发现并叠加全局 `~/.blora/rules.md`
 - 多模态：工具结果和用户输入可携带 `AttachmentRef`，图片字节存 `.blora/attachments/`，支持视觉的模型收到内容块，其他模型收到文本占位
+- 工具发现与后台进程：MCP/插件工具默认延迟到 `tool_search` 后声明；后台 shell 输出落盘到 `.blora/processes/`，`process output/wait/stdin` 可增量读取和交互
 - 会话 shell 工作目录（`cwd` 参数或单独的 `cd`，记在 `session.cwd.changed`，不离开工作区）、技能只在上下文里列名字、用 `skill` 按需加载全文、非 UTF-8 文件（含 PNG/JPEG/GIF/WEBP）以类型和尺寸描述返回
 - GitHub Actions：`blora github install` 写入工作流，评论里的 `/blora`、`/ba` 或 `@blora` 在 runner 上启动代理；是否改代码、推送或开 PR 由评论决定
 

@@ -14,7 +14,7 @@
 
 ## 工具
 
-`read_file`（可选 offset/limit 行范围；图片文件会作为图像内容返回给支持视觉的模型，其他非 UTF-8 文件返回类型、字节数和能解析到的宽高）、`view_image`（显式查看图片，`detail` 可选 auto/low/high）、`write_file`（新建或整体替换）、`list_dir`、`glob`（按文件名模式找文件，最新的在前；`*.rs` 匹配任意层级，`src/**/*.ts` 相对 path 匹配）、`search`（正则逐行匹配，`include` 用 glob 限定文件，`max_results` 封顶）、`shell`（可 `cwd`、background、pty、timeout_seconds ≤ 600）、`skill`（按名字加载 `.blora/skills` 里的全文）、`apply_patch`（old_string 必须唯一匹配，或 replace_all）、`git_status`、`git_diff`、`git_log`、`git_branch`、`git_worktree`、`process`、`schedule_task`、`delegate`、`handoff`、`remember`、`recall`、`forget`、`update_plan`。MCP 工具以 `mcp__` 前缀接入，插件以 `plugin__` 前缀接入。
+`read_file`（可选 offset/limit 行范围；图片文件会作为图像内容返回给支持视觉的模型，其他非 UTF-8 文件返回类型、字节数和能解析到的宽高）、`view_image`（显式查看图片，`detail` 可选 auto/low/high）、`write_file`（新建或整体替换）、`list_dir`、`glob`（按文件名模式找文件，最新的在前；`*.rs` 匹配任意层级，`src/**/*.ts` 相对 path 匹配）、`search`（正则逐行匹配，`include` 用 glob 限定文件，`max_results` 封顶）、`shell`（可 `cwd`、background、pty、timeout_seconds ≤ 600）、`process`（list/output/wait/stdin/kill；后台 shell 的 stdout/stderr 写入 `.blora/processes/<id>.log`，output 按 cursor 增量读取）、`tool_search`（搜索并按需启用 MCP/插件/延迟工具，下一轮生效）、`skill`（按名字加载 `.blora/skills` 里的全文）、`apply_patch`（old_string 必须唯一匹配，或 replace_all）、`git_status`、`git_diff`、`git_log`、`git_branch`、`git_worktree`、`schedule_task`、`delegate`、`handoff`、`remember`、`recall`、`forget`、`update_plan`。MCP 工具以 `mcp__` 前缀接入，插件以 `plugin__` 前缀接入。
 
 `shell` 的工作目录按会话记住。省略 `cwd` 时从上次的目录开始（默认工作区根）。传入 `cwd`，或成功执行一条单独的 `cd`（可带一个路径），都会把新目录写成 `session.cwd.changed`。`cd` 和 `cd ~` 回到工作区根，不进入账户家目录；目标必须是工作区里已存在的目录。带 `&&`、管道或其他命令的 `cd` 不会被改写，也不更新会话目录。投影字段是 `shell_cwd`，Web 会话 JSON 同样带上它。
 
