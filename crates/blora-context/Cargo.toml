@@ -8,6 +8,8 @@ authors.workspace = true
 description = "Stable/context/volatile compiler for Blora Agent."
 
 [dependencies]
+base64.workspace = true
+blora-content.workspace = true
 blora-events.workspace = true
 blora-model.workspace = true
 blora-types.workspace = true
@@ -15,6 +17,7 @@ chrono.workspace = true
 dirs.workspace = true
 
 [dev-dependencies]
+serde_json.workspace = true
 tempfile.workspace = true
 
 [lints]

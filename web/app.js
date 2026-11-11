@@ -443,8 +443,35 @@ function appendGeneratedImages(body, text) {
   }
 }
 
-function renderTranscript(items) {
-  if (currentRunMode() === "imagine") {
+function appendAttachmentImages(body, attachments) {
+  if (!Array.isArray(attachments) || !attachments.length || !state.sessionId) return;
+  const wrap = document.createElement("div");
+  wrap.className = "bubble-attachments";
+  for (const attachment of attachments) {
+    if (!attachment || !attachment.path) continue;
+    const name = String(attachment.path).split("/").pop();
+    if (!name) continue;
+    const href = `/api/sessions/${encodeURIComponent(state.sessionId)}/attachments/${encodeURIComponent(name)}`;
+    if (attachment.kind === "image") {
+      const image = document.createElement("img");
+      image.alt = attachment.name || "attachment";
+      image.loading = "lazy";
+      image.src = href;
+      image.onclick = () => window.open(href, "_blank");
+      wrap.append(image);
+    } else {
+      const link = document.createElement("a");
+      link.href = href;
+      link.target = "_blank";
+      link.rel = "noopener";
+      link.textContent = attachment.name || name;
+      wrap.append(link);
+    }
+  }
+  if (wrap.childElementCount) body.append(wrap);
+}
+
+function renderTranscript(items) {  if (currentRunMode() === "imagine") {
     renderGallery(items);
     return;
   }
@@ -464,6 +491,7 @@ function renderTranscript(items) {
     const kind = item.kind || "system";
     const bubble = bubbleParts(kind);
     setBubbleText(bubble.body, kind, item.text || "");
+    appendAttachmentImages(bubble.body, item.attachments);
     thread.append(bubble.root);
   }
   state.stick = stick;

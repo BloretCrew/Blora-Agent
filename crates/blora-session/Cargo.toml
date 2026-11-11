@@ -8,6 +8,7 @@ authors.workspace = true
 description = "Session, run, and projection state machines for Blora Agent."
 
 [dependencies]
+blora-content.workspace = true
 blora-events.workspace = true
 blora-types.workspace = true
 chrono.workspace = true

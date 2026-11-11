@@ -85,6 +85,9 @@ struct RunBody {
     model: Option<String>,
     #[serde(default)]
     worktree: bool,
+    /// Attachments already stored through the upload endpoint.
+    #[serde(default)]
+    attachments: Vec<blora_content::AttachmentRef>,
 }
 
 #[derive(Serialize)]
@@ -135,6 +138,8 @@ struct PlanStepJson {
 struct TranscriptJson {
     kind: String,
     text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    attachments: Vec<blora_content::AttachmentRef>,
 }
 
 #[derive(Serialize)]
@@ -231,6 +236,11 @@ fn app(state: AppState) -> Router {
         .route("/api/sessions/{id}", get(show_session))
         .route("/api/sessions/{id}/mode", post(set_session_mode))
         .route("/api/sessions/{id}/images/{name}", get(session_image))
+        .route("/api/sessions/{id}/attachments", post(upload_attachment))
+        .route(
+            "/api/sessions/{id}/attachments/{name}",
+            get(session_attachment),
+        )
         .route("/api/sessions/{id}/run", post(run_session))
         .route("/api/sessions/{id}/events", get(session_events))
         .route("/api/sessions/{id}/fork", post(fork_session))
@@ -948,6 +958,116 @@ fn image_name_ok(name: &str) -> bool {
         && hash.chars().all(|ch| ch.is_ascii_hexdigit())
 }
 
+#[derive(Deserialize)]
+struct AttachmentBody {
+    #[serde(default)]
+    kind: Option<String>,
+    mime: String,
+    #[serde(default)]
+    name: Option<String>,
+    data: String,
+}
+
+async fn upload_attachment(
+    State(state): State<AppState>,
+    headers: HttpHeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<AttachmentBody>,
+) -> Result<Json<blora_content::AttachmentRef>, ApiError> {
+    let session_id = SessionId::parse(&id).map_err(ApiError::from)?;
+    ensure_session(&state, &headers, &session_id)?;
+    let projection = state
+        .runtime
+        .show_session(&session_id)
+        .map_err(ApiError::from)?;
+    let workspace = projection
+        .session
+        .as_ref()
+        .map(|session| session.workspace_path.clone())
+        .ok_or_else(|| ApiError("session not found".to_owned()))?;
+    let store = blora_exec::AttachmentStore::new(FsPath::new(&workspace));
+    let reference = store
+        .save_base64(
+            session_id.as_str(),
+            body.kind.as_deref().unwrap_or("file"),
+            &body.mime,
+            body.name.as_deref(),
+            &body.data,
+        )
+        .map_err(ApiError::from)?;
+    Ok(Json(reference))
+}
+
+async fn session_attachment(
+    State(state): State<AppState>,
+    headers: HttpHeaderMap,
+    Path((id, name)): Path<(String, String)>,
+) -> Result<Response, ApiError> {
+    let session_id = SessionId::parse(&id).map_err(ApiError::from)?;
+    ensure_session(&state, &headers, &session_id)?;
+    if !attachment_name_ok(&name) {
+        return Err(ApiError("attachment not found".to_owned()));
+    }
+    let projection = state
+        .runtime
+        .show_session(&session_id)
+        .map_err(ApiError::from)?;
+    let workspace = projection
+        .session
+        .as_ref()
+        .map(|session| session.workspace_path.clone())
+        .ok_or_else(|| ApiError("attachment not found".to_owned()))?;
+    let path = FsPath::new(&workspace)
+        .join(".blora")
+        .join("attachments")
+        .join(session_id.as_str())
+        .join(&name);
+    let path = path
+        .canonicalize()
+        .map_err(|_| ApiError("attachment not found".to_owned()))?;
+    let workspace = FsPath::new(&workspace)
+        .canonicalize()
+        .map_err(|_| ApiError::forbidden())?;
+    if !path.starts_with(workspace) {
+        return Err(ApiError::forbidden());
+    }
+    let bytes = std::fs::read(&path).map_err(|_| ApiError("attachment not found".to_owned()))?;
+    let mime = attachment_mime(&name);
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_str(mime).unwrap_or(HeaderValue::from_static("application/octet-stream")),
+    );
+    Ok((headers, bytes).into_response())
+}
+
+fn attachment_name_ok(name: &str) -> bool {
+    let Some((hash, ext)) = name.rsplit_once('.') else {
+        return false;
+    };
+    hash.len() == 64
+        && hash.chars().all(|ch| ch.is_ascii_hexdigit())
+        && matches!(
+            ext,
+            "png" | "jpg" | "jpeg" | "webp" | "gif" | "svg" | "pdf" | "mp3" | "wav" | "mp4"
+        )
+}
+
+fn attachment_mime(name: &str) -> &'static str {
+    match name.rsplit('.').next() {
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("webp") => "image/webp",
+        Some("gif") => "image/gif",
+        Some("svg") => "image/svg+xml",
+        Some("pdf") => "application/pdf",
+        Some("mp3") => "audio/mpeg",
+        Some("wav") => "audio/wav",
+        Some("mp4") => "video/mp4",
+        _ => "application/octet-stream",
+    }
+}
+
 async fn show_session(
     State(state): State<AppState>,
     headers: HttpHeaderMap,
@@ -1007,6 +1127,7 @@ async fn run_session(
         worktree: body.worktree,
         passport_user_token,
         permission,
+        attachments: body.attachments,
         ..RunOptions::default()
     };
     {
@@ -1724,26 +1845,42 @@ fn to_json(state: &AppState, id: &SessionId) -> Result<SessionJson, ApiError> {
                         } else {
                             blora_session::summarize_tool_run(&group, false)
                         },
+                        attachments: group
+                            .iter()
+                            .filter_map(|item| match item {
+                                TranscriptItem::Tool { attachments, .. } => {
+                                    Some(attachments.clone())
+                                }
+                                _ => None,
+                            })
+                            .flatten()
+                            .collect(),
                     });
                     continue;
                 }
                 out.push(match &items[index] {
-                    TranscriptItem::User { text, .. } => TranscriptJson {
+                    TranscriptItem::User {
+                        text, attachments, ..
+                    } => TranscriptJson {
                         kind: "user".to_owned(),
                         text: text.clone(),
+                        attachments: attachments.clone(),
                     },
                     TranscriptItem::Assistant { text, .. } => TranscriptJson {
                         kind: "assistant".to_owned(),
                         text: text.clone(),
+                        attachments: Vec::new(),
                     },
                     TranscriptItem::Tool { .. } => unreachable!(),
                     TranscriptItem::System { summary, .. } => TranscriptJson {
                         kind: "system".to_owned(),
                         text: summary.clone(),
+                        attachments: Vec::new(),
                     },
                     TranscriptItem::Reasoning { text, .. } => TranscriptJson {
                         kind: "reasoning".to_owned(),
                         text: text.clone(),
+                        attachments: Vec::new(),
                     },
                     TranscriptItem::Question {
                         question,
@@ -1756,6 +1893,7 @@ fn to_json(state: &AppState, id: &SessionId) -> Result<SessionJson, ApiError> {
                             Some(answer) => format!("{question}\n→ {answer}"),
                             None => question.clone(),
                         },
+                        attachments: Vec::new(),
                     },
                     TranscriptItem::Routing {
                         from_provider,
@@ -1773,6 +1911,7 @@ fn to_json(state: &AppState, id: &SessionId) -> Result<SessionJson, ApiError> {
                             to_model,
                             *at,
                         ),
+                        attachments: Vec::new(),
                     },
                 });
                 index += 1;

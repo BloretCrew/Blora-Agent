@@ -6,41 +6,109 @@ use std::io::{BufRead, BufReader};
 use blora_types::{BloraError, CancelToken, Result};
 use serde_json::{Value, json};
 
-use crate::{ChatMessage, Completion, CompletionRequest, Provider, StreamEvent, ToolCall, http};
+use crate::{
+    ChatMessage, Completion, CompletionRequest, Provider, StreamEvent, ToolCall, data_url, http,
+    part_fallback_text,
+};
+
+fn openai_content(parts: &[blora_content::ContentPart]) -> Value {
+    Value::Array(
+        parts
+            .iter()
+            .map(|part| match part {
+                blora_content::ContentPart::Text { text } => {
+                    json!({"type": "text", "text": text})
+                }
+                blora_content::ContentPart::Image {
+                    media_type,
+                    data,
+                    detail,
+                    alt: _,
+                } => match data_url(media_type, data) {
+                    Some(url) => json!({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": url,
+                            "detail": detail.map(blora_content::ImageDetail::as_str).unwrap_or("auto"),
+                        }
+                    }),
+                    None => json!({
+                        "type": "text",
+                        "text": part_fallback_text(part).unwrap_or_default(),
+                    }),
+                },
+                _ => json!({
+                    "type": "text",
+                    "text": part_fallback_text(part).unwrap_or_default(),
+                }),
+            })
+            .collect(),
+    )
+}
 
 fn openai_messages(messages: &[ChatMessage]) -> Vec<Value> {
-    messages
-        .iter()
-        .map(|message| {
-            let mut value = json!({ "role": message.role });
+    let mut out = Vec::new();
+    for message in messages {
+        let mut value = json!({ "role": message.role });
+        if message.role == "tool" {
             if let Some(content) = &message.content {
                 value["content"] = json!(content);
-            } else if message.role == "assistant" {
-                value["content"] = Value::Null;
             }
             if let Some(tool_call_id) = &message.tool_call_id {
                 value["tool_call_id"] = json!(tool_call_id);
             }
-            if let Some(calls) = &message.tool_calls {
-                value["tool_calls"] = Value::Array(
-                    calls
-                        .iter()
-                        .map(|call| {
-                            json!({
-                                "id": call.id,
-                                "type": "function",
-                                "function": {
-                                    "name": call.name,
-                                    "arguments": call.arguments,
-                                }
-                            })
-                        })
-                        .collect(),
-                );
+            out.push(value);
+            let attachments = message
+                .parts
+                .iter()
+                .filter(|part| part.is_attachment())
+                .cloned()
+                .collect::<Vec<_>>();
+            if !attachments.is_empty() {
+                let mut content = vec![json!({
+                    "type": "text",
+                    "text": format!(
+                        "Attachments from tool call {}",
+                        message.tool_call_id.as_deref().unwrap_or("")
+                    ),
+                })];
+                if let Value::Array(items) = openai_content(&attachments) {
+                    content.extend(items);
+                }
+                out.push(json!({"role": "user", "content": content}));
             }
-            value
-        })
-        .collect()
+            continue;
+        }
+        if message.has_parts() {
+            value["content"] = openai_content(&message.parts);
+        } else if let Some(content) = &message.content {
+            value["content"] = json!(content);
+        } else if message.role == "assistant" {
+            value["content"] = Value::Null;
+        }
+        if let Some(tool_call_id) = &message.tool_call_id {
+            value["tool_call_id"] = json!(tool_call_id);
+        }
+        if let Some(calls) = &message.tool_calls {
+            value["tool_calls"] = Value::Array(
+                calls
+                    .iter()
+                    .map(|call| {
+                        json!({
+                            "id": call.id,
+                            "type": "function",
+                            "function": {
+                                "name": call.name,
+                                "arguments": call.arguments,
+                            }
+                        })
+                    })
+                    .collect(),
+            );
+        }
+        out.push(value);
+    }
+    out
 }
 
 pub struct OpenAiProvider {
@@ -303,7 +371,32 @@ struct PartialCall {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use blora_content::{ContentPart, ImageData};
     use std::io::Cursor;
+
+    #[test]
+    fn image_parts_use_data_urls() {
+        let message = ChatMessage::with_parts(
+            "user",
+            vec![
+                ContentPart::text("look"),
+                ContentPart::Image {
+                    media_type: "image/png".to_owned(),
+                    data: ImageData::Base64 {
+                        data: "abc".to_owned(),
+                    },
+                    detail: None,
+                    alt: None,
+                },
+            ],
+        );
+        let value = openai_messages(&[message]);
+        assert_eq!(value[0]["content"][0]["text"], "look");
+        assert_eq!(
+            value[0]["content"][1]["image_url"]["url"],
+            "data:image/png;base64,abc"
+        );
+    }
 
     #[test]
     fn parses_parallel_tool_calls_and_cached_usage() {

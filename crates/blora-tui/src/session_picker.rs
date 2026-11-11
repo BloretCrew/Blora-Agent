@@ -254,6 +254,7 @@ mod tests {
                     id.clone(),
                     blora_events::KnownPayload::UserInput(blora_events::UserInput {
                         text: "batchneedle 部署".into(),
+                        ..Default::default()
                     }),
                 ))
                 .unwrap();

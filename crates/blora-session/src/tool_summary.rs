@@ -236,6 +236,7 @@ mod tests {
             arguments: Some(args.to_owned()),
             output: output.map(ToOwned::to_owned),
             call_id: None,
+            attachments: Vec::new(),
         }
     }
 

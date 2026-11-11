@@ -4,10 +4,14 @@
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader};
 
+use blora_content::{ContentPart, ImageData};
 use blora_types::{BloraError, CancelToken, Result};
 use serde_json::{Value, json};
 
-use crate::{ChatMessage, Completion, CompletionRequest, Provider, StreamEvent, ToolCall, http};
+use crate::{
+    ChatMessage, Completion, CompletionRequest, Provider, StreamEvent, ToolCall, http,
+    part_fallback_text,
+};
 
 /// Anthropic accepts at most four cache breakpoints per request.
 const MAX_BREAKPOINTS: usize = 4;
@@ -98,6 +102,52 @@ fn cache_control() -> Value {
     json!({"type": "ephemeral"})
 }
 
+fn anthropic_blocks(parts: &[ContentPart]) -> Vec<Value> {
+    parts
+        .iter()
+        .map(|part| match part {
+            ContentPart::Text { text } => json!({"type": "text", "text": text}),
+            ContentPart::Image {
+                media_type, data, ..
+            } => match data {
+                ImageData::Base64 { data } => json!({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": media_type,
+                        "data": data,
+                    }
+                }),
+                ImageData::Url { url } => json!({
+                    "type": "image",
+                    "source": {"type": "url", "url": url},
+                }),
+                ImageData::Path { .. } => json!({
+                    "type": "text",
+                    "text": part_fallback_text(part).unwrap_or_default(),
+                }),
+            },
+            _ => json!({
+                "type": "text",
+                "text": part_fallback_text(part).unwrap_or_default(),
+            }),
+        })
+        .collect()
+}
+
+fn push_blocks(
+    out: &mut Vec<(String, Vec<Value>)>,
+    role: &str,
+    blocks: Vec<Value>,
+    breakpoint: bool,
+    breakpoints: &mut Vec<(usize, usize)>,
+) {
+    let last = blocks.len().saturating_sub(1);
+    for (index, block) in blocks.into_iter().enumerate() {
+        push_block(out, role, block, breakpoint && index == last, breakpoints);
+    }
+}
+
 /// Compile canonical messages into Anthropic `system` blocks and alternating messages.
 ///
 /// Consecutive same-role turns are merged, tool results become `tool_result` blocks,
@@ -123,10 +173,15 @@ pub fn build_messages(messages: &[ChatMessage]) -> (Vec<Value>, Vec<Value>) {
                 system.push(block);
             }
             "tool" => {
+                let content = if message.has_parts() {
+                    Value::Array(anthropic_blocks(&message.parts))
+                } else {
+                    json!(message.content.clone().unwrap_or_default())
+                };
                 let block = json!({
                     "type": "tool_result",
                     "tool_use_id": message.tool_call_id.clone().unwrap_or_default(),
-                    "content": message.content.clone().unwrap_or_default(),
+                    "content": content,
                 });
                 push_block(
                     &mut out,
@@ -137,10 +192,16 @@ pub fn build_messages(messages: &[ChatMessage]) -> (Vec<Value>, Vec<Value>) {
                 );
             }
             "assistant" => {
-                let mut blocks = Vec::new();
-                if let Some(text) = message.content.as_deref().filter(|t| !t.trim().is_empty()) {
-                    blocks.push(json!({"type": "text", "text": text}));
-                }
+                let mut blocks = if message.has_parts() {
+                    anthropic_blocks(&message.parts)
+                } else {
+                    message
+                        .content
+                        .as_deref()
+                        .filter(|t| !t.trim().is_empty())
+                        .map(|text| vec![json!({"type": "text", "text": text})])
+                        .unwrap_or_default()
+                };
                 if let Some(calls) = &message.tool_calls {
                     for call in calls {
                         let input = serde_json::from_str::<Value>(&call.arguments)
@@ -153,17 +214,25 @@ pub fn build_messages(messages: &[ChatMessage]) -> (Vec<Value>, Vec<Value>) {
                         }));
                     }
                 }
-                for block in blocks {
-                    push_block(
-                        &mut out,
-                        "assistant",
-                        block,
-                        false,
-                        &mut message_breakpoints,
-                    );
-                }
+                push_blocks(
+                    &mut out,
+                    "assistant",
+                    blocks,
+                    false,
+                    &mut message_breakpoints,
+                );
             }
             _ => {
+                if message.has_parts() {
+                    push_blocks(
+                        &mut out,
+                        "user",
+                        anthropic_blocks(&message.parts),
+                        message.cache_breakpoint,
+                        &mut message_breakpoints,
+                    );
+                    continue;
+                }
                 let text = message.content.clone().unwrap_or_default();
                 if text.trim().is_empty() {
                     continue;
@@ -388,7 +457,33 @@ struct PartialCall {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use blora_content::{ContentPart, ImageData};
     use std::io::Cursor;
+
+    #[test]
+    fn tool_results_can_carry_image_blocks() {
+        let message = ChatMessage::tool_result_parts(
+            "call_1",
+            vec![
+                ContentPart::text("screenshot"),
+                ContentPart::Image {
+                    media_type: "image/png".to_owned(),
+                    data: ImageData::Base64 {
+                        data: "abc".to_owned(),
+                    },
+                    detail: None,
+                    alt: None,
+                },
+            ],
+        );
+        let (_, messages) = build_messages(&[message]);
+        assert_eq!(messages[0]["content"][0]["type"], "tool_result");
+        assert_eq!(messages[0]["content"][0]["content"][1]["type"], "image");
+        assert_eq!(
+            messages[0]["content"][0]["content"][1]["source"]["data"],
+            "abc"
+        );
+    }
 
     #[test]
     fn parses_text_and_multiple_tool_uses() {

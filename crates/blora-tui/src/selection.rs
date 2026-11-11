@@ -138,6 +138,7 @@ mod tests {
                     id,
                     KnownPayload::UserInput(UserInput {
                         text: "hello\nworld".to_owned(),
+                        ..Default::default()
                     }),
                 ),
                 2,

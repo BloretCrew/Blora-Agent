@@ -4,10 +4,14 @@
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader};
 
+use blora_content::ContentPart;
 use blora_types::{BloraError, CancelToken, Result};
 use serde_json::{Value, json};
 
-use crate::{ChatMessage, Completion, CompletionRequest, Provider, StreamEvent, ToolCall, http};
+use crate::{
+    ChatMessage, Completion, CompletionRequest, Provider, StreamEvent, ToolCall, data_url, http,
+    part_fallback_text,
+};
 
 pub struct ResponsesProvider {
     pub base_url: String,
@@ -90,6 +94,28 @@ impl Provider for ResponsesProvider {
     }
 }
 
+fn responses_content(parts: &[ContentPart]) -> Vec<Value> {
+    parts
+        .iter()
+        .map(|part| match part {
+            ContentPart::Text { text } => json!({"type": "input_text", "text": text}),
+            ContentPart::Image {
+                media_type, data, ..
+            } => match data_url(media_type, data) {
+                Some(url) => json!({"type": "input_image", "image_url": url}),
+                None => json!({
+                    "type": "input_text",
+                    "text": part_fallback_text(part).unwrap_or_default(),
+                }),
+            },
+            _ => json!({
+                "type": "input_text",
+                "text": part_fallback_text(part).unwrap_or_default(),
+            }),
+        })
+        .collect()
+}
+
 fn split_input(messages: &[ChatMessage]) -> (String, Vec<Value>) {
     let mut instructions = String::new();
     let mut input = Vec::new();
@@ -103,13 +129,25 @@ fn split_input(messages: &[ChatMessage]) -> (String, Vec<Value>) {
                     instructions.push_str(content);
                 }
             }
-            "tool" => input.push(json!({
-                "type": "function_call_output",
-                "call_id": message.tool_call_id,
-                "output": message.content,
-            })),
+            "tool" => {
+                let output = if message.has_parts() {
+                    Value::Array(responses_content(&message.parts))
+                } else {
+                    json!(message.content)
+                };
+                input.push(json!({
+                    "type": "function_call_output",
+                    "call_id": message.tool_call_id,
+                    "output": output,
+                }));
+            }
             _ => {
-                if let Some(content) = &message.content {
+                if message.has_parts() {
+                    input.push(json!({
+                        "role": message.role,
+                        "content": responses_content(&message.parts),
+                    }));
+                } else if let Some(content) = &message.content {
                     if !content.is_empty() {
                         input.push(json!({
                             "role": message.role,

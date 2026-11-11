@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Blora Agent contributors
 
+use blora_content::AttachmentRef;
 use blora_events::{AskedQuestion, EventEnvelope, KnownPayload};
 use blora_types::{
     AgentId, ApprovalId, BloraError, EventId, HarnessKind, Mode, Result, RunId, RunStatus,
@@ -40,6 +41,8 @@ pub struct RunRecord {
 pub enum TranscriptItem {
     User {
         text: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<AttachmentRef>,
         event_id: EventId,
     },
     Assistant {
@@ -56,6 +59,8 @@ pub enum TranscriptItem {
         output: Option<String>,
         #[serde(default)]
         call_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<AttachmentRef>,
     },
     System {
         summary: String,
@@ -142,6 +147,9 @@ pub struct SessionProjection {
     /// Permission mode of the most recent run (`plan`, `ask`, `auto-edit`, `yolo`).
     #[serde(default)]
     pub permission_mode: Option<String>,
+    /// Whether the session is currently in plan mode.
+    #[serde(default)]
+    pub plan_mode: bool,
     /// Workspace-relative directory where the next shell command starts.
     /// `None` and `.` both mean the workspace root.
     #[serde(default)]
@@ -326,6 +334,13 @@ pub fn apply_event(projection: &mut SessionProjection, event: &EventEnvelope) ->
             session.mode = changed.to;
             session.updated_at = event.timestamp;
         }
+        KnownPayload::PermissionChanged(changed) => {
+            projection.permission_mode = Some(changed.to.clone());
+            projection.plan_mode = changed.to == "plan";
+        }
+        KnownPayload::PlanModeChanged(changed) => {
+            projection.plan_mode = changed.entered;
+        }
         KnownPayload::SessionForked(forked) => {
             projection.external_sessions.clear();
             if let Some(session) = projection.session.as_mut() {
@@ -368,6 +383,7 @@ pub fn apply_event(projection: &mut SessionProjection, event: &EventEnvelope) ->
         KnownPayload::UserInput(input) => {
             projection.transcript.push(TranscriptItem::User {
                 text: visible_user_input(&input.text).to_owned(),
+                attachments: input.attachments,
                 event_id: event.event_id.clone(),
             });
             touch_run(projection, event)?;
@@ -415,6 +431,7 @@ pub fn apply_event(projection: &mut SessionProjection, event: &EventEnvelope) ->
                     arguments,
                     output: None,
                     call_id: tool.call_id,
+                    attachments: Vec::new(),
                 });
             }
             touch_run(projection, event)?;
@@ -436,10 +453,14 @@ pub fn apply_event(projection: &mut SessionProjection, event: &EventEnvelope) ->
             if let Some(TranscriptItem::Tool {
                 output: slot,
                 status,
+                attachments,
                 ..
             }) = find_tool_mut(projection, None, output.call_id.as_deref())
             {
                 *slot = Some(output.text);
+                if !output.attachments.is_empty() {
+                    attachments.clone_from(&output.attachments);
+                }
                 if status == "requested" {
                     *status = "running".to_owned();
                 }
@@ -451,6 +472,7 @@ pub fn apply_event(projection: &mut SessionProjection, event: &EventEnvelope) ->
                     arguments: None,
                     output: Some(output.text),
                     call_id: output.call_id,
+                    attachments: output.attachments,
                 });
             }
             touch_run(projection, event)?;
@@ -479,6 +501,7 @@ pub fn apply_event(projection: &mut SessionProjection, event: &EventEnvelope) ->
                     arguments: None,
                     output: None,
                     call_id: None,
+                    attachments: Vec::new(),
                 });
             }
             touch_run(projection, event)?;
@@ -504,6 +527,7 @@ pub fn apply_event(projection: &mut SessionProjection, event: &EventEnvelope) ->
                     arguments: None,
                     output: Some(failed.error),
                     call_id: None,
+                    attachments: Vec::new(),
                 });
             }
             touch_run(projection, event)?;
@@ -962,6 +986,7 @@ mod tests {
             1,
             KnownPayload::UserInput(UserInput {
                 text: text.to_owned(),
+                ..Default::default()
             }),
         );
         let projection = rebuild(std::slice::from_ref(&event)).unwrap();
@@ -1003,6 +1028,7 @@ mod tests {
             3,
             KnownPayload::UserInput(UserInput {
                 text: "hi".to_owned(),
+                ..Default::default()
             }),
         );
         user.run_id = Some(run_id);

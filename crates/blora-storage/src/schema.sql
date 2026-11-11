@@ -13,8 +13,41 @@ CREATE TABLE IF NOT EXISTS sessions (
     status TEXT NOT NULL,
     parent_session_id TEXT,
     user_id TEXT,
+    permission_mode TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS session_settings (
+    session_id TEXT NOT NULL,
+    key TEXT NOT NULL,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (session_id, key)
+);
+
+CREATE TABLE IF NOT EXISTS session_tools (
+    session_id TEXT NOT NULL,
+    tool_name TEXT NOT NULL,
+    source TEXT NOT NULL,
+    discovered_at TEXT NOT NULL,
+    last_used_at TEXT,
+    PRIMARY KEY (session_id, tool_name)
+);
+
+CREATE TABLE IF NOT EXISTS attachments (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    run_id TEXT,
+    kind TEXT NOT NULL,
+    mime TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    sha256 TEXT NOT NULL,
+    path TEXT NOT NULL,
+    name TEXT,
+    width INTEGER,
+    height INTEGER,
+    created_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS runs (

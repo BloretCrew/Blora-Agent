@@ -186,6 +186,7 @@ impl SqliteStore {
 
     /// Search all sessions, including child sessions, in batches of at most 50.
     /// Resume after the returned `(at, rowid)` cursor using the same filters.
+    #[allow(clippy::type_complexity)]
     pub fn search_transcripts_page(
         &self,
         query: &str,
@@ -198,6 +199,7 @@ impl SqliteStore {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::type_complexity)]
     fn search_transcripts_page_inner(
         &self,
         query: &str,
@@ -398,6 +400,7 @@ mod tests {
                     id.clone(),
                     KnownPayload::UserInput(UserInput {
                         text: (*text).to_owned(),
+                        ..Default::default()
                     }),
                 ))
                 .unwrap();
@@ -532,6 +535,7 @@ mod tests {
                 child.clone(),
                 KnownPayload::UserInput(UserInput {
                     text: "部署 nginx child".to_owned(),
+                    ..Default::default()
                 }),
             ))
             .unwrap();
@@ -575,6 +579,7 @@ mod tests {
                 id.clone(),
                 KnownPayload::AssistantMessageCompleted(AssistantMessageCompleted {
                     text: "最新助手回复".to_owned(),
+                    ..Default::default()
                 }),
             ))
             .unwrap();
@@ -583,6 +588,7 @@ mod tests {
                 id.clone(),
                 KnownPayload::UserInput(UserInput {
                     text: " \t\n\u{3000}".to_owned(),
+                    ..Default::default()
                 }),
             ))
             .unwrap();

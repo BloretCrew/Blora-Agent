@@ -151,6 +151,7 @@ impl Runtime {
     }
 
     /// Search every session visible in the TUI, including the current session.
+    #[allow(clippy::type_complexity)]
     pub fn session_search_page(
         &self,
         query: &str,

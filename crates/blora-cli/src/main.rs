@@ -629,6 +629,7 @@ fn dispatch(
                     worktree,
                     passport_user_token: None,
                     permission,
+                    attachments: Vec::new(),
                 },
             )?;
             println!("run {run_id}");
@@ -822,6 +823,7 @@ fn headless(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             worktree: false,
             passport_user_token: None,
             permission,
+            attachments: Vec::new(),
         },
     );
     stop.store(true, std::sync::atomic::Ordering::Relaxed);

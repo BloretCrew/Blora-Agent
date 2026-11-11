@@ -114,6 +114,7 @@ impl Runtime {
             } else {
                 options.permission
             },
+            attachments: Vec::new(),
         };
         let child_prompt = subagent_brief(role, prompt, depth < MAX_SUBAGENT_DEPTH);
         let result = self.run(&child_session, &child_prompt, cancel, &child_options);

@@ -8,6 +8,7 @@ authors.workspace = true
 description = "Canonical event model for Blora Agent."
 
 [dependencies]
+blora-content.workspace = true
 blora-types.workspace = true
 chrono.workspace = true
 serde.workspace = true

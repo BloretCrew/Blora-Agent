@@ -9,6 +9,7 @@ description = "Agent loop coordinator for Blora Agent."
 
 [dependencies]
 blora-catalog.workspace = true
+blora-content.workspace = true
 blora-context.workspace = true
 blora-events.workspace = true
 blora-harness = { path = "../blora-harness" }

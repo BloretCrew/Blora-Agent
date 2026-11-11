@@ -3,8 +3,9 @@
 
 //! Built-in tools. Schemas are provider-facing; execution stays in-process.
 
+use blora_content::{ContentPart, ImageData, ImageDetail, ToolOutcome};
 use blora_context::read_skill;
-use blora_exec::{LocalBackend, ShellKind};
+use blora_exec::{AttachmentStore, LocalBackend, ShellKind, image_mime_for};
 use blora_imagine::{self, permission_path};
 use blora_types::{BloraError, Mode, Result};
 use serde_json::{Value, json};
@@ -34,6 +35,19 @@ impl ToolRegistry {
                         "path": {"type": "string", "description": "Path relative to the workspace"},
                         "offset": {"type": "integer", "minimum": 1, "description": "First line to return (1-based)"},
                         "limit": {"type": "integer", "minimum": 1, "description": "Maximum number of lines"}
+                    },
+                    "required": ["path"]
+                }),
+                read_only: true,
+            },
+            ToolSpec {
+                name: "view_image",
+                description: "View an image file inside the workspace. The image is returned to models that support vision; other models receive a text description. detail is auto, low, or high.",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Path relative to the workspace"},
+                        "detail": {"type": "string", "enum": ["auto", "low", "high"], "description": "Provider fidelity hint"}
                     },
                     "required": ["path"]
                 }),
@@ -468,6 +482,34 @@ impl ToolRegistry {
         Self::execute_for(backend, "", name, arguments)
     }
 
+    /// Execute a tool and keep rich attachments.
+    ///
+    /// `execute_for` is the text-only compatibility surface; new tools that
+    /// return images or files should add a branch here.
+    pub fn execute_outcome_for(
+        backend: &LocalBackend,
+        session_id: &str,
+        name: &str,
+        arguments: &Value,
+    ) -> Result<ToolOutcome> {
+        if name == "view_image" {
+            let path = required_str(arguments, "path")?;
+            let detail = optional_str(arguments, "detail").map(parse_detail);
+            return media_outcome(backend, session_id, path, detail);
+        }
+        if name == "read_file"
+            && arguments.get("offset").is_none()
+            && arguments.get("limit").is_none()
+        {
+            let path = required_str(arguments, "path")?;
+            let resolved = backend.policy().resolve(path)?;
+            if image_mime_for(&resolved).is_some() {
+                return media_outcome(backend, session_id, path, None);
+            }
+        }
+        Self::execute_for(backend, session_id, name, arguments).map(ToolOutcome::text)
+    }
+
     pub fn execute_for(
         backend: &LocalBackend,
         session_id: &str,
@@ -685,6 +727,46 @@ fn generate_image(backend: &LocalBackend, session_id: &str, arguments: &Value) -
     Ok(blora_imagine::format_saved(&saved))
 }
 
+fn parse_detail(value: &str) -> ImageDetail {
+    match value {
+        "low" => ImageDetail::Low,
+        "high" => ImageDetail::High,
+        _ => ImageDetail::Auto,
+    }
+}
+
+fn media_outcome(
+    backend: &LocalBackend,
+    session_id: &str,
+    path: &str,
+    detail: Option<ImageDetail>,
+) -> Result<ToolOutcome> {
+    let resolved = backend.policy().resolve(path)?;
+    let mime = image_mime_for(&resolved)
+        .ok_or_else(|| BloraError::Other(format!("not a supported image: {path}")))?;
+    let bytes = backend.read_media_bytes(path)?;
+    let name = resolved.file_name().and_then(|value| value.to_str());
+    let reference = AttachmentStore::new(backend.policy().workspace())
+        .save_bytes(session_id, "image", mime, name, &bytes)?;
+    let label = match (reference.width, reference.height) {
+        (Some(width), Some(height)) => format!("image {path} ({mime}, {width}x{height})"),
+        _ => format!("image {path} ({mime})"),
+    };
+    Ok(ToolOutcome::from_parts(vec![
+        ContentPart::text(label),
+        ContentPart::Image {
+            media_type: mime.to_owned(),
+            data: ImageData::Path {
+                path: reference.path,
+                sha256: Some(reference.sha256),
+                bytes: Some(reference.bytes),
+            },
+            detail,
+            alt: Some(path.to_owned()),
+        },
+    ]))
+}
+
 fn required_str<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
     value
         .get(key)
@@ -707,6 +789,7 @@ mod tests {
     #[test]
     fn read_only_classification() {
         assert!(ToolRegistry::is_read_only("read_file"));
+        assert!(ToolRegistry::is_read_only("view_image"));
         assert!(ToolRegistry::is_read_only("search"));
         assert!(ToolRegistry::is_read_only("glob"));
         assert!(ToolRegistry::is_read_only("update_plan"));
@@ -800,6 +883,41 @@ mod tests {
         assert!(!out.contains("line 2001\n"));
         assert!(out.contains("500 more lines"));
         assert!(out.contains("Use offset/limit"));
+    }
+
+    #[test]
+    fn view_image_returns_an_attachment() {
+        const PNG_1X1: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9C, 0x62, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
+            0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("dot.png"), PNG_1X1).unwrap();
+        let backend = LocalBackend::new(blora_policy::Policy::new(dir.path(), true).unwrap());
+        let outcome = ToolRegistry::execute_outcome_for(
+            &backend,
+            "ses_test",
+            "view_image",
+            &json!({"path": "dot.png"}),
+        )
+        .unwrap();
+        assert!(outcome.parts.iter().any(|part| part.is_image()));
+        let attachments = outcome.attachments();
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].kind, "image");
+        assert_eq!(attachments[0].mime, "image/png");
+
+        let read = ToolRegistry::execute_outcome_for(
+            &backend,
+            "ses_test",
+            "read_file",
+            &json!({"path": "dot.png"}),
+        )
+        .unwrap();
+        assert!(read.parts.iter().any(|part| part.is_image()));
     }
 
     #[test]

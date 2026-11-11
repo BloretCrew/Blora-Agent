@@ -15,6 +15,8 @@
 //!
 //! Dates, git status, and other volatile facts never enter the system blocks.
 
+use base64::Engine as _;
+use blora_content::{AttachmentRef, AttachmentResolver, ContentPart, ImageData};
 use blora_events::{EventEnvelope, KnownPayload};
 use blora_model::{ChatMessage, ToolCall};
 use blora_types::{BloraError, Result};
@@ -640,6 +642,15 @@ pub fn user_input_with_context(event: &EventEnvelope, text: &str) -> String {
 
 /// Compile the transcript only (no system blocks). Used by compaction requests.
 pub fn compile_transcript(events: &[EventEnvelope]) -> Result<Vec<ChatMessage>> {
+    compile_transcript_with_resolver(events, None)
+}
+
+/// Compile transcript messages, loading attachment bytes when a resolver is
+/// available. Without a resolver, attachments stay as text placeholders.
+pub fn compile_transcript_with_resolver(
+    events: &[EventEnvelope],
+    resolver: Option<&dyn AttachmentResolver>,
+) -> Result<Vec<ChatMessage>> {
     let mut messages = Vec::new();
     let mut assistant_text = String::new();
     let mut tool_calls: Vec<ToolCall> = Vec::new();
@@ -668,9 +679,12 @@ pub fn compile_transcript(events: &[EventEnvelope]) -> Result<Vec<ChatMessage>> 
         match payload {
             KnownPayload::UserInput(input) => {
                 flush_assistant(&mut messages, &mut assistant_text, &mut tool_calls);
-                messages.push(ChatMessage::text(
+                let text = user_input_with_context(event, &input.text);
+                messages.push(message_with_attachments(
                     "user",
-                    user_input_with_context(event, &input.text),
+                    text,
+                    &input.attachments,
+                    resolver,
                 ));
             }
             KnownPayload::AssistantDelta(delta) => assistant_text.push_str(&delta.text),
@@ -698,16 +712,60 @@ pub fn compile_transcript(events: &[EventEnvelope]) -> Result<Vec<ChatMessage>> 
             }
             KnownPayload::ToolOutput(output) => {
                 flush_assistant(&mut messages, &mut assistant_text, &mut tool_calls);
-                messages.push(ChatMessage::tool_result(
-                    output.call_id.unwrap_or_default(),
+                let call_id = output.call_id.unwrap_or_default();
+                messages.push(message_with_attachments(
+                    "tool",
                     output.text,
+                    &output.attachments,
+                    resolver,
                 ));
+                if let Some(message) = messages.last_mut() {
+                    message.tool_call_id = Some(call_id);
+                }
             }
             _ => {}
         }
     }
     flush_assistant(&mut messages, &mut assistant_text, &mut tool_calls);
     Ok(messages)
+}
+
+fn message_with_attachments(
+    role: &str,
+    text: String,
+    attachments: &[AttachmentRef],
+    resolver: Option<&dyn AttachmentResolver>,
+) -> ChatMessage {
+    if attachments.is_empty() {
+        return ChatMessage::text(role, text);
+    }
+    let mut parts = Vec::new();
+    if !text.is_empty() {
+        parts.push(ContentPart::text(text));
+    }
+    if let Some(resolver) = resolver {
+        for attachment in attachments {
+            if attachment.kind != "image" {
+                continue;
+            }
+            let Ok(bytes) = resolver.read(attachment) else {
+                continue;
+            };
+            parts.push(ContentPart::Image {
+                media_type: attachment.mime.clone(),
+                data: ImageData::Base64 {
+                    data: base64::engine::general_purpose::STANDARD.encode(bytes),
+                },
+                detail: None,
+                alt: attachment.name.clone(),
+            });
+        }
+    }
+    if parts.is_empty() {
+        ChatMessage::text(role, String::new())
+    } else {
+        ChatMessage::with_parts(role, parts)
+    }
 }
 
 /// Full provider-facing message list for a run.
@@ -728,6 +786,18 @@ pub fn compile_messages_with_tools(
     env: &EnvSnapshot,
     tool_names: &[String],
 ) -> Result<Vec<ChatMessage>> {
+    compile_messages_with_tools_and_resolver(events, workspace, mode, env, tool_names, None)
+}
+
+/// Compile messages and load image attachments into provider content parts.
+pub fn compile_messages_with_tools_and_resolver(
+    events: &[EventEnvelope],
+    workspace: &str,
+    mode: &str,
+    env: &EnvSnapshot,
+    tool_names: &[String],
+    resolver: Option<&dyn AttachmentResolver>,
+) -> Result<Vec<ChatMessage>> {
     compile_inner(
         events,
         workspace,
@@ -735,6 +805,7 @@ pub fn compile_messages_with_tools(
         env,
         CompileOptions::default(),
         tool_names,
+        resolver,
     )
 }
 
@@ -745,7 +816,7 @@ pub fn compile_with_options(
     env: &EnvSnapshot,
     options: CompileOptions,
 ) -> Result<Vec<ChatMessage>> {
-    compile_inner(events, workspace, mode, env, options, &[])
+    compile_inner(events, workspace, mode, env, options, &[], None)
 }
 
 fn compile_inner(
@@ -755,6 +826,7 @@ fn compile_inner(
     env: &EnvSnapshot,
     options: CompileOptions,
     tool_names: &[String],
+    resolver: Option<&dyn AttachmentResolver>,
 ) -> Result<Vec<ChatMessage>> {
     let split = split_at_compaction(events);
     let mut messages = vec![
@@ -765,7 +837,7 @@ fn compile_inner(
         )
         .with_breakpoint(),
     ];
-    let mut transcript = compile_transcript(split.events)?;
+    let mut transcript = compile_transcript_with_resolver(split.events, resolver)?;
     microcompact(&mut transcript, options);
 
     if let Some(summary) = split.summary {
@@ -878,8 +950,55 @@ pub fn head_tail(text: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blora_events::{NewEvent, ToolOutput, UserInput};
+    use blora_events::{NewEvent, ToolOutput, ToolRequested, UserInput};
     use blora_types::{SessionId, SystemClock};
+    use serde_json::json;
+
+    struct FixedResolver;
+
+    impl AttachmentResolver for FixedResolver {
+        fn read(&self, _reference: &AttachmentRef) -> std::result::Result<Vec<u8>, String> {
+            Ok(vec![1, 2, 3])
+        }
+    }
+
+    #[test]
+    fn tool_attachments_become_image_parts() {
+        let list = events(vec![
+            KnownPayload::UserInput(UserInput {
+                text: "look".to_owned(),
+                ..Default::default()
+            }),
+            KnownPayload::ToolRequested(ToolRequested {
+                tool: "view_image".to_owned(),
+                arguments: json!({"path": "shot.png"}),
+                call_id: Some("call_1".to_owned()),
+            }),
+            KnownPayload::ToolOutput(ToolOutput {
+                text: "image shot.png".to_owned(),
+                call_id: Some("call_1".to_owned()),
+                attachments: vec![AttachmentRef {
+                    id: "att_1".to_owned(),
+                    kind: "image".to_owned(),
+                    mime: "image/png".to_owned(),
+                    name: Some("shot.png".to_owned()),
+                    path: ".blora/attachments/s/shot.png".to_owned(),
+                    sha256: "abc".to_owned(),
+                    bytes: 3,
+                    width: Some(1),
+                    height: Some(1),
+                }],
+                ..Default::default()
+            }),
+        ]);
+        let messages = compile_transcript_with_resolver(&list, Some(&FixedResolver)).unwrap();
+        let tool = messages
+            .iter()
+            .find(|message| message.role == "tool")
+            .unwrap();
+        assert!(tool.parts.iter().any(|part| part.is_image()));
+        assert_eq!(tool.tool_call_id.as_deref(), Some("call_1"));
+    }
 
     fn env() -> EnvSnapshot {
         EnvSnapshot {
@@ -914,6 +1033,7 @@ mod tests {
     fn reference_metadata_is_provider_only_and_survives_replay() {
         let mut history = events(vec![KnownPayload::UserInput(UserInput {
             text: "compare @{ses_00000000000000000000000000000000}".to_owned(),
+            ..Default::default()
         })]);
         let snapshot = history[0].payload["text"].as_str().unwrap().to_owned();
         history[0].metadata.insert(
@@ -941,6 +1061,7 @@ mod tests {
             format!("compare{SESSION_REFERENCE_HEADER}[{{\"messages\":[\"legacy-content\"]}}]");
         let history = events(vec![KnownPayload::UserInput(UserInput {
             text: text.clone(),
+            ..Default::default()
         })]);
         assert_eq!(
             compile_transcript(&history).unwrap()[0].content.as_deref(),
@@ -1092,9 +1213,11 @@ mod tests {
         let list = events(vec![
             KnownPayload::UserInput(UserInput {
                 text: "first".to_owned(),
+                ..Default::default()
             }),
             KnownPayload::UserInput(UserInput {
                 text: "second".to_owned(),
+                ..Default::default()
             }),
         ]);
         let messages = compile_messages(&list, "/tmp", "code", &env()).unwrap();
@@ -1145,14 +1268,17 @@ mod tests {
         let mut list = events(vec![
             KnownPayload::UserInput(UserInput {
                 text: "old".to_owned(),
+                ..Default::default()
             }),
             KnownPayload::UserInput(UserInput {
                 text: "kept".to_owned(),
+                ..Default::default()
             }),
             KnownPayload::ToolOutput(ToolOutput {
                 text: "ignored".to_owned(),
                 call_id: None,
                 truncated: false,
+                ..Default::default()
             }),
             KnownPayload::ContextCompactionCompleted(blora_events::ContextCompactionCompleted {
                 summary: "SUMMARY".to_owned(),
@@ -1162,6 +1288,7 @@ mod tests {
             }),
             KnownPayload::UserInput(UserInput {
                 text: "new".to_owned(),
+                ..Default::default()
             }),
         ]);
         // sequences are 1..=5; preserve from 2 keeps "kept" and later.

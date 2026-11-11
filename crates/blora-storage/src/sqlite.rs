@@ -6,6 +6,7 @@ use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
 use crate::{AgentRecord, CreateTask, TaskRecord};
+use blora_content::AttachmentRef;
 use blora_events::{EventEnvelope, KnownPayload, NewEvent, SessionCreated};
 use blora_session::{SessionProjection, rebuild};
 use blora_types::{
@@ -202,6 +203,12 @@ impl SqliteStore {
             params![now],
         )
         .map_err(BloraError::storage)?;
+        let _ = conn.execute("ALTER TABLE sessions ADD COLUMN permission_mode TEXT", []);
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (14, ?1)",
+            params![now],
+        )
+        .map_err(BloraError::storage)?;
         Ok(Self {
             conn: Mutex::new(conn),
             clock: SystemClock,
@@ -209,7 +216,7 @@ impl SqliteStore {
     }
 
     /// Current storage schema version written by this build.
-    pub const STORE_VERSION: u32 = 13;
+    pub const STORE_VERSION: u32 = 14;
 
     pub fn queue_steer(&self, session_id: &SessionId, message: &str) -> Result<()> {
         let conn = self.lock();
@@ -782,6 +789,126 @@ impl SqliteStore {
             )
             .map_err(BloraError::storage)?;
         Ok(changed > 0)
+    }
+
+    pub fn set_session_setting(
+        &self,
+        session_id: &SessionId,
+        key: &str,
+        value: &str,
+    ) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "INSERT INTO session_settings (session_id, key, value, updated_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(session_id, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            params![session_id.as_str(), key, value, Utc::now().to_rfc3339()],
+        )
+        .map_err(BloraError::storage)?;
+        Ok(())
+    }
+
+    pub fn get_session_setting(&self, session_id: &SessionId, key: &str) -> Result<Option<String>> {
+        let conn = self.lock();
+        conn.query_row(
+            "SELECT value FROM session_settings WHERE session_id = ?1 AND key = ?2",
+            params![session_id.as_str(), key],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(BloraError::storage)
+    }
+
+    pub fn enable_session_tool(
+        &self,
+        session_id: &SessionId,
+        tool_name: &str,
+        source: &str,
+    ) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "INSERT INTO session_tools (session_id, tool_name, source, discovered_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(session_id, tool_name) DO UPDATE SET
+                 source = excluded.source,
+                 discovered_at = excluded.discovered_at",
+            params![
+                session_id.as_str(),
+                tool_name,
+                source,
+                Utc::now().to_rfc3339()
+            ],
+        )
+        .map_err(BloraError::storage)?;
+        Ok(())
+    }
+
+    pub fn list_session_tools(&self, session_id: &SessionId) -> Result<Vec<String>> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT tool_name FROM session_tools WHERE session_id = ?1 ORDER BY discovered_at ASC",
+            )
+            .map_err(BloraError::storage)?;
+        let rows = stmt
+            .query_map(params![session_id.as_str()], |row| row.get::<_, String>(0))
+            .map_err(BloraError::storage)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(BloraError::storage)
+    }
+
+    pub fn insert_attachment(
+        &self,
+        session_id: &SessionId,
+        run_id: Option<&RunId>,
+        attachment: &AttachmentRef,
+    ) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "INSERT OR REPLACE INTO attachments
+             (id, session_id, run_id, kind, mime, size, sha256, path, name, width, height, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                attachment.id,
+                session_id.as_str(),
+                run_id.map(RunId::as_str),
+                attachment.kind,
+                attachment.mime,
+                i64::try_from(attachment.bytes).unwrap_or(i64::MAX),
+                attachment.sha256,
+                attachment.path,
+                attachment.name,
+                attachment.width.map(i64::from),
+                attachment.height.map(i64::from),
+                Utc::now().to_rfc3339()
+            ],
+        )
+        .map_err(BloraError::storage)?;
+        Ok(())
+    }
+
+    pub fn get_attachment(&self, id: &str) -> Result<Option<AttachmentRef>> {
+        let conn = self.lock();
+        conn.query_row(
+            "SELECT id, kind, mime, name, path, sha256, size, width, height
+             FROM attachments WHERE id = ?1",
+            params![id],
+            |row| {
+                Ok(AttachmentRef {
+                    id: row.get(0)?,
+                    kind: row.get(1)?,
+                    mime: row.get(2)?,
+                    name: row.get(3)?,
+                    path: row.get(4)?,
+                    sha256: row.get(5)?,
+                    bytes: row.get::<_, i64>(6)? as u64,
+                    width: row.get::<_, Option<i64>>(7)?.map(|value| value as u32),
+                    height: row.get::<_, Option<i64>>(8)?.map(|value| value as u32),
+                })
+            },
+        )
+        .optional()
+        .map_err(BloraError::storage)
     }
 
     pub fn usage_totals(&self, session_id: Option<&SessionId>) -> Result<UsageTotals> {
@@ -1415,6 +1542,7 @@ mod tests {
                     session_id.clone(),
                     KnownPayload::UserInput(UserInput {
                         text: "hello".to_owned(),
+                        ..Default::default()
                     }),
                 ))
                 .unwrap();

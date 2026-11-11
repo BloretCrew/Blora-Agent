@@ -184,6 +184,7 @@ mod tests {
                 session_id,
                 KnownPayload::UserInput(UserInput {
                     text: "hello".to_owned(),
+                    ..Default::default()
                 }),
             ),
             1,

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Blora Agent contributors
 
+use blora_content::AttachmentRef;
 use blora_types::{
     Actor, AgentId, ApprovalId, ArtifactId, BloraError, HarnessKind, Mode, Result, SessionId,
     TaskId,
@@ -47,6 +48,25 @@ pub struct ExternalSessionBound {
 pub struct ModeChanged {
     pub from: Mode,
     pub to: Mode,
+}
+
+/// The session-wide permission mode changed.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PermissionChanged {
+    #[serde(default)]
+    pub from: Option<String>,
+    pub to: String,
+    /// Who changed it: `runtime`, `user`, `agent`, or `tool`.
+    #[serde(default)]
+    pub source: Option<String>,
+}
+
+/// The agent entered or left plan mode.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PlanModeChanged {
+    pub entered: bool,
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -98,9 +118,12 @@ pub struct RunCancelled {
     pub reason: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct UserInput {
     pub text: String,
+    /// Files or images attached to this input.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<AttachmentRef>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -108,9 +131,11 @@ pub struct AssistantDelta {
     pub text: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct AssistantMessageCompleted {
     pub text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<AttachmentRef>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -142,7 +167,7 @@ pub struct ToolStarted {
     pub tool: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ToolOutput {
     pub text: String,
     #[serde(default)]
@@ -150,6 +175,12 @@ pub struct ToolOutput {
     /// True when the harness cut the raw result before recording it.
     #[serde(default)]
     pub truncated: bool,
+    /// Durable references to images/files produced by the tool.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<AttachmentRef>,
+    /// Extra tool metadata; `null` when absent.
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub metadata: Value,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -501,6 +532,8 @@ pub enum KnownPayload {
     HarnessChanged(HarnessChanged),
     ExternalSessionBound(ExternalSessionBound),
     ModeChanged(ModeChanged),
+    PermissionChanged(PermissionChanged),
+    PlanModeChanged(PlanModeChanged),
     SessionForked(SessionForked),
     SessionArchived(SessionArchived),
     RunCreated(RunCreated),
@@ -563,6 +596,8 @@ impl KnownPayload {
             Self::HarnessChanged(_) => "session.harness.changed",
             Self::ExternalSessionBound(_) => "session.external.bound",
             Self::ModeChanged(_) => "mode.changed",
+            Self::PermissionChanged(_) => "permission.changed",
+            Self::PlanModeChanged(_) => "plan.mode.changed",
             Self::SessionForked(_) => "session.forked",
             Self::SessionArchived(_) => "session.archived",
             Self::RunCreated(_) => "run.created",
@@ -620,6 +655,8 @@ impl KnownPayload {
     pub fn default_actor(&self) -> Actor {
         match self {
             Self::UserInput(_) | Self::ApprovalResolved(_) | Self::InputProvided(_) => Actor::User,
+            Self::PermissionChanged(_) => Actor::System,
+            Self::PlanModeChanged(_) => Actor::Assistant,
             Self::AssistantDelta(_)
             | Self::AssistantMessageCompleted(_)
             | Self::AssistantReasoning(_)
@@ -653,6 +690,8 @@ impl KnownPayload {
             Self::HarnessChanged(v) => serde_json::to_value(v),
             Self::ExternalSessionBound(v) => serde_json::to_value(v),
             Self::ModeChanged(v) => serde_json::to_value(v),
+            Self::PermissionChanged(v) => serde_json::to_value(v),
+            Self::PlanModeChanged(v) => serde_json::to_value(v),
             Self::SessionForked(v) => serde_json::to_value(v),
             Self::SessionArchived(v) => serde_json::to_value(v),
             Self::RunCreated(v) => serde_json::to_value(v),
@@ -716,6 +755,8 @@ impl KnownPayload {
             "session.harness.changed" => Self::HarnessChanged(from_value(value)?),
             "session.external.bound" => Self::ExternalSessionBound(from_value(value)?),
             "mode.changed" => Self::ModeChanged(from_value(value)?),
+            "permission.changed" => Self::PermissionChanged(from_value(value)?),
+            "plan.mode.changed" => Self::PlanModeChanged(from_value(value)?),
             "session.forked" => Self::SessionForked(from_value(value)?),
             "session.archived" => Self::SessionArchived(from_value(value)?),
             "run.created" => Self::RunCreated(from_value(value)?),

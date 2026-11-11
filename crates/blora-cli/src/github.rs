@@ -160,6 +160,7 @@ impl AgentDriver for RuntimeAgent<'_> {
                     worktree: false,
                     passport_user_token: None,
                     permission: Some(permission),
+                    attachments: Vec::new(),
                 },
             )
             .map_err(|err| blora_github::GithubError::new(err.to_string()))?;

@@ -3,10 +3,14 @@
 
 use std::io::{BufRead, BufReader};
 
+use blora_content::{ContentPart, ImageData};
 use blora_types::{BloraError, CancelToken, Result};
 use serde_json::{Value, json};
 
-use crate::{ChatMessage, Completion, CompletionRequest, Provider, StreamEvent, ToolCall, http};
+use crate::{
+    ChatMessage, Completion, CompletionRequest, Provider, StreamEvent, ToolCall, http,
+    part_fallback_text,
+};
 
 pub struct GeminiProvider {
     pub api_key: String,
@@ -88,6 +92,29 @@ impl Provider for GeminiProvider {
     }
 }
 
+fn gemini_parts(parts: &[ContentPart]) -> Vec<Value> {
+    parts
+        .iter()
+        .map(|part| match part {
+            ContentPart::Text { text } => json!({"text": text}),
+            ContentPart::Image {
+                media_type, data, ..
+            } => match data {
+                ImageData::Base64 { data } => json!({
+                    "inlineData": {"mimeType": media_type, "data": data},
+                }),
+                ImageData::Url { url } => json!({
+                    "fileData": {"mimeType": media_type, "fileUri": url},
+                }),
+                ImageData::Path { .. } => json!({
+                    "text": part_fallback_text(part).unwrap_or_default(),
+                }),
+            },
+            _ => json!({"text": part_fallback_text(part).unwrap_or_default()}),
+        })
+        .collect()
+}
+
 fn split_contents(messages: &[ChatMessage]) -> (String, Vec<Value>) {
     let mut system = String::new();
     let mut contents: Vec<(String, Vec<Value>)> = Vec::new();
@@ -106,7 +133,11 @@ fn split_contents(messages: &[ChatMessage]) -> (String, Vec<Value>) {
                 }
             }
             "assistant" => {
-                if let Some(text) = message.content.as_deref().filter(|t| !t.is_empty()) {
+                if message.has_parts() {
+                    for part in gemini_parts(&message.parts) {
+                        push("model", part);
+                    }
+                } else if let Some(text) = message.content.as_deref().filter(|t| !t.is_empty()) {
                     push("model", json!({"text": text}));
                 }
                 if let Some(calls) = &message.tool_calls {
@@ -137,9 +168,22 @@ fn split_contents(messages: &[ChatMessage]) -> (String, Vec<Value>) {
                         }
                     }),
                 );
+                let attachments = message
+                    .parts
+                    .iter()
+                    .filter(|part| part.is_attachment())
+                    .cloned()
+                    .collect::<Vec<_>>();
+                for part in gemini_parts(&attachments) {
+                    push("user", part);
+                }
             }
             _ => {
-                if let Some(text) = message.content.as_deref().filter(|t| !t.is_empty()) {
+                if message.has_parts() {
+                    for part in gemini_parts(&message.parts) {
+                        push("user", part);
+                    }
+                } else if let Some(text) = message.content.as_deref().filter(|t| !t.is_empty()) {
                     push("user", json!({ "text": text }));
                 }
             }

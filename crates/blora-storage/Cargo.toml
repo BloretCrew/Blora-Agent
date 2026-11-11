@@ -8,6 +8,7 @@ authors.workspace = true
 description = "SQLite event store for Blora Agent."
 
 [dependencies]
+blora-content.workspace = true
 blora-events.workspace = true
 blora-session.workspace = true
 blora-types.workspace = true

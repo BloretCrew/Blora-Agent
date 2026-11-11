@@ -68,6 +68,9 @@ impl Provider for PassportProvider {
             tools: request.tools.clone(),
             max_output_tokens: request.max_output_tokens,
             cache_key: request.cache_key.clone(),
+            response_format: request.response_format.clone(),
+            tool_choice: request.tool_choice.clone(),
+            capabilities: request.capabilities,
         };
         let body = chat_completions_body(&user_request, PASSPORT_MODEL_NAME);
         let reader = post_chat_completions(PASSPORT_API_BASE_URL, &self.api_key, body).map_err(

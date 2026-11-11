@@ -4097,6 +4097,7 @@ fn transcript_lines(
                 status,
                 arguments,
                 output,
+                attachments,
                 ..
             } => {
                 let color = if status == "failed" || status == "error" {
@@ -4126,6 +4127,15 @@ fn transcript_lines(
                         spans.extend(highlight_spans(&line, needle.as_deref(), theme));
                         out.push(Line::from(spans));
                     }
+                }
+                for attachment in attachments {
+                    out.push(Line::from(vec![
+                        Span::styled("  ", theme.mute()),
+                        Span::styled(
+                            format!("[{}] {}", attachment.kind, attachment.path),
+                            theme.mute(),
+                        ),
+                    ]));
                 }
             }
             TranscriptItem::System { summary, .. } => {
@@ -8496,6 +8506,7 @@ mod tests {
         projection.transcript.push(TranscriptItem::User {
             text: "一张珊瑚壁纸\n画幅 16:9，张数 1".to_owned(),
             event_id: blora_types::EventId::generate(),
+            attachments: Vec::new(),
         });
         projection.transcript.push(TranscriptItem::Tool {
             name: "generate_image".to_owned(),
@@ -8504,6 +8515,7 @@ mod tests {
             arguments: None,
             output: Some(format!(".blora/images/sess/{hash}.png image/png 1x1")),
             call_id: None,
+            attachments: Vec::new(),
         });
         projection.transcript.push(TranscriptItem::Tool {
             name: "generate_image".to_owned(),
@@ -8512,6 +8524,7 @@ mod tests {
             arguments: None,
             output: Some("image API HTTP 401".to_owned()),
             call_id: None,
+            attachments: Vec::new(),
         });
         let rendered =
             transcript_lines(&projection, None, false, true, 78, "you", &Theme::current());
@@ -8534,6 +8547,7 @@ mod tests {
         projection.transcript.push(TranscriptItem::User {
             text: "用户 **Markdown**".into(),
             event_id: blora_types::EventId::generate(),
+            attachments: Vec::new(),
         });
         projection.transcript.push(TranscriptItem::Tool {
             name: "read_file".into(),
@@ -8542,6 +8556,7 @@ mod tests {
             arguments: None,
             output: None,
             call_id: None,
+            attachments: Vec::new(),
         });
         let event = blora_events::EventEnvelope::stamped(
             blora_events::NewEvent::new(
@@ -8616,6 +8631,7 @@ mod tests {
         projection.transcript.push(TranscriptItem::User {
             text: "用户正文".to_owned(),
             event_id: blora_types::EventId::generate(),
+            attachments: Vec::new(),
         });
         projection.transcript.push(TranscriptItem::Assistant {
             text: "**助手正文**".to_owned(),
@@ -8706,6 +8722,7 @@ mod tests {
                 arguments: None,
                 output: None,
                 call_id: None,
+                attachments: Vec::new(),
             });
         }
         let area = Rect::new(4, 5, 80, 8);
@@ -8749,6 +8766,7 @@ mod tests {
         projection.transcript.push(TranscriptItem::User {
             text: "hello".to_owned(),
             event_id: blora_types::EventId::generate(),
+            attachments: Vec::new(),
         });
         let theme = Theme::current();
         let mut cache = TranscriptCache::default();

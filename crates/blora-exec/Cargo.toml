@@ -8,9 +8,13 @@ authors.workspace = true
 description = "Local execution backend for Blora Agent."
 
 [dependencies]
+base64.workspace = true
+blora-content.workspace = true
 blora-policy.workspace = true
 blora-types.workspace = true
+image.workspace = true
 regex.workspace = true
+sha2.workspace = true
 walkdir.workspace = true
 
 [dev-dependencies]

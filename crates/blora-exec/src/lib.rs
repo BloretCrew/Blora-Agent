@@ -12,12 +12,15 @@ use std::time::Duration;
 
 use blora_policy::Policy;
 use blora_types::{BloraError, Result};
+mod attachment;
 mod glob;
 mod host;
 mod isolation;
 mod media;
 mod process;
 mod worktree;
+
+pub use attachment::{AttachmentStore, image_mime_for};
 
 use regex::Regex;
 use walkdir::WalkDir;
@@ -31,6 +34,7 @@ pub use process::ProcessInfo;
 pub use worktree::WorktreeHandle;
 
 const MAX_FILE_BYTES: usize = 1_000_000;
+const MAX_MEDIA_BYTES: usize = 20 * 1024 * 1024;
 const MAX_SEARCH_MATCHES: usize = 80;
 const MAX_GLOB_MATCHES: usize = 200;
 const MAX_SHELL_BYTES: usize = 200_000;
@@ -103,6 +107,28 @@ impl LocalBackend {
             Ok(text) => Ok(text),
             Err(err) => Ok(media::describe_bytes(&label, &err.into_bytes())),
         }
+    }
+
+    /// Read bytes for media tools. Images may be larger than text files.
+    pub fn read_media_bytes(&self, path: &str) -> Result<Vec<u8>> {
+        self.policy.require(
+            self.policy.file_read_path(path),
+            &format!("read_media {path}"),
+        )?;
+        let path = self.policy.resolve(path)?;
+        if self.isolation == Isolation::Remote {
+            return Err(BloraError::Exec(
+                "remote isolation cannot read media inline".to_owned(),
+            ));
+        }
+        let bytes = std::fs::read(&path).map_err(BloraError::exec)?;
+        if bytes.len() > MAX_MEDIA_BYTES {
+            return Err(BloraError::Exec(format!(
+                "media exceeds {MAX_MEDIA_BYTES} bytes: {}",
+                path.display()
+            )));
+        }
+        Ok(bytes)
     }
 
     pub fn write_file(&self, path: &str, contents: &str) -> Result<()> {

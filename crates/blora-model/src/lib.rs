@@ -15,6 +15,7 @@ pub mod retry;
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
+use blora_content::{ContentPart, ImageData, ModelCapabilities};
 use blora_types::{BloraError, CancelToken, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -33,6 +34,12 @@ pub struct ChatMessage {
     pub role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+    /// Rich content (images/files/JSON) sent alongside `content`.
+    ///
+    /// Empty for plain text, so existing provider request bodies stay
+    /// byte-identical.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<ContentPart>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -49,6 +56,24 @@ impl ChatMessage {
         Self {
             role: role.to_owned(),
             content: Some(content.into()),
+            parts: Vec::new(),
+            tool_call_id: None,
+            tool_calls: None,
+            cache_breakpoint: false,
+        }
+    }
+
+    #[must_use]
+    pub fn with_parts(role: &str, parts: Vec<ContentPart>) -> Self {
+        let text = parts
+            .iter()
+            .filter_map(ContentPart::as_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        Self {
+            role: role.to_owned(),
+            content: if text.is_empty() { None } else { Some(text) },
+            parts,
             tool_call_id: None,
             tool_calls: None,
             cache_breakpoint: false,
@@ -60,6 +85,24 @@ impl ChatMessage {
         Self {
             role: "tool".to_owned(),
             content: Some(content.into()),
+            parts: Vec::new(),
+            tool_call_id: Some(call_id.into()),
+            tool_calls: None,
+            cache_breakpoint: false,
+        }
+    }
+
+    #[must_use]
+    pub fn tool_result_parts(call_id: impl Into<String>, parts: Vec<ContentPart>) -> Self {
+        let text = parts
+            .iter()
+            .filter_map(ContentPart::as_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        Self {
+            role: "tool".to_owned(),
+            content: if text.is_empty() { None } else { Some(text) },
+            parts,
             tool_call_id: Some(call_id.into()),
             tool_calls: None,
             cache_breakpoint: false,
@@ -71,6 +114,7 @@ impl ChatMessage {
         Self {
             role: "assistant".to_owned(),
             content,
+            parts: Vec::new(),
             tool_call_id: None,
             tool_calls: if tool_calls.is_empty() {
                 None
@@ -85,6 +129,23 @@ impl ChatMessage {
     pub fn with_breakpoint(mut self) -> Self {
         self.cache_breakpoint = true;
         self
+    }
+
+    #[must_use]
+    pub fn has_parts(&self) -> bool {
+        !self.parts.is_empty()
+    }
+
+    /// Rich parts, falling back to the plain text body.
+    #[must_use]
+    pub fn effective_parts(&self) -> Vec<ContentPart> {
+        if !self.parts.is_empty() {
+            return self.parts.clone();
+        }
+        self.content
+            .as_ref()
+            .map(|text| vec![ContentPart::text(text.clone())])
+            .unwrap_or_default()
     }
 }
 
@@ -102,6 +163,24 @@ pub struct ToolDeclaration {
     pub parameters: Value,
 }
 
+/// Caller-supplied JSON schema for structured output.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ResponseFormat {
+    pub name: String,
+    pub schema: Value,
+    #[serde(default)]
+    pub strict: bool,
+}
+
+/// How the provider should choose a tool, when it supports the option.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ToolChoice {
+    Auto,
+    Required,
+    None,
+    Tool(String),
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct CompletionRequest {
     pub model: String,
@@ -111,6 +190,12 @@ pub struct CompletionRequest {
     pub max_output_tokens: Option<u32>,
     /// Session-affinity key for providers with server-side prefix caching.
     pub cache_key: Option<String>,
+    /// Structured output schema, when the caller requested one.
+    pub response_format: Option<ResponseFormat>,
+    /// Optional provider-side tool choice override.
+    pub tool_choice: Option<ToolChoice>,
+    /// Capabilities of the selected model.
+    pub capabilities: ModelCapabilities,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -140,6 +225,11 @@ pub trait Provider: Send + Sync {
         cancel: &CancelToken,
         on_event: &mut dyn FnMut(StreamEvent) -> Result<()>,
     ) -> Result<Completion>;
+
+    /// Best-effort capabilities for `model`.
+    fn capabilities(&self, model: &str) -> ModelCapabilities {
+        ModelCapabilities::heuristic(model)
+    }
 }
 
 pub struct MockProvider {
@@ -329,6 +419,33 @@ fn truncate(text: &str, max: usize) -> String {
         text.to_owned()
     } else {
         format!("{}…", text.chars().take(max).collect::<String>())
+    }
+}
+
+pub(crate) fn data_url(media_type: &str, data: &ImageData) -> Option<String> {
+    match data {
+        ImageData::Base64 { data } => Some(format!("data:{media_type};base64,{data}")),
+        ImageData::Url { url } => Some(url.clone()),
+        ImageData::Path { .. } => None,
+    }
+}
+
+pub(crate) fn part_fallback_text(part: &ContentPart) -> Option<String> {
+    match part {
+        ContentPart::Text { text } => Some(text.clone()),
+        ContentPart::Image {
+            media_type, data, ..
+        } => Some(match data {
+            ImageData::Base64 { data } => {
+                format!("[image {media_type}: {} base64 bytes]", data.len())
+            }
+            ImageData::Path { path, .. } => format!("[image {media_type}: {path}]"),
+            ImageData::Url { url } => format!("[image {media_type}: {url}]"),
+        }),
+        ContentPart::File {
+            media_type, name, ..
+        } => Some(format!("[file {name} ({media_type})]")),
+        ContentPart::Json { value } => Some(value.to_string()),
     }
 }
 

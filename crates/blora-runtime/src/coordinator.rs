@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Blora Agent contributors
 
-use blora_context::{EnvSnapshot, compile_messages_with_tools, estimate_messages};
+use blora_content::ToolOutcome;
+use blora_context::{
+    EnvSnapshot, compile_messages_with_tools, compile_messages_with_tools_and_resolver,
+    estimate_messages,
+};
 use blora_events::{
     AssistantDelta, AssistantMessageCompleted, AssistantReasoning, ContextSnapshotCreated,
     EventEnvelope, HookCompleted, KnownPayload, ModeChanged, ModelRequested,
@@ -89,6 +93,8 @@ pub struct RunOptions {
     /// A person is watching and can answer `ask_user` questions. Independent
     /// of `interactive` (approvals): bypass-permission runs can still ask.
     pub can_ask: bool,
+    /// Files or images attached to the user's prompt.
+    pub attachments: Vec<blora_content::AttachmentRef>,
 }
 
 impl RunOptions {
@@ -124,6 +130,7 @@ impl Default for RunOptions {
             passport_user_token: None,
             permission: None,
             can_ask: false,
+            attachments: Vec::new(),
         }
     }
 }
@@ -745,6 +752,7 @@ impl Runtime {
             Some(&turn_id),
             KnownPayload::UserInput(UserInput {
                 text: prompt.to_owned(),
+                ..Default::default()
             }),
         )?;
         let mut assembled = String::new();
@@ -766,7 +774,10 @@ impl Runtime {
             session_id,
             Some(&run_id),
             Some(&turn_id),
-            KnownPayload::AssistantMessageCompleted(AssistantMessageCompleted { text: assembled }),
+            KnownPayload::AssistantMessageCompleted(AssistantMessageCompleted {
+                text: assembled,
+                ..Default::default()
+            }),
         )?;
         self.emit(
             session_id,
@@ -904,7 +915,14 @@ impl Runtime {
                 model: Some(model.clone()),
             }),
         )?;
-        self.emit_referenced_input(session_id, &run_id, &turn_id, prompt.clone(), references)?;
+        self.emit_referenced_input(
+            session_id,
+            &run_id,
+            &turn_id,
+            prompt.clone(),
+            references,
+            options.attachments.clone(),
+        )?;
         if should_generate_title {
             let title = generate_session_title(
                 providers[provider_index].as_ref(),
@@ -953,6 +971,8 @@ impl Runtime {
         if !options.read_only && !imagine {
             tools.extend(plugins.iter().map(crate::plugins::PluginSpec::declaration));
         }
+        let attachments = blora_exec::AttachmentStore::new(backend.policy().workspace());
+        let attachments: &dyn blora_content::AttachmentResolver = &attachments;
         let tool_names: Vec<String> = tools.iter().map(|tool| tool.name.clone()).collect();
         let window = blora_context::context_window_for(blora_catalog::context_limit(&model));
         let compact_at = window * blora_context::compact_threshold_pct() / 100;
@@ -1003,6 +1023,7 @@ impl Runtime {
                 Some(&turn_id),
                 KnownPayload::AssistantMessageCompleted(AssistantMessageCompleted {
                     text: summary.clone(),
+                    ..Default::default()
                 }),
             )?;
             self.emit(
@@ -1035,7 +1056,14 @@ impl Runtime {
             // Steering messages become real user turns at this safe point.
             for steer in self.store.take_steers(session_id)? {
                 let references = self.session_reference_context(session_id, &steer)?;
-                self.emit_referenced_input(session_id, &run_id, &turn_id, steer, references)?;
+                self.emit_referenced_input(
+                    session_id,
+                    &run_id,
+                    &turn_id,
+                    steer,
+                    references,
+                    Vec::new(),
+                )?;
             }
             let current = self.show_session(session_id)?;
             env.shell_cwd = current
@@ -1046,8 +1074,14 @@ impl Runtime {
             env.plan = render_plan(&current);
             env.compactions = current.compaction_count;
             let mut events = self.store.load_events(session_id)?;
-            let mut messages =
-                compile_messages_with_tools(&events, &exec_root, mode.as_str(), &env, &tool_names)?;
+            let mut messages = compile_messages_with_tools_and_resolver(
+                &events,
+                &exec_root,
+                mode.as_str(),
+                &env,
+                &tool_names,
+                Some(attachments),
+            )?;
             if estimate_messages(&messages) >= compact_at {
                 match self.compact_with(
                     session_id,
@@ -1091,6 +1125,9 @@ impl Runtime {
                 tools: tools.clone(),
                 max_output_tokens: None,
                 cache_key: Some(session_id.to_string()),
+                response_format: None,
+                tool_choice: None,
+                capabilities: blora_content::ModelCapabilities::heuristic(&model),
             };
             let (completion, streamed) = match self.call_with_retry(
                 session_id,
@@ -1141,6 +1178,7 @@ impl Runtime {
                     Some(&turn_id),
                     KnownPayload::AssistantMessageCompleted(AssistantMessageCompleted {
                         text: assistant_text,
+                        ..Default::default()
                     }),
                 )?;
             }
@@ -1242,8 +1280,14 @@ impl Runtime {
         // user is not left with a bare failure.
         if !cancel.is_cancelled() {
             let events = self.store.load_events(session_id)?;
-            let mut messages =
-                compile_messages_with_tools(&events, &exec_root, mode.as_str(), &env, &tool_names)?;
+            let mut messages = compile_messages_with_tools_and_resolver(
+                &events,
+                &exec_root,
+                mode.as_str(),
+                &env,
+                &tool_names,
+                Some(attachments),
+            )?;
             messages.push(ChatMessage::text("user", TURN_LIMIT_PROMPT));
             let request = CompletionRequest {
                 model: model.clone(),
@@ -1251,6 +1295,9 @@ impl Runtime {
                 tools: Vec::new(),
                 max_output_tokens: None,
                 cache_key: Some(session_id.to_string()),
+                response_format: None,
+                tool_choice: None,
+                capabilities: blora_content::ModelCapabilities::heuristic(&model),
             };
             if let Ok((completion, streamed)) = self.call_with_retry(
                 session_id,
@@ -1280,7 +1327,10 @@ impl Runtime {
                         session_id,
                         Some(&run_id),
                         Some(&turn_id),
-                        KnownPayload::AssistantMessageCompleted(AssistantMessageCompleted { text }),
+                        KnownPayload::AssistantMessageCompleted(AssistantMessageCompleted {
+                            text,
+                            ..Default::default()
+                        }),
                     )?;
                 }
                 self.emit(
@@ -1388,6 +1438,7 @@ impl Runtime {
                                 KnownPayload::AssistantMessageCompleted(
                                     AssistantMessageCompleted {
                                         text: format!("{streamed}\n[stream interrupted]"),
+                                        ..Default::default()
                                     },
                                 ),
                             )?;
@@ -1460,7 +1511,7 @@ impl Runtime {
             && calls
                 .iter()
                 .all(|call| ToolRegistry::is_read_only(&call.name));
-        let precomputed: Vec<Option<Result<String>>> = if all_read_only {
+        let precomputed: Vec<Option<Result<ToolOutcome>>> = if all_read_only {
             std::thread::scope(|scope| {
                 let handles: Vec<_> = calls
                     .iter()
@@ -1478,7 +1529,7 @@ impl Runtime {
                                     "Imagine mode only runs generate_image".to_owned(),
                                 ))
                             } else {
-                                ToolRegistry::execute_for(
+                                ToolRegistry::execute_outcome_for(
                                     backend,
                                     session_id.as_str(),
                                     &call.name,
@@ -1543,7 +1594,7 @@ impl Runtime {
         mcp: Option<&crate::mcp::McpClient>,
         plugins: &[crate::plugins::PluginSpec],
         workspace: &str,
-        precomputed: Option<Result<String>>,
+        precomputed: Option<Result<ToolOutcome>>,
         nudge: bool,
     ) -> Result<()> {
         let arguments: Value = match parse_tool_arguments(&call.arguments) {
@@ -1648,191 +1699,201 @@ impl Runtime {
                 tool: call.name.clone(),
             }),
         )?;
-        let execute = |backend: &LocalBackend| match call.name.as_str() {
-            "shell" => self.execute_shell(session_id, run_id, turn_id, backend, &arguments),
-            "delegate" => {
-                let prompt = arguments
-                    .get("prompt")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                let role = arguments
-                    .get("role")
-                    .and_then(Value::as_str)
-                    .unwrap_or("worker");
-                self.spawn_subagent(session_id, role, prompt, options, cancel)
-            }
-            "schedule_task" => {
-                let title = arguments
-                    .get("title")
-                    .and_then(Value::as_str)
-                    .unwrap_or("scheduled")
-                    .to_owned();
-                let prompt = arguments
-                    .get("prompt")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned();
-                let delay = arguments
-                    .get("delay_seconds")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0);
-                let delay_until = if delay == 0 {
-                    None
-                } else {
-                    Some(chrono::Utc::now() + chrono::Duration::seconds(delay as i64))
-                };
-                self.create_task(CreateTask {
-                    session_id: session_id.clone(),
-                    title,
-                    prompt,
-                    delay_until,
-                    max_attempts: 3,
-                    auto_approve: options.auto_approve,
-                    mock: options.mock,
-                    cron: arguments
-                        .get("cron")
+        let execute = |backend: &LocalBackend| -> Result<ToolOutcome> {
+            let result: Result<String> = match call.name.as_str() {
+                "shell" => self.execute_shell(session_id, run_id, turn_id, backend, &arguments),
+                "delegate" => {
+                    let prompt = arguments
+                        .get("prompt")
                         .and_then(Value::as_str)
-                        .map(ToOwned::to_owned),
-                })
-                .map(|id| format!("queued {id}"))
-            }
-            name if name.starts_with("mcp__") => mcp
-                .ok_or_else(|| BloraError::Other("MCP client is not connected".to_owned()))
-                .and_then(|client| client.call(name, &arguments)),
-            name if name.starts_with("plugin__") => {
-                crate::plugins::execute(backend, plugins, name, &arguments)
-            }
-            "remember" => {
-                let key = arguments
-                    .get("key")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                let value = arguments
-                    .get("value")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                if key.is_empty() {
-                    Err(BloraError::Other("remember needs key".to_owned()))
-                } else {
-                    self.store
-                        .upsert_memory(workspace, key, value, chrono::Utc::now())?;
-                    self.write_memory_file(workspace)?;
-                    Ok(format!("remembered {key}"))
+                        .unwrap_or_default();
+                    let role = arguments
+                        .get("role")
+                        .and_then(Value::as_str)
+                        .unwrap_or("worker");
+                    self.spawn_subagent(session_id, role, prompt, options, cancel)
                 }
-            }
-            "recall" => {
-                if let Some(key) = arguments.get("key").and_then(Value::as_str) {
-                    Ok(self
-                        .store
-                        .get_memory(workspace, key)?
-                        .map(|row| row.value)
-                        .unwrap_or_else(|| "(missing)".to_owned()))
-                } else {
-                    let rows = self.store.list_memories(workspace)?;
-                    if rows.is_empty() {
-                        Ok("(no memories)".to_owned())
+                "schedule_task" => {
+                    let title = arguments
+                        .get("title")
+                        .and_then(Value::as_str)
+                        .unwrap_or("scheduled")
+                        .to_owned();
+                    let prompt = arguments
+                        .get("prompt")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned();
+                    let delay = arguments
+                        .get("delay_seconds")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
+                    let delay_until = if delay == 0 {
+                        None
                     } else {
-                        Ok(rows
-                            .into_iter()
-                            .map(|row| format!("{}={}", row.key, row.value))
-                            .collect::<Vec<_>>()
-                            .join("\n"))
+                        Some(chrono::Utc::now() + chrono::Duration::seconds(delay as i64))
+                    };
+                    self.create_task(CreateTask {
+                        session_id: session_id.clone(),
+                        title,
+                        prompt,
+                        delay_until,
+                        max_attempts: 3,
+                        auto_approve: options.auto_approve,
+                        mock: options.mock,
+                        cron: arguments
+                            .get("cron")
+                            .and_then(Value::as_str)
+                            .map(ToOwned::to_owned),
+                    })
+                    .map(|id| format!("queued {id}"))
+                }
+                name if name.starts_with("mcp__") => mcp
+                    .ok_or_else(|| BloraError::Other("MCP client is not connected".to_owned()))
+                    .and_then(|client| client.call(name, &arguments)),
+                name if name.starts_with("plugin__") => {
+                    crate::plugins::execute(backend, plugins, name, &arguments)
+                }
+                "remember" => {
+                    let key = arguments
+                        .get("key")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    let value = arguments
+                        .get("value")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    if key.is_empty() {
+                        Err(BloraError::Other("remember needs key".to_owned()))
+                    } else {
+                        self.store
+                            .upsert_memory(workspace, key, value, chrono::Utc::now())?;
+                        self.write_memory_file(workspace)?;
+                        Ok(format!("remembered {key}"))
                     }
                 }
-            }
-            "forget" => {
-                let key = arguments
-                    .get("key")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                self.store.delete_memory(workspace, key)?;
-                self.write_memory_file(workspace)?;
-                Ok(format!("forgot {key}"))
-            }
-            "ask_user" => {
-                let questions = crate::input::normalize_questions(&arguments)?;
-                self.ask_user(
+                "recall" => {
+                    if let Some(key) = arguments.get("key").and_then(Value::as_str) {
+                        Ok(self
+                            .store
+                            .get_memory(workspace, key)?
+                            .map(|row| row.value)
+                            .unwrap_or_else(|| "(missing)".to_owned()))
+                    } else {
+                        let rows = self.store.list_memories(workspace)?;
+                        if rows.is_empty() {
+                            Ok("(no memories)".to_owned())
+                        } else {
+                            Ok(rows
+                                .into_iter()
+                                .map(|row| format!("{}={}", row.key, row.value))
+                                .collect::<Vec<_>>()
+                                .join("\n"))
+                        }
+                    }
+                }
+                "forget" => {
+                    let key = arguments
+                        .get("key")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    self.store.delete_memory(workspace, key)?;
+                    self.write_memory_file(workspace)?;
+                    Ok(format!("forgot {key}"))
+                }
+                "ask_user" => {
+                    let questions = crate::input::normalize_questions(&arguments)?;
+                    self.ask_user(
+                        session_id,
+                        run_id,
+                        turn_id,
+                        &call.id,
+                        questions,
+                        options.can_ask || options.interactive,
+                        cancel,
+                    )
+                }
+                "skill_manage" => self.manage_skill(
                     session_id,
                     run_id,
                     turn_id,
-                    &call.id,
-                    questions,
-                    options.can_ask || options.interactive,
-                    cancel,
-                )
-            }
-            "skill_manage" => self.manage_skill(
-                session_id,
-                run_id,
-                turn_id,
-                workspace,
-                arguments
-                    .get("action")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default(),
-                arguments
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default(),
-                arguments.get("content").and_then(Value::as_str),
-                arguments
-                    .get("scope")
-                    .and_then(Value::as_str)
-                    .unwrap_or("workspace"),
-            ),
-            "session_search" => self.session_search_text(
-                session_id,
-                arguments
-                    .get("query")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default(),
-                arguments
-                    .get("limit")
-                    .and_then(Value::as_u64)
-                    .map_or(8, |n| n as usize),
-            ),
-            "update_plan" => {
-                let steps: Vec<PlanStep> = arguments
-                    .get("steps")
-                    .cloned()
-                    .map(serde_json::from_value)
-                    .transpose()
-                    .map_err(|err| BloraError::Other(format!("update_plan steps: {err}")))?
-                    .unwrap_or_default();
-                let steps: Vec<PlanStep> = steps
-                    .into_iter()
-                    .filter(|step| !step.title.trim().is_empty())
-                    .take(40)
-                    .map(|step| PlanStep {
-                        title: step.title.trim().chars().take(200).collect(),
-                        status: match step.status.as_str() {
-                            "done" | "completed" => "done".to_owned(),
-                            "in_progress" | "active" => "in_progress".to_owned(),
-                            _ => "pending".to_owned(),
-                        },
-                    })
-                    .collect();
-                if steps.is_empty() {
-                    return Err(BloraError::Other(
-                        "update_plan needs at least one step".to_owned(),
-                    ));
-                }
-                let done = steps.iter().filter(|s| s.status == "done").count();
-                let total = steps.len();
-                let note = arguments
-                    .get("note")
-                    .and_then(Value::as_str)
-                    .map(|n| n.trim().chars().take(300).collect::<String>())
-                    .filter(|n| !n.is_empty());
-                self.emit(
+                    workspace,
+                    arguments
+                        .get("action")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                    arguments
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                    arguments.get("content").and_then(Value::as_str),
+                    arguments
+                        .get("scope")
+                        .and_then(Value::as_str)
+                        .unwrap_or("workspace"),
+                ),
+                "session_search" => self.session_search_text(
                     session_id,
-                    Some(run_id),
-                    Some(turn_id),
-                    KnownPayload::PlanUpdated(PlanUpdated { steps, note }),
-                )?;
-                Ok(format!("plan recorded ({done}/{total} done)"))
-            }
-            _ => ToolRegistry::execute_for(backend, session_id.as_str(), &call.name, &arguments),
+                    arguments
+                        .get("query")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                    arguments
+                        .get("limit")
+                        .and_then(Value::as_u64)
+                        .map_or(8, |n| n as usize),
+                ),
+                "update_plan" => {
+                    let steps: Vec<PlanStep> = arguments
+                        .get("steps")
+                        .cloned()
+                        .map(serde_json::from_value)
+                        .transpose()
+                        .map_err(|err| BloraError::Other(format!("update_plan steps: {err}")))?
+                        .unwrap_or_default();
+                    let steps: Vec<PlanStep> = steps
+                        .into_iter()
+                        .filter(|step| !step.title.trim().is_empty())
+                        .take(40)
+                        .map(|step| PlanStep {
+                            title: step.title.trim().chars().take(200).collect(),
+                            status: match step.status.as_str() {
+                                "done" | "completed" => "done".to_owned(),
+                                "in_progress" | "active" => "in_progress".to_owned(),
+                                _ => "pending".to_owned(),
+                            },
+                        })
+                        .collect();
+                    if steps.is_empty() {
+                        return Err(BloraError::Other(
+                            "update_plan needs at least one step".to_owned(),
+                        ));
+                    }
+                    let done = steps.iter().filter(|s| s.status == "done").count();
+                    let total = steps.len();
+                    let note = arguments
+                        .get("note")
+                        .and_then(Value::as_str)
+                        .map(|n| n.trim().chars().take(300).collect::<String>())
+                        .filter(|n| !n.is_empty());
+                    self.emit(
+                        session_id,
+                        Some(run_id),
+                        Some(turn_id),
+                        KnownPayload::PlanUpdated(PlanUpdated { steps, note }),
+                    )?;
+                    Ok(format!("plan recorded ({done}/{total} done)"))
+                }
+                _ => {
+                    return ToolRegistry::execute_outcome_for(
+                        backend,
+                        session_id.as_str(),
+                        &call.name,
+                        &arguments,
+                    );
+                }
+            };
+            result.map(ToolOutcome::text)
         };
         let first = match precomputed {
             Some(result) => result,
@@ -1857,11 +1918,14 @@ impl Runtime {
                 "tool": call.name,
                 "arguments": arguments,
                 "ok": intercepted.is_ok(),
-                "output": intercepted.as_ref().ok().map(|t| blora_context::head_tail(t, 4_000)),
+                "output": intercepted.as_ref().ok().map(|t| blora_context::head_tail(&t.as_text(), 4_000)),
             }),
         );
         match intercepted {
-            Ok(mut text) => {
+            Ok(outcome) => {
+                let mut text = outcome.as_text();
+                let attachments = outcome.attachments();
+                let metadata = serde_json::to_value(&outcome.metadata).unwrap_or(Value::Null);
                 if let Some(extra) = after.additional_context {
                     text.push_str("\n\n<hook_context>\n");
                     text.push_str(&extra);
@@ -1892,6 +1956,8 @@ impl Runtime {
                         text: recorded,
                         call_id: Some(call.id.clone()),
                         truncated,
+                        attachments,
+                        metadata,
                     }),
                 )?;
                 self.emit(
@@ -1951,6 +2017,7 @@ impl Runtime {
                 text: message,
                 call_id: Some(call.id.clone()),
                 truncated: false,
+                ..Default::default()
             }),
         )
     }
@@ -2075,7 +2142,7 @@ impl Runtime {
 }
 
 trait ClonedResult {
-    fn cloned_result(self) -> Option<Result<String>>;
+    fn cloned_result(self) -> Option<Result<ToolOutcome>>;
 }
 
 /// Tools whose execution lives in `dispatch_tool` (they touch the store or emit
@@ -2212,10 +2279,10 @@ fn prune_spilled_outputs(dir: &std::path::Path) {
     }
 }
 
-impl ClonedResult for Option<&Result<String>> {
-    fn cloned_result(self) -> Option<Result<String>> {
+impl ClonedResult for Option<&Result<ToolOutcome>> {
+    fn cloned_result(self) -> Option<Result<ToolOutcome>> {
         self.map(|result| match result {
-            Ok(text) => Ok(text.clone()),
+            Ok(outcome) => Ok(outcome.clone()),
             Err(err) => Err(BloraError::Other(err.to_string())),
         })
     }
@@ -2423,6 +2490,7 @@ mod tests {
                     None,
                     KnownPayload::AssistantMessageCompleted(AssistantMessageCompleted {
                         text: "欢迎使用 Blora".to_owned(),
+                        ..Default::default()
                     }),
                 )
                 .unwrap();
@@ -2436,6 +2504,7 @@ mod tests {
                     None,
                     KnownPayload::UserInput(UserInput {
                         text: "整理 README".to_owned(),
+                        ..Default::default()
                     }),
                 )
                 .unwrap();
@@ -2952,6 +3021,7 @@ mod tests {
                 None,
                 KnownPayload::UserInput(UserInput {
                     text: "recorded-source-content".to_owned(),
+                    ..Default::default()
                 }),
             )
             .unwrap();
@@ -2992,6 +3062,7 @@ mod tests {
                 None,
                 KnownPayload::UserInput(UserInput {
                     text: "later-source-change".to_owned(),
+                    ..Default::default()
                 }),
             )
             .unwrap();
@@ -3017,6 +3088,7 @@ mod tests {
                 None,
                 KnownPayload::UserInput(UserInput {
                     text: "queued-reference-content".to_owned(),
+                    ..Default::default()
                 }),
             )
             .unwrap();
@@ -3393,6 +3465,7 @@ mod tests {
                 None,
                 KnownPayload::UserInput(UserInput {
                     text: "Draft the quarterly revenue report".to_owned(),
+                    ..Default::default()
                 }),
             )
             .unwrap();

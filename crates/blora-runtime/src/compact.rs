@@ -317,6 +317,9 @@ fn model_summary(
         tools: Vec::new(),
         max_output_tokens: Some(4_000),
         cache_key: None,
+        response_format: None,
+        tool_choice: None,
+        capabilities: blora_content::ModelCapabilities::heuristic(model),
     };
     let completion = provider.complete(&request, cancel, &mut |_| Ok(()))?;
     let summary = completion.text.trim().to_owned();

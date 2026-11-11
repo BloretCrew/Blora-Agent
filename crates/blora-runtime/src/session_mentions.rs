@@ -100,10 +100,11 @@ impl Runtime {
         turn_id: &TurnId,
         text: String,
         references: Option<Value>,
+        attachments: Vec<blora_content::AttachmentRef>,
     ) -> Result<()> {
         let mut event = NewEvent::new(
             session_id.clone(),
-            KnownPayload::UserInput(UserInput { text }),
+            KnownPayload::UserInput(UserInput { text, attachments }),
         )
         .with_run(run_id.clone())
         .with_turn(turn_id.clone());
@@ -249,6 +250,7 @@ mod tests {
                 None,
                 KnownPayload::UserInput(UserInput {
                     text: text.to_owned(),
+                    ..Default::default()
                 }),
             )
             .unwrap();
@@ -330,6 +332,7 @@ mod tests {
                 None,
                 KnownPayload::AssistantMessageCompleted(AssistantMessageCompleted {
                     text: "source-answer".to_owned(),
+                    ..Default::default()
                 }),
             )
             .unwrap();
@@ -342,6 +345,7 @@ mod tests {
                     text: "tool-result".to_owned(),
                     call_id: Some("private-metadata".to_owned()),
                     truncated: false,
+                    ..Default::default()
                 }),
             )
             .unwrap();
@@ -354,6 +358,7 @@ mod tests {
                 source.clone(),
                 KnownPayload::UserInput(UserInput {
                     text: text.to_owned(),
+                    ..Default::default()
                 }),
             );
             event.actor = actor;
@@ -434,6 +439,7 @@ mod tests {
                         text: "工".repeat(3000),
                         call_id: None,
                         truncated: false,
+                        ..Default::default()
                     }),
                 )
                 .unwrap();

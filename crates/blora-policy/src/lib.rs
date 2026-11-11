@@ -8,7 +8,7 @@
 //! inspection never nags and dangerous commands confirm unless permissions are explicitly bypassed.
 
 /// Increment when capability defaults change. Recorded on approval events.
-pub const POLICY_VERSION: u32 = 3;
+pub const POLICY_VERSION: u32 = 4;
 
 use std::path::{Path, PathBuf};
 
@@ -317,6 +317,86 @@ impl Policy {
             Decision::Allow
         } else {
             Decision::Ask
+        }
+    }
+
+    /// Read an attachment under `.blora/attachments`.
+    #[must_use]
+    pub fn attachment_read_path(&self, path: &str) -> Decision {
+        self.file_read_path(path)
+    }
+
+    /// Generate or edit media through a configured provider.
+    #[must_use]
+    pub fn media_generate(&self) -> Decision {
+        self.external_control()
+    }
+
+    /// Start or talk to an MCP server.
+    #[must_use]
+    pub fn mcp_server(&self, _server: &str) -> Decision {
+        match self.mode {
+            PermissionMode::Plan => Decision::Allow,
+            PermissionMode::Ask => Decision::Ask,
+            PermissionMode::AutoEdit | PermissionMode::Yolo => Decision::Allow,
+        }
+    }
+
+    /// Start a language server. Read-only queries are allowed in plan mode.
+    #[must_use]
+    pub fn lsp_server(&self, _server: &str) -> Decision {
+        match self.mode {
+            PermissionMode::Plan => Decision::Allow,
+            PermissionMode::Ask => Decision::Ask,
+            PermissionMode::AutoEdit | PermissionMode::Yolo => Decision::Allow,
+        }
+    }
+
+    /// Control a background process (stdin, kill).
+    #[must_use]
+    pub fn process_control(&self) -> Decision {
+        self.external_control()
+    }
+
+    /// Execute caller-supplied code.
+    #[must_use]
+    pub fn code_exec(&self) -> Decision {
+        self.external_control()
+    }
+
+    /// Navigate a browser to an http(s) URL.
+    #[must_use]
+    pub fn browser_navigate(&self, _url: &str) -> Decision {
+        if self.mode == PermissionMode::Plan {
+            Decision::Deny
+        } else {
+            self.network()
+        }
+    }
+
+    /// Control the desktop (screenshot, mouse, keyboard).
+    #[must_use]
+    pub fn computer_use(&self) -> Decision {
+        self.external_control()
+    }
+
+    /// Fetch an arbitrary network URL.
+    #[must_use]
+    pub fn network_url(&self, _url: &str) -> Decision {
+        self.network()
+    }
+
+    /// Write a user-visible artifact.
+    #[must_use]
+    pub fn artifact_write(&self) -> Decision {
+        self.file_write()
+    }
+
+    fn external_control(&self) -> Decision {
+        match self.mode {
+            PermissionMode::Plan => Decision::Deny,
+            PermissionMode::Ask => Decision::Ask,
+            PermissionMode::AutoEdit | PermissionMode::Yolo => Decision::Allow,
         }
     }
 

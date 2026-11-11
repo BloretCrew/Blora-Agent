@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Blora Agent contributors
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::Path;
 
 use blora_events::{
     AssistantDelta, AssistantMessageCompleted, AssistantReasoning, ExternalSessionBound,
@@ -175,7 +175,7 @@ impl Runtime {
         }
         let binding = projection.external_sessions.iter().find(|binding| {
             binding.harness == harness
-                && PathBuf::from(&binding.cwd) == cwd
+                && Path::new(&binding.cwd) == cwd.as_path()
                 && binding.synced_sequence <= projection.last_sequence
         });
         let request = RunRequest {
@@ -221,7 +221,14 @@ impl Runtime {
             return self.cancel_run(session_id, &run_id, &turn_id);
         }
         emit(KnownPayload::RunStarted(RunStarted { model: None }))?;
-        self.emit_referenced_input(session_id, &run_id, &turn_id, prompt.to_owned(), references)?;
+        self.emit_referenced_input(
+            session_id,
+            &run_id,
+            &turn_id,
+            prompt.to_owned(),
+            references,
+            options.attachments.clone(),
+        )?;
         let mut text = String::new();
         let mut tools = HashMap::new();
         let mut warnings = Vec::new();
@@ -276,6 +283,7 @@ impl Runtime {
                         text: output,
                         call_id: Some(call_id.clone()),
                         truncated: false,
+                        ..Default::default()
                     }))
                     .and_then(|()| {
                         self.emit_external_tool(
@@ -340,7 +348,10 @@ impl Runtime {
         // Commit partial output even when the process failed or was cancelled.
         if !text.is_empty() {
             emit(KnownPayload::AssistantMessageCompleted(
-                AssistantMessageCompleted { text },
+                AssistantMessageCompleted {
+                    text,
+                    ..Default::default()
+                },
             ))?;
         }
         for message in warnings {
@@ -400,6 +411,7 @@ impl Runtime {
     ) -> Result<()> {
         let payload = KnownPayload::AssistantMessageCompleted(AssistantMessageCompleted {
             text: format!("[{} 状态提示] {message}", harness.display_name()),
+            ..Default::default()
         });
         let mut event = blora_events::NewEvent::new(session_id.clone(), payload)
             .with_run(run_id.clone())
@@ -563,6 +575,7 @@ mod tests {
                 None,
                 KnownPayload::UserInput(UserInput {
                     text: "external-replay-reference".to_owned(),
+                    ..Default::default()
                 }),
             )
             .unwrap();
@@ -575,6 +588,7 @@ mod tests {
             id.clone(),
             KnownPayload::UserInput(UserInput {
                 text: prompt.clone(),
+                ..Default::default()
             }),
         );
         event
@@ -790,6 +804,7 @@ mod tests {
                     None,
                     KnownPayload::UserInput(UserInput {
                         text: "external-reference-content".to_owned(),
+                        ..Default::default()
                     }),
                 )
                 .unwrap();
@@ -805,8 +820,8 @@ mod tests {
                 .events(&id)
                 .unwrap()
                 .into_iter()
-                .filter(|event| event.event_type == "user.input")
-                .last()
+                .rev()
+                .find(|event| event.event_type == "user.input")
                 .unwrap();
             let text = stored.payload["text"].as_str().unwrap();
             assert_eq!(text, mention);
@@ -1052,6 +1067,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"thread-1"}' '{"type":"item.
                     None,
                     KnownPayload::UserInput(UserInput {
                         text: message.into(),
+                        ..Default::default()
                     }),
                 )
                 .unwrap();
@@ -1133,6 +1149,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"thread-1"}' '{"type":"item.
                 None,
                 KnownPayload::UserInput(UserInput {
                     text: "旧".repeat(100_000),
+                    ..Default::default()
                 }),
             )
             .unwrap();
@@ -1143,6 +1160,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"thread-1"}' '{"type":"item.
                 None,
                 KnownPayload::UserInput(UserInput {
                     text: "recent request".into(),
+                    ..Default::default()
                 }),
             )
             .unwrap();
