@@ -120,6 +120,51 @@ impl ToolRegistry {
                 read_only: true,
             },
             ToolSpec {
+                name: "mcp_list_resources",
+                description: "List resources exposed by configured MCP servers. Omit server to list all servers.",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {"server": {"type": "string"}}
+                }),
+                read_only: true,
+            },
+            ToolSpec {
+                name: "mcp_read_resource",
+                description: "Read one MCP resource by server and URI. Returns text content, or a note for binary blobs.",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "server": {"type": "string"},
+                        "uri": {"type": "string"}
+                    },
+                    "required": ["server", "uri"]
+                }),
+                read_only: true,
+            },
+            ToolSpec {
+                name: "mcp_list_prompts",
+                description: "List prompts exposed by configured MCP servers. Omit server to list all servers.",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {"server": {"type": "string"}}
+                }),
+                read_only: true,
+            },
+            ToolSpec {
+                name: "mcp_get_prompt",
+                description: "Fetch one MCP prompt by server and name, rendering its messages as text.",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "server": {"type": "string"},
+                        "name": {"type": "string"},
+                        "arguments": {"type": "object"}
+                    },
+                    "required": ["server", "name"]
+                }),
+                read_only: true,
+            },
+            ToolSpec {
                 name: "shell",
                 description: "Run a shell command. The session remembers a working directory inside the workspace: pass cwd to set it, or use a bare cd. timeout_seconds caps foreground commands (default 30, max 600).",
                 parameters: json!({

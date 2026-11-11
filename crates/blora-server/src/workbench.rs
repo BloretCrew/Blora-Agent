@@ -576,9 +576,15 @@ async fn extensions(
         }
     }
     skills.sort();
+    let mcp_configured = std::env::var_os("BLORA_MCP_COMMAND").is_some()
+        || std::env::var_os("BLORA_MCP_CONFIG").is_some()
+        || path.join(".blora/mcp.json").exists()
+        || std::env::var_os("BLORA_HOME")
+            .map(|home| PathBuf::from(home).join("mcp.json").exists())
+            .unwrap_or(false);
     Ok(Json(
         json!({"plugins": state.runtime.list_plugins(&path).iter().map(|plugin| json!({"name": plugin.name, "description": plugin.description, "parameters": plugin.parameters})).collect::<Vec<_>>(),
-        "tools": tools, "skills": skills, "mcp_configured": std::env::var_os("BLORA_MCP_COMMAND").is_some(), "hooks_configured": std::env::var_os("BLORA_HOOKS_DIR").is_some()}),
+        "tools": tools, "skills": skills, "mcp_configured": mcp_configured, "hooks_configured": std::env::var_os("BLORA_HOOKS_DIR").is_some()}),
     ))
 }
 async fn diagnostics(

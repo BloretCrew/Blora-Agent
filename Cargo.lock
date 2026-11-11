@@ -392,6 +392,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tracing",
+ "ureq",
 ]
 
 [[package]]

@@ -949,9 +949,7 @@ impl Runtime {
             }),
         )?;
 
-        let mcp = std::env::var("BLORA_MCP_COMMAND")
-            .ok()
-            .and_then(|command| crate::mcp::McpClient::connect(&command).ok());
+        let mcp = crate::mcp::McpManager::load(std::path::Path::new(&exec_root));
         let imagine = mode == Mode::Imagine;
         let base_tools = ToolRegistry::specs_for(mode)
             .into_iter()
@@ -966,7 +964,7 @@ impl Runtime {
             Vec::new()
         } else {
             mcp.as_ref()
-                .and_then(|client| client.list_tools().ok())
+                .map(crate::mcp::McpManager::tool_declarations)
                 .unwrap_or_default()
         };
         let plugins = crate::plugins::load(std::path::Path::new(&exec_root));
@@ -1535,11 +1533,11 @@ impl Runtime {
         arguments: &Value,
         mode: Mode,
         options: &RunOptions,
-        mcp: Option<&crate::mcp::McpClient>,
+        mcp: Option<&crate::mcp::McpManager>,
         plugins: &[crate::plugins::PluginSpec],
     ) -> Result<String> {
         let mcp_tools = mcp
-            .and_then(|client| client.list_tools().ok())
+            .map(crate::mcp::McpManager::tool_declarations)
             .unwrap_or_default();
         let entries = catalog::entries(mode, options.read_only, &mcp_tools, plugins);
         let query = arguments.get("query").and_then(Value::as_str);
@@ -1595,7 +1593,7 @@ impl Runtime {
         options: &RunOptions,
         cancel: &CancelToken,
         mode: Mode,
-        mcp: Option<&crate::mcp::McpClient>,
+        mcp: Option<&crate::mcp::McpManager>,
         plugins: &[crate::plugins::PluginSpec],
         workspace: &str,
         nudge: bool,
@@ -1687,7 +1685,7 @@ impl Runtime {
         options: &RunOptions,
         cancel: &CancelToken,
         mode: Mode,
-        mcp: Option<&crate::mcp::McpClient>,
+        mcp: Option<&crate::mcp::McpManager>,
         plugins: &[crate::plugins::PluginSpec],
         workspace: &str,
         precomputed: Option<Result<ToolOutcome>>,
@@ -1843,6 +1841,54 @@ impl Runtime {
                             .map(ToOwned::to_owned),
                     })
                     .map(|id| format!("queued {id}"))
+                }
+                "mcp_list_resources" => {
+                    let manager = mcp
+                        .ok_or_else(|| BloraError::Other("no MCP servers configured".to_owned()))?;
+                    manager.list_resources(arguments.get("server").and_then(Value::as_str))
+                }
+                "mcp_read_resource" => {
+                    let manager = mcp
+                        .ok_or_else(|| BloraError::Other("no MCP servers configured".to_owned()))?;
+                    let server =
+                        arguments
+                            .get("server")
+                            .and_then(Value::as_str)
+                            .ok_or_else(|| {
+                                BloraError::Other("mcp_read_resource needs server".to_owned())
+                            })?;
+                    let uri = arguments
+                        .get("uri")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            BloraError::Other("mcp_read_resource needs uri".to_owned())
+                        })?;
+                    manager.read_resource(server, uri)
+                }
+                "mcp_list_prompts" => {
+                    let manager = mcp
+                        .ok_or_else(|| BloraError::Other("no MCP servers configured".to_owned()))?;
+                    manager.list_prompts(arguments.get("server").and_then(Value::as_str))
+                }
+                "mcp_get_prompt" => {
+                    let manager = mcp
+                        .ok_or_else(|| BloraError::Other("no MCP servers configured".to_owned()))?;
+                    let server =
+                        arguments
+                            .get("server")
+                            .and_then(Value::as_str)
+                            .ok_or_else(|| {
+                                BloraError::Other("mcp_get_prompt needs server".to_owned())
+                            })?;
+                    let name = arguments
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| BloraError::Other("mcp_get_prompt needs name".to_owned()))?;
+                    manager.get_prompt(
+                        server,
+                        name,
+                        arguments.get("arguments").unwrap_or(&Value::Null),
+                    )
                 }
                 name if name.starts_with("mcp__") => mcp
                     .ok_or_else(|| BloraError::Other("MCP client is not connected".to_owned()))
@@ -2325,7 +2371,16 @@ impl Provider for SharedProvider {
 fn runtime_handled_tool(name: &str) -> bool {
     matches!(
         name,
-        "recall" | "update_plan" | "shell" | "ask_user" | "session_search" | "tool_search"
+        "recall"
+            | "update_plan"
+            | "shell"
+            | "ask_user"
+            | "session_search"
+            | "tool_search"
+            | "mcp_list_resources"
+            | "mcp_read_resource"
+            | "mcp_list_prompts"
+            | "mcp_get_prompt"
     )
 }
 
