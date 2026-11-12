@@ -147,8 +147,7 @@ CREATE TABLE IF NOT EXISTS approvals (
 
 CREATE INDEX IF NOT EXISTS idx_approvals_session ON approvals(session_id, status);
 
-CREATE TABLE IF NOT EXISTS artifacts (
-    id TEXT PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS artifacts (    id TEXT PRIMARY KEY,
     session_id TEXT NOT NULL,
     kind TEXT NOT NULL,
     path TEXT,
@@ -230,4 +229,56 @@ CREATE TABLE IF NOT EXISTS onboarding (
 CREATE TABLE IF NOT EXISTS tui_preferences (
     key TEXT PRIMARY KEY,
     value INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS goals (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    parent_goal_id TEXT,
+    title TEXT NOT NULL,
+    description TEXT,
+    status TEXT NOT NULL,
+    priority INTEGER NOT NULL DEFAULT 0,
+    progress INTEGER NOT NULL DEFAULT 0,
+    due_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (session_id) REFERENCES sessions(id)
+);
+
+CREATE TABLE IF NOT EXISTS teams (
+    id TEXT PRIMARY KEY,
+    workspace_path TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(workspace_path, name)
+);
+
+CREATE TABLE IF NOT EXISTS team_tasks (
+    id TEXT PRIMARY KEY,
+    team_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    description TEXT,
+    status TEXT NOT NULL,
+    priority INTEGER NOT NULL DEFAULT 0,
+    assignee_agent_id TEXT,
+    depends_on_json TEXT,
+    blocked_reason TEXT,
+    review_state TEXT,
+    heartbeat_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    completed_at TEXT,
+    FOREIGN KEY (team_id) REFERENCES teams(id)
+);
+
+CREATE TABLE IF NOT EXISTS team_task_comments (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    author TEXT NOT NULL,
+    body TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (task_id) REFERENCES team_tasks(id)
 );

@@ -281,6 +281,64 @@ impl ToolRegistry {
                 read_only: false,
             },
             ToolSpec {
+                name: "goal",
+                description: "Manage goals: propose, get, list, update, approve, reject. Goals are durable per session.",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": ["propose", "get", "list", "update", "approve", "reject"]},
+                        "goal_id": {"type": "string"},
+                        "title": {"type": "string"},
+                        "description": {"type": "string"},
+                        "status": {"type": "string"},
+                        "priority": {"type": "integer"},
+                        "progress": {"type": "integer", "minimum": 0, "maximum": 100},
+                        "due_at": {"type": "string"}
+                    },
+                    "required": ["action"]
+                }),
+                read_only: false,
+            },
+            ToolSpec {
+                name: "team",
+                description: "Manage a workspace team task board: create, list, board, dispatch ready tasks to background subagents, delete.",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": ["create", "list", "board", "dispatch", "delete"]},
+                        "team_id": {"type": "string"},
+                        "name": {"type": "string"},
+                        "description": {"type": "string"},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 8}
+                    },
+                    "required": ["action"]
+                }),
+                read_only: false,
+            },
+            ToolSpec {
+                name: "team_task",
+                description: "Manage team tasks: create, get, list, claim, complete, block, unblock, update, heartbeat, comment, delete.",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": ["create", "get", "list", "claim", "complete", "block", "unblock", "update", "heartbeat", "comment", "delete"]},
+                        "team_id": {"type": "string"},
+                        "task_id": {"type": "string"},
+                        "title": {"type": "string"},
+                        "description": {"type": "string"},
+                        "status": {"type": "string"},
+                        "priority": {"type": "integer"},
+                        "assignee": {"type": "string"},
+                        "review_state": {"type": "string"},
+                        "reason": {"type": "string"},
+                        "body": {"type": "string"},
+                        "depends_on": {"type": "array", "items": {"type": "string"}}
+                    },
+                    "required": ["action"]
+                }),
+                read_only: false,
+            },
+            ToolSpec {
                 name: "schedule",
                 description: "Manage durable scheduled tasks. Actions: create, list, get, update, pause, resume, delete, run_now. create accepts prompt plus cron or delay_seconds; update accepts title, prompt, cron, max_attempts.",
                 parameters: json!({
@@ -680,7 +738,14 @@ impl ToolRegistry {
             Mode::Imagine => name == "generate_image",
             Mode::Code => !matches!(
                 name,
-                "generate_image" | "schedule_task" | "schedule" | "skill_manage" | "session_search"
+                "generate_image"
+                    | "schedule_task"
+                    | "schedule"
+                    | "skill_manage"
+                    | "session_search"
+                    | "goal"
+                    | "team"
+                    | "team_task"
             ),
             Mode::Work => !matches!(
                 name,

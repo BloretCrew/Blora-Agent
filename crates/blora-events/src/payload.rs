@@ -415,6 +415,26 @@ pub struct StructuredOutput {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GoalUpdated {
+    pub goal_id: blora_types::GoalId,
+    pub status: String,
+    pub action: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TeamCreated {
+    pub team_id: blora_types::TeamId,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TeamTaskUpdated {
+    pub task_id: blora_types::TeamTaskId,
+    pub status: String,
+    pub action: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CheckpointCreated {
     pub sequence: u64,
     pub note: Option<String>,
@@ -628,6 +648,9 @@ pub enum KnownPayload {
     ArtifactDeleted(ArtifactDeleted),
     ArtifactPresented(ArtifactPresented),
     StructuredOutput(StructuredOutput),
+    GoalUpdated(GoalUpdated),
+    TeamCreated(TeamCreated),
+    TeamTaskUpdated(TeamTaskUpdated),
     CheckpointCreated(CheckpointCreated),
     PlanUpdated(PlanUpdated),
     SessionCwdChanged(SessionCwdChanged),
@@ -699,6 +722,9 @@ impl KnownPayload {
             Self::ArtifactDeleted(_) => "artifact.deleted",
             Self::ArtifactPresented(_) => "artifact.presented",
             Self::StructuredOutput(_) => "structured.output",
+            Self::GoalUpdated(_) => "goal.updated",
+            Self::TeamCreated(_) => "team.created",
+            Self::TeamTaskUpdated(_) => "team.task.updated",
             Self::CheckpointCreated(_) => "checkpoint.created",
             Self::PlanUpdated(_) => "plan.updated",
             Self::SessionCwdChanged(_) => "session.cwd.changed",
@@ -803,6 +829,9 @@ impl KnownPayload {
             Self::ArtifactDeleted(v) => serde_json::to_value(v),
             Self::ArtifactPresented(v) => serde_json::to_value(v),
             Self::StructuredOutput(v) => serde_json::to_value(v),
+            Self::GoalUpdated(v) => serde_json::to_value(v),
+            Self::TeamCreated(v) => serde_json::to_value(v),
+            Self::TeamTaskUpdated(v) => serde_json::to_value(v),
             Self::CheckpointCreated(v) => serde_json::to_value(v),
             Self::PlanUpdated(v) => serde_json::to_value(v),
             Self::SessionCwdChanged(v) => serde_json::to_value(v),
@@ -875,6 +904,9 @@ impl KnownPayload {
             "artifact.deleted" => Self::ArtifactDeleted(from_value(value)?),
             "artifact.presented" => Self::ArtifactPresented(from_value(value)?),
             "structured.output" => Self::StructuredOutput(from_value(value)?),
+            "goal.updated" => Self::GoalUpdated(from_value(value)?),
+            "team.created" => Self::TeamCreated(from_value(value)?),
+            "team.task.updated" => Self::TeamTaskUpdated(from_value(value)?),
             "checkpoint.created" => Self::CheckpointCreated(from_value(value)?),
             "plan.updated" => Self::PlanUpdated(from_value(value)?),
             "session.cwd.changed" => Self::SessionCwdChanged(from_value(value)?),

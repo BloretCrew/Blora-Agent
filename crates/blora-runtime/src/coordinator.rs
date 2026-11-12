@@ -2282,6 +2282,9 @@ impl Runtime {
                 "structured_output" => {
                     self.structured_output_tool(session_id, run_id, turn_id, &arguments, options)
                 }
+                "goal" => self.goal_tool(session_id, run_id, turn_id, &arguments),
+                "team" => self.team_tool(session_id, run_id, turn_id, &arguments, options),
+                "team_task" => self.team_task_tool(session_id, run_id, turn_id, &arguments),
                 "subagent" => {
                     self.subagent_tool(session_id, run_id, turn_id, &arguments, options, cancel)
                 }
@@ -2962,6 +2965,9 @@ fn runtime_handled_tool(name: &str) -> bool {
             | "schedule"
             | "subagent"
             | "structured_output"
+            | "goal"
+            | "team"
+            | "team_task"
     )
 }
 
@@ -4288,6 +4294,92 @@ mod tests {
                 .as_deref()
                 .unwrap()
                 .contains("# Mode: Code")
+        );
+    }
+
+    #[test]
+    fn goals_and_team_board_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = Runtime::new(SqliteStore::open_in_memory().unwrap());
+        let session = session(&runtime, Mode::Work, dir.path().to_str().unwrap());
+        Recorder::install(&runtime, vec![text_reply("ok", "stop")], None);
+        runtime
+            .run(&session, "init", &CancelToken::new(), &yolo())
+            .unwrap();
+        let run_id = runtime
+            .show_session(&session)
+            .unwrap()
+            .runs
+            .last()
+            .unwrap()
+            .id
+            .clone();
+        let turn_id = TurnId::generate();
+        runtime
+            .goal_tool(
+                &session,
+                &run_id,
+                &turn_id,
+                &json!({"action":"propose","title":"Ship"}),
+            )
+            .unwrap();
+        let goals = runtime
+            .goal_tool(&session, &run_id, &turn_id, &json!({"action":"list"}))
+            .unwrap();
+        assert!(goals.contains("Ship"));
+        runtime
+            .team_tool(
+                &session,
+                &run_id,
+                &turn_id,
+                &json!({"action":"create","name":"core"}),
+                &yolo(),
+            )
+            .unwrap();
+        let team = runtime
+            .store
+            .list_teams(dir.path().to_str().unwrap())
+            .unwrap()[0]
+            .id
+            .clone();
+        runtime
+            .team_task_tool(
+                &session,
+                &run_id,
+                &turn_id,
+                &json!({"action":"create","team_id":team,"title":"T"}),
+            )
+            .unwrap();
+        let board = runtime
+            .team_tool(
+                &session,
+                &run_id,
+                &turn_id,
+                &json!({"action":"board","team_id":team}),
+                &yolo(),
+            )
+            .unwrap();
+        assert!(board.contains("T"));
+        let task = runtime.store.list_team_tasks(&team).unwrap()[0].id.clone();
+        runtime
+            .team_task_tool(
+                &session,
+                &run_id,
+                &turn_id,
+                &json!({"action":"claim","task_id":task}),
+            )
+            .unwrap();
+        runtime
+            .team_task_tool(
+                &session,
+                &run_id,
+                &turn_id,
+                &json!({"action":"complete","task_id":task}),
+            )
+            .unwrap();
+        assert_eq!(
+            runtime.store.get_team_task(&task).unwrap().unwrap().status,
+            "done"
         );
     }
 

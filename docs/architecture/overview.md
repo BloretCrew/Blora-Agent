@@ -50,6 +50,7 @@ Blora Agent 是从零实现的本地优先 harness。第一阶段是单用户模
 - MCP：多服务器配置文件、`mcp__{server}__{tool}` 命名空间、stdio/HTTP 传输，以及 resources/prompts 工具
 - LSP：`lsp` 工具提供 diagnostics/hover/definition/references/symbols，按语言与项目根惰性启动服务器
 - 子代理：`subagent` 工具支持后台 spawn、list、send、wait、close、status；`Runtime` 共享状态可克隆，后台线程独立运行
+- 目标与团队：`goal`、`team`、`team_task` 工具提供目标跟踪与工作区级 Kanban 任务板，`team dispatch` 可把 ready 任务派给后台子代理
 - 会话 shell 工作目录（`cwd` 参数或单独的 `cd`，记在 `session.cwd.changed`，不离开工作区）、技能只在上下文里列名字、用 `skill` 按需加载全文、非 UTF-8 文件（含 PNG/JPEG/GIF/WEBP）以类型和尺寸描述返回
 - GitHub Actions：`blora github install` 写入工作流，评论里的 `/blora`、`/ba` 或 `@blora` 在 runner 上启动代理；是否改代码、推送或开 PR 由评论决定
 

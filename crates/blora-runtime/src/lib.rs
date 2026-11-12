@@ -10,6 +10,7 @@ mod compact;
 mod coordinator;
 mod cron;
 mod external;
+mod goals;
 pub mod hooks;
 mod input;
 mod market;
@@ -20,6 +21,7 @@ mod plugins;
 mod preferences;
 mod session_mentions;
 mod skills;
+mod team;
 mod work;
 
 pub use agents::{MAX_RUNNING_CHILDREN, MAX_SUBAGENT_DEPTH, SUBAGENT_TURNS};

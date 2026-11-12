@@ -18,8 +18,8 @@ pub use cancel::CancelToken;
 pub use error::{BloraError, Result};
 pub use harness::HarnessKind;
 pub use id::{
-    AgentId, ApprovalId, ArtifactId, CheckpointId, EventId, RunId, SessionId, TaskId, TurnId,
-    WorkspaceId,
+    AgentId, ApprovalId, ArtifactId, CheckpointId, EventId, GoalId, RunId, SessionId, TaskId,
+    TeamId, TeamTaskId, TurnId, WorkspaceId,
 };
 pub use mode::Mode;
 pub use status::{RunStatus, SessionStatus, TaskStatus};

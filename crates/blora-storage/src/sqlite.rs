@@ -52,6 +52,49 @@ pub struct ArtifactRecord {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Clone, Debug)]
+pub struct GoalRecord {
+    pub id: blora_types::GoalId,
+    pub session_id: SessionId,
+    pub parent_goal_id: Option<blora_types::GoalId>,
+    pub title: String,
+    pub description: Option<String>,
+    pub status: String,
+    pub priority: i64,
+    pub progress: i64,
+    pub due_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug)]
+pub struct TeamRecord {
+    pub id: blora_types::TeamId,
+    pub workspace_path: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug)]
+pub struct TeamTaskRecord {
+    pub id: blora_types::TeamTaskId,
+    pub team_id: blora_types::TeamId,
+    pub title: String,
+    pub description: Option<String>,
+    pub status: String,
+    pub priority: i64,
+    pub assignee_agent_id: Option<AgentId>,
+    pub depends_on_json: Option<String>,
+    pub blocked_reason: Option<String>,
+    pub review_state: Option<String>,
+    pub heartbeat_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct UsageTotals {
     pub input_tokens: u64,
@@ -234,6 +277,11 @@ impl SqliteStore {
             params![now],
         )
         .map_err(BloraError::storage)?;
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (16, ?1)",
+            params![now],
+        )
+        .map_err(BloraError::storage)?;
         Ok(Self {
             conn: Mutex::new(conn),
             clock: SystemClock,
@@ -241,7 +289,7 @@ impl SqliteStore {
     }
 
     /// Current storage schema version written by this build.
-    pub const STORE_VERSION: u32 = 15;
+    pub const STORE_VERSION: u32 = 16;
 
     pub fn queue_steer(&self, session_id: &SessionId, message: &str) -> Result<()> {
         let conn = self.lock();
@@ -1249,6 +1297,312 @@ impl SqliteStore {
         Ok(changed > 0)
     }
 
+    pub fn insert_goal(&self, goal: &GoalRecord) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "INSERT OR REPLACE INTO goals
+             (id, session_id, parent_goal_id, title, description, status, priority, progress,
+              due_at, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                goal.id.as_str(),
+                goal.session_id.as_str(),
+                goal.parent_goal_id
+                    .as_ref()
+                    .map(blora_types::GoalId::as_str),
+                goal.title,
+                goal.description,
+                goal.status,
+                goal.priority,
+                goal.progress,
+                goal.due_at.map(|time| time.to_rfc3339()),
+                goal.created_at.to_rfc3339(),
+                goal.updated_at.to_rfc3339()
+            ],
+        )
+        .map_err(BloraError::storage)?;
+        Ok(())
+    }
+
+    pub fn get_goal(&self, id: &blora_types::GoalId) -> Result<Option<GoalRecord>> {
+        let conn = self.lock();
+        conn.query_row(
+            "SELECT id, session_id, parent_goal_id, title, description, status, priority,
+                    progress, due_at, created_at, updated_at FROM goals WHERE id = ?1",
+            params![id.as_str()],
+            goal_row,
+        )
+        .optional()
+        .map_err(BloraError::storage)?
+        .map(row_to_goal)
+        .transpose()
+    }
+
+    pub fn list_goals(&self, session_id: &SessionId) -> Result<Vec<GoalRecord>> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, session_id, parent_goal_id, title, description, status, priority,
+                        progress, due_at, created_at, updated_at
+                 FROM goals WHERE session_id = ?1 ORDER BY priority DESC, created_at ASC",
+            )
+            .map_err(BloraError::storage)?;
+        let rows = stmt
+            .query_map(params![session_id.as_str()], goal_row)
+            .map_err(BloraError::storage)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row_to_goal(row.map_err(BloraError::storage)?)?);
+        }
+        Ok(out)
+    }
+
+    pub fn update_goal(
+        &self,
+        id: &blora_types::GoalId,
+        title: Option<&str>,
+        description: Option<&str>,
+        status: Option<&str>,
+        priority: Option<i64>,
+        progress: Option<i64>,
+        due_at: Option<DateTime<Utc>>,
+    ) -> Result<bool> {
+        let conn = self.lock();
+        let changed = conn
+            .execute(
+                "UPDATE goals SET
+                    title = COALESCE(?2, title),
+                    description = COALESCE(?3, description),
+                    status = COALESCE(?4, status),
+                    priority = COALESCE(?5, priority),
+                    progress = COALESCE(?6, progress),
+                    due_at = COALESCE(?7, due_at),
+                    updated_at = ?8
+                 WHERE id = ?1",
+                params![
+                    id.as_str(),
+                    title,
+                    description,
+                    status,
+                    priority,
+                    progress,
+                    due_at.map(|time| time.to_rfc3339()),
+                    Utc::now().to_rfc3339()
+                ],
+            )
+            .map_err(BloraError::storage)?;
+        Ok(changed > 0)
+    }
+
+    pub fn delete_goal(&self, id: &blora_types::GoalId) -> Result<bool> {
+        let conn = self.lock();
+        let changed = conn
+            .execute("DELETE FROM goals WHERE id = ?1", params![id.as_str()])
+            .map_err(BloraError::storage)?;
+        Ok(changed > 0)
+    }
+
+    pub fn insert_team(&self, team: &TeamRecord) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "INSERT INTO teams (id, workspace_path, name, description, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                team.id.as_str(),
+                team.workspace_path,
+                team.name,
+                team.description,
+                team.created_at.to_rfc3339(),
+                team.updated_at.to_rfc3339()
+            ],
+        )
+        .map_err(BloraError::storage)?;
+        Ok(())
+    }
+
+    pub fn list_teams(&self, workspace_path: &str) -> Result<Vec<TeamRecord>> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, workspace_path, name, description, created_at, updated_at
+                 FROM teams WHERE workspace_path = ?1 ORDER BY name ASC",
+            )
+            .map_err(BloraError::storage)?;
+        let rows = stmt
+            .query_map(params![workspace_path], team_row)
+            .map_err(BloraError::storage)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row_to_team(row.map_err(BloraError::storage)?)?);
+        }
+        Ok(out)
+    }
+
+    pub fn get_team(&self, id: &blora_types::TeamId) -> Result<Option<TeamRecord>> {
+        let conn = self.lock();
+        conn.query_row(
+            "SELECT id, workspace_path, name, description, created_at, updated_at
+             FROM teams WHERE id = ?1",
+            params![id.as_str()],
+            team_row,
+        )
+        .optional()
+        .map_err(BloraError::storage)?
+        .map(row_to_team)
+        .transpose()
+    }
+
+    pub fn delete_team(&self, id: &blora_types::TeamId) -> Result<bool> {
+        let conn = self.lock();
+        let changed = conn
+            .execute("DELETE FROM teams WHERE id = ?1", params![id.as_str()])
+            .map_err(BloraError::storage)?;
+        Ok(changed > 0)
+    }
+
+    pub fn insert_team_task(&self, task: &TeamTaskRecord) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "INSERT INTO team_tasks
+             (id, team_id, title, description, status, priority, assignee_agent_id,
+              depends_on_json, blocked_reason, review_state, heartbeat_at, created_at, updated_at, completed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            params![
+                task.id.as_str(),
+                task.team_id.as_str(),
+                task.title,
+                task.description,
+                task.status,
+                task.priority,
+                task.assignee_agent_id.as_ref().map(AgentId::as_str),
+                task.depends_on_json,
+                task.blocked_reason,
+                task.review_state,
+                task.heartbeat_at.map(|time| time.to_rfc3339()),
+                task.created_at.to_rfc3339(),
+                task.updated_at.to_rfc3339(),
+                task.completed_at.map(|time| time.to_rfc3339())
+            ],
+        )
+        .map_err(BloraError::storage)?;
+        Ok(())
+    }
+
+    pub fn list_team_tasks(&self, team_id: &blora_types::TeamId) -> Result<Vec<TeamTaskRecord>> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, team_id, title, description, status, priority, assignee_agent_id,
+                        depends_on_json, blocked_reason, review_state, heartbeat_at, created_at,
+                        updated_at, completed_at
+                 FROM team_tasks WHERE team_id = ?1 ORDER BY priority DESC, created_at ASC",
+            )
+            .map_err(BloraError::storage)?;
+        let rows = stmt
+            .query_map(params![team_id.as_str()], team_task_row)
+            .map_err(BloraError::storage)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row_to_team_task(row.map_err(BloraError::storage)?)?);
+        }
+        Ok(out)
+    }
+
+    pub fn get_team_task(&self, id: &blora_types::TeamTaskId) -> Result<Option<TeamTaskRecord>> {
+        let conn = self.lock();
+        conn.query_row(
+            "SELECT id, team_id, title, description, status, priority, assignee_agent_id,
+                    depends_on_json, blocked_reason, review_state, heartbeat_at, created_at,
+                    updated_at, completed_at
+             FROM team_tasks WHERE id = ?1",
+            params![id.as_str()],
+            team_task_row,
+        )
+        .optional()
+        .map_err(BloraError::storage)?
+        .map(row_to_team_task)
+        .transpose()
+    }
+
+    pub fn set_team_task_status(
+        &self,
+        id: &blora_types::TeamTaskId,
+        status: &str,
+        assignee: Option<&str>,
+        blocked_reason: Option<&str>,
+        review_state: Option<&str>,
+    ) -> Result<bool> {
+        let conn = self.lock();
+        let now = Utc::now().to_rfc3339();
+        let completed_at = matches!(status, "done" | "cancelled").then(|| now.clone());
+        let changed = conn
+            .execute(
+                "UPDATE team_tasks SET
+                    status = ?2,
+                    assignee_agent_id = COALESCE(?3, assignee_agent_id),
+                    blocked_reason = ?4,
+                    review_state = COALESCE(?5, review_state),
+                    completed_at = ?6,
+                    updated_at = ?7
+                 WHERE id = ?1",
+                params![
+                    id.as_str(),
+                    status,
+                    assignee,
+                    blocked_reason,
+                    review_state,
+                    completed_at,
+                    now
+                ],
+            )
+            .map_err(BloraError::storage)?;
+        Ok(changed > 0)
+    }
+
+    pub fn heartbeat_team_task(&self, id: &blora_types::TeamTaskId) -> Result<bool> {
+        let conn = self.lock();
+        let changed = conn
+            .execute(
+                "UPDATE team_tasks SET heartbeat_at = ?2, updated_at = ?2 WHERE id = ?1",
+                params![id.as_str(), Utc::now().to_rfc3339()],
+            )
+            .map_err(BloraError::storage)?;
+        Ok(changed > 0)
+    }
+
+    pub fn delete_team_task(&self, id: &blora_types::TeamTaskId) -> Result<bool> {
+        let conn = self.lock();
+        let changed = conn
+            .execute("DELETE FROM team_tasks WHERE id = ?1", params![id.as_str()])
+            .map_err(BloraError::storage)?;
+        Ok(changed > 0)
+    }
+
+    pub fn add_team_comment(
+        &self,
+        task_id: &blora_types::TeamTaskId,
+        author: &str,
+        body: &str,
+    ) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "INSERT INTO team_task_comments (id, task_id, author, body, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                format!(
+                    "cmt_{}",
+                    Utc::now().timestamp_nanos_opt().unwrap_or_default()
+                ),
+                task_id.as_str(),
+                author,
+                body,
+                Utc::now().to_rfc3339()
+            ],
+        )
+        .map_err(BloraError::storage)?;
+        Ok(())
+    }
+
     fn list_agents_filtered(
         &self,
         agent_id: Option<&AgentId>,
@@ -1592,6 +1946,165 @@ fn restrict_home(path: &Path) {
         }
     }
     let _ = path;
+}
+
+type GoalRow = (
+    String,
+    String,
+    Option<String>,
+    String,
+    Option<String>,
+    String,
+    i64,
+    i64,
+    Option<String>,
+    String,
+    String,
+);
+
+fn goal_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<GoalRow> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+        row.get(6)?,
+        row.get(7)?,
+        row.get(8)?,
+        row.get(9)?,
+        row.get(10)?,
+    ))
+}
+
+fn row_to_goal(row: GoalRow) -> Result<GoalRecord> {
+    let (
+        id,
+        session_id,
+        parent_goal_id,
+        title,
+        description,
+        status,
+        priority,
+        progress,
+        due_at,
+        created_at,
+        updated_at,
+    ) = row;
+    Ok(GoalRecord {
+        id: blora_types::GoalId::parse(&id)?,
+        session_id: SessionId::parse(&session_id)?,
+        parent_goal_id: parent_goal_id
+            .map(|value| blora_types::GoalId::parse(&value))
+            .transpose()?,
+        title,
+        description,
+        status,
+        priority,
+        progress,
+        due_at: due_at.map(|value| parse_time(&value)).transpose()?,
+        created_at: parse_time(&created_at)?,
+        updated_at: parse_time(&updated_at)?,
+    })
+}
+
+type TeamRow = (String, String, String, Option<String>, String, String);
+
+fn team_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TeamRow> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+    ))
+}
+
+fn row_to_team(row: TeamRow) -> Result<TeamRecord> {
+    let (id, workspace_path, name, description, created_at, updated_at) = row;
+    Ok(TeamRecord {
+        id: blora_types::TeamId::parse(&id)?,
+        workspace_path,
+        name,
+        description,
+        created_at: parse_time(&created_at)?,
+        updated_at: parse_time(&updated_at)?,
+    })
+}
+
+type TeamTaskRow = (
+    String,
+    String,
+    String,
+    Option<String>,
+    String,
+    i64,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    String,
+    String,
+    Option<String>,
+);
+
+fn team_task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TeamTaskRow> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+        row.get(6)?,
+        row.get(7)?,
+        row.get(8)?,
+        row.get(9)?,
+        row.get(10)?,
+        row.get(11)?,
+        row.get(12)?,
+        row.get(13)?,
+    ))
+}
+
+fn row_to_team_task(row: TeamTaskRow) -> Result<TeamTaskRecord> {
+    let (
+        id,
+        team_id,
+        title,
+        description,
+        status,
+        priority,
+        assignee_agent_id,
+        depends_on_json,
+        blocked_reason,
+        review_state,
+        heartbeat_at,
+        created_at,
+        updated_at,
+        completed_at,
+    ) = row;
+    Ok(TeamTaskRecord {
+        id: blora_types::TeamTaskId::parse(&id)?,
+        team_id: blora_types::TeamId::parse(&team_id)?,
+        title,
+        description,
+        status,
+        priority,
+        assignee_agent_id: assignee_agent_id
+            .map(|value| AgentId::parse(&value))
+            .transpose()?,
+        depends_on_json,
+        blocked_reason,
+        review_state,
+        heartbeat_at: heartbeat_at.map(|value| parse_time(&value)).transpose()?,
+        created_at: parse_time(&created_at)?,
+        updated_at: parse_time(&updated_at)?,
+        completed_at: completed_at.map(|value| parse_time(&value)).transpose()?,
+    })
 }
 
 type ArtifactRow = (
