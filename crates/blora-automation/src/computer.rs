@@ -58,14 +58,10 @@ fn action_with(_workspace: &Path, request: &ComputerRequest, fake: bool) -> Resu
         }
         "click" => {
             let (x, y) = point(request)?;
-            if fake {
-                return Ok(ComputerOutput {
-                    text: format!("clicked {x},{y}"),
-                    image: None,
-                });
+            if !fake {
+                move_pointer(x, y)?;
+                click_left()?;
             }
-            xdotool(&["mousemove", &x.to_string(), &y.to_string()])?;
-            xdotool(&["click", "1"])?;
             Ok(ComputerOutput {
                 text: format!("clicked {x},{y}"),
                 image: None,
@@ -74,7 +70,7 @@ fn action_with(_workspace: &Path, request: &ComputerRequest, fake: bool) -> Resu
         "move" => {
             let (x, y) = point(request)?;
             if !fake {
-                xdotool(&["mousemove", &x.to_string(), &y.to_string()])?;
+                move_pointer(x, y)?;
             }
             Ok(ComputerOutput {
                 text: format!("moved to {x},{y}"),
@@ -84,7 +80,7 @@ fn action_with(_workspace: &Path, request: &ComputerRequest, fake: bool) -> Resu
         "type" => {
             let text = request.text.as_deref().unwrap_or_default();
             if !fake {
-                xdotool(&["type", "--clearmodifiers", "--", text])?;
+                type_text(text)?;
             }
             Ok(ComputerOutput {
                 text: format!("typed {} characters", text.len()),
@@ -94,7 +90,7 @@ fn action_with(_workspace: &Path, request: &ComputerRequest, fake: bool) -> Resu
         "key" => {
             let key = request.key.as_deref().unwrap_or("Return");
             if !fake {
-                xdotool(&["key", key])?;
+                press_key(key)?;
             }
             Ok(ComputerOutput {
                 text: format!("pressed {key}"),
@@ -103,11 +99,8 @@ fn action_with(_workspace: &Path, request: &ComputerRequest, fake: bool) -> Resu
         }
         "scroll" => {
             let amount = request.amount.unwrap_or(3);
-            let button = if amount >= 0 { "5" } else { "4" };
             if !fake {
-                for _ in 0..amount.unsigned_abs() {
-                    xdotool(&["click", button])?;
-                }
+                scroll(amount)?;
             }
             Ok(ComputerOutput {
                 text: format!("scrolled {amount}"),
@@ -143,6 +136,232 @@ fn point(request: &ComputerRequest) -> Result<(i64, i64)> {
     Ok((x, y))
 }
 
+#[cfg(target_os = "linux")]
+fn move_pointer(x: i64, y: i64) -> Result<()> {
+    if xdotool(&["mousemove", &x.to_string(), &y.to_string()]).is_ok() {
+        return Ok(());
+    }
+    ydotool(&[
+        "mousemove",
+        "--absolute",
+        "-x",
+        &x.to_string(),
+        "-y",
+        &y.to_string(),
+    ])
+}
+
+#[cfg(target_os = "linux")]
+fn click_left() -> Result<()> {
+    if xdotool(&["click", "1"]).is_ok() {
+        return Ok(());
+    }
+    ydotool(&["click", "0x40"])
+}
+
+#[cfg(target_os = "linux")]
+fn type_text(text: &str) -> Result<()> {
+    if xdotool(&["type", "--clearmodifiers", "--", text]).is_ok() {
+        return Ok(());
+    }
+    ydotool(&["type", "--clearmodifiers", "--", text])
+}
+
+#[cfg(target_os = "linux")]
+fn press_key(key: &str) -> Result<()> {
+    xdotool(&["key", key])
+}
+
+#[cfg(target_os = "linux")]
+fn scroll(amount: i64) -> Result<()> {
+    let button = if amount >= 0 { "5" } else { "4" };
+    for _ in 0..amount.unsigned_abs() {
+        xdotool(&["click", button])?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn ydotool(args: &[&str]) -> Result<()> {
+    let output = Command::new("ydotool")
+        .args(args)
+        .output()
+        .map_err(|err| BloraError::Exec(format!("ydotool: {err}")))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(BloraError::Exec(format!(
+            "ydotool failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )))
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn move_pointer(x: i64, y: i64) -> Result<()> {
+    cliclick(&format!("m:{x},{y}"))
+}
+
+#[cfg(target_os = "macos")]
+fn click_left() -> Result<()> {
+    cliclick("c:.")
+}
+
+#[cfg(target_os = "macos")]
+fn type_text(text: &str) -> Result<()> {
+    let escaped = text.replace('\\', "\\\\").replace('"', "\\\"");
+    osascript(&format!(
+        "tell application \"System Events\" to keystroke \"{escaped}\""
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn press_key(key: &str) -> Result<()> {
+    let code = match key {
+        "Return" | "Enter" => 36,
+        "Escape" | "Esc" => 53,
+        "Tab" => 48,
+        "Space" => 49,
+        "Backspace" => 51,
+        "Delete" => 117,
+        "ArrowUp" | "Up" => 126,
+        "ArrowDown" | "Down" => 125,
+        "ArrowLeft" | "Left" => 123,
+        "ArrowRight" | "Right" => 124,
+        other => return type_text(other),
+    };
+    osascript(&format!(
+        "tell application \"System Events\" to key code {code}"
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn scroll(_amount: i64) -> Result<()> {
+    Err(BloraError::Exec(
+        "computer scroll is not implemented on macOS; install cliclick or use key presses"
+            .to_owned(),
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn cliclick(args: &str) -> Result<()> {
+    let output = Command::new("cliclick")
+        .arg(args)
+        .output()
+        .map_err(|err| BloraError::Exec(format!("cliclick: {err}")))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(BloraError::Exec("cliclick failed".to_owned()))
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn osascript(script: &str) -> Result<()> {
+    let output = Command::new("osascript")
+        .args(["-e", script])
+        .output()
+        .map_err(|err| BloraError::Exec(format!("osascript: {err}")))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(BloraError::Exec(format!(
+            "osascript failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )))
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn move_pointer(x: i64, y: i64) -> Result<()> {
+    powershell(&format!(
+        "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point({x},{y})"
+    ))
+}
+
+#[cfg(target_os = "windows")]
+fn click_left() -> Result<()> {
+    powershell(
+        "Add-Type @'\nusing System;\nusing System.Runtime.InteropServices;\npublic class BloraMouse {\n [DllImport(\"user32.dll\")] public static extern void mouse_event(int f,int x,int y,int d,int e);\n}\n'@; [BloraMouse]::mouse_event(0x02,0,0,0,0); [BloraMouse]::mouse_event(0x04,0,0,0,0)",
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn type_text(text: &str) -> Result<()> {
+    let escaped = text.replace('\'', "''");
+    powershell(&format!(
+        "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('{escaped}')"
+    ))
+}
+
+#[cfg(target_os = "windows")]
+fn press_key(key: &str) -> Result<()> {
+    let escaped = key.replace('\'', "''");
+    powershell(&format!(
+        "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('{escaped}')"
+    ))
+}
+
+#[cfg(target_os = "windows")]
+fn scroll(amount: i64) -> Result<()> {
+    let key = if amount >= 0 { "{DOWN}" } else { "{UP}" };
+    for _ in 0..amount.unsigned_abs() {
+        press_key(key)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn powershell(script: &str) -> Result<()> {
+    let output = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .output()
+        .map_err(|err| BloraError::Exec(format!("powershell: {err}")))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(BloraError::Exec(format!(
+            "powershell failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )))
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn move_pointer(_x: i64, _y: i64) -> Result<()> {
+    Err(BloraError::Exec(
+        "computer input is not supported".to_owned(),
+    ))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn click_left() -> Result<()> {
+    Err(BloraError::Exec(
+        "computer input is not supported".to_owned(),
+    ))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn type_text(_text: &str) -> Result<()> {
+    Err(BloraError::Exec(
+        "computer input is not supported".to_owned(),
+    ))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn press_key(_key: &str) -> Result<()> {
+    Err(BloraError::Exec(
+        "computer input is not supported".to_owned(),
+    ))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn scroll(_amount: i64) -> Result<()> {
+    Err(BloraError::Exec(
+        "computer input is not supported".to_owned(),
+    ))
+}
+
 fn screenshot() -> Result<Vec<u8>> {
     #[cfg(target_os = "linux")]
     {
@@ -174,9 +393,25 @@ fn screenshot() -> Result<Vec<u8>> {
     }
     #[cfg(target_os = "windows")]
     {
-        Err(BloraError::Exec(
-            "computer screenshot is not implemented on Windows".to_owned(),
-        ))
+        let path = std::env::temp_dir().join("blora-computer.png");
+        let script = format!(
+            "Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $b=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds; $bmp=New-Object System.Drawing.Bitmap $b.Width,$b.Height; $g=[System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($b.Location,[System.Drawing.Point]::Empty,$b.Size); $bmp.Save('{}'); Write-Output '{}'",
+            path.display(),
+            path.display()
+        );
+        let output = Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .output()
+            .map_err(BloraError::exec)?;
+        if !output.status.success() {
+            return Err(BloraError::Exec(format!(
+                "screenshot failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+        let bytes = std::fs::read(&path).map_err(BloraError::exec)?;
+        let _ = std::fs::remove_file(&path);
+        Ok(bytes)
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
