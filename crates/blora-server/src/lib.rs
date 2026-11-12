@@ -2830,8 +2830,17 @@ mod tests {
             .request(&format!("/api/sessions/{id}/extensions"), "", None, "")
             .await;
         let imagine: serde_json::Value = serde_json::from_str(&imagine.2).unwrap();
-        assert_eq!(imagine["tools"].as_array().unwrap().len(), 1);
-        assert_eq!(imagine["tools"][0]["name"], "generate_image");
+        assert_eq!(imagine["tools"].as_array().unwrap().len(), 4);
+        let imagine_names = imagine["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect::<Vec<_>>();
+        assert!(imagine_names.contains(&"generate_image"));
+        assert!(imagine_names.contains(&"edit_image"));
+        assert!(imagine_names.contains(&"generate_video"));
+        assert!(imagine_names.contains(&"text_to_speech"));
         assert_eq!(
             h.request(
                 &format!("/api/sessions/{id}/mode"),

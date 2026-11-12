@@ -630,6 +630,7 @@ fn dispatch(
                     passport_user_token: None,
                     permission,
                     attachments: Vec::new(),
+                    output_schema: None,
                 },
             )?;
             println!("run {run_id}");
@@ -824,6 +825,7 @@ fn headless(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             passport_user_token: None,
             permission,
             attachments: Vec::new(),
+            output_schema: None,
         },
     );
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
