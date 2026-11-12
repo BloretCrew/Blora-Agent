@@ -16,6 +16,7 @@ blora-harness = { path = "../blora-harness" }
 blora-exec.workspace = true
 blora-imagine.workspace = true
 blora-model.workspace = true
+blora-ptc.workspace = true
 blora-policy.workspace = true
 blora-session.workspace = true
 blora-storage.workspace = true

@@ -1633,6 +1633,73 @@ impl Runtime {
         )
     }
 
+    fn execute_code_tool(
+        &self,
+        session_id: &SessionId,
+        _run_id: &RunId,
+        _turn_id: &TurnId,
+        arguments: &Value,
+        backend: &LocalBackend,
+        _options: &RunOptions,
+    ) -> Result<String> {
+        backend
+            .policy()
+            .require(backend.policy().code_exec(), "execute_code")?;
+        let language = arguments
+            .get("language")
+            .and_then(Value::as_str)
+            .ok_or_else(|| BloraError::Other("execute_code needs language".to_owned()))?;
+        let code = arguments
+            .get("code")
+            .and_then(Value::as_str)
+            .filter(|code| !code.trim().is_empty())
+            .ok_or_else(|| BloraError::Other("execute_code needs code".to_owned()))?;
+        let timeout = arguments
+            .get("timeout_seconds")
+            .and_then(Value::as_u64)
+            .map_or(60, |value| value.clamp(1, 600));
+        let request = blora_ptc::PtcRequest {
+            language: language.to_owned(),
+            code: code.to_owned(),
+            timeout: std::time::Duration::from_secs(timeout),
+            max_tool_calls: arguments
+                .get("max_tool_calls")
+                .and_then(Value::as_u64)
+                .map_or(50, |value| value.clamp(1, 200) as usize),
+        };
+        let output = blora_ptc::run(&request, backend.policy().workspace(), |tool, args| {
+            ToolRegistry::execute_outcome_for(backend, session_id.as_str(), tool, args)
+                .map(|outcome| outcome.as_text())
+        })?;
+        let mut out = String::new();
+        if !output.stdout.is_empty() {
+            out.push_str("stdout:\n");
+            out.push_str(&output.stdout);
+            out.push('\n');
+        }
+        if !output.stderr.is_empty() {
+            out.push_str("stderr:\n");
+            out.push_str(&output.stderr);
+            out.push('\n');
+        }
+        if !output.logs.is_empty() {
+            out.push_str("logs:\n");
+            out.push_str(&output.logs.join("\n"));
+            out.push('\n');
+        }
+        if let Some(value) = output.value {
+            out.push_str("result: ");
+            out.push_str(
+                &serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string()),
+            );
+            out.push('\n');
+        }
+        if out.is_empty() {
+            out.push_str("execute_code finished without output");
+        }
+        Ok(out)
+    }
+
     fn structured_output_tool(
         &self,
         session_id: &SessionId,
@@ -2282,6 +2349,8 @@ impl Runtime {
                 "structured_output" => {
                     self.structured_output_tool(session_id, run_id, turn_id, &arguments, options)
                 }
+                "execute_code" => self
+                    .execute_code_tool(session_id, run_id, turn_id, &arguments, backend, options),
                 "goal" => self.goal_tool(session_id, run_id, turn_id, &arguments),
                 "team" => self.team_tool(session_id, run_id, turn_id, &arguments, options),
                 "team_task" => self.team_task_tool(session_id, run_id, turn_id, &arguments),
@@ -2968,6 +3037,7 @@ fn runtime_handled_tool(name: &str) -> bool {
             | "goal"
             | "team"
             | "team_task"
+            | "execute_code"
     )
 }
 
@@ -4295,6 +4365,45 @@ mod tests {
                 .unwrap()
                 .contains("# Mode: Code")
         );
+    }
+
+    #[test]
+    fn execute_code_calls_blora_tools() {
+        if std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("data.txt"), "hello").unwrap();
+        let runtime = Runtime::new(SqliteStore::open_in_memory().unwrap());
+        let session = session(&runtime, Mode::Code, dir.path().to_str().unwrap());
+        Recorder::install(
+            &runtime,
+            vec![
+                tool_reply(
+                    "e",
+                    "execute_code",
+                    r#"{"language":"python","code":"text = call_tool('read_file', {'path': 'data.txt'})\nfinish(text)"}"#,
+                ),
+                text_reply("done", "stop"),
+            ],
+            None,
+        );
+        runtime
+            .run(&session, "run code", &CancelToken::new(), &yolo())
+            .unwrap();
+        let events = runtime.events(&session).unwrap();
+        let output = events
+            .iter()
+            .find(|event| event.event_type == "tool.output")
+            .and_then(|event| event.payload.get("text"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        assert!(output.contains("result:"), "{output}");
+        assert!(output.contains("hello"), "{output}");
     }
 
     #[test]

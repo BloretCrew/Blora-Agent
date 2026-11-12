@@ -133,6 +133,22 @@ impl ToolRegistry {
                 read_only: true,
             },
             ToolSpec {
+                name: "execute_code",
+                description: "Run Python or JavaScript with a bridge to Blora tools. Scripts call call_tool(name, arguments), log(text), and finish(value). Allowed tools are read/write/edit/search/git/web/process/doc tools; recursive execute_code, subagents, user questions, and team/goal tools are blocked.",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "language": {"type": "string", "enum": ["python", "javascript"]},
+                        "code": {"type": "string"},
+                        "description": {"type": "string"},
+                        "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600},
+                        "max_tool_calls": {"type": "integer", "minimum": 1, "maximum": 200}
+                    },
+                    "required": ["language", "code"]
+                }),
+                read_only: false,
+            },
+            ToolSpec {
                 name: "notebook_edit",
                 description: "Read or edit Jupyter notebooks (.ipynb) without executing them. Actions: read, insert, replace, delete, move, edit. Edits clear code cell outputs and execution_count.",
                 parameters: json!({
@@ -749,7 +765,12 @@ impl ToolRegistry {
             ),
             Mode::Work => !matches!(
                 name,
-                "generate_image" | "skill_manage" | "session_search" | "notebook_edit" | "lsp"
+                "generate_image"
+                    | "skill_manage"
+                    | "session_search"
+                    | "notebook_edit"
+                    | "lsp"
+                    | "execute_code"
             ),
             Mode::Agent => name != "generate_image",
         }

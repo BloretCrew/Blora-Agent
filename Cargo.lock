@@ -384,6 +384,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "blora-ptc"
+version = "0.1.0-beta.3"
+dependencies = [
+ "blora-types",
+ "serde_json",
+ "tempfile",
+ "uuid",
+]
+
+[[package]]
 name = "blora-runtime"
 version = "0.1.0-beta.3"
 dependencies = [
@@ -396,6 +406,7 @@ dependencies = [
  "blora-imagine",
  "blora-model",
  "blora-policy",
+ "blora-ptc",
  "blora-session",
  "blora-storage",
  "blora-tools",
