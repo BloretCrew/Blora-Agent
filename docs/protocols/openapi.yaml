@@ -120,6 +120,60 @@ paths:
       summary: List artifacts
       responses:
         "200": { description: Artifacts }
+  /api/sessions/{id}/goals:
+    get:
+      summary: List session goals
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: Goals }
+  /api/sessions/{id}/workflows:
+    get:
+      summary: List session workflows
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: Workflows }
+  /api/sessions/{id}/teams:
+    get:
+      summary: List workspace teams
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: Teams }
+  /api/teams/{id}/board:
+    get:
+      summary: Team columns and tasks
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: Board }
+  /api/processes:
+    get:
+      summary: Tracked background processes
+      responses:
+        "200": { description: Processes }
+  /api/mcp/servers:
+    get:
+      summary: Configured MCP servers
+      parameters:
+        - in: query
+          name: session
+          schema: { type: string }
+      responses:
+        "200": { description: MCP server list and tool count }
   /api/settings:
     get:
       summary: Non-secret runtime settings

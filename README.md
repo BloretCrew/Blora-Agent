@@ -10,7 +10,11 @@
 
 - Canonical Event Log + SQLite 追加写存储
 - 可恢复 Session / Run 状态机
-- 本地工具：`read_file`、`write_file`、`list_dir`、`glob`、`search`、`shell`、`apply_patch`、`process`；超长工具输出落盘到 `.blora/tool-output/` 可分页回读
+- 本地工具：`read_file`、`view_image`、`write_file`、`list_dir`、`glob`、`search`、`grep`、`shell`、`apply_patch`、`process`、`notebook_edit`、`lsp`；超长工具输出落盘到 `.blora/tool-output/` 可分页回读
+- 多模态：图片附件写入 `.blora/attachments/`，支持视觉的模型收到图像内容块
+- 工具发现：`tool_search` 延迟声明 MCP/插件工具；MCP 支持多服务器、resources/prompts、stdio/HTTP
+- 编排：后台子代理、`goal`、`team`/`team_task` Kanban、`workflow`、`artifact`、`structured_output`、`schedule`
+- 自动化：Python/JavaScript `execute_code`、原生 CDP `browser`、`computer`（默认关闭）、图片编辑/视频/TTS/vision
 - 项目规则从仓库根逐级向下发现 `AGENTS.md` / `CLAUDE.md`，外加全局 `~/.blora/rules.md`
 - 工作区路径沙箱；权限模式 `plan` / `ask` / `auto-edit` / `yolo`（`--permission`，`--yes` = yolo），shell 命令按只读 / 改动 / 危险分级，危险命令永远要确认
 - 模型用 `update_plan` 维护清单，`plan.updated` 事件进投影，CLI 与 Web API 可见
