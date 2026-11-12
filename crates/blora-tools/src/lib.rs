@@ -116,6 +116,23 @@ impl ToolRegistry {
                 read_only: false,
             },
             ToolSpec {
+                name: "lsp",
+                description: "Query a language server for code intelligence. Actions: diagnostics, hover, definition, references, symbols (document), workspace_symbols. line and character are 1-based.",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": ["diagnostics", "hover", "definition", "references", "symbols", "workspace_symbols"]},
+                        "path": {"type": "string"},
+                        "line": {"type": "integer", "minimum": 1},
+                        "character": {"type": "integer", "minimum": 1},
+                        "query": {"type": "string"},
+                        "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 120}
+                    },
+                    "required": ["action", "path"]
+                }),
+                read_only: true,
+            },
+            ToolSpec {
                 name: "notebook_edit",
                 description: "Read or edit Jupyter notebooks (.ipynb) without executing them. Actions: read, insert, replace, delete, move, edit. Edits clear code cell outputs and execution_count.",
                 parameters: json!({
@@ -636,7 +653,7 @@ impl ToolRegistry {
             ),
             Mode::Work => !matches!(
                 name,
-                "generate_image" | "skill_manage" | "session_search" | "notebook_edit"
+                "generate_image" | "skill_manage" | "session_search" | "notebook_edit" | "lsp"
             ),
             Mode::Agent => name != "generate_image",
         }
@@ -712,6 +729,29 @@ impl ToolRegistry {
                     .and_then(Value::as_u64)
                     .map_or(80, |n| n as usize),
             ),
+            "lsp" => {
+                let path = required_str(arguments, "path")?;
+                let server = blora_lsp::server_for(backend.policy().workspace(), path)?;
+                backend.policy().require(
+                    backend.policy().lsp_server(&server),
+                    &format!("lsp {server}"),
+                )?;
+                let request = blora_lsp::LspRequest {
+                    action: required_str(arguments, "action")?.to_owned(),
+                    path: path.to_owned(),
+                    line: arguments
+                        .get("line")
+                        .and_then(Value::as_u64)
+                        .map(|value| value as u32),
+                    character: arguments
+                        .get("character")
+                        .and_then(Value::as_u64)
+                        .map(|value| value as u32),
+                    query: optional_str(arguments, "query").map(str::to_owned),
+                    timeout_secs: arguments.get("timeout_seconds").and_then(Value::as_u64),
+                };
+                blora_lsp::action(backend.policy().workspace(), &request)
+            }
             "notebook_edit" => notebook::execute(backend, arguments),
             "grep" => {
                 let output_mode = match optional_str(arguments, "output_mode").unwrap_or("content")

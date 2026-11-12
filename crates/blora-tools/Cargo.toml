@@ -12,6 +12,7 @@ blora-content.workspace = true
 blora-context.workspace = true
 blora-exec.workspace = true
 blora-imagine.workspace = true
+blora-lsp.workspace = true
 blora-types.workspace = true
 blora-web.workspace = true
 serde.workspace = true

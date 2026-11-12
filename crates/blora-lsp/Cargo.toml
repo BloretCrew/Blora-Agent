@@ -1,0 +1,21 @@
+[package]
+name = "blora-lsp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description = "Language Server Protocol client for Blora Agent."
+
+[dependencies]
+blora-types.workspace = true
+dirs.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

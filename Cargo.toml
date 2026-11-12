@@ -17,6 +17,7 @@ members = [
     "crates/blora-model",
     "crates/blora-runtime",
     "crates/blora-harness",
+    "crates/blora-lsp",
     "crates/blora-tui",
     "crates/blora-server",
     "crates/blora-cli",
@@ -51,6 +52,7 @@ blora-catalog = { path = "crates/blora-catalog" }
 blora-model = { path = "crates/blora-model" }
 blora-runtime = { path = "crates/blora-runtime" }
 blora-harness = { path = "crates/blora-harness" }
+blora-lsp = { path = "crates/blora-lsp" }
 blora-tui = { path = "crates/blora-tui" }
 blora-github = { path = "crates/blora-github" }
 axum = { version = "0.8", features = ["json", "ws"] }
@@ -78,6 +80,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ureq = { version = "2", features = ["json"] }
 uuid = { version = "1", features = ["v7", "serde"] }
 unicode-width = "0.2"
+url = "2"
 walkdir = "2"
 
 [workspace.lints.rust]
