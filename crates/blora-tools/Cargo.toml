@@ -16,6 +16,7 @@ blora-types.workspace = true
 blora-web.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 blora-policy.workspace = true

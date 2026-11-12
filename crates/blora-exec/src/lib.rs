@@ -14,6 +14,7 @@ use blora_policy::Policy;
 use blora_types::{BloraError, Result};
 mod attachment;
 mod glob;
+mod grep;
 mod host;
 mod isolation;
 mod media;
@@ -21,6 +22,7 @@ mod process;
 mod worktree;
 
 pub use attachment::{AttachmentStore, image_mime_for};
+pub use grep::{GrepOptions, OutputMode};
 
 use regex::Regex;
 use walkdir::WalkDir;

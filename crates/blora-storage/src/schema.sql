@@ -153,6 +153,14 @@ CREATE TABLE IF NOT EXISTS artifacts (
     kind TEXT NOT NULL,
     path TEXT,
     content TEXT,
+    title TEXT,
+    mime TEXT,
+    size INTEGER,
+    sha256 TEXT,
+    updated_at TEXT,
+    deleted_at TEXT,
+    version INTEGER NOT NULL DEFAULT 1,
+    metadata TEXT,
     created_at TEXT NOT NULL,
     FOREIGN KEY (session_id) REFERENCES sessions(id)
 );

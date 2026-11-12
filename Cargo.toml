@@ -61,6 +61,8 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 clap = { version = "4", features = ["derive", "env"] }
 crossterm = "0.28"
 dirs = "6"
+globset = "0.4"
+ignore = "0.4"
 ratatui = "0.29"
 regex = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }

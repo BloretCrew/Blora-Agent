@@ -41,6 +41,14 @@ pub struct ArtifactRecord {
     pub kind: String,
     pub path: Option<String>,
     pub content: Option<String>,
+    pub title: Option<String>,
+    pub mime: Option<String>,
+    pub size: Option<u64>,
+    pub sha256: Option<String>,
+    pub updated_at: DateTime<Utc>,
+    pub deleted_at: Option<DateTime<Utc>>,
+    pub version: u32,
+    pub metadata: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -204,8 +212,25 @@ impl SqliteStore {
         )
         .map_err(BloraError::storage)?;
         let _ = conn.execute("ALTER TABLE sessions ADD COLUMN permission_mode TEXT", []);
+        for statement in [
+            "ALTER TABLE artifacts ADD COLUMN title TEXT",
+            "ALTER TABLE artifacts ADD COLUMN mime TEXT",
+            "ALTER TABLE artifacts ADD COLUMN size INTEGER",
+            "ALTER TABLE artifacts ADD COLUMN sha256 TEXT",
+            "ALTER TABLE artifacts ADD COLUMN updated_at TEXT",
+            "ALTER TABLE artifacts ADD COLUMN deleted_at TEXT",
+            "ALTER TABLE artifacts ADD COLUMN version INTEGER NOT NULL DEFAULT 1",
+            "ALTER TABLE artifacts ADD COLUMN metadata TEXT",
+        ] {
+            let _ = conn.execute(statement, []);
+        }
         conn.execute(
             "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (14, ?1)",
+            params![now],
+        )
+        .map_err(BloraError::storage)?;
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (15, ?1)",
             params![now],
         )
         .map_err(BloraError::storage)?;
@@ -216,7 +241,7 @@ impl SqliteStore {
     }
 
     /// Current storage schema version written by this build.
-    pub const STORE_VERSION: u32 = 14;
+    pub const STORE_VERSION: u32 = 15;
 
     pub fn queue_steer(&self, session_id: &SessionId, message: &str) -> Result<()> {
         let conn = self.lock();
@@ -626,6 +651,62 @@ impl SqliteStore {
         )
         .map_err(BloraError::storage)?;
         Ok(())
+    }
+
+    pub fn update_task_fields(
+        &self,
+        task_id: &TaskId,
+        title: Option<&str>,
+        prompt: Option<&str>,
+        cron: Option<&str>,
+        max_attempts: Option<u32>,
+        now: DateTime<Utc>,
+    ) -> Result<bool> {
+        let conn = self.lock();
+        let changed = conn
+            .execute(
+                "UPDATE tasks SET
+                    title = COALESCE(?2, title),
+                    prompt = COALESCE(?3, prompt),
+                    cron = COALESCE(?4, cron),
+                    max_attempts = COALESCE(?5, max_attempts),
+                    updated_at = ?6
+                 WHERE id = ?1 AND status NOT IN ('running')",
+                params![
+                    task_id.as_str(),
+                    title,
+                    prompt,
+                    cron,
+                    max_attempts.map(i64::from),
+                    now.to_rfc3339()
+                ],
+            )
+            .map_err(BloraError::storage)?;
+        Ok(changed > 0)
+    }
+
+    pub fn delete_task(&self, task_id: &TaskId) -> Result<bool> {
+        let conn = self.lock();
+        let changed = conn
+            .execute(
+                "DELETE FROM tasks WHERE id = ?1 AND status NOT IN ('running')",
+                params![task_id.as_str()],
+            )
+            .map_err(BloraError::storage)?;
+        Ok(changed > 0)
+    }
+
+    pub fn run_task_now(&self, task_id: &TaskId, now: DateTime<Utc>) -> Result<bool> {
+        let conn = self.lock();
+        let changed = conn
+            .execute(
+                "UPDATE tasks SET status = 'queued', delay_until = ?2, attempt = 0, error = NULL,
+                    updated_at = ?2
+                 WHERE id = ?1 AND status NOT IN ('running')",
+                params![task_id.as_str(), now.to_rfc3339()],
+            )
+            .map_err(BloraError::storage)?;
+        Ok(changed > 0)
     }
 
     pub fn reschedule_task(
@@ -1039,8 +1120,11 @@ impl SqliteStore {
         if let Some(session_id) = session_id {
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, session_id, kind, path, content, created_at FROM artifacts
-                     WHERE session_id = ?1 ORDER BY created_at DESC",
+                    "SELECT id, session_id, kind, path, content, title, mime, size, sha256,
+                            COALESCE(updated_at, created_at), deleted_at,
+                            COALESCE(version, 1), metadata, created_at
+                     FROM artifacts
+                     WHERE session_id = ?1 AND deleted_at IS NULL ORDER BY created_at DESC",
                 )
                 .map_err(BloraError::storage)?;
             let rows = stmt
@@ -1052,8 +1136,10 @@ impl SqliteStore {
         } else {
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, session_id, kind, path, content, created_at FROM artifacts
-                     ORDER BY created_at DESC",
+                    "SELECT id, session_id, kind, path, content, title, mime, size, sha256,
+                            COALESCE(updated_at, created_at), deleted_at,
+                            COALESCE(version, 1), metadata, created_at
+                     FROM artifacts WHERE deleted_at IS NULL ORDER BY created_at DESC",
                 )
                 .map_err(BloraError::storage)?;
             let rows = stmt
@@ -1064,6 +1150,103 @@ impl SqliteStore {
             }
         }
         Ok(out)
+    }
+
+    pub fn get_artifact(&self, id: &ArtifactId) -> Result<Option<ArtifactRecord>> {
+        let conn = self.lock();
+        conn.query_row(
+            "SELECT id, session_id, kind, path, content, title, mime, size, sha256,
+                    COALESCE(updated_at, created_at), deleted_at,
+                    COALESCE(version, 1), metadata, created_at
+             FROM artifacts WHERE id = ?1",
+            params![id.as_str()],
+            artifact_row,
+        )
+        .optional()
+        .map_err(BloraError::storage)?
+        .map(row_to_artifact)
+        .transpose()
+    }
+
+    pub fn insert_artifact_record(&self, record: &ArtifactRecord) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "INSERT OR REPLACE INTO artifacts
+             (id, session_id, kind, path, content, title, mime, size, sha256,
+              updated_at, deleted_at, version, metadata, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            params![
+                record.id.as_str(),
+                record.session_id.as_str(),
+                record.kind,
+                record.path,
+                record.content,
+                record.title,
+                record.mime,
+                record.size.and_then(|value| i64::try_from(value).ok()),
+                record.sha256,
+                record.updated_at.to_rfc3339(),
+                record.deleted_at.map(|value| value.to_rfc3339()),
+                i64::from(record.version),
+                record.metadata,
+                record.created_at.to_rfc3339()
+            ],
+        )
+        .map_err(BloraError::storage)?;
+        Ok(())
+    }
+
+    pub fn update_artifact(
+        &self,
+        id: &ArtifactId,
+        title: Option<&str>,
+        content: Option<&str>,
+        path: Option<&str>,
+        mime: Option<&str>,
+        size: Option<u64>,
+        sha256: Option<&str>,
+        metadata: Option<&str>,
+    ) -> Result<bool> {
+        let conn = self.lock();
+        let changed = conn
+            .execute(
+                "UPDATE artifacts SET
+                    title = COALESCE(?2, title),
+                    content = COALESCE(?3, content),
+                    path = COALESCE(?4, path),
+                    mime = COALESCE(?5, mime),
+                    size = COALESCE(?6, size),
+                    sha256 = COALESCE(?7, sha256),
+                    metadata = COALESCE(?8, metadata),
+                    updated_at = ?9,
+                    version = COALESCE(version, 1) + 1
+                 WHERE id = ?1 AND deleted_at IS NULL",
+                params![
+                    id.as_str(),
+                    title,
+                    content,
+                    path,
+                    mime,
+                    size.and_then(|value| i64::try_from(value).ok()),
+                    sha256,
+                    metadata,
+                    Utc::now().to_rfc3339()
+                ],
+            )
+            .map_err(BloraError::storage)?;
+        Ok(changed > 0)
+    }
+
+    pub fn delete_artifact(&self, id: &ArtifactId) -> Result<bool> {
+        let conn = self.lock();
+        let changed = conn
+            .execute(
+                "UPDATE artifacts SET deleted_at = ?2, updated_at = ?2
+                 WHERE id = ?1 AND deleted_at IS NULL",
+                params![id.as_str(), Utc::now().to_rfc3339()],
+            )
+            .map_err(BloraError::storage)?;
+        Ok(changed > 0)
     }
 
     fn list_agents_filtered(
@@ -1417,6 +1600,14 @@ type ArtifactRow = (
     String,
     Option<String>,
     Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<i64>,
+    Option<String>,
+    String,
+    Option<String>,
+    i64,
+    Option<String>,
     String,
 );
 
@@ -1428,17 +1619,48 @@ fn artifact_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ArtifactRow> {
         row.get(3)?,
         row.get(4)?,
         row.get(5)?,
+        row.get(6)?,
+        row.get(7)?,
+        row.get(8)?,
+        row.get(9)?,
+        row.get(10)?,
+        row.get(11)?,
+        row.get(12)?,
+        row.get(13)?,
     ))
 }
 
 fn row_to_artifact(row: ArtifactRow) -> Result<ArtifactRecord> {
-    let (id, session_id, kind, path, content, created_at) = row;
+    let (
+        id,
+        session_id,
+        kind,
+        path,
+        content,
+        title,
+        mime,
+        size,
+        sha256,
+        updated_at,
+        deleted_at,
+        version,
+        metadata,
+        created_at,
+    ) = row;
     Ok(ArtifactRecord {
         id: ArtifactId::parse(&id)?,
         session_id: SessionId::parse(&session_id)?,
         kind,
         path,
         content,
+        title,
+        mime,
+        size: size.and_then(|value| u64::try_from(value).ok()),
+        sha256,
+        updated_at: parse_time(&updated_at)?,
+        deleted_at: deleted_at.map(|value| parse_time(&value)).transpose()?,
+        version: u32::try_from(version).unwrap_or(1),
+        metadata,
         created_at: parse_time(&created_at)?,
     })
 }
@@ -1678,5 +1900,58 @@ mod tests {
             activity.sessions[0].created_at.date_naive().to_string(),
             "2026-09-14"
         );
+    }
+
+    #[test]
+    fn artifact_crud_and_soft_delete() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let session = store
+            .create_session(CreateSession {
+                title: Some("artifacts".to_owned()),
+                workspace_path: "/tmp/ws".to_owned(),
+                mode: Mode::Code,
+                parent_session_id: None,
+            })
+            .unwrap();
+        let id = ArtifactId::generate();
+        let now = Utc::now();
+        store
+            .insert_artifact_record(&ArtifactRecord {
+                id: id.clone(),
+                session_id: session.clone(),
+                kind: "markdown".to_owned(),
+                path: Some(".blora/artifacts/s/a.md".to_owned()),
+                content: Some("# A".to_owned()),
+                title: Some("A".to_owned()),
+                mime: Some("text/markdown".to_owned()),
+                size: Some(3),
+                sha256: None,
+                updated_at: now,
+                deleted_at: None,
+                version: 1,
+                metadata: None,
+                created_at: now,
+            })
+            .unwrap();
+        let record = store.get_artifact(&id).unwrap().unwrap();
+        assert_eq!(record.title.as_deref(), Some("A"));
+        assert!(
+            store
+                .update_artifact(&id, Some("B"), Some("# B"), None, None, Some(3), None, None)
+                .unwrap()
+        );
+        let record = store.get_artifact(&id).unwrap().unwrap();
+        assert_eq!(record.version, 2);
+        assert_eq!(record.content.as_deref(), Some("# B"));
+        assert!(store.delete_artifact(&id).unwrap());
+        assert!(
+            store
+                .get_artifact(&id)
+                .unwrap()
+                .unwrap()
+                .deleted_at
+                .is_some()
+        );
+        assert!(store.list_artifacts(Some(&session)).unwrap().is_empty());
     }
 }

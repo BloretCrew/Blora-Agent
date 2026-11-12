@@ -7,13 +7,14 @@ use blora_context::{
     estimate_messages,
 };
 use blora_events::{
-    AssistantDelta, AssistantMessageCompleted, AssistantReasoning, ContextSnapshotCreated,
-    EventEnvelope, HookCompleted, KnownPayload, ModeChanged, ModelRequested,
-    ModelResponseCompleted, NewEvent, PermissionChanged, PlanModeChanged, PlanStep, PlanUpdated,
-    ProviderChanged, RetryStarted, RoutingChanged, RunCancelRequested, RunCancelled, RunCompleted,
-    RunCreated, RunFailed, RunStarted, SessionArchived, SessionCwdChanged, SessionResumed,
-    SessionTitleChanged, ToolCompleted, ToolDiscovered, ToolFailed, ToolOutput, ToolRequested,
-    ToolStarted, UsageRecorded, UserInput,
+    ArtifactCreated, ArtifactDeleted, ArtifactPresented, ArtifactUpdated, AssistantDelta,
+    AssistantMessageCompleted, AssistantReasoning, ContextSnapshotCreated, EventEnvelope,
+    HookCompleted, KnownPayload, ModeChanged, ModelRequested, ModelResponseCompleted, NewEvent,
+    PermissionChanged, PlanModeChanged, PlanStep, PlanUpdated, ProviderChanged, RetryStarted,
+    RoutingChanged, RunCancelRequested, RunCancelled, RunCompleted, RunCreated, RunFailed,
+    RunStarted, SessionArchived, SessionCwdChanged, SessionResumed, SessionTitleChanged,
+    ToolCompleted, ToolDiscovered, ToolFailed, ToolOutput, ToolRequested, ToolStarted,
+    UsageRecorded, UserInput,
 };
 use blora_exec::{Isolation, LocalBackend, ShellKind, WorktreeHandle, shell_cwd_after};
 use blora_model::retry::{self, RetryClass};
@@ -23,9 +24,9 @@ use blora_model::{
 };
 use blora_policy::{PermissionMode, Policy};
 use blora_session::SessionProjection;
-use blora_storage::{CreateSession, CreateTask, SessionSummary, SqliteStore};
+use blora_storage::{ArtifactRecord, CreateSession, CreateTask, SessionSummary, SqliteStore};
 use blora_tools::ToolRegistry;
-use blora_types::{BloraError, CancelToken, Mode, Result, RunId, SessionId, TurnId};
+use blora_types::{ArtifactId, BloraError, CancelToken, Mode, Result, RunId, SessionId, TurnId};
 use serde_json::{Value, json};
 use std::sync::Mutex;
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
@@ -1609,6 +1610,213 @@ impl Runtime {
         )
     }
 
+    fn artifact_tool(
+        &self,
+        session_id: &SessionId,
+        run_id: &RunId,
+        turn_id: &TurnId,
+        arguments: &Value,
+        backend: &LocalBackend,
+    ) -> Result<String> {
+        let action = arguments
+            .get("action")
+            .and_then(Value::as_str)
+            .ok_or_else(|| BloraError::Other("artifact needs action".to_owned()))?;
+        let id = arguments
+            .get("id")
+            .and_then(Value::as_str)
+            .map(ArtifactId::parse)
+            .transpose()?;
+        match action {
+            "create" => {
+                let kind = arguments
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .unwrap_or("text");
+                let content = match arguments.get("content").and_then(Value::as_str) {
+                    Some(content) => content.to_owned(),
+                    None => {
+                        let path =
+                            arguments
+                                .get("path")
+                                .and_then(Value::as_str)
+                                .ok_or_else(|| {
+                                    BloraError::Other(
+                                        "artifact create needs content or path".to_owned(),
+                                    )
+                                })?;
+                        backend.read_file(path)?
+                    }
+                };
+                let artifact_id = ArtifactId::generate();
+                let relative = format!(
+                    ".blora/artifacts/{}/{}.{}",
+                    session_id.as_str(),
+                    artifact_id.as_str(),
+                    artifact_ext(kind)
+                );
+                backend.write_file(&relative, &content)?;
+                let now = chrono::Utc::now();
+                let title = arguments
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                let mime = arguments
+                    .get("mime")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .or_else(|| Some(artifact_mime(kind).to_owned()));
+                let metadata = arguments.get("metadata").map(Value::to_string);
+                let record = ArtifactRecord {
+                    id: artifact_id.clone(),
+                    session_id: session_id.clone(),
+                    kind: kind.to_owned(),
+                    path: Some(relative.clone()),
+                    content: (content.len() <= 1_048_576).then_some(content.clone()),
+                    title,
+                    mime,
+                    size: Some(content.len() as u64),
+                    sha256: None,
+                    updated_at: now,
+                    deleted_at: None,
+                    version: 1,
+                    metadata,
+                    created_at: now,
+                };
+                self.store.insert_artifact_record(&record)?;
+                self.emit(
+                    session_id,
+                    Some(run_id),
+                    Some(turn_id),
+                    KnownPayload::ArtifactCreated(ArtifactCreated {
+                        artifact_id: artifact_id.clone(),
+                        kind: kind.to_owned(),
+                        path: relative.clone(),
+                    }),
+                )?;
+                Ok(format!("created artifact {artifact_id} at {relative}"))
+            }
+            "read" => {
+                let id =
+                    id.ok_or_else(|| BloraError::Other("artifact read needs id".to_owned()))?;
+                let record = self
+                    .store
+                    .get_artifact(&id)?
+                    .filter(|record| record.deleted_at.is_none())
+                    .ok_or_else(|| BloraError::Other("artifact not found".to_owned()))?;
+                if let Some(content) = record.content {
+                    Ok(content)
+                } else if let Some(path) = record.path {
+                    backend.read_file(&path)
+                } else {
+                    Err(BloraError::Other("artifact has no content".to_owned()))
+                }
+            }
+            "update" => {
+                let id =
+                    id.ok_or_else(|| BloraError::Other("artifact update needs id".to_owned()))?;
+                let record = self
+                    .store
+                    .get_artifact(&id)?
+                    .filter(|record| record.deleted_at.is_none())
+                    .ok_or_else(|| BloraError::Other("artifact not found".to_owned()))?;
+                let content = arguments.get("content").and_then(Value::as_str);
+                if let Some(content) = content {
+                    let path = record.path.clone().unwrap_or_else(|| {
+                        format!(
+                            ".blora/artifacts/{}/{}.txt",
+                            session_id.as_str(),
+                            id.as_str()
+                        )
+                    });
+                    backend.write_file(&path, content)?;
+                }
+                let title = arguments.get("title").and_then(Value::as_str);
+                let mime = arguments.get("mime").and_then(Value::as_str);
+                let metadata = arguments.get("metadata").map(Value::to_string);
+                let changed = self.store.update_artifact(
+                    &id,
+                    title,
+                    content,
+                    None,
+                    mime,
+                    content.map(|content| content.len() as u64),
+                    None,
+                    metadata.as_deref(),
+                )?;
+                if !changed {
+                    return Err(BloraError::Other("artifact not found".to_owned()));
+                }
+                self.emit(
+                    session_id,
+                    Some(run_id),
+                    Some(turn_id),
+                    KnownPayload::ArtifactUpdated(ArtifactUpdated {
+                        artifact_id: id,
+                        version: record.version + 1,
+                    }),
+                )?;
+                Ok("artifact updated".to_owned())
+            }
+            "delete" => {
+                let id =
+                    id.ok_or_else(|| BloraError::Other("artifact delete needs id".to_owned()))?;
+                if !self.store.delete_artifact(&id)? {
+                    return Err(BloraError::Other("artifact not found".to_owned()));
+                }
+                self.emit(
+                    session_id,
+                    Some(run_id),
+                    Some(turn_id),
+                    KnownPayload::ArtifactDeleted(ArtifactDeleted { artifact_id: id }),
+                )?;
+                Ok("artifact deleted".to_owned())
+            }
+            "present" => {
+                let id =
+                    id.ok_or_else(|| BloraError::Other("artifact present needs id".to_owned()))?;
+                let record = self
+                    .store
+                    .get_artifact(&id)?
+                    .filter(|record| record.deleted_at.is_none())
+                    .ok_or_else(|| BloraError::Other("artifact not found".to_owned()))?;
+                self.emit(
+                    session_id,
+                    Some(run_id),
+                    Some(turn_id),
+                    KnownPayload::ArtifactPresented(ArtifactPresented { artifact_id: id }),
+                )?;
+                Ok(record.path.map_or_else(
+                    || "artifact presented".to_owned(),
+                    |path| format!("artifact at {path}"),
+                ))
+            }
+            "list" => {
+                let artifacts = self.store.list_artifacts(Some(session_id))?;
+                if artifacts.is_empty() {
+                    return Ok("(no artifacts)".to_owned());
+                }
+                Ok(artifacts
+                    .iter()
+                    .map(|record| {
+                        format!(
+                            "{}  {}  v{}  {}  {}",
+                            record.id,
+                            record.kind,
+                            record.version,
+                            record.title.as_deref().unwrap_or(""),
+                            record.path.as_deref().unwrap_or("")
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"))
+            }
+            other => Err(BloraError::Other(format!(
+                "unknown artifact action: {other}"
+            ))),
+        }
+    }
+
     fn enter_plan_mode(
         &self,
         session_id: &SessionId,
@@ -2021,6 +2229,7 @@ impl Runtime {
                         .unwrap_or("worker");
                     self.spawn_subagent(session_id, role, prompt, options, cancel)
                 }
+                "schedule" => self.schedule_tool(session_id, run_id, turn_id, &arguments, options),
                 "schedule_task" => {
                     let title = arguments
                         .get("title")
@@ -2056,6 +2265,7 @@ impl Runtime {
                     })
                     .map(|id| format!("queued {id}"))
                 }
+                "artifact" => self.artifact_tool(session_id, run_id, turn_id, &arguments, backend),
                 "enter_plan_mode" => {
                     self.enter_plan_mode(session_id, run_id, turn_id, &arguments, options)
                 }
@@ -2588,6 +2798,28 @@ impl Provider for SharedProvider {
     }
 }
 
+fn artifact_ext(kind: &str) -> &'static str {
+    match kind {
+        "markdown" => "md",
+        "html" => "html",
+        "json" => "json",
+        "csv" => "csv",
+        "image" => "png",
+        _ => "txt",
+    }
+}
+
+fn artifact_mime(kind: &str) -> &'static str {
+    match kind {
+        "markdown" => "text/markdown",
+        "html" => "text/html",
+        "json" => "application/json",
+        "csv" => "text/csv",
+        "image" => "image/png",
+        _ => "text/plain",
+    }
+}
+
 fn declared_tools(mode: Mode, read_only: bool, plan_mode: bool) -> Vec<ToolDeclaration> {
     ToolRegistry::specs_for(mode)
         .into_iter()
@@ -2620,6 +2852,8 @@ fn runtime_handled_tool(name: &str) -> bool {
             | "mcp_get_prompt"
             | "enter_plan_mode"
             | "exit_plan_mode"
+            | "artifact"
+            | "schedule"
     )
 }
 
@@ -3947,6 +4181,112 @@ mod tests {
                 .unwrap()
                 .contains("# Mode: Code")
         );
+    }
+
+    #[test]
+    fn schedule_crud_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = Runtime::new(SqliteStore::open_in_memory().unwrap());
+        let session = session(&runtime, Mode::Work, dir.path().to_str().unwrap());
+        let run_id = RunId::generate();
+        let turn_id = TurnId::generate();
+        let options = yolo();
+        runtime
+            .schedule_tool(
+                &session,
+                &run_id,
+                &turn_id,
+                &json!({"action":"create","prompt":"do it","title":"T","delay_seconds":3600}),
+                &options,
+            )
+            .unwrap();
+        let tasks = runtime.list_tasks(Some(&session)).unwrap();
+        assert_eq!(tasks.len(), 1);
+        let id = tasks[0].id.clone();
+        runtime
+            .schedule_tool(
+                &session,
+                &run_id,
+                &turn_id,
+                &json!({"action":"update","task_id":id,"title":"U","max_attempts":5}),
+                &options,
+            )
+            .unwrap();
+        let task = runtime.get_task(&id).unwrap();
+        assert_eq!(task.title, "U");
+        assert_eq!(task.max_attempts, 5);
+        runtime
+            .schedule_tool(
+                &session,
+                &run_id,
+                &turn_id,
+                &json!({"action":"pause","task_id":id}),
+                &options,
+            )
+            .unwrap();
+        runtime
+            .schedule_tool(
+                &session,
+                &run_id,
+                &turn_id,
+                &json!({"action":"resume","task_id":id}),
+                &options,
+            )
+            .unwrap();
+        runtime
+            .schedule_tool(
+                &session,
+                &run_id,
+                &turn_id,
+                &json!({"action":"run_now","task_id":id}),
+                &options,
+            )
+            .unwrap();
+        runtime
+            .schedule_tool(
+                &session,
+                &run_id,
+                &turn_id,
+                &json!({"action":"delete","task_id":id}),
+                &options,
+            )
+            .unwrap();
+        assert!(runtime.get_task(&id).is_err());
+    }
+
+    #[test]
+    fn artifact_create_writes_file_and_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = Runtime::new(SqliteStore::open_in_memory().unwrap());
+        let session = session(&runtime, Mode::Code, dir.path().to_str().unwrap());
+        Recorder::install(
+            &runtime,
+            vec![
+                tool_reply(
+                    "a",
+                    "artifact",
+                    r##"{"action":"create","kind":"markdown","title":"Plan","content":"# Hi"}"##,
+                ),
+                text_reply("done", "stop"),
+            ],
+            None,
+        );
+        runtime
+            .run(&session, "make an artifact", &CancelToken::new(), &yolo())
+            .unwrap();
+        let events = runtime.events(&session).unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == "artifact.created")
+        );
+        let root = dir.path().join(".blora/artifacts").join(session.as_str());
+        let file = std::fs::read_dir(root)
+            .unwrap()
+            .flatten()
+            .find(|entry| entry.path().extension().is_some_and(|ext| ext == "md"))
+            .expect("markdown artifact");
+        assert_eq!(std::fs::read_to_string(file.path()).unwrap(), "# Hi");
     }
 
     #[test]

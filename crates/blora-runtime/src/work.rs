@@ -1,10 +1,36 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Blora Agent contributors
 
-use blora_events::{KnownPayload, TaskCompleted, TaskCreated, TaskFailed, TaskStarted, TaskWakeup};
+use blora_events::{
+    KnownPayload, TaskCompleted, TaskCreated, TaskDeleted, TaskFailed, TaskStarted, TaskUpdated,
+    TaskWakeup,
+};
 use blora_storage::{CreateTask, TaskRecord};
-use blora_types::{BloraError, CancelToken, Result, RunId, SessionId, TaskId, TaskStatus};
+use blora_types::{BloraError, CancelToken, Result, RunId, SessionId, TaskId, TaskStatus, TurnId};
 use chrono::{Duration, Utc};
+use serde_json::Value;
+
+fn require_task_id(id: Option<TaskId>) -> Result<TaskId> {
+    id.ok_or_else(|| BloraError::Other("schedule action needs task_id".to_owned()))
+}
+
+fn format_task(task: &TaskRecord) -> String {
+    format!(
+        "{}  {}  {}  attempts {}/{}  {}{}",
+        task.id,
+        task.status.as_str(),
+        task.title,
+        task.attempt,
+        task.max_attempts,
+        task.cron
+            .as_deref()
+            .map(|cron| format!("cron {cron}  "))
+            .unwrap_or_default(),
+        task.delay_until
+            .map(|time| format!("next {}", time.to_rfc3339()))
+            .unwrap_or_else(|| "no delay".to_owned())
+    )
+}
 
 use crate::coordinator::{RunOptions, Runtime};
 
@@ -47,6 +73,158 @@ impl Runtime {
 
     pub fn get_task(&self, task_id: &TaskId) -> Result<TaskRecord> {
         self.store.get_task(task_id)
+    }
+
+    pub(crate) fn schedule_tool(
+        &self,
+        session_id: &SessionId,
+        run_id: &RunId,
+        turn_id: &TurnId,
+        arguments: &Value,
+        options: &RunOptions,
+    ) -> Result<String> {
+        let action = arguments
+            .get("action")
+            .and_then(Value::as_str)
+            .ok_or_else(|| BloraError::Other("schedule needs action".to_owned()))?;
+        let task_id = arguments
+            .get("task_id")
+            .and_then(Value::as_str)
+            .map(TaskId::parse)
+            .transpose()?;
+        match action {
+            "create" => {
+                let prompt = arguments
+                    .get("prompt")
+                    .and_then(Value::as_str)
+                    .filter(|prompt| !prompt.trim().is_empty())
+                    .ok_or_else(|| BloraError::Other("schedule create needs prompt".to_owned()))?;
+                let delay = arguments
+                    .get("delay_seconds")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let delay_until = (delay > 0).then(|| Utc::now() + Duration::seconds(delay as i64));
+                let id = self.create_task(CreateTask {
+                    session_id: session_id.clone(),
+                    title: arguments
+                        .get("title")
+                        .and_then(Value::as_str)
+                        .unwrap_or("scheduled")
+                        .to_owned(),
+                    prompt: prompt.to_owned(),
+                    delay_until,
+                    max_attempts: arguments
+                        .get("max_attempts")
+                        .and_then(Value::as_u64)
+                        .map_or(3, |value| u32::try_from(value).unwrap_or(3).clamp(1, 10)),
+                    auto_approve: options.auto_approve,
+                    mock: options.mock,
+                    cron: arguments
+                        .get("cron")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                })?;
+                Ok(format!("scheduled task {id}"))
+            }
+            "list" => {
+                let tasks = self.list_tasks(Some(session_id))?;
+                if tasks.is_empty() {
+                    return Ok("(no scheduled tasks)".to_owned());
+                }
+                Ok(tasks.iter().map(format_task).collect::<Vec<_>>().join("\n"))
+            }
+            "get" => {
+                let id = require_task_id(task_id)?;
+                Ok(format_task(&self.get_task(&id)?))
+            }
+            "update" => {
+                let id = require_task_id(task_id)?;
+                let max_attempts = arguments
+                    .get("max_attempts")
+                    .and_then(Value::as_u64)
+                    .map(|value| u32::try_from(value).unwrap_or(3).clamp(1, 10));
+                if !self.store.update_task_fields(
+                    &id,
+                    arguments.get("title").and_then(Value::as_str),
+                    arguments.get("prompt").and_then(Value::as_str),
+                    arguments.get("cron").and_then(Value::as_str),
+                    max_attempts,
+                    Utc::now(),
+                )? {
+                    return Err(BloraError::Other(format!("task {id} cannot be updated")));
+                }
+                self.emit(
+                    session_id,
+                    Some(run_id),
+                    Some(turn_id),
+                    KnownPayload::TaskUpdated(TaskUpdated {
+                        task_id: id.clone(),
+                    }),
+                )?;
+                Ok(format!("updated task {id}"))
+            }
+            "pause" => {
+                let id = require_task_id(task_id)?;
+                self.pause_task(&id)?;
+                self.emit(
+                    session_id,
+                    Some(run_id),
+                    Some(turn_id),
+                    KnownPayload::TaskUpdated(TaskUpdated {
+                        task_id: id.clone(),
+                    }),
+                )?;
+                Ok(format!("paused task {id}"))
+            }
+            "resume" => {
+                let id = require_task_id(task_id)?;
+                self.resume_task(&id)?;
+                self.emit(
+                    session_id,
+                    Some(run_id),
+                    Some(turn_id),
+                    KnownPayload::TaskUpdated(TaskUpdated {
+                        task_id: id.clone(),
+                    }),
+                )?;
+                Ok(format!("resumed task {id}"))
+            }
+            "delete" => {
+                let id = require_task_id(task_id)?;
+                if !self.store.delete_task(&id)? {
+                    return Err(BloraError::Other(format!(
+                        "task {id} cannot be deleted while running"
+                    )));
+                }
+                self.emit(
+                    session_id,
+                    Some(run_id),
+                    Some(turn_id),
+                    KnownPayload::TaskDeleted(TaskDeleted {
+                        task_id: id.clone(),
+                    }),
+                )?;
+                Ok(format!("deleted task {id}"))
+            }
+            "run_now" => {
+                let id = require_task_id(task_id)?;
+                if !self.store.run_task_now(&id, Utc::now())? {
+                    return Err(BloraError::Other(format!("task {id} cannot run now")));
+                }
+                self.emit(
+                    session_id,
+                    Some(run_id),
+                    Some(turn_id),
+                    KnownPayload::TaskUpdated(TaskUpdated {
+                        task_id: id.clone(),
+                    }),
+                )?;
+                Ok(format!("queued task {id} to run now"))
+            }
+            other => Err(BloraError::Other(format!(
+                "unknown schedule action: {other}"
+            ))),
+        }
     }
 
     pub fn pause_task(&self, task_id: &TaskId) -> Result<()> {

@@ -231,6 +231,16 @@ pub struct TaskCreated {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TaskUpdated {
+    pub task_id: TaskId,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TaskDeleted {
+    pub task_id: TaskId,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TaskStarted {
     pub task_id: TaskId,
 }
@@ -380,6 +390,22 @@ pub struct ArtifactCreated {
     pub artifact_id: ArtifactId,
     pub kind: String,
     pub path: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ArtifactUpdated {
+    pub artifact_id: ArtifactId,
+    pub version: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ArtifactDeleted {
+    pub artifact_id: ArtifactId,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ArtifactPresented {
+    pub artifact_id: ArtifactId,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -570,6 +596,8 @@ pub enum KnownPayload {
     ApprovalResolved(ApprovalResolved),
     PolicyDenied(PolicyDenied),
     TaskCreated(TaskCreated),
+    TaskUpdated(TaskUpdated),
+    TaskDeleted(TaskDeleted),
     TaskStarted(TaskStarted),
     TaskProgress(TaskProgress),
     TaskCompleted(TaskCompleted),
@@ -590,6 +618,9 @@ pub enum KnownPayload {
     RoutingChanged(RoutingChanged),
     UsageRecorded(UsageRecorded),
     ArtifactCreated(ArtifactCreated),
+    ArtifactUpdated(ArtifactUpdated),
+    ArtifactDeleted(ArtifactDeleted),
+    ArtifactPresented(ArtifactPresented),
     CheckpointCreated(CheckpointCreated),
     PlanUpdated(PlanUpdated),
     SessionCwdChanged(SessionCwdChanged),
@@ -635,6 +666,8 @@ impl KnownPayload {
             Self::ApprovalResolved(_) => "approval.resolved",
             Self::PolicyDenied(_) => "policy.denied",
             Self::TaskCreated(_) => "task.created",
+            Self::TaskUpdated(_) => "task.updated",
+            Self::TaskDeleted(_) => "task.deleted",
             Self::TaskStarted(_) => "task.started",
             Self::TaskProgress(_) => "task.progress",
             Self::TaskCompleted(_) => "task.completed",
@@ -655,6 +688,9 @@ impl KnownPayload {
             Self::RoutingChanged(_) => "routing.changed",
             Self::UsageRecorded(_) => "usage.recorded",
             Self::ArtifactCreated(_) => "artifact.created",
+            Self::ArtifactUpdated(_) => "artifact.updated",
+            Self::ArtifactDeleted(_) => "artifact.deleted",
+            Self::ArtifactPresented(_) => "artifact.presented",
             Self::CheckpointCreated(_) => "checkpoint.created",
             Self::PlanUpdated(_) => "plan.updated",
             Self::SessionCwdChanged(_) => "session.cwd.changed",
@@ -684,6 +720,8 @@ impl KnownPayload {
             Self::ToolDiscovered(_) => Actor::System,
             Self::TaskCreated(_)
             | Self::TaskStarted(_)
+            | Self::TaskUpdated(_)
+            | Self::TaskDeleted(_)
             | Self::TaskProgress(_)
             | Self::TaskCompleted(_)
             | Self::TaskFailed(_)
@@ -731,6 +769,8 @@ impl KnownPayload {
             Self::ApprovalResolved(v) => serde_json::to_value(v),
             Self::PolicyDenied(v) => serde_json::to_value(v),
             Self::TaskCreated(v) => serde_json::to_value(v),
+            Self::TaskUpdated(v) => serde_json::to_value(v),
+            Self::TaskDeleted(v) => serde_json::to_value(v),
             Self::TaskStarted(v) => serde_json::to_value(v),
             Self::TaskProgress(v) => serde_json::to_value(v),
             Self::TaskCompleted(v) => serde_json::to_value(v),
@@ -751,6 +791,9 @@ impl KnownPayload {
             Self::RoutingChanged(v) => serde_json::to_value(v),
             Self::UsageRecorded(v) => serde_json::to_value(v),
             Self::ArtifactCreated(v) => serde_json::to_value(v),
+            Self::ArtifactUpdated(v) => serde_json::to_value(v),
+            Self::ArtifactDeleted(v) => serde_json::to_value(v),
+            Self::ArtifactPresented(v) => serde_json::to_value(v),
             Self::CheckpointCreated(v) => serde_json::to_value(v),
             Self::PlanUpdated(v) => serde_json::to_value(v),
             Self::SessionCwdChanged(v) => serde_json::to_value(v),
@@ -797,6 +840,8 @@ impl KnownPayload {
             "approval.resolved" => Self::ApprovalResolved(from_value(value)?),
             "policy.denied" => Self::PolicyDenied(from_value(value)?),
             "task.created" => Self::TaskCreated(from_value(value)?),
+            "task.updated" => Self::TaskUpdated(from_value(value)?),
+            "task.deleted" => Self::TaskDeleted(from_value(value)?),
             "task.started" => Self::TaskStarted(from_value(value)?),
             "task.progress" => Self::TaskProgress(from_value(value)?),
             "task.completed" => Self::TaskCompleted(from_value(value)?),
@@ -817,6 +862,9 @@ impl KnownPayload {
             "routing.changed" => Self::RoutingChanged(from_value(value)?),
             "usage.recorded" => Self::UsageRecorded(from_value(value)?),
             "artifact.created" => Self::ArtifactCreated(from_value(value)?),
+            "artifact.updated" => Self::ArtifactUpdated(from_value(value)?),
+            "artifact.deleted" => Self::ArtifactDeleted(from_value(value)?),
+            "artifact.presented" => Self::ArtifactPresented(from_value(value)?),
             "checkpoint.created" => Self::CheckpointCreated(from_value(value)?),
             "plan.updated" => Self::PlanUpdated(from_value(value)?),
             "session.cwd.changed" => Self::SessionCwdChanged(from_value(value)?),

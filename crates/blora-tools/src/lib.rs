@@ -5,10 +5,14 @@
 
 use blora_content::{ContentPart, ImageData, ImageDetail, ToolOutcome};
 use blora_context::read_skill;
-use blora_exec::{AttachmentStore, LocalBackend, ShellKind, image_mime_for};
+use blora_exec::{
+    AttachmentStore, GrepOptions, LocalBackend, OutputMode, ShellKind, image_mime_for,
+};
 use blora_imagine::{self, permission_path};
 use blora_types::{BloraError, Mode, Result};
 use serde_json::{Value, json};
+
+mod notebook;
 
 #[derive(Clone, Debug)]
 pub struct ToolSpec {
@@ -87,6 +91,72 @@ impl ToolRegistry {
                         "path": {"type": "string"},
                         "include": {"type": "string", "description": "Glob filter on file paths, e.g. *.rs"},
                         "max_results": {"type": "integer", "minimum": 1, "maximum": 1000}
+                    },
+                    "required": ["pattern"]
+                }),
+                read_only: true,
+            },
+            ToolSpec {
+                name: "artifact",
+                description: "Create and manage user-visible artifacts (Markdown, HTML, JSON, CSV, text, images). Actions: create, read, update, delete, list, present. Content is stored under .blora/artifacts/ and the event log keeps a reference.",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": ["create", "read", "update", "delete", "list", "present"]},
+                        "id": {"type": "string"},
+                        "kind": {"type": "string", "enum": ["text", "markdown", "html", "json", "csv", "image"]},
+                        "title": {"type": "string"},
+                        "content": {"type": "string"},
+                        "path": {"type": "string", "description": "Existing file to copy into the artifact on create"},
+                        "mime": {"type": "string"},
+                        "metadata": {"type": "object"}
+                    },
+                    "required": ["action"]
+                }),
+                read_only: false,
+            },
+            ToolSpec {
+                name: "notebook_edit",
+                description: "Read or edit Jupyter notebooks (.ipynb) without executing them. Actions: read, insert, replace, delete, move, edit. Edits clear code cell outputs and execution_count.",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "action": {"type": "string", "enum": ["read", "insert", "replace", "delete", "move", "edit"]},
+                        "cell_id": {"type": "string"},
+                        "index": {"type": "integer", "minimum": 0},
+                        "cell_type": {"type": "string", "enum": ["code", "markdown", "raw"]},
+                        "source": {"type": "string"},
+                        "old_string": {"type": "string"},
+                        "new_string": {"type": "string"},
+                        "to": {"type": "integer", "minimum": 0}
+                    },
+                    "required": ["path", "action"]
+                }),
+                read_only: false,
+            },
+            ToolSpec {
+                name: "grep",
+                description: "Search file contents with regex or fixed strings. Supports context lines, smart case, multiline, file type filters, gitignore-aware walking, and content/files_with_matches/count output modes.",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "pattern": {"type": "string"},
+                        "path": {"type": "string", "default": "."},
+                        "include": {"type": "string", "description": "Glob of files to include"},
+                        "exclude": {"type": "string", "description": "Glob of files to exclude"},
+                        "case_sensitive": {"type": "boolean"},
+                        "smart_case": {"type": "boolean", "default": true},
+                        "fixed_strings": {"type": "boolean"},
+                        "multiline": {"type": "boolean"},
+                        "context": {"type": "integer", "minimum": 0, "maximum": 20},
+                        "before": {"type": "integer", "minimum": 0, "maximum": 20},
+                        "after": {"type": "integer", "minimum": 0, "maximum": 20},
+                        "output_mode": {"type": "string", "enum": ["content", "files_with_matches", "count"]},
+                        "type": {"type": "string", "description": "rust, ts, js, py, go, java, json, md, yaml, toml, sh, html, css"},
+                        "max_results": {"type": "integer", "minimum": 1, "maximum": 2000},
+                        "hidden": {"type": "boolean"},
+                        "no_ignore": {"type": "boolean"}
                     },
                     "required": ["pattern"]
                 }),
@@ -177,6 +247,24 @@ impl ToolRegistry {
                         "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600}
                     },
                     "required": ["command"]
+                }),
+                read_only: false,
+            },
+            ToolSpec {
+                name: "schedule",
+                description: "Manage durable scheduled tasks. Actions: create, list, get, update, pause, resume, delete, run_now. create accepts prompt plus cron or delay_seconds; update accepts title, prompt, cron, max_attempts.",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": ["create", "list", "get", "update", "pause", "resume", "delete", "run_now"]},
+                        "task_id": {"type": "string"},
+                        "title": {"type": "string"},
+                        "prompt": {"type": "string"},
+                        "cron": {"type": "string", "description": "Five-field cron expression"},
+                        "delay_seconds": {"type": "integer", "minimum": 0},
+                        "max_attempts": {"type": "integer", "minimum": 1, "maximum": 10}
+                    },
+                    "required": ["action"]
                 }),
                 read_only: false,
             },
@@ -544,9 +632,12 @@ impl ToolRegistry {
             Mode::Imagine => name == "generate_image",
             Mode::Code => !matches!(
                 name,
-                "generate_image" | "schedule_task" | "skill_manage" | "session_search"
+                "generate_image" | "schedule_task" | "schedule" | "skill_manage" | "session_search"
             ),
-            Mode::Work => !matches!(name, "generate_image" | "skill_manage" | "session_search"),
+            Mode::Work => !matches!(
+                name,
+                "generate_image" | "skill_manage" | "session_search" | "notebook_edit"
+            ),
             Mode::Agent => name != "generate_image",
         }
     }
@@ -621,6 +712,48 @@ impl ToolRegistry {
                     .and_then(Value::as_u64)
                     .map_or(80, |n| n as usize),
             ),
+            "notebook_edit" => notebook::execute(backend, arguments),
+            "grep" => {
+                let output_mode = match optional_str(arguments, "output_mode").unwrap_or("content")
+                {
+                    "files_with_matches" => OutputMode::FilesWithMatches,
+                    "count" => OutputMode::Count,
+                    _ => OutputMode::Content,
+                };
+                backend.grep(&GrepOptions {
+                    pattern: required_str(arguments, "pattern")?.to_owned(),
+                    path: optional_str(arguments, "path").unwrap_or(".").to_owned(),
+                    include: optional_str(arguments, "include").map(str::to_owned),
+                    exclude: optional_str(arguments, "exclude").map(str::to_owned),
+                    case_sensitive: arguments.get("case_sensitive").and_then(Value::as_bool),
+                    smart_case: arguments
+                        .get("smart_case")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(true),
+                    fixed_strings: optional_bool(arguments, "fixed_strings"),
+                    multiline: optional_bool(arguments, "multiline"),
+                    context: arguments
+                        .get("context")
+                        .and_then(Value::as_u64)
+                        .map(|value| value as usize),
+                    before: arguments
+                        .get("before")
+                        .and_then(Value::as_u64)
+                        .map(|value| value as usize),
+                    after: arguments
+                        .get("after")
+                        .and_then(Value::as_u64)
+                        .map(|value| value as usize),
+                    output_mode,
+                    file_type: optional_str(arguments, "type").map(str::to_owned),
+                    max_results: arguments
+                        .get("max_results")
+                        .and_then(Value::as_u64)
+                        .map_or(200, |value| value as usize),
+                    hidden: optional_bool(arguments, "hidden"),
+                    no_ignore: optional_bool(arguments, "no_ignore"),
+                })
+            }
             "glob" => backend.glob(
                 required_str(arguments, "pattern")?,
                 optional_str(arguments, "path"),
