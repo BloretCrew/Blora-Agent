@@ -32,7 +32,7 @@ pub use host::{
     HostShell, command, host_shell, open_url, path_is_absolute, quote, shell_command, terminate_pid,
 };
 pub use isolation::{Isolation, remote_command, remote_host, remote_root};
-pub use process::{ProcessInfo, process_infos};
+pub use process::{ProcessInfo, kill_process, process_infos};
 pub use worktree::WorktreeHandle;
 
 const MAX_FILE_BYTES: usize = 1_000_000;

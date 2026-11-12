@@ -25,7 +25,7 @@ use blora_auth::PassportConfig;
 use blora_runtime::{CancelToken, PermissionMode, RunOptions, Runtime};
 use blora_session::{TranscriptItem, format_routing_switch, relative_zh};
 use blora_storage::{CreateSession, CreateTask};
-use blora_types::{ApprovalId, Mode, SessionId, TaskId};
+use blora_types::{ApprovalId, Mode, SessionId, TaskId, TeamId, TeamTaskId};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
@@ -245,7 +245,9 @@ fn app(state: AppState) -> Router {
         .route("/api/sessions/{id}/workflows", get(session_workflows))
         .route("/api/sessions/{id}/teams", get(session_teams))
         .route("/api/teams/{id}/board", get(team_board))
+        .route("/api/teams/{id}/tasks/{task}/move", post(move_team_task))
         .route("/api/processes", get(list_processes))
+        .route("/api/processes/{id}/kill", post(kill_process))
         .route("/api/mcp/servers", get(mcp_servers))
         .route("/api/sessions/{id}/images/{name}", get(session_image))
         .route("/api/sessions/{id}/attachments", post(upload_attachment))
@@ -1017,6 +1019,34 @@ async fn team_board(
     })))
 }
 
+#[derive(Deserialize)]
+struct MoveTeamTaskRequest {
+    column_id: String,
+}
+
+async fn move_team_task(
+    State(state): State<AppState>,
+    _headers: HttpHeaderMap,
+    Path((id, task)): Path<(String, String)>,
+    Json(body): Json<MoveTeamTaskRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let team_id = TeamId::parse(&id).map_err(ApiError::from)?;
+    let task_id = TeamTaskId::parse(&task).map_err(ApiError::from)?;
+    let task = state
+        .runtime
+        .move_team_task(&team_id, &task_id, &body.column_id)
+        .map_err(ApiError::from)?;
+    Ok(Json(json!({
+        "task": {
+            "id": task.id,
+            "column_id": task.column_id,
+            "title": task.title,
+            "status": task.status,
+            "priority": task.priority,
+        }
+    })))
+}
+
 async fn list_processes(
     State(_state): State<AppState>,
     _headers: HttpHeaderMap,
@@ -1030,6 +1060,15 @@ async fn list_processes(
             "log_path": process.log_path,
         })).collect::<Vec<_>>()
     })))
+}
+
+async fn kill_process(
+    State(_state): State<AppState>,
+    _headers: HttpHeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let message = blora_exec::kill_process(&id).map_err(ApiError::from)?;
+    Ok(Json(json!({ "message": message })))
 }
 
 async fn mcp_servers(

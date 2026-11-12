@@ -486,6 +486,106 @@ function workPanel(title, rows) {
   return section;
 }
 
+function processPanel(processes) {
+  const section = document.createElement("section");
+  section.className = "ba-work-panel";
+  const heading = document.createElement("h3");
+  heading.textContent = "后台进程";
+  const list = document.createElement("ul");
+  for (const process of processes.slice(0, 12)) {
+    const item = document.createElement("li");
+    const label = document.createElement("span");
+    label.textContent = `${process.status} ${process.command}`;
+    const kill = document.createElement("button");
+    kill.type = "button";
+    kill.className = "ba-work-action";
+    kill.textContent = "终止";
+    kill.addEventListener("click", async () => {
+      kill.disabled = true;
+      try {
+        await api(`/api/processes/${encodeURIComponent(process.id)}/kill`, {
+          method: "POST",
+          body: "{}",
+        });
+        await refreshWorkPanels();
+      } catch (error) {
+        kill.textContent = "失败";
+        kill.title = String(error);
+      }
+    });
+    item.append(label, kill);
+    list.append(item);
+  }
+  section.append(heading, list);
+  return section;
+}
+
+async function teamBoardPanel(team) {
+  const board = await api(`/api/teams/${encodeURIComponent(team.id)}/board`);
+  const section = document.createElement("section");
+  section.className = "ba-work-panel ba-team-board";
+  const heading = document.createElement("h3");
+  heading.textContent = `团队 · ${team.name}`;
+  const kanban = document.createElement("div");
+  kanban.className = "ba-kanban";
+  const byColumn = new Map((board.columns || []).map((column) => [column.id, []]));
+  for (const task of board.tasks || []) {
+    const bucket = task.column_id ? byColumn.get(task.column_id) : null;
+    (bucket || []).push(task);
+  }
+  for (const column of board.columns || []) {
+    const lane = document.createElement("div");
+    lane.className = "ba-kanban-column";
+    lane.dataset.columnId = column.id;
+    const title = document.createElement("header");
+    title.textContent = `${column.name} · ${(byColumn.get(column.id) || []).length}`;
+    lane.append(title);
+    for (const task of byColumn.get(column.id) || []) {
+      const card = document.createElement("article");
+      card.className = "ba-kanban-card";
+      card.draggable = true;
+      card.dataset.taskId = task.id;
+      card.dataset.status = task.status || "";
+      const name = document.createElement("strong");
+      name.textContent = task.title;
+      const meta = document.createElement("small");
+      meta.textContent = [task.status, task.assignee].filter(Boolean).join(" · ");
+      card.append(name, meta);
+      card.addEventListener("dragstart", (event) => {
+        event.dataTransfer.setData("text/plain", task.id);
+        event.dataTransfer.effectAllowed = "move";
+      });
+      lane.append(card);
+    }
+    lane.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      lane.classList.add("ba-kanban-drop");
+    });
+    lane.addEventListener("dragleave", () => lane.classList.remove("ba-kanban-drop"));
+    lane.addEventListener("drop", async (event) => {
+      event.preventDefault();
+      lane.classList.remove("ba-kanban-drop");
+      const taskId = event.dataTransfer.getData("text/plain");
+      if (!taskId) return;
+      try {
+        await api(
+          `/api/teams/${encodeURIComponent(team.id)}/tasks/${encodeURIComponent(taskId)}/move`,
+          {
+            method: "POST",
+            body: JSON.stringify({ column_id: column.id }),
+          },
+        );
+        await refreshWorkPanels();
+      } catch (_) {
+        await refreshWorkPanels();
+      }
+    });
+    kanban.append(lane);
+  }
+  section.append(heading, kanban);
+  return section;
+}
+
 async function refreshWorkPanels() {
   const host = document.querySelector("#work-panels");
   if (!host) return;
@@ -511,10 +611,14 @@ async function refreshWorkPanels() {
       sections.push(workPanel("工作流", workflows.workflows.map((workflow) => `${workflow.status} ${workflow.name}`)));
     }
     if (teams.teams && teams.teams.length) {
-      sections.push(workPanel("团队", teams.teams.map((team) => team.name)));
+      try {
+        sections.push(await teamBoardPanel(teams.teams[0]));
+      } catch (_) {
+        sections.push(workPanel("团队", teams.teams.map((team) => team.name)));
+      }
     }
     if (processes.processes && processes.processes.length) {
-      sections.push(workPanel("后台进程", processes.processes.map((process) => `${process.status} ${process.command}`)));
+      sections.push(processPanel(processes.processes));
     }
     if (mcp.servers && mcp.servers.length) {
       sections.push(workPanel("MCP", mcp.servers.map((server) => `${server} · ${mcp.tools} tools`)));

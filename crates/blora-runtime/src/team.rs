@@ -24,6 +24,30 @@ impl Runtime {
         ))
     }
 
+    pub fn move_team_task(
+        &self,
+        team_id: &TeamId,
+        task_id: &TeamTaskId,
+        column_id: &str,
+    ) -> Result<TeamTaskRecord> {
+        let task = self.require_team_task(task_id)?;
+        if &task.team_id != team_id {
+            return Err(BloraError::Other(format!(
+                "task {task_id} does not belong to team {team_id}"
+            )));
+        }
+        let column = self
+            .store
+            .list_team_columns(team_id)?
+            .into_iter()
+            .find(|column| column.id == column_id)
+            .ok_or_else(|| BloraError::Other(format!("unknown column: {column_id}")))?;
+        let status = column.name.to_ascii_lowercase().replace(' ', "_");
+        self.store
+            .set_team_task_status(task_id, &status, Some(column_id), None, None, None)?;
+        self.require_team_task(task_id)
+    }
+
     pub(crate) fn team_tool(
         &self,
         session_id: &SessionId,
@@ -576,4 +600,109 @@ fn format_team_task(task: &TeamTaskRecord) -> String {
         "review_state": task.review_state,
     })
     .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use blora_storage::SqliteStore;
+
+    #[test]
+    fn move_team_task_updates_column_and_status() {
+        let runtime = Runtime::new(SqliteStore::open_in_memory().unwrap());
+        let team_id = TeamId::generate();
+        let now = Utc::now();
+        runtime
+            .store
+            .insert_team(&TeamRecord {
+                id: team_id.clone(),
+                workspace_path: "/tmp".to_owned(),
+                name: "Board".to_owned(),
+                description: None,
+                created_at: now,
+                updated_at: now,
+            })
+            .unwrap();
+        runtime
+            .store
+            .insert_team_column(&TeamColumnRecord {
+                id: "col_progress".to_owned(),
+                team_id: team_id.clone(),
+                name: "In Progress".to_owned(),
+                position: 1,
+                wip_limit: None,
+            })
+            .unwrap();
+        let task_id = TeamTaskId::generate();
+        runtime
+            .store
+            .insert_team_task(&TeamTaskRecord {
+                id: task_id.clone(),
+                team_id: team_id.clone(),
+                column_id: None,
+                title: "Ship it".to_owned(),
+                description: None,
+                status: "backlog".to_owned(),
+                priority: 1,
+                assignee_agent_id: None,
+                depends_on_json: None,
+                blocked_reason: None,
+                review_state: None,
+                heartbeat_at: None,
+                created_at: now,
+                updated_at: now,
+                completed_at: None,
+            })
+            .unwrap();
+        let moved = runtime
+            .move_team_task(&team_id, &task_id, "col_progress")
+            .unwrap();
+        assert_eq!(moved.column_id.as_deref(), Some("col_progress"));
+        assert_eq!(moved.status, "in_progress");
+    }
+
+    #[test]
+    fn move_team_task_rejects_foreign_team() {
+        let runtime = Runtime::new(SqliteStore::open_in_memory().unwrap());
+        let team_id = TeamId::generate();
+        let other = TeamId::generate();
+        let now = Utc::now();
+        runtime
+            .store
+            .insert_team(&TeamRecord {
+                id: other.clone(),
+                workspace_path: "/tmp".to_owned(),
+                name: "Other".to_owned(),
+                description: None,
+                created_at: now,
+                updated_at: now,
+            })
+            .unwrap();
+        let task_id = TeamTaskId::generate();
+        runtime
+            .store
+            .insert_team_task(&TeamTaskRecord {
+                id: task_id.clone(),
+                team_id: other,
+                column_id: None,
+                title: "Foreign".to_owned(),
+                description: None,
+                status: "backlog".to_owned(),
+                priority: 0,
+                assignee_agent_id: None,
+                depends_on_json: None,
+                blocked_reason: None,
+                review_state: None,
+                heartbeat_at: None,
+                created_at: now,
+                updated_at: now,
+                completed_at: None,
+            })
+            .unwrap();
+        assert!(
+            runtime
+                .move_team_task(&team_id, &task_id, "col_progress")
+                .is_err()
+        );
+    }
 }

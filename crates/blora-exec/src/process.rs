@@ -85,6 +85,24 @@ pub fn process_infos() -> Vec<ProcessInfo> {
         .collect()
 }
 
+pub fn kill_process(key: &str) -> Result<String> {
+    let record =
+        record_for(key).ok_or_else(|| BloraError::Policy(format!("unknown process: {key}")))?;
+    let pid = record
+        .lock()
+        .map_err(|_| BloraError::Exec("process record is poisoned".to_owned()))?
+        .pid;
+    let status = terminate_pid(pid).map_err(BloraError::exec)?;
+    if let Ok(mut record) = record.lock() {
+        record.status = "killed".to_owned();
+    }
+    if status.success() {
+        Ok(format!("killed {key} (pid {pid})"))
+    } else {
+        Err(BloraError::Exec(format!("kill {key} failed")))
+    }
+}
+
 impl LocalBackend {
     pub fn shell_background(&self, command: &str) -> Result<String> {
         self.policy().require(
@@ -259,21 +277,7 @@ impl LocalBackend {
     pub fn process_kill(&self, key: &str) -> Result<String> {
         self.policy()
             .require(self.policy().shell(), &format!("process_kill {key}"))?;
-        let record =
-            record_for(key).ok_or_else(|| BloraError::Policy(format!("unknown process: {key}")))?;
-        let pid = record
-            .lock()
-            .map_err(|_| BloraError::Exec("process record is poisoned".to_owned()))?
-            .pid;
-        let status = terminate_pid(pid).map_err(BloraError::exec)?;
-        if let Ok(mut record) = record.lock() {
-            record.status = "killed".to_owned();
-        }
-        if status.success() {
-            Ok(format!("killed {key} (pid {pid})"))
-        } else {
-            Err(BloraError::Exec(format!("kill {key} failed")))
-        }
+        kill_process(key)
     }
 }
 
