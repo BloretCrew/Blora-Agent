@@ -95,6 +95,28 @@ pub struct TeamTaskRecord {
     pub completed_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Clone, Debug)]
+pub struct WorkflowRecord {
+    pub id: blora_types::WorkflowId,
+    pub session_id: SessionId,
+    pub name: String,
+    pub definition_json: String,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug)]
+pub struct WorkflowRunRecord {
+    pub id: blora_types::WorkflowRunId,
+    pub workflow_id: blora_types::WorkflowId,
+    pub status: String,
+    pub current_step: i64,
+    pub state_json: String,
+    pub started_at: DateTime<Utc>,
+    pub finished_at: Option<DateTime<Utc>>,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct UsageTotals {
     pub input_tokens: u64,
@@ -282,6 +304,11 @@ impl SqliteStore {
             params![now],
         )
         .map_err(BloraError::storage)?;
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (17, ?1)",
+            params![now],
+        )
+        .map_err(BloraError::storage)?;
         Ok(Self {
             conn: Mutex::new(conn),
             clock: SystemClock,
@@ -289,7 +316,7 @@ impl SqliteStore {
     }
 
     /// Current storage schema version written by this build.
-    pub const STORE_VERSION: u32 = 16;
+    pub const STORE_VERSION: u32 = 17;
 
     pub fn queue_steer(&self, session_id: &SessionId, message: &str) -> Result<()> {
         let conn = self.lock();
@@ -1603,6 +1630,150 @@ impl SqliteStore {
         Ok(())
     }
 
+    pub fn insert_workflow(&self, workflow: &WorkflowRecord) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "INSERT INTO workflows (id, session_id, name, definition_json, status, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                workflow.id.as_str(),
+                workflow.session_id.as_str(),
+                workflow.name,
+                workflow.definition_json,
+                workflow.status,
+                workflow.created_at.to_rfc3339(),
+                workflow.updated_at.to_rfc3339()
+            ],
+        )
+        .map_err(BloraError::storage)?;
+        Ok(())
+    }
+
+    pub fn list_workflows(&self, session_id: &SessionId) -> Result<Vec<WorkflowRecord>> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, session_id, name, definition_json, status, created_at, updated_at
+                 FROM workflows WHERE session_id = ?1 ORDER BY created_at DESC",
+            )
+            .map_err(BloraError::storage)?;
+        let rows = stmt
+            .query_map(params![session_id.as_str()], workflow_row)
+            .map_err(BloraError::storage)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row_to_workflow(row.map_err(BloraError::storage)?)?);
+        }
+        Ok(out)
+    }
+
+    pub fn get_workflow(&self, id: &blora_types::WorkflowId) -> Result<Option<WorkflowRecord>> {
+        let conn = self.lock();
+        conn.query_row(
+            "SELECT id, session_id, name, definition_json, status, created_at, updated_at
+             FROM workflows WHERE id = ?1",
+            params![id.as_str()],
+            workflow_row,
+        )
+        .optional()
+        .map_err(BloraError::storage)?
+        .map(row_to_workflow)
+        .transpose()
+    }
+
+    pub fn delete_workflow(&self, id: &blora_types::WorkflowId) -> Result<bool> {
+        let conn = self.lock();
+        conn.execute(
+            "DELETE FROM workflow_runs WHERE workflow_id = ?1",
+            params![id.as_str()],
+        )
+        .map_err(BloraError::storage)?;
+        let changed = conn
+            .execute("DELETE FROM workflows WHERE id = ?1", params![id.as_str()])
+            .map_err(BloraError::storage)?;
+        Ok(changed > 0)
+    }
+
+    pub fn insert_workflow_run(&self, run: &WorkflowRunRecord) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "INSERT INTO workflow_runs
+             (id, workflow_id, status, current_step, state_json, started_at, finished_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                run.id.as_str(),
+                run.workflow_id.as_str(),
+                run.status,
+                run.current_step,
+                run.state_json,
+                run.started_at.to_rfc3339(),
+                run.finished_at.map(|time| time.to_rfc3339())
+            ],
+        )
+        .map_err(BloraError::storage)?;
+        Ok(())
+    }
+
+    pub fn get_workflow_run(
+        &self,
+        id: &blora_types::WorkflowRunId,
+    ) -> Result<Option<WorkflowRunRecord>> {
+        let conn = self.lock();
+        conn.query_row(
+            "SELECT id, workflow_id, status, current_step, state_json, started_at, finished_at
+             FROM workflow_runs WHERE id = ?1",
+            params![id.as_str()],
+            workflow_run_row,
+        )
+        .optional()
+        .map_err(BloraError::storage)?
+        .map(row_to_workflow_run)
+        .transpose()
+    }
+
+    pub fn latest_workflow_run(
+        &self,
+        workflow_id: &blora_types::WorkflowId,
+    ) -> Result<Option<WorkflowRunRecord>> {
+        let conn = self.lock();
+        conn.query_row(
+            "SELECT id, workflow_id, status, current_step, state_json, started_at, finished_at
+             FROM workflow_runs WHERE workflow_id = ?1 ORDER BY started_at DESC LIMIT 1",
+            params![workflow_id.as_str()],
+            workflow_run_row,
+        )
+        .optional()
+        .map_err(BloraError::storage)?
+        .map(row_to_workflow_run)
+        .transpose()
+    }
+
+    pub fn update_workflow_run(
+        &self,
+        id: &blora_types::WorkflowRunId,
+        status: &str,
+        current_step: i64,
+        state_json: &str,
+        finished: bool,
+    ) -> Result<bool> {
+        let conn = self.lock();
+        let now = Utc::now().to_rfc3339();
+        let changed = conn
+            .execute(
+                "UPDATE workflow_runs SET status = ?2, current_step = ?3, state_json = ?4,
+                    finished_at = ?5 WHERE id = ?1",
+                params![
+                    id.as_str(),
+                    status,
+                    current_step,
+                    state_json,
+                    finished.then(|| now.clone())
+                ],
+            )
+            .map_err(BloraError::storage)?;
+        Ok(changed > 0)
+    }
+
     fn list_agents_filtered(
         &self,
         agent_id: Option<&AgentId>,
@@ -2104,6 +2275,60 @@ fn row_to_team_task(row: TeamTaskRow) -> Result<TeamTaskRecord> {
         created_at: parse_time(&created_at)?,
         updated_at: parse_time(&updated_at)?,
         completed_at: completed_at.map(|value| parse_time(&value)).transpose()?,
+    })
+}
+
+type WorkflowRow = (String, String, String, String, String, String, String);
+
+fn workflow_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowRow> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+        row.get(6)?,
+    ))
+}
+
+fn row_to_workflow(row: WorkflowRow) -> Result<WorkflowRecord> {
+    let (id, session_id, name, definition_json, status, created_at, updated_at) = row;
+    Ok(WorkflowRecord {
+        id: blora_types::WorkflowId::parse(&id)?,
+        session_id: SessionId::parse(&session_id)?,
+        name,
+        definition_json,
+        status,
+        created_at: parse_time(&created_at)?,
+        updated_at: parse_time(&updated_at)?,
+    })
+}
+
+type WorkflowRunRow = (String, String, String, i64, String, String, Option<String>);
+
+fn workflow_run_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowRunRow> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+        row.get(6)?,
+    ))
+}
+
+fn row_to_workflow_run(row: WorkflowRunRow) -> Result<WorkflowRunRecord> {
+    let (id, workflow_id, status, current_step, state_json, started_at, finished_at) = row;
+    Ok(WorkflowRunRecord {
+        id: blora_types::WorkflowRunId::parse(&id)?,
+        workflow_id: blora_types::WorkflowId::parse(&workflow_id)?,
+        status,
+        current_step,
+        state_json,
+        started_at: parse_time(&started_at)?,
+        finished_at: finished_at.map(|value| parse_time(&value)).transpose()?,
     })
 }
 

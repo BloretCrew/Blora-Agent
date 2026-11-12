@@ -397,6 +397,22 @@ impl ToolRegistry {
                 read_only: false,
             },
             ToolSpec {
+                name: "workflow",
+                description: "Manage explicit multi-step workflows. create stores a definition {steps:[...]}; start creates a run; status shows the current step; advance moves to the next step (optionally recording a result); cancel/delete manage the workflow.",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": ["create", "start", "status", "list", "advance", "cancel", "delete"]},
+                        "workflow_id": {"type": "string"},
+                        "name": {"type": "string"},
+                        "definition": {"type": "object", "description": "{\"steps\": [...]} or an array"},
+                        "result": {"description": "Optional result to record when advancing"}
+                    },
+                    "required": ["action"]
+                }),
+                read_only: false,
+            },
+            ToolSpec {
                 name: "goal",
                 description: "Manage goals: propose, get, list, update, approve, reject. Goals are durable per session.",
                 parameters: json!({
@@ -867,6 +883,7 @@ impl ToolRegistry {
                     | "team_task"
                     | "browser"
                     | "computer"
+                    | "workflow"
                     | "edit_image"
                     | "generate_video"
                     | "text_to_speech"

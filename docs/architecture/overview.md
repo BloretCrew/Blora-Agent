@@ -50,7 +50,7 @@ Blora Agent 是从零实现的本地优先 harness。第一阶段是单用户模
 - MCP：多服务器配置文件、`mcp__{server}__{tool}` 命名空间、stdio/HTTP 传输，以及 resources/prompts 工具
 - LSP：`lsp` 工具提供 diagnostics/hover/definition/references/symbols，按语言与项目根惰性启动服务器
 - 子代理：`subagent` 工具支持后台 spawn、list、send、wait、close、status；`Runtime` 共享状态可克隆，后台线程独立运行
-- 目标与团队：`goal`、`team`、`team_task` 工具提供目标跟踪与工作区级 Kanban 任务板，`team dispatch` 可把 ready 任务派给后台子代理
+- 目标、团队与工作流：`goal`、`team`、`team_task`、`workflow` 工具提供目标跟踪、工作区 Kanban 和显式多步流程
 - 程序化工具调用：`execute_code` 运行 Python/JavaScript，通过 loopback 桥回调 Blora 工具
 - 浏览器：`browser` 工具通过原生 CDP 驱动 headless Chrome，支持导航、快照、点击、输入、滚动与截图
 - 桌面控制：`computer` 工具通过 xdotool/scrot 等系统命令截图与操作桌面，默认关闭并加审批

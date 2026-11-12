@@ -19,7 +19,7 @@ pub use error::{BloraError, Result};
 pub use harness::HarnessKind;
 pub use id::{
     AgentId, ApprovalId, ArtifactId, CheckpointId, EventId, GoalId, RunId, SessionId, TaskId,
-    TeamId, TeamTaskId, TurnId, WorkspaceId,
+    TeamId, TeamTaskId, TurnId, WorkflowId, WorkflowRunId, WorkspaceId,
 };
 pub use mode::Mode;
 pub use status::{RunStatus, SessionStatus, TaskStatus};

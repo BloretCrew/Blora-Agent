@@ -2351,6 +2351,7 @@ impl Runtime {
                 }
                 "execute_code" => self
                     .execute_code_tool(session_id, run_id, turn_id, &arguments, backend, options),
+                "workflow" => self.workflow_tool(session_id, run_id, turn_id, &arguments),
                 "goal" => self.goal_tool(session_id, run_id, turn_id, &arguments),
                 "team" => self.team_tool(session_id, run_id, turn_id, &arguments, options),
                 "team_task" => self.team_task_tool(session_id, run_id, turn_id, &arguments),
@@ -3037,6 +3038,7 @@ fn runtime_handled_tool(name: &str) -> bool {
             | "goal"
             | "team"
             | "team_task"
+            | "workflow"
             | "execute_code"
     )
 }
@@ -4365,6 +4367,68 @@ mod tests {
                 .unwrap()
                 .contains("# Mode: Code")
         );
+    }
+
+    #[test]
+    fn workflow_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = Runtime::new(SqliteStore::open_in_memory().unwrap());
+        let session = session(&runtime, Mode::Work, dir.path().to_str().unwrap());
+        Recorder::install(&runtime, vec![text_reply("ok", "stop")], None);
+        runtime
+            .run(&session, "init", &CancelToken::new(), &yolo())
+            .unwrap();
+        let run_id = runtime
+            .show_session(&session)
+            .unwrap()
+            .runs
+            .last()
+            .unwrap()
+            .id
+            .clone();
+        let turn_id = TurnId::generate();
+        runtime
+            .workflow_tool(
+                &session,
+                &run_id,
+                &turn_id,
+                &json!({
+                    "action":"create",
+                    "name":"W",
+                    "definition":{"steps":[{"tool":"read_file"},{"tool":"write_file"}]}
+                }),
+            )
+            .unwrap();
+        let id = runtime.store.list_workflows(&session).unwrap()[0]
+            .id
+            .clone();
+        let started = runtime
+            .workflow_tool(
+                &session,
+                &run_id,
+                &turn_id,
+                &json!({"action":"start","workflow_id":id}),
+            )
+            .unwrap();
+        assert!(started.contains("read_file"), "{started}");
+        let next = runtime
+            .workflow_tool(
+                &session,
+                &run_id,
+                &turn_id,
+                &json!({"action":"advance","workflow_id":id,"result":"done"}),
+            )
+            .unwrap();
+        assert!(next.contains("write_file"), "{next}");
+        let done = runtime
+            .workflow_tool(
+                &session,
+                &run_id,
+                &turn_id,
+                &json!({"action":"advance","workflow_id":id}),
+            )
+            .unwrap();
+        assert!(done.contains("completed"), "{done}");
     }
 
     #[test]

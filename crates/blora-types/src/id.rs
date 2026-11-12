@@ -66,6 +66,8 @@ prefixed_id!(ApprovalId, "apr");
 prefixed_id!(GoalId, "goal");
 prefixed_id!(TeamId, "team");
 prefixed_id!(TeamTaskId, "ttask");
+prefixed_id!(WorkflowId, "wf");
+prefixed_id!(WorkflowRunId, "wfr");
 prefixed_id!(ArtifactId, "art");
 prefixed_id!(CheckpointId, "chk");
 

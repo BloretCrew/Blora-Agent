@@ -22,5 +22,5 @@ pub use payload::{
     SubagentFailed, SubagentMessage, SubagentSpawned, TaskCompleted, TaskCreated, TaskDeleted,
     TaskFailed, TaskProgress, TaskStarted, TaskUpdated, TaskWakeup, TeamCreated, TeamTaskUpdated,
     ToolCompleted, ToolDiscovered, ToolFailed, ToolOutput, ToolRequested, ToolStarted,
-    UsageRecorded, UserInput,
+    UsageRecorded, UserInput, WorkflowUpdated,
 };

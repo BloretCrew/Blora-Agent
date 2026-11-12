@@ -23,6 +23,7 @@ mod session_mentions;
 mod skills;
 mod team;
 mod work;
+mod workflow;
 
 pub use agents::{MAX_RUNNING_CHILDREN, MAX_SUBAGENT_DEPTH, SUBAGENT_TURNS};
 pub use blora_exec::{GitIndicator, command, open_url};

@@ -435,6 +435,13 @@ pub struct TeamTaskUpdated {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WorkflowUpdated {
+    pub workflow_id: blora_types::WorkflowId,
+    pub status: String,
+    pub step: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CheckpointCreated {
     pub sequence: u64,
     pub note: Option<String>,
@@ -651,6 +658,7 @@ pub enum KnownPayload {
     GoalUpdated(GoalUpdated),
     TeamCreated(TeamCreated),
     TeamTaskUpdated(TeamTaskUpdated),
+    WorkflowUpdated(WorkflowUpdated),
     CheckpointCreated(CheckpointCreated),
     PlanUpdated(PlanUpdated),
     SessionCwdChanged(SessionCwdChanged),
@@ -725,6 +733,7 @@ impl KnownPayload {
             Self::GoalUpdated(_) => "goal.updated",
             Self::TeamCreated(_) => "team.created",
             Self::TeamTaskUpdated(_) => "team.task.updated",
+            Self::WorkflowUpdated(_) => "workflow.updated",
             Self::CheckpointCreated(_) => "checkpoint.created",
             Self::PlanUpdated(_) => "plan.updated",
             Self::SessionCwdChanged(_) => "session.cwd.changed",
@@ -832,6 +841,7 @@ impl KnownPayload {
             Self::GoalUpdated(v) => serde_json::to_value(v),
             Self::TeamCreated(v) => serde_json::to_value(v),
             Self::TeamTaskUpdated(v) => serde_json::to_value(v),
+            Self::WorkflowUpdated(v) => serde_json::to_value(v),
             Self::CheckpointCreated(v) => serde_json::to_value(v),
             Self::PlanUpdated(v) => serde_json::to_value(v),
             Self::SessionCwdChanged(v) => serde_json::to_value(v),
@@ -907,6 +917,7 @@ impl KnownPayload {
             "goal.updated" => Self::GoalUpdated(from_value(value)?),
             "team.created" => Self::TeamCreated(from_value(value)?),
             "team.task.updated" => Self::TeamTaskUpdated(from_value(value)?),
+            "workflow.updated" => Self::WorkflowUpdated(from_value(value)?),
             "checkpoint.created" => Self::CheckpointCreated(from_value(value)?),
             "plan.updated" => Self::PlanUpdated(from_value(value)?),
             "session.cwd.changed" => Self::SessionCwdChanged(from_value(value)?),

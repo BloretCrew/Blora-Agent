@@ -24,7 +24,7 @@ Blora 的 Code、Work、Agent 三种模式共用一个 Runtime 和同一套事�
 | `enter_plan_mode` / `exit_plan_mode`（会话级 plan mode） | ✓ | ✓ | ✓ |
 | `web_search`、`web_fetch`、`read_document` | ✓ | ✓ | ✓ |
 | `schedule` / `schedule_task` | | ✓ | ✓ |
-| `goal`、`team`、`team_task` | | ✓ | ✓ |
+| `goal`、`team`、`team_task`、`workflow` | | ✓ | ✓ |
 | `execute_code` | ✓ | | ✓ |
 | `browser` | | ✓ | ✓ |
 | `computer` | | | ✓ |

@@ -282,3 +282,25 @@ CREATE TABLE IF NOT EXISTS team_task_comments (
     created_at TEXT NOT NULL,
     FOREIGN KEY (task_id) REFERENCES team_tasks(id)
 );
+
+CREATE TABLE IF NOT EXISTS workflows (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    definition_json TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (session_id) REFERENCES sessions(id)
+);
+
+CREATE TABLE IF NOT EXISTS workflow_runs (
+    id TEXT PRIMARY KEY,
+    workflow_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    current_step INTEGER NOT NULL DEFAULT 0,
+    state_json TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    FOREIGN KEY (workflow_id) REFERENCES workflows(id)
+);
