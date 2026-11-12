@@ -316,6 +316,16 @@ pub const COMMANDS: &[SlashCommand] = &[
     cmd("files", &["ls"], "", "List workspace files", "git"),
     cmd("read", &[], "<path>", "Read a workspace file", "git"),
     cmd("artifacts", &[], "", "List session artifacts", "session"),
+    cmd("goals", &[], "", "List session goals", "session"),
+    cmd("workflows", &[], "", "List session workflows", "session"),
+    cmd("teams", &[], "", "List workspace teams", "session"),
+    cmd(
+        "processes",
+        &["procs"],
+        "",
+        "List tracked background processes",
+        "work",
+    ),
     cmd("pwd", &[], "", "Show workspace path", "session"),
     cmd(
         "doctor",

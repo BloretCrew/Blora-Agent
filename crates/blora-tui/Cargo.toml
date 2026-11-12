@@ -11,6 +11,7 @@ description = "Terminal interface for Blora Agent."
 blora-auth.workspace = true
 blora-harness.workspace = true
 blora-events.workspace = true
+blora-exec.workspace = true
 blora-catalog.workspace = true
 blora-context.workspace = true
 blora-model.workspace = true

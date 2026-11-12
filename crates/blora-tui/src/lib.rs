@@ -5438,10 +5438,75 @@ fn slash(
             }
         }
         "skills" => panel("skills", list_skills(workspace)),
-        "mcp" => SlashOutcome::Status(format!(
-            "BLORA_MCP_COMMAND={}",
-            env_flag("BLORA_MCP_COMMAND", "(unset)")
-        )),
+        "mcp" => match blora_runtime::McpManager::load(workspace) {
+            Some(manager) => {
+                let servers = manager.server_names();
+                if servers.is_empty() {
+                    SlashOutcome::Status("no MCP servers configured".to_owned())
+                } else {
+                    panel("mcp", servers.join("\n"))
+                }
+            }
+            None => SlashOutcome::Status("no MCP servers configured".to_owned()),
+        },
+        "goals" => match runtime.list_goals(session_id) {
+            Ok(rows) if rows.is_empty() => SlashOutcome::Status("no goals".to_owned()),
+            Ok(rows) => panel(
+                "goals",
+                rows.into_iter()
+                    .map(|row| {
+                        format!(
+                            "{}  {}  {}%  {}",
+                            row.id, row.status, row.progress, row.title
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            Err(err) => SlashOutcome::Status(err.to_string()),
+        },
+        "workflows" => match runtime.list_workflows(session_id) {
+            Ok(rows) if rows.is_empty() => SlashOutcome::Status("no workflows".to_owned()),
+            Ok(rows) => panel(
+                "workflows",
+                rows.into_iter()
+                    .map(|row| format!("{}  {}  {}", row.id, row.status, row.name))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            Err(err) => SlashOutcome::Status(err.to_string()),
+        },
+        "teams" => match runtime.list_teams(&workspace.to_string_lossy()) {
+            Ok(rows) if rows.is_empty() => SlashOutcome::Status("no teams".to_owned()),
+            Ok(rows) => panel(
+                "teams",
+                rows.into_iter()
+                    .map(|row| format!("{}  {}", row.id, row.name))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            Err(err) => SlashOutcome::Status(err.to_string()),
+        },
+        "processes" => {
+            let infos = blora_exec::process_infos();
+            if infos.is_empty() {
+                SlashOutcome::Status("no tracked processes".to_owned())
+            } else {
+                panel(
+                    "processes",
+                    infos
+                        .into_iter()
+                        .map(|process| {
+                            format!(
+                                "{}  pid {}  {}  {}",
+                                process.id, process.pid, process.status, process.command
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                )
+            }
+        }
         "agents" => match runtime.list_subagents(session_id) {
             Ok(rows) if rows.is_empty() => SlashOutcome::Status("no subagents".to_owned()),
             Ok(rows) => panel(

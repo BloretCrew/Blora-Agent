@@ -519,6 +519,7 @@ dependencies = [
  "blora-catalog",
  "blora-context",
  "blora-events",
+ "blora-exec",
  "blora-harness",
  "blora-model",
  "blora-policy",
