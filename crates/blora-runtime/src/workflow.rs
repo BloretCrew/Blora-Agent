@@ -2,12 +2,17 @@
 // Copyright (C) 2026 Blora Agent contributors
 
 use blora_events::{KnownPayload, WorkflowUpdated};
+use blora_exec::{Isolation, LocalBackend};
+use blora_policy::Policy;
 use blora_storage::{WorkflowRecord, WorkflowRunRecord};
-use blora_types::{BloraError, Result, RunId, SessionId, TurnId, WorkflowId, WorkflowRunId};
+use blora_tools::ToolRegistry;
+use blora_types::{
+    BloraError, CancelToken, Result, RunId, SessionId, TurnId, WorkflowId, WorkflowRunId,
+};
 use chrono::Utc;
 use serde_json::{Value, json};
 
-use crate::coordinator::Runtime;
+use crate::coordinator::{RunOptions, Runtime};
 
 impl Runtime {
     pub(crate) fn workflow_tool(
@@ -16,6 +21,7 @@ impl Runtime {
         run_id: &RunId,
         turn_id: &TurnId,
         arguments: &Value,
+        options: &RunOptions,
     ) -> Result<String> {
         let action = arguments
             .get("action")
@@ -106,6 +112,22 @@ impl Runtime {
                     finished_at: None,
                 })?;
                 self.emit_workflow(session_id, run_id, turn_id, &workflow.id, "running", 0)?;
+                if arguments
+                    .get("background")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    self.run_workflow_background(
+                        session_id,
+                        workflow.id.clone(),
+                        workflow_run_id.clone(),
+                        options.clone(),
+                    )?;
+                    return Ok(format!(
+                        "started workflow {} in background (run {workflow_run_id})",
+                        workflow.id
+                    ));
+                }
                 Ok(format!(
                     "started workflow {} (run {workflow_run_id}); first step:\n{}",
                     workflow.id, steps[0]
@@ -170,6 +192,110 @@ impl Runtime {
                 "unknown workflow action: {other}"
             ))),
         }
+    }
+
+    fn run_workflow_background(
+        &self,
+        session_id: &SessionId,
+        workflow_id: WorkflowId,
+        run_id: WorkflowRunId,
+        options: RunOptions,
+    ) -> Result<()> {
+        let runtime = self.clone();
+        let parent = session_id.clone();
+        std::thread::spawn(move || {
+            let workspace = runtime
+                .show_session(&parent)
+                .ok()
+                .and_then(|projection| projection.session.map(|session| session.workspace_path))
+                .unwrap_or_default();
+            let Ok(policy) =
+                Policy::with_mode(std::path::Path::new(&workspace), options.permission_mode())
+            else {
+                return;
+            };
+            let backend = LocalBackend::new(policy).with_isolation(Isolation::from_env());
+            let Some(workflow) = runtime.store.get_workflow(&workflow_id).ok().flatten() else {
+                return;
+            };
+            let definition: Value =
+                serde_json::from_str(&workflow.definition_json).unwrap_or(Value::Null);
+            let steps = steps(&definition);
+            let cancel = CancelToken::new();
+            for (index, step) in steps.iter().enumerate() {
+                let kind = step.get("type").and_then(Value::as_str).unwrap_or("tool");
+                let result: Result<String> = match kind {
+                    "tool" => {
+                        let tool = step.get("tool").and_then(Value::as_str).unwrap_or_default();
+                        let arguments = step.get("arguments").cloned().unwrap_or_else(|| json!({}));
+                        ToolRegistry::execute_outcome_for(
+                            &backend,
+                            parent.as_str(),
+                            tool,
+                            &arguments,
+                        )
+                        .map(|outcome| outcome.as_text())
+                    }
+                    "subagent" => {
+                        let role = step.get("role").and_then(Value::as_str).unwrap_or("worker");
+                        let prompt = step
+                            .get("prompt")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+                        runtime.spawn_subagent(&parent, role, prompt, &options, &cancel)
+                    }
+                    "checkpoint" => Ok("checkpoint".to_owned()),
+                    "ask" => Ok("ask step skipped in background workflow".to_owned()),
+                    other => Err(BloraError::Other(format!(
+                        "unknown workflow step type: {other}"
+                    ))),
+                };
+                let finished = index + 1 == steps.len() || result.is_err();
+                let status = if result.is_err() {
+                    "failed"
+                } else if finished {
+                    "completed"
+                } else {
+                    "running"
+                };
+                let state = json!({
+                    "last_result": result.as_ref().ok(),
+                    "error": result.as_ref().err().map(ToString::to_string),
+                })
+                .to_string();
+                let _ = runtime.store.update_workflow_run(
+                    &run_id,
+                    status,
+                    (index + 1) as i64,
+                    &state,
+                    finished,
+                );
+                let _ = runtime.emit_workflow_bg(&parent, &workflow_id, status, (index + 1) as i64);
+                if result.is_err() {
+                    break;
+                }
+            }
+        });
+        Ok(())
+    }
+
+    fn emit_workflow_bg(
+        &self,
+        session_id: &SessionId,
+        workflow_id: &WorkflowId,
+        status: &str,
+        step: i64,
+    ) -> Result<()> {
+        self.emit(
+            session_id,
+            None,
+            None,
+            KnownPayload::WorkflowUpdated(WorkflowUpdated {
+                workflow_id: workflow_id.clone(),
+                status: status.to_owned(),
+                step,
+            }),
+        )
     }
 
     fn require_workflow(&self, id: Option<WorkflowId>) -> Result<WorkflowRecord> {

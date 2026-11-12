@@ -2401,7 +2401,7 @@ impl Runtime {
                 }
                 "execute_code" => self
                     .execute_code_tool(session_id, run_id, turn_id, &arguments, backend, options),
-                "workflow" => self.workflow_tool(session_id, run_id, turn_id, &arguments),
+                "workflow" => self.workflow_tool(session_id, run_id, turn_id, &arguments, options),
                 "goal" => self.goal_tool(session_id, run_id, turn_id, &arguments),
                 "team" => self.team_tool(session_id, run_id, turn_id, &arguments, options),
                 "team_task" => self.team_task_tool(session_id, run_id, turn_id, &arguments),
@@ -4440,6 +4440,75 @@ mod tests {
     }
 
     #[test]
+    fn workflow_background_runner_executes_steps() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = Runtime::new(SqliteStore::open_in_memory().unwrap());
+        let session = session(&runtime, Mode::Work, dir.path().to_str().unwrap());
+        Recorder::install(&runtime, vec![text_reply("ok", "stop")], None);
+        runtime
+            .run(&session, "init", &CancelToken::new(), &yolo())
+            .unwrap();
+        let run_id = runtime
+            .show_session(&session)
+            .unwrap()
+            .runs
+            .last()
+            .unwrap()
+            .id
+            .clone();
+        let turn_id = TurnId::generate();
+        runtime
+            .workflow_tool(
+                &session,
+                &run_id,
+                &turn_id,
+                &json!({
+                    "action":"create",
+                    "name":"BG",
+                    "definition":{"steps":[
+                        {"type":"tool","tool":"write_file","arguments":{"path":"out.txt","contents":"hi"}},
+                        {"type":"tool","tool":"read_file","arguments":{"path":"out.txt"}}
+                    ]}
+                }),
+                &yolo(),
+            )
+            .unwrap();
+        let id = runtime.store.list_workflows(&session).unwrap()[0]
+            .id
+            .clone();
+        runtime
+            .workflow_tool(
+                &session,
+                &run_id,
+                &turn_id,
+                &json!({"action":"start","workflow_id":id,"background":true}),
+                &yolo(),
+            )
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let run = runtime
+                .store
+                .latest_workflow_run(&id)
+                .unwrap()
+                .expect("run");
+            if run.status != "running" {
+                assert_eq!(run.status, "completed", "{}", run.state_json);
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "workflow did not finish"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("out.txt")).unwrap(),
+            "hi"
+        );
+    }
+
+    #[test]
     fn team_kanban_dependencies_and_review() {
         let dir = tempfile::tempdir().unwrap();
         let runtime = Runtime::new(SqliteStore::open_in_memory().unwrap());
@@ -4612,6 +4681,7 @@ mod tests {
                     "name":"W",
                     "definition":{"steps":[{"tool":"read_file"},{"tool":"write_file"}]}
                 }),
+                &yolo(),
             )
             .unwrap();
         let id = runtime.store.list_workflows(&session).unwrap()[0]
@@ -4623,6 +4693,7 @@ mod tests {
                 &run_id,
                 &turn_id,
                 &json!({"action":"start","workflow_id":id}),
+                &yolo(),
             )
             .unwrap();
         assert!(started.contains("read_file"), "{started}");
@@ -4632,6 +4703,7 @@ mod tests {
                 &run_id,
                 &turn_id,
                 &json!({"action":"advance","workflow_id":id,"result":"done"}),
+                &yolo(),
             )
             .unwrap();
         assert!(next.contains("write_file"), "{next}");
@@ -4641,6 +4713,7 @@ mod tests {
                 &run_id,
                 &turn_id,
                 &json!({"action":"advance","workflow_id":id}),
+                &yolo(),
             )
             .unwrap();
         assert!(done.contains("completed"), "{done}");

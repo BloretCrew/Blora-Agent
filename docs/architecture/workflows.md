@@ -19,12 +19,21 @@
 
 也可以直接传数组。步骤是任意 JSON；运行时只负责顺序和状态，不自动执行步骤内容，模型根据 `status` 返回的当前步骤决定下一步。
 
+`background=true` 时，运行时会按顺序执行：
+
+- `{"type":"tool","tool":"read_file","arguments":{...}}`：调用内置工具。
+- `{"type":"subagent","role":"review","prompt":"..."}`：同步运行子代理并记录报告。
+- `{"type":"checkpoint"}`：无操作，用于标记阶段。
+- `{"type":"ask","prompt":"..."}`：后台不能提问，记录为跳过。
+
+任一步失败会停止并把 run 标为 `failed`。
+
 ## 工具
 
 `workflow { action, workflow_id?, name?, definition?, result? }`
 
 - `create`：保存定义（至少一步）。
-- `start`：创建 run，`current_step=0`，返回第一步。
+- `start`：创建 run，`current_step=0`，返回第一步；`background=true` 时在后台自动执行步骤。
 - `status`：返回工作流状态、当前步骤序号和内容。
 - `list`：列出会话内的工作流。
 - `advance`：推进到下一步；可附带 `result` 记录到 `state_json`。最后一步后状态变为 `completed`。

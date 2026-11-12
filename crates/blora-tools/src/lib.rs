@@ -406,7 +406,8 @@ impl ToolRegistry {
                         "workflow_id": {"type": "string"},
                         "name": {"type": "string"},
                         "definition": {"type": "object", "description": "{\"steps\": [...]} or an array"},
-                        "result": {"description": "Optional result to record when advancing"}
+                        "result": {"description": "Optional result to record when advancing"},
+                        "background": {"type": "boolean", "description": "Run steps automatically in the background on start"}
                     },
                     "required": ["action"]
                 }),
