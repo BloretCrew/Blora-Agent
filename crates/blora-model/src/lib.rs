@@ -337,9 +337,10 @@ impl Provider for MockProvider {
                 finish_reason: "tool_calls".to_owned(),
                 ..Completion::default()
             }
-        } else if system.contains("# Mode: Agent")
+        } else if (system.contains("# Mode: Agent")
             || last_user.to_ascii_lowercase().contains("delegate")
-            || last_user.to_ascii_lowercase().contains("subagent")
+            || last_user.to_ascii_lowercase().contains("subagent"))
+            && !last_user.contains("[subagent result")
         {
             Completion {
                 tool_calls: vec![ToolCall {
