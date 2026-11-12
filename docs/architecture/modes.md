@@ -28,6 +28,8 @@ Blora 的 Code、Work、Agent 三种模式共用一个 Runtime 和同一套事�
 | `execute_code` | ✓ | | ✓ |
 | `browser` | | ✓ | ✓ |
 | `computer` | | | ✓ |
+| `edit_image`、`generate_video`、`text_to_speech`（Imagine 也可用） | | ✓ | ✓ |
+| `vision_analyze` | ✓ | ✓ | ✓ |
 | `skill_manage`、`session_search` | | | ✓ |
 
 子代理沿用父会话的模式。例如 Code 或 Work 会话派出的 research 子代理也能联网。只读角色（research、review、plan）只拿到只读工具。MCP 与插件工具默认由 `tool_search` 延迟启用；MCP 的 resources/prompts 通过 `mcp_list_*` 工具访问。

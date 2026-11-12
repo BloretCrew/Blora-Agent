@@ -8,6 +8,7 @@ authors.workspace = true
 description = "Workspace image generation for Blora Agent Imagine mode."
 
 [dependencies]
+base64.workspace = true
 blora-types.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

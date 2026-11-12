@@ -3,6 +3,7 @@
 
 //! Built-in tools. Schemas are provider-facing; execution stays in-process.
 
+use base64::Engine as _;
 use blora_content::{ContentPart, ImageData, ImageDetail, ToolOutcome};
 use blora_context::read_skill;
 use blora_exec::{
@@ -170,6 +171,66 @@ impl ToolRegistry {
                     "required": ["action"]
                 }),
                 read_only: false,
+            },
+            ToolSpec {
+                name: "edit_image",
+                description: "Edit an existing image with a text prompt. Provide path or base64 image. Returns the edited image.",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "image": {"type": "string", "description": "Base64 image data"},
+                        "prompt": {"type": "string"},
+                        "mask_path": {"type": "string"},
+                        "size": {"type": "string"}
+                    },
+                    "required": ["prompt"]
+                }),
+                read_only: false,
+            },
+            ToolSpec {
+                name: "generate_video",
+                description: "Generate a short video from a prompt, optionally starting from an image. Returns a saved video file or a provider job id.",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "prompt": {"type": "string"},
+                        "image_path": {"type": "string"},
+                        "duration_seconds": {"type": "integer", "minimum": 1, "maximum": 60},
+                        "aspect_ratio": {"type": "string"}
+                    },
+                    "required": ["prompt"]
+                }),
+                read_only: false,
+            },
+            ToolSpec {
+                name: "text_to_speech",
+                description: "Synthesize speech from text. Returns a saved audio file.",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "text": {"type": "string"},
+                        "voice": {"type": "string"},
+                        "format": {"type": "string", "enum": ["mp3", "wav", "opus", "aac", "flac"]}
+                    },
+                    "required": ["text"]
+                }),
+                read_only: false,
+            },
+            ToolSpec {
+                name: "vision_analyze",
+                description: "Analyze an image with a vision model and return text. Use when the main model cannot see images or when a second opinion is useful.",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "image": {"type": "string", "description": "Base64 image data"},
+                        "prompt": {"type": "string"},
+                        "detail": {"type": "string", "enum": ["auto", "low", "high"]}
+                    },
+                    "required": ["prompt"]
+                }),
+                read_only: true,
             },
             ToolSpec {
                 name: "execute_code",
@@ -790,7 +851,10 @@ impl ToolRegistry {
     #[must_use]
     pub fn offered_in(mode: Mode, name: &str) -> bool {
         match mode {
-            Mode::Imagine => name == "generate_image",
+            Mode::Imagine => matches!(
+                name,
+                "generate_image" | "edit_image" | "generate_video" | "text_to_speech"
+            ),
             Mode::Code => !matches!(
                 name,
                 "generate_image"
@@ -803,6 +867,9 @@ impl ToolRegistry {
                     | "team_task"
                     | "browser"
                     | "computer"
+                    | "edit_image"
+                    | "generate_video"
+                    | "text_to_speech"
             ),
             Mode::Work => !matches!(
                 name,
@@ -845,6 +912,12 @@ impl ToolRegistry {
         }
         if name == "computer" {
             return computer_outcome(backend, session_id, arguments);
+        }
+        if matches!(
+            name,
+            "edit_image" | "generate_video" | "text_to_speech" | "vision_analyze"
+        ) {
+            return media_tool_outcome(backend, session_id, name, arguments);
         }
         if name == "view_image" {
             let path = required_str(arguments, "path")?;
@@ -1173,6 +1246,149 @@ fn generate_image(backend: &LocalBackend, session_id: &str, arguments: &Value) -
     Ok(blora_imagine::format_saved(&saved))
 }
 
+fn media_tool_outcome(
+    backend: &LocalBackend,
+    session_id: &str,
+    name: &str,
+    arguments: &Value,
+) -> Result<ToolOutcome> {
+    backend
+        .policy()
+        .require(backend.policy().media_generate(), name)?;
+    let endpoint = blora_imagine::MediaEndpoint::from_env().ok_or_else(|| {
+        BloraError::Other(
+            "media endpoint is not configured; set BLORA_API_KEY or BLORA_MEDIA_KEY".to_owned(),
+        )
+    })?;
+    match name {
+        "vision_analyze" => {
+            let (bytes, mime) = media_image(backend, arguments)?;
+            let prompt = required_str(arguments, "prompt")?;
+            let text = blora_imagine::vision_analyze(&endpoint, &bytes, &mime, prompt)?;
+            Ok(ToolOutcome::text(text))
+        }
+        "edit_image" => {
+            let (bytes, mime) = media_image(backend, arguments)?;
+            let prompt = required_str(arguments, "prompt")?;
+            let file = blora_imagine::edit_image(
+                &endpoint,
+                &bytes,
+                &mime,
+                prompt,
+                optional_str(arguments, "size"),
+            )?;
+            let reference = AttachmentStore::new(backend.policy().workspace()).save_bytes(
+                session_id,
+                "image",
+                &file.mime,
+                Some(&format!("edited.{}", file.extension)),
+                &file.bytes,
+            )?;
+            Ok(ToolOutcome::from_parts(vec![
+                ContentPart::text(format!("edited image {} bytes", reference.bytes)),
+                ContentPart::Image {
+                    media_type: file.mime,
+                    data: ImageData::Path {
+                        path: reference.path,
+                        sha256: Some(reference.sha256),
+                        bytes: Some(reference.bytes),
+                    },
+                    detail: None,
+                    alt: Some("edited image".to_owned()),
+                },
+            ]))
+        }
+        "generate_video" => {
+            let prompt = required_str(arguments, "prompt")?;
+            let image = optional_str(arguments, "image_path")
+                .map(|path| backend.read_media_bytes(path))
+                .transpose()?;
+            let output = blora_imagine::generate_video(
+                &endpoint,
+                prompt,
+                image.as_deref(),
+                arguments
+                    .get("duration_seconds")
+                    .and_then(Value::as_u64)
+                    .map(|value| value as u32),
+                optional_str(arguments, "aspect_ratio"),
+            )?;
+            match output {
+                blora_imagine::VideoOutput::Job(id) => {
+                    Ok(ToolOutcome::text(format!("video job started: {id}")))
+                }
+                blora_imagine::VideoOutput::File(file) => {
+                    let reference = AttachmentStore::new(backend.policy().workspace()).save_bytes(
+                        session_id,
+                        "video",
+                        &file.mime,
+                        Some(&format!("video.{}", file.extension)),
+                        &file.bytes,
+                    )?;
+                    Ok(ToolOutcome::from_parts(vec![
+                        ContentPart::text(format!("video saved to {}", reference.path)),
+                        ContentPart::File {
+                            media_type: file.mime,
+                            name: format!("video.{}", file.extension),
+                            data: ImageData::Path {
+                                path: reference.path,
+                                sha256: Some(reference.sha256),
+                                bytes: Some(reference.bytes),
+                            },
+                        },
+                    ]))
+                }
+            }
+        }
+        "text_to_speech" => {
+            let text = required_str(arguments, "text")?;
+            let file = blora_imagine::text_to_speech(
+                &endpoint,
+                text,
+                optional_str(arguments, "voice"),
+                optional_str(arguments, "format"),
+            )?;
+            let reference = AttachmentStore::new(backend.policy().workspace()).save_bytes(
+                session_id,
+                "audio",
+                &file.mime,
+                Some(&format!("speech.{}", file.extension)),
+                &file.bytes,
+            )?;
+            Ok(ToolOutcome::from_parts(vec![
+                ContentPart::text(format!("audio saved to {}", reference.path)),
+                ContentPart::File {
+                    media_type: file.mime,
+                    name: format!("speech.{}", file.extension),
+                    data: ImageData::Path {
+                        path: reference.path,
+                        sha256: Some(reference.sha256),
+                        bytes: Some(reference.bytes),
+                    },
+                },
+            ]))
+        }
+        other => Err(BloraError::Other(format!("unknown media tool: {other}"))),
+    }
+}
+
+fn media_image(backend: &LocalBackend, arguments: &Value) -> Result<(Vec<u8>, String)> {
+    if let Some(path) = optional_str(arguments, "path") {
+        let resolved = backend.policy().resolve(path)?;
+        let mime = image_mime_for(&resolved).unwrap_or("image/png");
+        return Ok((backend.read_media_bytes(path)?, mime.to_owned()));
+    }
+    if let Some(data) = optional_str(arguments, "image") {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(data.trim())
+            .map_err(|err| BloraError::Other(format!("invalid base64 image: {err}")))?;
+        return Ok((bytes, "image/png".to_owned()));
+    }
+    Err(BloraError::Other(
+        "media action needs path or image".to_owned(),
+    ))
+}
+
 fn computer_outcome(
     backend: &LocalBackend,
     session_id: &str,
@@ -1362,7 +1578,16 @@ mod tests {
             .into_iter()
             .map(|spec| spec.name)
             .collect();
-        assert_eq!(names, vec!["generate_image"]);
+        assert_eq!(names.len(), 4);
+        for name in [
+            "generate_image",
+            "edit_image",
+            "generate_video",
+            "text_to_speech",
+        ] {
+            assert!(names.contains(&name), "{name}");
+        }
+        assert!(!names.contains(&"shell"));
         let code: Vec<_> = ToolRegistry::specs_for(Mode::Code)
             .into_iter()
             .map(|spec| spec.name)

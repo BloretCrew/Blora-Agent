@@ -10,6 +10,12 @@ use blora_types::{BloraError, Result};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+mod media;
+pub use media::{
+    MediaEndpoint, MediaFile, VideoOutput, edit_image, generate_video, text_to_speech,
+    vision_analyze,
+};
+
 #[derive(Clone, Debug)]
 pub struct ImageEndpoint {
     pub base_url: String,
