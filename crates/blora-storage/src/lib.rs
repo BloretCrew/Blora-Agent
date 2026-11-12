@@ -15,8 +15,8 @@ pub use approvals::ApprovalRecord;
 pub use search::SearchMatch;
 pub use sqlite::{
     ArtifactRecord, CreateSession, GoalRecord, MemoryRecord, SessionSpan, SessionSummary,
-    SqliteStore, TeamRecord, TeamTaskRecord, UsageActivity, UsageSample, UsageTotals,
-    WorkflowRecord, WorkflowRunRecord,
+    SqliteStore, TeamAttachmentRecord, TeamColumnRecord, TeamLinkRecord, TeamRecord,
+    TeamTaskRecord, UsageActivity, UsageSample, UsageTotals, WorkflowRecord, WorkflowRunRecord,
 };
 pub use tasks::{AgentRecord, CreateTask, TaskRecord};
 pub use users::UserRecord;

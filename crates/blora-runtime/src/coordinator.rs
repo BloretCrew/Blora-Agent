@@ -4440,6 +4440,151 @@ mod tests {
     }
 
     #[test]
+    fn team_kanban_dependencies_and_review() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = Runtime::new(SqliteStore::open_in_memory().unwrap());
+        let session = session(&runtime, Mode::Work, dir.path().to_str().unwrap());
+        Recorder::install(&runtime, vec![text_reply("ok", "stop")], None);
+        runtime
+            .run(&session, "init", &CancelToken::new(), &yolo())
+            .unwrap();
+        let run_id = runtime
+            .show_session(&session)
+            .unwrap()
+            .runs
+            .last()
+            .unwrap()
+            .id
+            .clone();
+        let turn_id = TurnId::generate();
+        runtime
+            .team_tool(
+                &session,
+                &run_id,
+                &turn_id,
+                &json!({"action":"create","name":"core"}),
+                &yolo(),
+            )
+            .unwrap();
+        let team = runtime
+            .store
+            .list_teams(dir.path().to_str().unwrap())
+            .unwrap()[0]
+            .id
+            .clone();
+        assert_eq!(runtime.store.list_team_columns(&team).unwrap().len(), 6);
+        runtime
+            .team_task_tool(
+                &session,
+                &run_id,
+                &turn_id,
+                &json!({"action":"create","team_id":team,"title":"A"}),
+            )
+            .unwrap();
+        let task_a = runtime.store.list_team_tasks(&team).unwrap()[0].id.clone();
+        runtime
+            .team_task_tool(
+                &session,
+                &run_id,
+                &turn_id,
+                &json!({"action":"create","team_id":team,"title":"B","depends_on":[task_a]}),
+            )
+            .unwrap();
+        let task_b = runtime
+            .store
+            .list_team_tasks(&team)
+            .unwrap()
+            .into_iter()
+            .find(|task| task.title == "B")
+            .unwrap()
+            .id;
+        assert!(
+            runtime
+                .team_task_tool(
+                    &session,
+                    &run_id,
+                    &turn_id,
+                    &json!({"action":"claim","task_id":task_b}),
+                )
+                .is_err()
+        );
+        runtime
+            .team_task_tool(
+                &session,
+                &run_id,
+                &turn_id,
+                &json!({"action":"complete","task_id":task_a}),
+            )
+            .unwrap();
+        runtime
+            .team_task_tool(
+                &session,
+                &run_id,
+                &turn_id,
+                &json!({"action":"claim","task_id":task_b}),
+            )
+            .unwrap();
+        runtime
+            .team_task_tool(
+                &session,
+                &run_id,
+                &turn_id,
+                &json!({"action":"request_review","task_id":task_b}),
+            )
+            .unwrap();
+        let reviewed = runtime.store.get_team_task(&task_b).unwrap().unwrap();
+        assert_eq!(reviewed.status, "review");
+        assert_eq!(reviewed.review_state.as_deref(), Some("requested"));
+        runtime
+            .team_task_tool(
+                &session,
+                &run_id,
+                &turn_id,
+                &json!({"action":"approve","task_id":task_b}),
+            )
+            .unwrap();
+        assert_eq!(
+            runtime
+                .store
+                .get_team_task(&task_b)
+                .unwrap()
+                .unwrap()
+                .status,
+            "done"
+        );
+        runtime
+            .team_task_tool(
+                &session,
+                &run_id,
+                &turn_id,
+                &json!({"action":"attach","task_id":task_b,"path":"README.md","mime":"text/plain","size":3}),
+            )
+            .unwrap();
+        assert_eq!(
+            runtime.store.list_team_attachments(&task_b).unwrap().len(),
+            1
+        );
+        runtime
+            .team_task_tool(
+                &session,
+                &run_id,
+                &turn_id,
+                &json!({"action":"link","task_id":task_b,"kind":"url","target":"https://example.com"}),
+            )
+            .unwrap();
+        assert_eq!(runtime.store.list_team_links(&task_b).unwrap().len(), 1);
+        runtime
+            .team_task_tool(
+                &session,
+                &run_id,
+                &turn_id,
+                &json!({"action":"comment","task_id":task_b,"body":"looks good"}),
+            )
+            .unwrap();
+        assert_eq!(runtime.store.list_team_comments(&task_b).unwrap().len(), 1);
+    }
+
+    #[test]
     fn workflow_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
         let runtime = Runtime::new(SqliteStore::open_in_memory().unwrap());

@@ -260,6 +260,7 @@ CREATE TABLE IF NOT EXISTS teams (
 CREATE TABLE IF NOT EXISTS team_tasks (
     id TEXT PRIMARY KEY,
     team_id TEXT NOT NULL,
+    column_id TEXT,
     title TEXT NOT NULL,
     description TEXT,
     status TEXT NOT NULL,
@@ -280,6 +281,37 @@ CREATE TABLE IF NOT EXISTS team_task_comments (
     task_id TEXT NOT NULL,
     author TEXT NOT NULL,
     body TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (task_id) REFERENCES team_tasks(id)
+);
+
+CREATE TABLE IF NOT EXISTS team_columns (
+    id TEXT PRIMARY KEY,
+    team_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    wip_limit INTEGER,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (team_id) REFERENCES teams(id)
+);
+
+CREATE TABLE IF NOT EXISTS team_task_attachments (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    mime TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    sha256 TEXT NOT NULL,
+    path TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (task_id) REFERENCES team_tasks(id)
+);
+
+CREATE TABLE IF NOT EXISTS team_task_links (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    target TEXT NOT NULL,
     created_at TEXT NOT NULL,
     FOREIGN KEY (task_id) REFERENCES team_tasks(id)
 );

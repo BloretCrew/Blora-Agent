@@ -449,11 +449,11 @@ impl ToolRegistry {
             },
             ToolSpec {
                 name: "team_task",
-                description: "Manage team tasks: create, get, list, claim, complete, block, unblock, update, heartbeat, comment, delete.",
+                description: "Manage team tasks: create, get, list, claim, complete, block, unblock, update, request_review, request_changes, approve, heartbeat, comment, comments, attach, attachments, link, links, delete. claim enforces depends_on.",
                 parameters: json!({
                     "type": "object",
                     "properties": {
-                        "action": {"type": "string", "enum": ["create", "get", "list", "claim", "complete", "block", "unblock", "update", "heartbeat", "comment", "delete"]},
+                        "action": {"type": "string", "enum": ["create", "get", "list", "claim", "complete", "block", "unblock", "update", "request_review", "request_changes", "approve", "heartbeat", "comment", "comments", "attach", "attachments", "link", "links", "delete"]},
                         "team_id": {"type": "string"},
                         "task_id": {"type": "string"},
                         "title": {"type": "string"},
@@ -464,6 +464,10 @@ impl ToolRegistry {
                         "review_state": {"type": "string"},
                         "reason": {"type": "string"},
                         "body": {"type": "string"},
+                        "kind": {"type": "string"},
+                        "target": {"type": "string"},
+                        "mime": {"type": "string"},
+                        "size": {"type": "integer"},
                         "depends_on": {"type": "array", "items": {"type": "string"}}
                     },
                     "required": ["action"]
