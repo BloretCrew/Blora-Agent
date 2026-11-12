@@ -180,6 +180,16 @@ pub(crate) fn chat_completions_body(request: &CompletionRequest, model: &str) ->
     if let Some(key) = &request.cache_key {
         body["prompt_cache_key"] = json!(key);
     }
+    if let Some(format) = &request.response_format {
+        body["response_format"] = json!({
+            "type": "json_schema",
+            "json_schema": {
+                "name": format.name,
+                "schema": format.schema,
+                "strict": format.strict,
+            }
+        });
+    }
     body
 }
 

@@ -89,6 +89,9 @@ struct RunBody {
     /// Attachments already stored through the upload endpoint.
     #[serde(default)]
     attachments: Vec<blora_content::AttachmentRef>,
+    /// Optional JSON schema for structured output.
+    #[serde(default)]
+    output_schema: Option<Value>,
 }
 
 #[derive(Serialize)]
@@ -122,6 +125,7 @@ struct SessionJson {
     shell_cwd: Option<String>,
     plan: Vec<PlanStepJson>,
     plan_note: Option<String>,
+    structured_output: Option<Value>,
     compaction_count: u32,
     pending_input: Option<blora_session::PendingInput>,
     transcript: Vec<TranscriptJson>,
@@ -1152,6 +1156,7 @@ async fn run_session(
         passport_user_token,
         permission,
         attachments: body.attachments,
+        output_schema: body.output_schema,
         ..RunOptions::default()
     };
     {
@@ -1847,6 +1852,7 @@ fn to_json(state: &AppState, id: &SessionId) -> Result<SessionJson, ApiError> {
             })
             .collect(),
         plan_note: projection.plan_note.clone(),
+        structured_output: projection.structured_output.clone(),
         compaction_count: projection.compaction_count,
         pending_input: projection.pending_input.clone(),
         transcript: {

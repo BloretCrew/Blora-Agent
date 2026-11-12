@@ -77,6 +77,10 @@ impl Provider for GeminiProvider {
         if !system.is_empty() {
             body["systemInstruction"] = json!({ "parts": [{ "text": system }] });
         }
+        if let Some(format) = &request.response_format {
+            body["generationConfig"]["responseMimeType"] = json!("application/json");
+            body["generationConfig"]["responseSchema"] = format.schema.clone();
+        }
         let url = format!(
             "{}/v1beta/models/{model}:streamGenerateContent?alt=sse",
             self.base_url

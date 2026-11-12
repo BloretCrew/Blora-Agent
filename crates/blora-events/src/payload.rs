@@ -409,6 +409,12 @@ pub struct ArtifactPresented {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct StructuredOutput {
+    pub schema: Value,
+    pub value: Value,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CheckpointCreated {
     pub sequence: u64,
     pub note: Option<String>,
@@ -621,6 +627,7 @@ pub enum KnownPayload {
     ArtifactUpdated(ArtifactUpdated),
     ArtifactDeleted(ArtifactDeleted),
     ArtifactPresented(ArtifactPresented),
+    StructuredOutput(StructuredOutput),
     CheckpointCreated(CheckpointCreated),
     PlanUpdated(PlanUpdated),
     SessionCwdChanged(SessionCwdChanged),
@@ -691,6 +698,7 @@ impl KnownPayload {
             Self::ArtifactUpdated(_) => "artifact.updated",
             Self::ArtifactDeleted(_) => "artifact.deleted",
             Self::ArtifactPresented(_) => "artifact.presented",
+            Self::StructuredOutput(_) => "structured.output",
             Self::CheckpointCreated(_) => "checkpoint.created",
             Self::PlanUpdated(_) => "plan.updated",
             Self::SessionCwdChanged(_) => "session.cwd.changed",
@@ -794,6 +802,7 @@ impl KnownPayload {
             Self::ArtifactUpdated(v) => serde_json::to_value(v),
             Self::ArtifactDeleted(v) => serde_json::to_value(v),
             Self::ArtifactPresented(v) => serde_json::to_value(v),
+            Self::StructuredOutput(v) => serde_json::to_value(v),
             Self::CheckpointCreated(v) => serde_json::to_value(v),
             Self::PlanUpdated(v) => serde_json::to_value(v),
             Self::SessionCwdChanged(v) => serde_json::to_value(v),
@@ -865,6 +874,7 @@ impl KnownPayload {
             "artifact.updated" => Self::ArtifactUpdated(from_value(value)?),
             "artifact.deleted" => Self::ArtifactDeleted(from_value(value)?),
             "artifact.presented" => Self::ArtifactPresented(from_value(value)?),
+            "structured.output" => Self::StructuredOutput(from_value(value)?),
             "checkpoint.created" => Self::CheckpointCreated(from_value(value)?),
             "plan.updated" => Self::PlanUpdated(from_value(value)?),
             "session.cwd.changed" => Self::SessionCwdChanged(from_value(value)?),

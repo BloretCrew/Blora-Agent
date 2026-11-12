@@ -13,8 +13,8 @@ use blora_events::{
     PermissionChanged, PlanModeChanged, PlanStep, PlanUpdated, ProviderChanged, RetryStarted,
     RoutingChanged, RunCancelRequested, RunCancelled, RunCompleted, RunCreated, RunFailed,
     RunStarted, SessionArchived, SessionCwdChanged, SessionResumed, SessionTitleChanged,
-    ToolCompleted, ToolDiscovered, ToolFailed, ToolOutput, ToolRequested, ToolStarted,
-    UsageRecorded, UserInput,
+    StructuredOutput, ToolCompleted, ToolDiscovered, ToolFailed, ToolOutput, ToolRequested,
+    ToolStarted, UsageRecorded, UserInput,
 };
 use blora_exec::{Isolation, LocalBackend, ShellKind, WorktreeHandle, shell_cwd_after};
 use blora_model::retry::{self, RetryClass};
@@ -100,6 +100,8 @@ pub struct RunOptions {
     pub can_ask: bool,
     /// Files or images attached to the user's prompt.
     pub attachments: Vec<blora_content::AttachmentRef>,
+    /// Optional JSON schema for structured output.
+    pub output_schema: Option<Value>,
 }
 
 impl RunOptions {
@@ -136,6 +138,7 @@ impl Default for RunOptions {
             permission: None,
             can_ask: false,
             attachments: Vec::new(),
+            output_schema: None,
         }
     }
 }
@@ -1233,7 +1236,13 @@ impl Runtime {
                 tools: tools.clone(),
                 max_output_tokens: None,
                 cache_key: Some(session_id.to_string()),
-                response_format: None,
+                response_format: options.output_schema.clone().map(|schema| {
+                    blora_model::ResponseFormat {
+                        name: "output".to_owned(),
+                        schema,
+                        strict: true,
+                    }
+                }),
                 tool_choice: None,
                 capabilities: blora_content::ModelCapabilities::heuristic(&model),
             };
@@ -1403,7 +1412,13 @@ impl Runtime {
                 tools: Vec::new(),
                 max_output_tokens: None,
                 cache_key: Some(session_id.to_string()),
-                response_format: None,
+                response_format: options.output_schema.clone().map(|schema| {
+                    blora_model::ResponseFormat {
+                        name: "output".to_owned(),
+                        schema,
+                        strict: true,
+                    }
+                }),
                 tool_choice: None,
                 capabilities: blora_content::ModelCapabilities::heuristic(&model),
             };
@@ -1616,6 +1631,33 @@ impl Runtime {
             LocalBackend::new(Policy::with_mode(backend.policy().workspace(), mode)?)
                 .with_isolation(backend.isolation()),
         )
+    }
+
+    fn structured_output_tool(
+        &self,
+        session_id: &SessionId,
+        run_id: &RunId,
+        turn_id: &TurnId,
+        arguments: &Value,
+        options: &RunOptions,
+    ) -> Result<String> {
+        let schema = arguments
+            .get("schema")
+            .cloned()
+            .or_else(|| options.output_schema.clone())
+            .ok_or_else(|| BloraError::Other("structured_output needs a schema".to_owned()))?;
+        let value = arguments
+            .get("data")
+            .cloned()
+            .ok_or_else(|| BloraError::Other("structured_output needs data".to_owned()))?;
+        validate_json(&schema, &value)?;
+        self.emit(
+            session_id,
+            Some(run_id),
+            Some(turn_id),
+            KnownPayload::StructuredOutput(StructuredOutput { schema, value }),
+        )?;
+        Ok("structured output recorded".to_owned())
     }
 
     fn artifact_tool(
@@ -2237,6 +2279,9 @@ impl Runtime {
                         .unwrap_or("worker");
                     self.spawn_subagent(session_id, role, prompt, options, cancel)
                 }
+                "structured_output" => {
+                    self.structured_output_tool(session_id, run_id, turn_id, &arguments, options)
+                }
                 "subagent" => {
                     self.subagent_tool(session_id, run_id, turn_id, &arguments, options, cancel)
                 }
@@ -2809,6 +2854,56 @@ impl Provider for SharedProvider {
     }
 }
 
+fn validate_json(schema: &Value, value: &Value) -> Result<()> {
+    if let Some(kind) = schema.get("type").and_then(Value::as_str) {
+        validate_json_type(kind, value)?;
+    }
+    if let Some(required) = schema.get("required").and_then(Value::as_array) {
+        for key in required.iter().filter_map(Value::as_str) {
+            if value.get(key).is_none() {
+                return Err(BloraError::Other(format!(
+                    "structured output missing required field: {key}"
+                )));
+            }
+        }
+    }
+    if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
+        for (key, property) in properties {
+            if let Some(field) = value.get(key) {
+                validate_json(property, field)?;
+            }
+        }
+    }
+    if let Some(items) = schema.get("items") {
+        if let Some(array) = value.as_array() {
+            for item in array {
+                validate_json(items, item)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_json_type(kind: &str, value: &Value) -> Result<()> {
+    let ok = match kind {
+        "object" => value.is_object(),
+        "array" => value.is_array(),
+        "string" => value.is_string(),
+        "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+        "number" => value.is_number(),
+        "boolean" => value.is_boolean(),
+        "null" => value.is_null(),
+        _ => true,
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(BloraError::Other(format!(
+            "structured output field has wrong type: expected {kind}"
+        )))
+    }
+}
+
 fn artifact_ext(kind: &str) -> &'static str {
     match kind {
         "markdown" => "md",
@@ -2866,6 +2961,7 @@ fn runtime_handled_tool(name: &str) -> bool {
             | "artifact"
             | "schedule"
             | "subagent"
+            | "structured_output"
     )
 }
 
@@ -4192,6 +4288,46 @@ mod tests {
                 .as_deref()
                 .unwrap()
                 .contains("# Mode: Code")
+        );
+    }
+
+    #[test]
+    fn structured_output_is_recorded_and_validated() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = Runtime::new(SqliteStore::open_in_memory().unwrap());
+        let session = session(&runtime, Mode::Code, dir.path().to_str().unwrap());
+        let recorder = Recorder::install(
+            &runtime,
+            vec![
+                tool_reply(
+                    "s",
+                    "structured_output",
+                    r#"{"schema":{"type":"object","required":["answer"],"properties":{"answer":{"type":"string"}}},"data":{"answer":"42"}}"#,
+                ),
+                text_reply("done", "stop"),
+            ],
+            None,
+        );
+        runtime
+            .run(&session, "answer", &CancelToken::new(), &yolo())
+            .unwrap();
+        let projection = runtime.show_session(&session).unwrap();
+        assert_eq!(
+            projection.structured_output.as_ref().unwrap()["answer"],
+            "42"
+        );
+        let events = runtime.events(&session).unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == "structured.output")
+        );
+        let requests = recorder.requests.lock().unwrap();
+        assert!(
+            requests[0]
+                .tools
+                .iter()
+                .any(|tool| tool.name == "structured_output")
         );
     }
 

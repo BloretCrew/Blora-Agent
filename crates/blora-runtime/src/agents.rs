@@ -131,6 +131,7 @@ impl Runtime {
                 options.permission
             },
             attachments: Vec::new(),
+            output_schema: None,
         };
         let child_prompt = subagent_brief(role, prompt, depth < MAX_SUBAGENT_DEPTH);
         Ok(PreparedSubagent {

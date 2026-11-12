@@ -811,6 +811,16 @@ impl LocalBackend {
                     "HEAD",
                 ])
             }
+            "remove" => {
+                let path =
+                    path.ok_or_else(|| BloraError::Exec("worktree remove needs path".to_owned()))?;
+                self.policy.require(
+                    self.policy.file_write(),
+                    &format!("git worktree remove {path}"),
+                )?;
+                let resolved = self.resolve_for_write(path)?;
+                self.git(&["worktree", "remove", &resolved.display().to_string()])
+            }
             other => Err(BloraError::Exec(format!(
                 "unknown git_worktree action: {other}"
             ))),

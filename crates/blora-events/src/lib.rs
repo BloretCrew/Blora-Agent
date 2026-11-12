@@ -18,8 +18,8 @@ pub use payload::{
     PlanUpdated, PolicyDenied, ProviderChanged, QuestionChoice, RetryStarted, RoutingChanged,
     RunCancelRequested, RunCancelled, RunCompleted, RunCreated, RunFailed, RunPaused, RunStarted,
     SessionArchived, SessionCreated, SessionCwdChanged, SessionForked, SessionResumed,
-    SessionTitleChanged, SkillChanged, SubagentCompleted, SubagentFailed, SubagentMessage,
-    SubagentSpawned, TaskCompleted, TaskCreated, TaskDeleted, TaskFailed, TaskProgress,
-    TaskStarted, TaskUpdated, TaskWakeup, ToolCompleted, ToolDiscovered, ToolFailed, ToolOutput,
-    ToolRequested, ToolStarted, UsageRecorded, UserInput,
+    SessionTitleChanged, SkillChanged, StructuredOutput, SubagentCompleted, SubagentFailed,
+    SubagentMessage, SubagentSpawned, TaskCompleted, TaskCreated, TaskDeleted, TaskFailed,
+    TaskProgress, TaskStarted, TaskUpdated, TaskWakeup, ToolCompleted, ToolDiscovered, ToolFailed,
+    ToolOutput, ToolRequested, ToolStarted, UsageRecorded, UserInput,
 };

@@ -150,6 +150,9 @@ pub struct SessionProjection {
     /// Whether the session is currently in plan mode.
     #[serde(default)]
     pub plan_mode: bool,
+    /// Latest structured output requested by the model.
+    #[serde(default)]
+    pub structured_output: Option<serde_json::Value>,
     /// Workspace-relative directory where the next shell command starts.
     /// `None` and `.` both mean the workspace root.
     #[serde(default)]
@@ -340,6 +343,10 @@ pub fn apply_event(projection: &mut SessionProjection, event: &EventEnvelope) ->
         }
         KnownPayload::PlanModeChanged(changed) => {
             projection.plan_mode = changed.entered;
+        }
+        KnownPayload::StructuredOutput(output) => {
+            projection.structured_output = Some(output.value);
+            touch_run(projection, event)?;
         }
         KnownPayload::SessionForked(forked) => {
             projection.external_sessions.clear();

@@ -193,6 +193,19 @@ impl ToolRegistry {
                 read_only: true,
             },
             ToolSpec {
+                name: "structured_output",
+                description: "Return a final structured result matching a JSON schema. Validates required fields and primitive types, records structured.output, and lets the caller read it from the session.",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "schema": {"type": "object", "description": "JSON schema; may be omitted when the run supplies one"},
+                        "data": {"type": "object"}
+                    },
+                    "required": ["data"]
+                }),
+                read_only: true,
+            },
+            ToolSpec {
                 name: "tool_search",
                 description: "Search tools that are available but not currently declared (MCP servers, plugins, and deferred built-ins). Returns compact matches; matched tools become callable on the next turn. Use select for exact names, query to search names/descriptions, and source to filter.",
                 parameters: json!({
@@ -339,11 +352,11 @@ impl ToolRegistry {
             },
             ToolSpec {
                 name: "git_worktree",
-                description: "List or add a git worktree inside the workspace.",
+                description: "List, add, or remove a git worktree inside the workspace.",
                 parameters: json!({
                     "type": "object",
                     "properties": {
-                        "action": {"type": "string", "enum": ["list", "add"]},
+                        "action": {"type": "string", "enum": ["list", "add", "remove"]},
                         "path": {"type": "string"}
                     }
                 }),

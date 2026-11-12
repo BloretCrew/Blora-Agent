@@ -7,7 +7,7 @@ GET    /api/sessions          session summaries: id, title, workspace_path, mode
 GET    /api/sessions?q=       same summary shape; full transcript stays on GET /api/sessions/:id
 POST   /api/sessions
 GET    /api/sessions/:id
-POST   /api/sessions/:id/run         {"prompt", "permission_mode": "plan|default|acceptEdits|bypassPermissions", "attachments": [AttachmentRef], ...}
+POST   /api/sessions/:id/run         {"prompt", "permission_mode": "plan|default|acceptEdits|bypassPermissions", "attachments": [AttachmentRef], "output_schema": {...}, ...}
 POST   /api/sessions/:id/permission  {"permission_mode": "..."} — persist session-level mode; emits permission.changed/plan.mode.changed
 GET    /api/sessions/:id/events
 POST   /api/sessions/:id/attachments {"kind":"image|file","mime","name","data":"base64"} → AttachmentRef

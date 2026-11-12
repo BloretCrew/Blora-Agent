@@ -82,6 +82,16 @@ impl Provider for ResponsesProvider {
         if let Some(key) = &request.cache_key {
             body["prompt_cache_key"] = json!(key);
         }
+        if let Some(format) = &request.response_format {
+            body["text"] = json!({
+                "format": {
+                    "type": "json_schema",
+                    "name": format.name,
+                    "schema": format.schema,
+                    "strict": format.strict,
+                }
+            });
+        }
         let url = format!("{}/responses", self.base_url);
         let response = http::agent()
             .post(&url)

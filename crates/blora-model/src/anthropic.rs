@@ -85,6 +85,14 @@ impl Provider for AnthropicProvider {
         if let Some(key) = &request.cache_key {
             body["metadata"] = json!({ "user_id": key });
         }
+        if request.response_format.is_some()
+            && request
+                .tools
+                .iter()
+                .any(|tool| tool.name == "structured_output")
+        {
+            body["tool_choice"] = json!({"type": "tool", "name": "structured_output"});
+        }
         let url = format!("{}/v1/messages", self.base_url);
         let response = http::agent()
             .post(&url)
