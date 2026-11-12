@@ -26,7 +26,9 @@ use blora_policy::{PermissionMode, Policy};
 use blora_session::SessionProjection;
 use blora_storage::{ArtifactRecord, CreateSession, CreateTask, SessionSummary, SqliteStore};
 use blora_tools::ToolRegistry;
-use blora_types::{ArtifactId, BloraError, CancelToken, Mode, Result, RunId, SessionId, TurnId};
+use blora_types::{
+    AgentId, ArtifactId, BloraError, CancelToken, Mode, Result, RunId, SessionId, TurnId,
+};
 use serde_json::{Value, json};
 use std::sync::Mutex;
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
@@ -138,29 +140,35 @@ impl Default for RunOptions {
     }
 }
 
+#[derive(Clone)]
 pub struct Runtime {
-    pub(crate) store: SqliteStore,
-    pub(crate) foreground_sessions: Mutex<std::collections::HashSet<SessionId>>,
+    pub(crate) store: std::sync::Arc<SqliteStore>,
+    pub(crate) foreground_sessions: std::sync::Arc<Mutex<std::collections::HashSet<SessionId>>>,
     /// Live event subscribers (SSE, TUI). Lossy: a slow subscriber drops events
     /// and must resynchronise from the store, which it can always do.
-    subscribers: Mutex<Vec<SyncSender<EventEnvelope>>>,
+    subscribers: std::sync::Arc<Mutex<Vec<SyncSender<EventEnvelope>>>>,
     /// Answers to open `ask_user` questions, keyed by request id. `None` is a dismissal.
-    pub(crate) input_answers: Mutex<std::collections::HashMap<String, Option<String>>>,
+    pub(crate) input_answers:
+        std::sync::Arc<Mutex<std::collections::HashMap<String, Option<String>>>>,
     /// Scripted provider used by unit tests in place of the resolved chain.
     #[cfg(test)]
-    pub(crate) test_provider: Mutex<Option<std::sync::Arc<dyn Provider>>>,
+    pub(crate) test_provider: std::sync::Arc<Mutex<Option<std::sync::Arc<dyn Provider>>>>,
+    /// Cancellation tokens for background subagents.
+    pub(crate) subagent_cancels:
+        std::sync::Arc<Mutex<std::collections::HashMap<AgentId, CancelToken>>>,
 }
 
 impl Runtime {
     #[must_use]
     pub fn new(store: SqliteStore) -> Self {
         Self {
-            store,
-            foreground_sessions: Mutex::new(std::collections::HashSet::new()),
-            subscribers: Mutex::new(Vec::new()),
-            input_answers: Mutex::new(std::collections::HashMap::new()),
+            store: std::sync::Arc::new(store),
+            foreground_sessions: std::sync::Arc::new(Mutex::new(std::collections::HashSet::new())),
+            subscribers: std::sync::Arc::new(Mutex::new(Vec::new())),
+            input_answers: std::sync::Arc::new(Mutex::new(std::collections::HashMap::new())),
             #[cfg(test)]
-            test_provider: Mutex::new(None),
+            test_provider: std::sync::Arc::new(Mutex::new(None)),
+            subagent_cancels: std::sync::Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -2229,6 +2237,9 @@ impl Runtime {
                         .unwrap_or("worker");
                     self.spawn_subagent(session_id, role, prompt, options, cancel)
                 }
+                "subagent" => {
+                    self.subagent_tool(session_id, run_id, turn_id, &arguments, options, cancel)
+                }
                 "schedule" => self.schedule_tool(session_id, run_id, turn_id, &arguments, options),
                 "schedule_task" => {
                     let title = arguments
@@ -2854,6 +2865,7 @@ fn runtime_handled_tool(name: &str) -> bool {
             | "exit_plan_mode"
             | "artifact"
             | "schedule"
+            | "subagent"
     )
 }
 
@@ -4181,6 +4193,26 @@ mod tests {
                 .unwrap()
                 .contains("# Mode: Code")
         );
+    }
+
+    #[test]
+    fn background_subagent_runs_and_reports_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = Runtime::new(SqliteStore::open_in_memory().unwrap());
+        let session = session(&runtime, Mode::Code, dir.path().to_str().unwrap());
+        let mut options = yolo();
+        options.mock = true;
+        let id = runtime
+            .spawn_subagent_background(&session, "research", "look around", &options)
+            .unwrap();
+        let id = AgentId::parse(id).unwrap();
+        let result = runtime
+            .wait_subagent(&id, std::time::Duration::from_secs(10))
+            .unwrap();
+        assert!(result.contains("completed"), "{result}");
+        let agents = runtime.list_subagents(&session).unwrap();
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].status, "completed");
     }
 
     #[test]

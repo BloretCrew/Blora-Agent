@@ -384,6 +384,24 @@ impl ToolRegistry {
                 read_only: false,
             },
             ToolSpec {
+                name: "subagent",
+                description: "Manage subagents. spawn starts a child agent (background=true returns immediately with an agent id); list shows children; send steers a running child; wait blocks until it finishes; close cancels it; status reads one agent.",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": ["spawn", "list", "send", "wait", "close", "status"]},
+                        "agent_id": {"type": "string"},
+                        "role": {"type": "string", "enum": ["research", "review", "plan", "code", "worker"]},
+                        "prompt": {"type": "string"},
+                        "message": {"type": "string"},
+                        "background": {"type": "boolean"},
+                        "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600}
+                    },
+                    "required": ["action"]
+                }),
+                read_only: false,
+            },
+            ToolSpec {
                 name: "delegate",
                 description: "Spawn a child agent with a small turn budget and return its final report. The child cannot see this conversation, so the prompt must be a complete brief: goal, relevant paths, constraints, and what to report. Roles: research, review, plan (read-only), code (may edit).",
                 parameters: json!({

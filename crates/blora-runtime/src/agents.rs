@@ -1,16 +1,29 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 Blora Agent contributors
 
-use blora_events::{KnownPayload, SubagentCompleted, SubagentFailed, SubagentSpawned};
+use std::time::{Duration, Instant};
+
+use blora_events::{
+    KnownPayload, SubagentCompleted, SubagentFailed, SubagentMessage, SubagentSpawned,
+};
 use blora_storage::{AgentRecord, CreateSession};
 use blora_types::{AgentId, BloraError, CancelToken, Mode, Result, SessionId};
 use chrono::Utc;
+use serde_json::Value;
 
 use crate::coordinator::{RunOptions, Runtime};
 
 pub const MAX_SUBAGENT_DEPTH: u32 = 2;
 pub const MAX_RUNNING_CHILDREN: u32 = 3;
 pub const SUBAGENT_TURNS: u32 = 6;
+
+struct PreparedSubagent {
+    agent_id: AgentId,
+    child_session: SessionId,
+    child_options: RunOptions,
+    child_prompt: String,
+    role: String,
+}
 
 impl Runtime {
     pub fn session_depth(&self, session_id: &SessionId) -> Result<u32> {
@@ -30,14 +43,17 @@ impl Runtime {
         self.store.list_agents(session_id)
     }
 
-    pub fn spawn_subagent(
+    pub fn get_subagent(&self, agent_id: &AgentId) -> Result<AgentRecord> {
+        self.store.get_agent(agent_id)
+    }
+
+    fn prepare_subagent(
         &self,
         parent_session: &SessionId,
         role: &str,
         prompt: &str,
         options: &RunOptions,
-        cancel: &CancelToken,
-    ) -> Result<String> {
+    ) -> Result<PreparedSubagent> {
         if prompt.trim().is_empty() {
             return Err(BloraError::Other(
                 "subagent prompt must not be empty".to_owned(),
@@ -117,10 +133,33 @@ impl Runtime {
             attachments: Vec::new(),
         };
         let child_prompt = subagent_brief(role, prompt, depth < MAX_SUBAGENT_DEPTH);
-        let result = self.run(&child_session, &child_prompt, cancel, &child_options);
+        Ok(PreparedSubagent {
+            agent_id,
+            child_session,
+            child_options,
+            child_prompt,
+            role: role.to_owned(),
+        })
+    }
+
+    fn finish_subagent(
+        &self,
+        parent_session: &SessionId,
+        prepared: PreparedSubagent,
+        result: Result<blora_types::RunId>,
+    ) -> Result<String> {
+        let PreparedSubagent {
+            agent_id,
+            child_session,
+            role,
+            ..
+        } = prepared;
         // Steer/stop: a control row may have been written while the child ran.
         let control = self.store.get_agent(&agent_id).ok();
-        if control.as_ref().is_some_and(|a| a.status == "cancelled") {
+        if control
+            .as_ref()
+            .is_some_and(|agent| agent.status == "cancelled")
+        {
             return Err(BloraError::Cancelled);
         }
         let projection = self.show_session(&child_session).ok();
@@ -138,13 +177,13 @@ impl Runtime {
             .unwrap_or_else(|| "subagent finished without text".to_owned());
         let (input_tokens, output_tokens, turns) = projection
             .as_ref()
-            .map(|p| {
-                let turns = p
+            .map(|projection| {
+                let turns = projection
                     .transcript
                     .iter()
                     .filter(|item| matches!(item, blora_session::TranscriptItem::Assistant { .. }))
                     .count() as u32;
-                (p.input_tokens, p.output_tokens, turns)
+                (projection.input_tokens, projection.output_tokens, turns)
             })
             .unwrap_or_default();
         match result {
@@ -186,12 +225,64 @@ impl Runtime {
         }
     }
 
-    /// Mark a running subagent as cancelled. The child run observes this at the
-    /// next safe point via its parent's cancel token or when it returns.
+    pub fn spawn_subagent(
+        &self,
+        parent_session: &SessionId,
+        role: &str,
+        prompt: &str,
+        options: &RunOptions,
+        cancel: &CancelToken,
+    ) -> Result<String> {
+        let prepared = self.prepare_subagent(parent_session, role, prompt, options)?;
+        let child_session = prepared.child_session.clone();
+        let child_options = prepared.child_options.clone();
+        let child_prompt = prepared.child_prompt.clone();
+        let result = self.run(&child_session, &child_prompt, cancel, &child_options);
+        self.finish_subagent(parent_session, prepared, result)
+    }
+
+    /// Start a child agent on its own thread and return its agent id immediately.
+    pub fn spawn_subagent_background(
+        &self,
+        parent_session: &SessionId,
+        role: &str,
+        prompt: &str,
+        options: &RunOptions,
+    ) -> Result<String> {
+        let prepared = self.prepare_subagent(parent_session, role, prompt, options)?;
+        let agent_id = prepared.agent_id.clone();
+        let token = CancelToken::new();
+        if let Ok(mut cancels) = self.subagent_cancels.lock() {
+            cancels.insert(agent_id.clone(), token.clone());
+        }
+        let runtime = self.clone();
+        let parent = parent_session.clone();
+        let thread_agent = agent_id.clone();
+        std::thread::spawn(move || {
+            let result = runtime.run(
+                &prepared.child_session,
+                &prepared.child_prompt,
+                &token,
+                &prepared.child_options,
+            );
+            let _ = runtime.finish_subagent(&parent, prepared, result);
+            if let Ok(mut cancels) = runtime.subagent_cancels.lock() {
+                cancels.remove(&thread_agent);
+            }
+        });
+        Ok(agent_id.to_string())
+    }
+
+    /// Mark a running subagent as cancelled and signal its run to stop.
     pub fn cancel_subagent(&self, agent_id: &AgentId) -> Result<()> {
         let agent = self.store.get_agent(agent_id)?;
         if agent.status != "running" {
             return Ok(());
+        }
+        if let Ok(cancels) = self.subagent_cancels.lock() {
+            if let Some(token) = cancels.get(agent_id) {
+                token.cancel();
+            }
         }
         self.store
             .update_agent(agent_id, "cancelled", Some("cancelled"), Utc::now())?;
@@ -217,6 +308,136 @@ impl Runtime {
         }
         self.queue_steer(&agent.child_session_id, message)
     }
+
+    /// Wait for a subagent to leave `running`, up to `timeout`.
+    pub fn wait_subagent(&self, agent_id: &AgentId, timeout: Duration) -> Result<String> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let agent = self.store.get_agent(agent_id)?;
+            if agent.status != "running" {
+                return Ok(format!(
+                    "{} {} {}",
+                    agent.id,
+                    agent.status,
+                    agent.summary.unwrap_or_default()
+                ));
+            }
+            if Instant::now() >= deadline {
+                return Ok(format!("{} still running (timeout)", agent.id));
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn subagent_tool(
+        &self,
+        session_id: &SessionId,
+        run_id: &blora_types::RunId,
+        turn_id: &blora_types::TurnId,
+        arguments: &Value,
+        options: &RunOptions,
+        cancel: &CancelToken,
+    ) -> Result<String> {
+        let action = arguments
+            .get("action")
+            .and_then(Value::as_str)
+            .ok_or_else(|| BloraError::Other("subagent needs action".to_owned()))?;
+        let agent_id = arguments
+            .get("agent_id")
+            .and_then(Value::as_str)
+            .map(AgentId::parse)
+            .transpose()?;
+        match action {
+            "spawn" => {
+                let role = arguments
+                    .get("role")
+                    .and_then(Value::as_str)
+                    .unwrap_or("worker");
+                let prompt = arguments
+                    .get("prompt")
+                    .and_then(Value::as_str)
+                    .filter(|prompt| !prompt.trim().is_empty())
+                    .ok_or_else(|| BloraError::Other("subagent spawn needs prompt".to_owned()))?;
+                let background = arguments
+                    .get("background")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true);
+                if background {
+                    self.spawn_subagent_background(session_id, role, prompt, options)
+                        .map(|id| format!("spawned subagent {id} in background"))
+                } else {
+                    self.spawn_subagent(session_id, role, prompt, options, cancel)
+                }
+            }
+            "list" => {
+                let agents = self.list_subagents(session_id)?;
+                if agents.is_empty() {
+                    return Ok("(no subagents)".to_owned());
+                }
+                Ok(agents
+                    .iter()
+                    .map(format_agent)
+                    .collect::<Vec<_>>()
+                    .join("\n"))
+            }
+            "send" => {
+                let id = require_agent_id(agent_id)?;
+                let message = arguments
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .filter(|message| !message.trim().is_empty())
+                    .ok_or_else(|| BloraError::Other("subagent send needs message".to_owned()))?;
+                self.steer_subagent(&id, message)?;
+                self.emit(
+                    session_id,
+                    Some(run_id),
+                    Some(turn_id),
+                    KnownPayload::SubagentMessage(SubagentMessage {
+                        agent_id: id.clone(),
+                        text: message.to_owned(),
+                    }),
+                )?;
+                Ok(format!("sent message to {id}"))
+            }
+            "wait" => {
+                let id = require_agent_id(agent_id)?;
+                let timeout = arguments
+                    .get("timeout_seconds")
+                    .and_then(Value::as_u64)
+                    .map_or(60, |value| value.clamp(1, 600));
+                self.wait_subagent(&id, Duration::from_secs(timeout))
+            }
+            "close" => {
+                let id = require_agent_id(agent_id)?;
+                self.cancel_subagent(&id)?;
+                Ok(format!("closed {id}"))
+            }
+            "status" => {
+                let id = require_agent_id(agent_id)?;
+                Ok(format_agent(&self.get_subagent(&id)?))
+            }
+            other => Err(BloraError::Other(format!(
+                "unknown subagent action: {other}"
+            ))),
+        }
+    }
+}
+
+fn require_agent_id(id: Option<AgentId>) -> Result<AgentId> {
+    id.ok_or_else(|| BloraError::Other("subagent action needs agent_id".to_owned()))
+}
+
+fn format_agent(agent: &AgentRecord) -> String {
+    format!(
+        "{}  {}  {}  turns {}/{}  {}",
+        agent.id,
+        agent.role,
+        agent.status,
+        agent.budget_turns,
+        agent.depth,
+        agent.summary.as_deref().unwrap_or("")
+    )
 }
 
 /// Task text for a child agent. The child cannot see the parent conversation,
