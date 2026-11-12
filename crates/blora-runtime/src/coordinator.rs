@@ -1147,6 +1147,16 @@ impl Runtime {
                 .unwrap_or_else(|| ".".to_owned());
             env.plan = render_plan(&current);
             env.compactions = current.compaction_count;
+            for (agent_id, role, summary) in self.pending_subagent_summaries(session_id)? {
+                self.emit_referenced_input(
+                    session_id,
+                    &run_id,
+                    &turn_id,
+                    format!("[subagent {role} {agent_id} result]\n{summary}"),
+                    None,
+                    Vec::new(),
+                )?;
+            }
             let current_permission = self
                 .store
                 .get_session_setting(session_id, "permission_mode")?
@@ -1631,6 +1641,46 @@ impl Runtime {
             LocalBackend::new(Policy::with_mode(backend.policy().workspace(), mode)?)
                 .with_isolation(backend.isolation()),
         )
+    }
+
+    fn worktree_session(
+        &self,
+        session_id: &SessionId,
+        run_id: &RunId,
+        turn_id: &TurnId,
+        action: &str,
+        arguments: &Value,
+        backend: &LocalBackend,
+    ) -> Result<String> {
+        let cwd = if action == "exit" {
+            ".".to_owned()
+        } else {
+            let path = arguments
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or_else(|| BloraError::Other("worktree enter needs path".to_owned()))?;
+            let resolved = backend.policy().resolve(path)?;
+            if !resolved.is_dir() {
+                return Err(BloraError::Other(format!(
+                    "worktree enter target is not a directory: {path}"
+                )));
+            }
+            resolved
+                .strip_prefix(backend.policy().workspace())
+                .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+                .map_err(|_| BloraError::Policy("worktree escapes workspace".to_owned()))?
+        };
+        self.emit(
+            session_id,
+            Some(run_id),
+            Some(turn_id),
+            KnownPayload::SessionCwdChanged(SessionCwdChanged { cwd: cwd.clone() }),
+        )?;
+        Ok(if action == "exit" {
+            "exited worktree; shell cwd is the workspace root".to_owned()
+        } else {
+            format!("entered worktree; shell cwd is {cwd}")
+        })
     }
 
     fn execute_code_tool(
@@ -2355,6 +2405,25 @@ impl Runtime {
                 "goal" => self.goal_tool(session_id, run_id, turn_id, &arguments),
                 "team" => self.team_tool(session_id, run_id, turn_id, &arguments, options),
                 "team_task" => self.team_task_tool(session_id, run_id, turn_id, &arguments),
+                "git_worktree" => {
+                    let action = arguments
+                        .get("action")
+                        .and_then(Value::as_str)
+                        .unwrap_or("list");
+                    if matches!(action, "enter" | "exit") {
+                        self.worktree_session(
+                            session_id, run_id, turn_id, action, &arguments, backend,
+                        )
+                    } else {
+                        ToolRegistry::execute_outcome_for(
+                            backend,
+                            session_id.as_str(),
+                            "git_worktree",
+                            &arguments,
+                        )
+                        .map(|outcome| outcome.as_text())
+                    }
+                }
                 "subagent" => {
                     self.subagent_tool(session_id, run_id, turn_id, &arguments, options, cancel)
                 }
@@ -3040,6 +3109,7 @@ fn runtime_handled_tool(name: &str) -> bool {
             | "team_task"
             | "workflow"
             | "execute_code"
+            | "git_worktree"
     )
 }
 
@@ -4614,6 +4684,25 @@ mod tests {
         let agents = runtime.list_subagents(&session).unwrap();
         assert_eq!(agents.len(), 1);
         assert_eq!(agents[0].status, "completed");
+        let pending = runtime.pending_subagent_summaries(&session).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(
+            runtime
+                .pending_subagent_summaries(&session)
+                .unwrap()
+                .is_empty()
+        );
+        runtime
+            .resume_subagent(&id, "look again", &options)
+            .unwrap();
+        let resumed = runtime
+            .wait_subagent(&id, std::time::Duration::from_secs(10))
+            .unwrap();
+        assert!(resumed.contains("completed"), "{resumed}");
+        assert_eq!(
+            runtime.pending_subagent_summaries(&session).unwrap().len(),
+            1
+        );
     }
 
     #[test]

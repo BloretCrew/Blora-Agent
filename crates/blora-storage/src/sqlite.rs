@@ -309,6 +309,15 @@ impl SqliteStore {
             params![now],
         )
         .map_err(BloraError::storage)?;
+        let _ = conn.execute(
+            "ALTER TABLE agents ADD COLUMN summary_delivered INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (18, ?1)",
+            params![now],
+        )
+        .map_err(BloraError::storage)?;
         Ok(Self {
             conn: Mutex::new(conn),
             clock: SystemClock,
@@ -316,7 +325,7 @@ impl SqliteStore {
     }
 
     /// Current storage schema version written by this build.
-    pub const STORE_VERSION: u32 = 17;
+    pub const STORE_VERSION: u32 = 18;
 
     pub fn queue_steer(&self, session_id: &SessionId, message: &str) -> Result<()> {
         let conn = self.lock();
@@ -811,8 +820,8 @@ impl SqliteStore {
         conn.execute(
             "INSERT INTO agents (
                 id, parent_session_id, child_session_id, role, depth, status,
-                budget_turns, summary, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                budget_turns, summary, summary_delivered, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 record.id.as_str(),
                 record.parent_session_id.as_str(),
@@ -822,6 +831,7 @@ impl SqliteStore {
                 record.status,
                 record.budget_turns as i64,
                 record.summary,
+                i64::from(record.summary_delivered),
                 record.created_at.to_rfc3339(),
                 record.updated_at.to_rfc3339(),
             ],
@@ -839,8 +849,20 @@ impl SqliteStore {
     ) -> Result<()> {
         let conn = self.lock();
         conn.execute(
-            "UPDATE agents SET status = ?1, summary = ?2, updated_at = ?3 WHERE id = ?4",
+            "UPDATE agents SET status = ?1, summary = ?2,
+                summary_delivered = CASE WHEN ?2 IS NULL THEN summary_delivered ELSE 0 END,
+                updated_at = ?3 WHERE id = ?4",
             params![status, summary, now.to_rfc3339(), agent_id.as_str()],
+        )
+        .map_err(BloraError::storage)?;
+        Ok(())
+    }
+
+    pub fn mark_agent_delivered(&self, agent_id: &AgentId) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE agents SET summary_delivered = 1 WHERE id = ?1",
+            params![agent_id.as_str()],
         )
         .map_err(BloraError::storage)?;
         Ok(())
@@ -1783,7 +1805,7 @@ impl SqliteStore {
         let mut stmt = conn
             .prepare(
                 "SELECT id, parent_session_id, child_session_id, role, depth, status,
-                        budget_turns, summary, created_at, updated_at
+                        budget_turns, summary, summary_delivered, created_at, updated_at
                  FROM agents
                  WHERE (?1 IS NULL OR id = ?1) AND (?2 IS NULL OR parent_session_id = ?2)
                  ORDER BY created_at ASC",
@@ -1802,16 +1824,28 @@ impl SqliteStore {
                         row.get::<_, String>(5)?,
                         row.get::<_, i64>(6)?,
                         row.get::<_, Option<String>>(7)?,
-                        row.get::<_, String>(8)?,
+                        row.get::<_, i64>(8)? != 0,
                         row.get::<_, String>(9)?,
+                        row.get::<_, String>(10)?,
                     ))
                 },
             )
             .map_err(BloraError::storage)?;
         let mut out = Vec::new();
         for row in rows {
-            let (id, parent_id, child, role, depth, status, budget, summary, created, updated) =
-                row.map_err(BloraError::storage)?;
+            let (
+                id,
+                parent_id,
+                child,
+                role,
+                depth,
+                status,
+                budget,
+                summary,
+                delivered,
+                created,
+                updated,
+            ) = row.map_err(BloraError::storage)?;
             out.push(AgentRecord {
                 id: AgentId::parse(&id)?,
                 parent_session_id: SessionId::parse(&parent_id)?,
@@ -1821,6 +1855,7 @@ impl SqliteStore {
                 status,
                 budget_turns: u32::try_from(budget).unwrap_or(0),
                 summary,
+                summary_delivered: delivered,
                 created_at: parse_time(&created)?,
                 updated_at: parse_time(&updated)?,
             });

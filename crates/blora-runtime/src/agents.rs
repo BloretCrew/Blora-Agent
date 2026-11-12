@@ -98,6 +98,7 @@ impl Runtime {
             status: "running".to_owned(),
             budget_turns: budget,
             summary: None,
+            summary_delivered: false,
             created_at: now,
             updated_at: now,
         })?;
@@ -251,13 +252,20 @@ impl Runtime {
         options: &RunOptions,
     ) -> Result<String> {
         let prepared = self.prepare_subagent(parent_session, role, prompt, options)?;
+        self.launch_prepared(parent_session.clone(), prepared)
+    }
+
+    fn launch_prepared(
+        &self,
+        parent_session: SessionId,
+        prepared: PreparedSubagent,
+    ) -> Result<String> {
         let agent_id = prepared.agent_id.clone();
         let token = CancelToken::new();
         if let Ok(mut cancels) = self.subagent_cancels.lock() {
             cancels.insert(agent_id.clone(), token.clone());
         }
         let runtime = self.clone();
-        let parent = parent_session.clone();
         let thread_agent = agent_id.clone();
         std::thread::spawn(move || {
             let result = runtime.run(
@@ -266,12 +274,79 @@ impl Runtime {
                 &token,
                 &prepared.child_options,
             );
-            let _ = runtime.finish_subagent(&parent, prepared, result);
+            let _ = runtime.finish_subagent(&parent_session, prepared, result);
             if let Ok(mut cancels) = runtime.subagent_cancels.lock() {
                 cancels.remove(&thread_agent);
             }
         });
         Ok(agent_id.to_string())
+    }
+
+    /// Resume a finished subagent with a new prompt, reusing its child session.
+    pub fn resume_subagent(
+        &self,
+        agent_id: &AgentId,
+        prompt: &str,
+        options: &RunOptions,
+    ) -> Result<String> {
+        if prompt.trim().is_empty() {
+            return Err(BloraError::Other(
+                "subagent resume needs a prompt".to_owned(),
+            ));
+        }
+        let agent = self.store.get_agent(agent_id)?;
+        if agent.status == "running" {
+            return Err(BloraError::Other(format!(
+                "subagent {agent_id} is still running"
+            )));
+        }
+        let (budget, read_only) = role_limits(&agent.role);
+        let child_options = RunOptions {
+            model: options.model.clone(),
+            mock: options.mock,
+            auto_approve: options.auto_approve && !read_only,
+            interactive: options.interactive,
+            can_ask: false,
+            max_turns: budget,
+            provider: options.provider.clone(),
+            read_only,
+            worktree: false,
+            passport_user_token: options.passport_user_token.clone(),
+            permission: if read_only {
+                Some(blora_policy::PermissionMode::Plan)
+            } else {
+                options.permission
+            },
+            attachments: Vec::new(),
+            output_schema: None,
+        };
+        let prepared = PreparedSubagent {
+            agent_id: agent.id.clone(),
+            child_session: agent.child_session_id.clone(),
+            child_prompt: subagent_brief(&agent.role, prompt, agent.depth < MAX_SUBAGENT_DEPTH),
+            child_options,
+            role: agent.role.clone(),
+        };
+        self.store
+            .update_agent(agent_id, "running", None, Utc::now())?;
+        self.launch_prepared(agent.parent_session_id.clone(), prepared)
+    }
+
+    /// Completed subagent summaries that the parent has not seen yet.
+    pub fn pending_subagent_summaries(
+        &self,
+        parent_session: &SessionId,
+    ) -> Result<Vec<(AgentId, String, String)>> {
+        let mut out = Vec::new();
+        for agent in self.list_subagents(parent_session)? {
+            if agent.status == "completed" && !agent.summary_delivered {
+                if let Some(summary) = agent.summary.clone() {
+                    self.store.mark_agent_delivered(&agent.id)?;
+                    out.push((agent.id, agent.role, summary));
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// Mark a running subagent as cancelled and signal its run to stop.
@@ -408,6 +483,16 @@ impl Runtime {
                     .and_then(Value::as_u64)
                     .map_or(60, |value| value.clamp(1, 600));
                 self.wait_subagent(&id, Duration::from_secs(timeout))
+            }
+            "resume" => {
+                let id = require_agent_id(agent_id)?;
+                let prompt = arguments
+                    .get("prompt")
+                    .and_then(Value::as_str)
+                    .filter(|prompt| !prompt.trim().is_empty())
+                    .ok_or_else(|| BloraError::Other("subagent resume needs prompt".to_owned()))?;
+                self.resume_subagent(&id, prompt, options)
+                    .map(|id| format!("resumed subagent {id}"))
             }
             "close" => {
                 let id = require_agent_id(agent_id)?;

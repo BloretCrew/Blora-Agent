@@ -45,6 +45,7 @@ pub struct AgentRecord {
     pub status: String,
     pub budget_turns: u32,
     pub summary: Option<String>,
+    pub summary_delivered: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

@@ -542,11 +542,11 @@ impl ToolRegistry {
             },
             ToolSpec {
                 name: "git_worktree",
-                description: "List, add, or remove a git worktree inside the workspace.",
+                description: "List, add, enter, exit, or remove a git worktree inside the workspace. enter/exit change the session shell cwd.",
                 parameters: json!({
                     "type": "object",
                     "properties": {
-                        "action": {"type": "string", "enum": ["list", "add", "remove"]},
+                        "action": {"type": "string", "enum": ["list", "add", "enter", "exit", "remove"]},
                         "path": {"type": "string"}
                     }
                 }),
@@ -588,11 +588,11 @@ impl ToolRegistry {
             },
             ToolSpec {
                 name: "subagent",
-                description: "Manage subagents. spawn starts a child agent (background=true returns immediately with an agent id); list shows children; send steers a running child; wait blocks until it finishes; close cancels it; status reads one agent.",
+                description: "Manage subagents. spawn starts a child agent (background=true returns immediately with an agent id); list shows children; send steers a running child; wait blocks until it finishes; resume reuses a finished child session; close cancels it; status reads one agent.",
                 parameters: json!({
                     "type": "object",
                     "properties": {
-                        "action": {"type": "string", "enum": ["spawn", "list", "send", "wait", "close", "status"]},
+                        "action": {"type": "string", "enum": ["spawn", "list", "send", "wait", "resume", "close", "status"]},
                         "agent_id": {"type": "string"},
                         "role": {"type": "string", "enum": ["research", "review", "plan", "code", "worker"]},
                         "prompt": {"type": "string"},

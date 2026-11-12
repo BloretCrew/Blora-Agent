@@ -124,6 +124,7 @@ CREATE TABLE IF NOT EXISTS agents (
     status TEXT NOT NULL,
     budget_turns INTEGER NOT NULL,
     summary TEXT,
+    summary_delivered INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     FOREIGN KEY (parent_session_id) REFERENCES sessions(id)
