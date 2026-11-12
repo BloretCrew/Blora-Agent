@@ -133,6 +133,23 @@ impl ToolRegistry {
                 read_only: true,
             },
             ToolSpec {
+                name: "computer",
+                description: "Control the desktop through platform tools. Actions: screenshot, click, move, type, key, scroll, wait. Disabled unless BLORA_COMPUTER_USE=1; screenshots return images.",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": ["screenshot", "click", "move", "type", "key", "scroll", "wait"]},
+                        "x": {"type": "integer", "minimum": 0},
+                        "y": {"type": "integer", "minimum": 0},
+                        "text": {"type": "string"},
+                        "key": {"type": "string"},
+                        "amount": {"type": "integer"}
+                    },
+                    "required": ["action"]
+                }),
+                read_only: false,
+            },
+            ToolSpec {
                 name: "browser",
                 description: "Drive a headless Chrome/Chromium via CDP. Actions: open/navigate, snapshot, click, type, press, scroll, screenshot, evaluate, wait_for, back, forward, list, close. Use snapshot to get element refs, then click/type with ref.",
                 parameters: json!({
@@ -785,6 +802,7 @@ impl ToolRegistry {
                     | "team"
                     | "team_task"
                     | "browser"
+                    | "computer"
             ),
             Mode::Work => !matches!(
                 name,
@@ -794,6 +812,7 @@ impl ToolRegistry {
                     | "notebook_edit"
                     | "lsp"
                     | "execute_code"
+                    | "computer"
             ),
             Mode::Agent => name != "generate_image",
         }
@@ -823,6 +842,9 @@ impl ToolRegistry {
     ) -> Result<ToolOutcome> {
         if name == "browser" {
             return browser_outcome(backend, session_id, arguments);
+        }
+        if name == "computer" {
+            return computer_outcome(backend, session_id, arguments);
         }
         if name == "view_image" {
             let path = required_str(arguments, "path")?;
@@ -1149,6 +1171,50 @@ fn generate_image(backend: &LocalBackend, session_id: &str, arguments: &Value) -
     let images = blora_imagine::fetch_images(&endpoint, &request)?;
     let saved = blora_imagine::write_images(backend.policy().workspace(), session_id, &images)?;
     Ok(blora_imagine::format_saved(&saved))
+}
+
+fn computer_outcome(
+    backend: &LocalBackend,
+    session_id: &str,
+    arguments: &Value,
+) -> Result<ToolOutcome> {
+    backend
+        .policy()
+        .require(backend.policy().computer_use(), "computer")?;
+    let output = blora_automation::computer::action(
+        backend.policy().workspace(),
+        &blora_automation::ComputerRequest {
+            action: required_str(arguments, "action")?.to_owned(),
+            x: arguments.get("x").and_then(Value::as_i64),
+            y: arguments.get("y").and_then(Value::as_i64),
+            text: optional_str(arguments, "text").map(str::to_owned),
+            key: optional_str(arguments, "key").map(str::to_owned),
+            amount: arguments.get("amount").and_then(Value::as_i64),
+        },
+    )?;
+    let Some(bytes) = output.image else {
+        return Ok(ToolOutcome::text(output.text));
+    };
+    let reference = AttachmentStore::new(backend.policy().workspace()).save_bytes(
+        session_id,
+        "image",
+        "image/png",
+        Some("computer.png"),
+        &bytes,
+    )?;
+    Ok(ToolOutcome::from_parts(vec![
+        ContentPart::text(output.text),
+        ContentPart::Image {
+            media_type: "image/png".to_owned(),
+            data: ImageData::Path {
+                path: reference.path,
+                sha256: Some(reference.sha256),
+                bytes: Some(reference.bytes),
+            },
+            detail: None,
+            alt: Some("computer screenshot".to_owned()),
+        },
+    ]))
 }
 
 fn browser_outcome(

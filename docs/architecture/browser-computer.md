@@ -40,6 +40,15 @@
 
 ## Computer use
 
-桌面控制尚未实现。计划中的接口是 `computer { action, x, y, text, key, screen }`，平台后端使用
-X11（xdotool/scrot）、Wayland（ydotool/grim）、macOS（osascript/screencapture）和 Windows PowerShell。
-默认关闭，需要显式开启并审批。
+`computer` 工具通过平台命令控制桌面：
+
+- Linux/X11：`xdotool`（点击、移动、输入、按键、滚动），截图使用 `grim`、`scrot` 或 ImageMagick `import`。
+- macOS：`screencapture` 截图；输入后端尚未接入 `osascript`。
+- Windows：暂未实现。
+
+动作：`screenshot`、`click`、`move`、`type`、`key`、`scroll`、`wait`。坐标从 0 开始，负值拒绝。
+
+默认关闭：需要 `BLORA_COMPUTER_USE=1`；`BLORA_COMPUTER_BACKEND=fake` 用于无显示环境的测试。每次调用仍受
+`Policy::computer_use` 约束（Plan 拒绝，Ask 审批，AutoEdit/Yolo 放行）。截图写入附件链路，返回图像内容块。
+
+computer use 只在 Agent 模式提供，因为它会直接操作真实桌面。
