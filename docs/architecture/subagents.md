@@ -40,4 +40,4 @@ Blora 支持同步 `delegate` 和显式的 `subagent` 工具。子代理是独�
 
 同步 `delegate` 直接把 `<subagent ...>` 报告作为工具结果返回。后台子代理通过 `wait` 返回报告；父会话的投影同时记录 `subagents` 列表，供 TUI/Web 展示。
 
-后台子代理完成后，父会话下一轮会自动注入一条 `[subagent <role> <id> result]` 用户消息；`agents.summary_delivered` 防止重复注入。父代理不需要主动轮询也能看到结果。
+后台子代理完成后，父会话下一轮会自动注入一条 `[subagent-result] <role> <id>` 用户消息；`agents.summary_delivered` 防止重复注入。父代理不需要主动轮询也能看到结果。

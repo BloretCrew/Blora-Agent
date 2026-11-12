@@ -1152,7 +1152,7 @@ impl Runtime {
                     session_id,
                     &run_id,
                     &turn_id,
-                    format!("[subagent {role} {agent_id} result]\n{summary}"),
+                    format!("[subagent-result] {role} {agent_id}\n{summary}"),
                     None,
                     Vec::new(),
                 )?;

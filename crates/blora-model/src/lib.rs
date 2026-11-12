@@ -340,7 +340,7 @@ impl Provider for MockProvider {
         } else if (system.contains("# Mode: Agent")
             || last_user.to_ascii_lowercase().contains("delegate")
             || last_user.to_ascii_lowercase().contains("subagent"))
-            && !last_user.contains("[subagent result")
+            && !last_user.starts_with("[subagent-result")
         {
             Completion {
                 tool_calls: vec![ToolCall {
