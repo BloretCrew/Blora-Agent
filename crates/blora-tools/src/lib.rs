@@ -152,11 +152,11 @@ impl ToolRegistry {
             },
             ToolSpec {
                 name: "browser",
-                description: "Drive a headless Chrome/Chromium via CDP. Actions: open/navigate, snapshot, click, type, press, scroll, screenshot, evaluate, wait_for, back, forward, list, close. Use snapshot to get element refs, then click/type with ref.",
+                description: "Drive a headless Chrome/Chromium via CDP. Actions: open/navigate, snapshot, click, type, press, scroll, screenshot, evaluate, console, dialog, cdp, wait_for, back, forward, list, close. Use snapshot to get element refs, then click/type with ref.",
                 parameters: json!({
                     "type": "object",
                     "properties": {
-                        "action": {"type": "string", "enum": ["open", "navigate", "snapshot", "click", "type", "press", "scroll", "screenshot", "evaluate", "wait_for", "back", "forward", "list", "close"]},
+                        "action": {"type": "string", "enum": ["open", "navigate", "snapshot", "click", "type", "press", "scroll", "screenshot", "evaluate", "console", "dialog", "cdp", "wait_for", "back", "forward", "list", "close"]},
                         "url": {"type": "string"},
                         "selector": {"type": "string"},
                         "ref": {"type": "string"},
@@ -166,6 +166,10 @@ impl ToolRegistry {
                         "y": {"type": "integer"},
                         "full_page": {"type": "boolean"},
                         "expression": {"type": "string"},
+                        "accept": {"type": "boolean"},
+                        "prompt_text": {"type": "string"},
+                        "method": {"type": "string"},
+                        "params": {"type": "object"},
                         "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 120}
                     },
                     "required": ["action"]
@@ -691,7 +695,8 @@ impl ToolRegistry {
                     "properties": {
                         "prompt": {"type": "string", "description": "What the image should show"},
                         "aspect_ratio": {"type": "string", "enum": ["1:1", "16:9", "9:16", "4:3", "3:4"]},
-                        "n": {"type": "integer", "minimum": 1, "maximum": 4}
+                        "n": {"type": "integer", "minimum": 1, "maximum": 4},
+                        "image_path": {"type": "string", "description": "Optional source image for image-to-image"}
                     },
                     "required": ["prompt"]
                 }),
@@ -1262,6 +1267,26 @@ fn generate_image(backend: &LocalBackend, session_id: &str, arguments: &Value) -
     backend
         .policy()
         .require(backend.policy().file_write_path(&check), "generate_image")?;
+    if let Some(image_path) = optional_str(arguments, "image_path") {
+        backend
+            .policy()
+            .require(backend.policy().media_generate(), "generate_image")?;
+        let resolved = backend.policy().resolve(image_path)?;
+        let mime = image_mime_for(&resolved).unwrap_or("image/png");
+        let bytes = backend.read_media_bytes(image_path)?;
+        let endpoint = blora_imagine::MediaEndpoint::from_env()
+            .ok_or_else(|| BloraError::Other("media endpoint is not configured".to_owned()))?;
+        let file = blora_imagine::edit_image(&endpoint, &bytes, mime, None, &request.prompt, None)?;
+        let saved = blora_imagine::write_images(
+            backend.policy().workspace(),
+            session_id,
+            &[blora_imagine::DecodedImage {
+                mime: file.mime,
+                bytes: file.bytes,
+            }],
+        )?;
+        return Ok(blora_imagine::format_saved(&saved));
+    }
     let endpoint = blora_imagine::ImageEndpoint::from_env()?;
     let images = blora_imagine::fetch_images(&endpoint, &request)?;
     let saved = blora_imagine::write_images(backend.policy().workspace(), session_id, &images)?;
@@ -1292,10 +1317,21 @@ fn media_tool_outcome(
         "edit_image" => {
             let (bytes, mime) = media_image(backend, arguments)?;
             let prompt = required_str(arguments, "prompt")?;
+            let mask = optional_str(arguments, "mask_path")
+                .map(|path| {
+                    let resolved = backend.policy().resolve(path)?;
+                    let mime = image_mime_for(&resolved).unwrap_or("image/png");
+                    Ok::<_, BloraError>((backend.read_media_bytes(path)?, mime.to_owned()))
+                })
+                .transpose()?;
+            let mask_ref = mask
+                .as_ref()
+                .map(|(bytes, mime)| (bytes.as_slice(), mime.as_str()));
             let file = blora_imagine::edit_image(
                 &endpoint,
                 &bytes,
                 &mime,
+                mask_ref,
                 prompt,
                 optional_str(arguments, "size"),
             )?;
@@ -1483,6 +1519,10 @@ fn browser_outcome(
             full_page: optional_bool(arguments, "full_page"),
             expression: optional_str(arguments, "expression").map(str::to_owned),
             timeout_secs: arguments.get("timeout_seconds").and_then(Value::as_u64),
+            accept: arguments.get("accept").and_then(Value::as_bool),
+            prompt_text: optional_str(arguments, "prompt_text").map(str::to_owned),
+            method: optional_str(arguments, "method").map(str::to_owned),
+            params: arguments.get("params").cloned(),
         },
     )?;
     let Some(bytes) = output.image else {

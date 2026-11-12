@@ -65,6 +65,7 @@ pub fn edit_image(
     endpoint: &MediaEndpoint,
     image: &[u8],
     media_type: &str,
+    mask: Option<(&[u8], &str)>,
     prompt: &str,
     size: Option<&str>,
 ) -> Result<MediaFile> {
@@ -89,6 +90,19 @@ pub fn edit_image(
     body.extend_from_slice(format!("Content-Type: {media_type}\r\n\r\n").as_bytes());
     body.extend_from_slice(image);
     body.extend_from_slice(b"\r\n");
+    if let Some((mask, mask_type)) = mask {
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        body.extend_from_slice(
+            format!(
+                "Content-Disposition: form-data; name=\"mask\"; filename=\"mask.{}\"\r\n",
+                extension_for(mask_type)
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(format!("Content-Type: {mask_type}\r\n\r\n").as_bytes());
+        body.extend_from_slice(mask);
+        body.extend_from_slice(b"\r\n");
+    }
     body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
     let response = ureq::post(&format!("{}/images/edits", endpoint.base))
         .set("Authorization", &format!("Bearer {}", endpoint.key))

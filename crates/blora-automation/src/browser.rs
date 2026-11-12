@@ -26,6 +26,10 @@ pub struct BrowserRequest {
     pub full_page: bool,
     pub expression: Option<String>,
     pub timeout_secs: Option<u64>,
+    pub accept: Option<bool>,
+    pub prompt_text: Option<String>,
+    pub method: Option<String>,
+    pub params: Option<Value>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -40,6 +44,7 @@ struct Browser {
     next_id: u64,
     session_id: Option<String>,
     user_data: PathBuf,
+    dialogs: Vec<Value>,
 }
 
 fn browser() -> &'static Mutex<Option<Browser>> {
@@ -106,9 +111,14 @@ impl Browser {
             next_id: 1,
             session_id: None,
             user_data,
+            dialogs: Vec::new(),
         };
         browser.command("Page.enable", json!({}))?;
         browser.command("Runtime.enable", json!({}))?;
+        browser.command(
+            "Page.addScriptToEvaluateOnNewDocument",
+            json!({"source": console_capture_script()}),
+        )?;
         browser.command(
             "Emulation.setDeviceMetricsOverride",
             json!({"width": 1280, "height": 900, "deviceScaleFactor": 1, "mobile": false}),
@@ -264,6 +274,40 @@ impl Browser {
                     image: None,
                 })
             }
+            "console" => Ok(BrowserOutput {
+                text: self.evaluate("JSON.stringify(window.__bloraConsole || [])")?,
+                image: None,
+            }),
+            "dialog" => {
+                if self.dialogs.is_empty() {
+                    return Ok(BrowserOutput {
+                        text: "no open dialog".to_owned(),
+                        image: None,
+                    });
+                }
+                let dialog = self.dialogs.remove(0);
+                let accept = request.accept.unwrap_or(true);
+                self.command(
+                    "Page.handleJavaScriptDialog",
+                    json!({"accept": accept, "promptText": request.prompt_text}),
+                )?;
+                Ok(BrowserOutput {
+                    text: dialog.to_string(),
+                    image: None,
+                })
+            }
+            "cdp" => {
+                let method = request
+                    .method
+                    .as_deref()
+                    .ok_or_else(|| BloraError::Other("browser cdp needs method".to_owned()))?;
+                let params = request.params.clone().unwrap_or_else(|| json!({}));
+                let result = self.command(method, params)?;
+                Ok(BrowserOutput {
+                    text: result.to_string(),
+                    image: None,
+                })
+            }
             "list" => Ok(BrowserOutput {
                 text: self.page_info()?,
                 image: None,
@@ -355,6 +399,10 @@ impl Browser {
             let Ok(value) = serde_json::from_str::<Value>(text.as_str()) else {
                 continue;
             };
+            if value.get("method").and_then(Value::as_str) == Some("Page.javascriptDialogOpening") {
+                self.dialogs.push(value);
+                continue;
+            }
             if value.get("id").and_then(Value::as_u64) == Some(id) {
                 if let Some(error) = value.get("error") {
                     return Err(BloraError::Other(format!("browser {method}: {error}")));
@@ -426,6 +474,21 @@ fn find_in_path(name: &str) -> Option<PathBuf> {
         }
     }
     None
+}
+
+fn console_capture_script() -> &'static str {
+    "(() => {\
+      if (window.__bloraConsole) return;\
+      window.__bloraConsole = [];\
+      for (const level of ['log','info','warn','error','debug']) {\
+        const original = console[level];\
+        console[level] = (...args) => {\
+          window.__bloraConsole.push({level, text: args.map(a => { try { return typeof a === 'string' ? a : JSON.stringify(a); } catch { return String(a); } }).join(' '), time: Date.now()});\
+          if (window.__bloraConsole.length > 200) window.__bloraConsole.shift();\
+          original.apply(console, args);\
+        };\
+      }\
+    })()"
 }
 
 fn snapshot_script() -> &'static str {

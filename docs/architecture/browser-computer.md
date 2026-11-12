@@ -16,6 +16,9 @@
 | `scroll` | `x`, `y` | `window.scrollBy` |
 | `screenshot` | `full_page?` | 返回 PNG，走附件链路 |
 | `evaluate` | `expression` | 执行任意 JS 并返回结果 |
+| `console` | | 返回页面捕获的 console 消息 |
+| `dialog` | `accept?`, `prompt_text?` | 处理 alert/confirm/prompt 并返回内容 |
+| `cdp` | `method`, `params?` | 发送原始 CDP 命令 |
 | `wait_for` | `selector`/`ref`, `timeout_seconds` | 轮询元素出现 |
 | `back` / `forward` | | history 导航 |
 | `list` | | 当前标题、URL、正文摘要 |
