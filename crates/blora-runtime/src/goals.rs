@@ -10,6 +10,10 @@ use serde_json::Value;
 use crate::coordinator::Runtime;
 
 impl Runtime {
+    pub fn list_goals(&self, session_id: &SessionId) -> Result<Vec<GoalRecord>> {
+        self.store.list_goals(session_id)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn goal_tool(
         &self,

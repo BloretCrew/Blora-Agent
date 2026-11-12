@@ -241,6 +241,12 @@ fn app(state: AppState) -> Router {
         .route("/api/sessions/{id}", get(show_session))
         .route("/api/sessions/{id}/mode", post(set_session_mode))
         .route("/api/sessions/{id}/permission", post(set_permission))
+        .route("/api/sessions/{id}/goals", get(session_goals))
+        .route("/api/sessions/{id}/workflows", get(session_workflows))
+        .route("/api/sessions/{id}/teams", get(session_teams))
+        .route("/api/teams/{id}/board", get(team_board))
+        .route("/api/processes", get(list_processes))
+        .route("/api/mcp/servers", get(mcp_servers))
         .route("/api/sessions/{id}/images/{name}", get(session_image))
         .route("/api/sessions/{id}/attachments", post(upload_attachment))
         .route(
@@ -911,6 +917,146 @@ async fn set_permission(
         .set_permission_mode(&session_id, mode, "user")
         .map_err(ApiError::from)?;
     Ok(Json(json!({"permission_mode": mode.as_str()})))
+}
+
+async fn session_goals(
+    State(state): State<AppState>,
+    headers: HttpHeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let session_id = SessionId::parse(&id).map_err(ApiError::from)?;
+    ensure_session(&state, &headers, &session_id)?;
+    let goals = state
+        .runtime
+        .list_goals(&session_id)
+        .map_err(ApiError::from)?;
+    Ok(Json(json!({
+        "goals": goals.iter().map(|goal| json!({
+            "id": goal.id,
+            "title": goal.title,
+            "description": goal.description,
+            "status": goal.status,
+            "priority": goal.priority,
+            "progress": goal.progress,
+            "due_at": goal.due_at,
+            "updated_at": goal.updated_at,
+        })).collect::<Vec<_>>()
+    })))
+}
+
+async fn session_workflows(
+    State(state): State<AppState>,
+    headers: HttpHeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let session_id = SessionId::parse(&id).map_err(ApiError::from)?;
+    ensure_session(&state, &headers, &session_id)?;
+    let workflows = state
+        .runtime
+        .list_workflows(&session_id)
+        .map_err(ApiError::from)?;
+    Ok(Json(json!({
+        "workflows": workflows.iter().map(|workflow| json!({
+            "id": workflow.id,
+            "name": workflow.name,
+            "status": workflow.status,
+            "updated_at": workflow.updated_at,
+        })).collect::<Vec<_>>()
+    })))
+}
+
+async fn session_teams(
+    State(state): State<AppState>,
+    headers: HttpHeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let session_id = SessionId::parse(&id).map_err(ApiError::from)?;
+    ensure_session(&state, &headers, &session_id)?;
+    let workspace = state
+        .runtime
+        .show_session(&session_id)
+        .map_err(ApiError::from)?
+        .session
+        .ok_or_else(|| ApiError("session missing".to_owned()))?
+        .workspace_path;
+    let teams = state
+        .runtime
+        .list_teams(&workspace)
+        .map_err(ApiError::from)?;
+    Ok(Json(json!({
+        "teams": teams.iter().map(|team| json!({
+            "id": team.id,
+            "name": team.name,
+            "description": team.description,
+        })).collect::<Vec<_>>()
+    })))
+}
+
+async fn team_board(
+    State(state): State<AppState>,
+    _headers: HttpHeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let team_id = blora_types::TeamId::parse(&id).map_err(ApiError::from)?;
+    let (columns, tasks) = state.runtime.team_board(&team_id).map_err(ApiError::from)?;
+    Ok(Json(json!({
+        "columns": columns.iter().map(|column| json!({
+            "id": column.id,
+            "name": column.name,
+            "position": column.position,
+            "wip_limit": column.wip_limit,
+        })).collect::<Vec<_>>(),
+        "tasks": tasks.iter().map(|task| json!({
+            "id": task.id,
+            "column_id": task.column_id,
+            "title": task.title,
+            "status": task.status,
+            "priority": task.priority,
+            "assignee": task.assignee_agent_id,
+        })).collect::<Vec<_>>()
+    })))
+}
+
+async fn list_processes(
+    State(_state): State<AppState>,
+    _headers: HttpHeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(json!({
+        "processes": blora_exec::process_infos().iter().map(|process| json!({
+            "id": process.id,
+            "pid": process.pid,
+            "command": process.command,
+            "status": process.status,
+            "log_path": process.log_path,
+        })).collect::<Vec<_>>()
+    })))
+}
+
+async fn mcp_servers(
+    State(state): State<AppState>,
+    headers: HttpHeaderMap,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, ApiError> {
+    let workspace = if let Some(session) = query.get("session") {
+        let session_id = SessionId::parse(session).map_err(ApiError::from)?;
+        ensure_session(&state, &headers, &session_id)?;
+        state
+            .runtime
+            .show_session(&session_id)
+            .map_err(ApiError::from)?
+            .session
+            .ok_or_else(|| ApiError("session missing".to_owned()))?
+            .workspace_path
+    } else {
+        state.workspace.display().to_string()
+    };
+    let manager = blora_runtime::McpManager::load(FsPath::new(&workspace));
+    let (servers, tools) = manager.map_or((Vec::new(), 0), |manager| {
+        let servers = manager.server_names();
+        let tools = manager.tool_declarations().len();
+        (servers, tools)
+    });
+    Ok(Json(json!({"servers": servers, "tools": tools})))
 }
 
 async fn set_session_mode(

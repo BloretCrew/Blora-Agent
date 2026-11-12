@@ -471,6 +471,61 @@ function appendAttachmentImages(body, attachments) {
   if (wrap.childElementCount) body.append(wrap);
 }
 
+function workPanel(title, rows) {
+  const section = document.createElement("section");
+  section.className = "ba-work-panel";
+  const heading = document.createElement("h3");
+  heading.textContent = title;
+  const list = document.createElement("ul");
+  for (const row of rows.slice(0, 12)) {
+    const item = document.createElement("li");
+    item.textContent = row;
+    list.append(item);
+  }
+  section.append(heading, list);
+  return section;
+}
+
+async function refreshWorkPanels() {
+  const host = document.querySelector("#work-panels");
+  if (!host) return;
+  if (!state.sessionId) {
+    host.hidden = true;
+    return;
+  }
+  const sessionId = state.sessionId;
+  try {
+    const [goals, workflows, teams, processes, mcp] = await Promise.all([
+      api(`/api/sessions/${encodeURIComponent(sessionId)}/goals`),
+      api(`/api/sessions/${encodeURIComponent(sessionId)}/workflows`),
+      api(`/api/sessions/${encodeURIComponent(sessionId)}/teams`),
+      api("/api/processes"),
+      api(`/api/mcp/servers?session=${encodeURIComponent(sessionId)}`),
+    ]);
+    if (state.sessionId !== sessionId) return;
+    const sections = [];
+    if (goals.goals && goals.goals.length) {
+      sections.push(workPanel("目标", goals.goals.map((goal) => `${goal.status} ${goal.progress}% ${goal.title}`)));
+    }
+    if (workflows.workflows && workflows.workflows.length) {
+      sections.push(workPanel("工作流", workflows.workflows.map((workflow) => `${workflow.status} ${workflow.name}`)));
+    }
+    if (teams.teams && teams.teams.length) {
+      sections.push(workPanel("团队", teams.teams.map((team) => team.name)));
+    }
+    if (processes.processes && processes.processes.length) {
+      sections.push(workPanel("后台进程", processes.processes.map((process) => `${process.status} ${process.command}`)));
+    }
+    if (mcp.servers && mcp.servers.length) {
+      sections.push(workPanel("MCP", mcp.servers.map((server) => `${server} · ${mcp.tools} tools`)));
+    }
+    host.replaceChildren(...sections);
+    host.hidden = sections.length === 0;
+  } catch (_) {
+    host.hidden = true;
+  }
+}
+
 function renderTranscript(items) {  if (currentRunMode() === "imagine") {
     renderGallery(items);
     return;
@@ -910,6 +965,7 @@ async function selectSession(id) {
   renderQuestion(session);
   renderTranscript(session.transcript);
   renderSubagents(session.subagents);
+  await refreshWorkPanels();
   await refreshApprovals();
   await refreshTasks();
   await refreshSessions();
@@ -970,6 +1026,9 @@ async function handleSessionEvent(id, data) {
     kind === "routing.changed" ||
     kind.startsWith("run.") ||
     kind.startsWith("subagent.") ||
+    kind.startsWith("goal.") ||
+    kind.startsWith("team.") ||
+    kind.startsWith("workflow.") ||
     kind.startsWith("context.") ||
     kind === "snapshot"
   ) {
@@ -985,6 +1044,7 @@ async function handleSessionEvent(id, data) {
     renderQuestion(latest);
     renderTranscript(latest.transcript);
     renderSubagents(latest.subagents);
+    await refreshWorkPanels();
   }
 }
 

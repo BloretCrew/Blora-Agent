@@ -15,6 +15,7 @@ pub mod hooks;
 mod input;
 mod market;
 mod mcp;
+pub use mcp::McpManager;
 mod memory;
 mod onboarding;
 mod plugins;

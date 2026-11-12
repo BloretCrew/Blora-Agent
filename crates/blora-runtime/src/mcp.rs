@@ -115,6 +115,14 @@ impl McpManager {
         (!servers.is_empty()).then_some(Self { servers })
     }
 
+    #[must_use]
+    pub fn server_names(&self) -> Vec<String> {
+        self.servers
+            .iter()
+            .map(|server| server.name.clone())
+            .collect()
+    }
+
     /// Tool declarations for all servers, using `mcp__server__tool` names.
     ///
     /// A single compatibility server named `default` keeps the old

@@ -15,6 +15,10 @@ use serde_json::{Value, json};
 use crate::coordinator::{RunOptions, Runtime};
 
 impl Runtime {
+    pub fn list_workflows(&self, session_id: &SessionId) -> Result<Vec<WorkflowRecord>> {
+        self.store.list_workflows(session_id)
+    }
+
     pub(crate) fn workflow_tool(
         &self,
         session_id: &SessionId,

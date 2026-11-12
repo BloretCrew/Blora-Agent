@@ -9,6 +9,12 @@ POST   /api/sessions
 GET    /api/sessions/:id
 POST   /api/sessions/:id/run         {"prompt", "permission_mode": "plan|default|acceptEdits|bypassPermissions", "attachments": [AttachmentRef], "output_schema": {...}, ...}
 POST   /api/sessions/:id/permission  {"permission_mode": "..."} — persist session-level mode; emits permission.changed/plan.mode.changed
+GET    /api/sessions/:id/goals       goals for the session
+GET    /api/sessions/:id/workflows   workflows for the session
+GET    /api/sessions/:id/teams       teams for the session workspace
+GET    /api/teams/:id/board          columns + tasks
+GET    /api/processes                tracked background processes
+GET    /api/mcp/servers?session=     configured MCP servers and tool count
 GET    /api/sessions/:id/events
 POST   /api/sessions/:id/attachments {"kind":"image|file","mime","name","data":"base64"} → AttachmentRef
 GET    /api/sessions/:id/attachments/:name   stored attachment bytes (path-checked)

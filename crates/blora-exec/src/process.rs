@@ -77,6 +77,14 @@ fn process_key(pid: u32) -> String {
     format!("proc_{pid}")
 }
 
+pub fn process_infos() -> Vec<ProcessInfo> {
+    let registry = lock_registry();
+    registry
+        .values()
+        .filter_map(|record| record.lock().ok().map(|record| format_info(&record)))
+        .collect()
+}
+
 impl LocalBackend {
     pub fn shell_background(&self, command: &str) -> Result<String> {
         self.policy().require(

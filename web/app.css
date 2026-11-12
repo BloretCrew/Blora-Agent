@@ -1017,3 +1017,31 @@ blora-sidebar-layout[hidden],
   color: var(--blora-accent, #5b8cff);
   text-decoration: underline;
 }
+
+.ba-work-panels {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--blora-space-2, 8px);
+  margin-block: var(--blora-space-3, 12px);
+}
+
+.ba-work-panel {
+  border: 1px solid var(--blora-border, rgba(127, 127, 127, 0.25));
+  border-radius: var(--blora-radius-md, 10px);
+  padding: var(--blora-space-3, 12px);
+  background: var(--blora-surface, transparent);
+}
+
+.ba-work-panel h3 {
+  margin: 0 0 var(--blora-space-2, 8px);
+  font-size: 0.85rem;
+  color: var(--blora-text-muted, inherit);
+}
+
+.ba-work-panel ul {
+  margin: 0;
+  padding-left: 1rem;
+  display: grid;
+  gap: 4px;
+  font-size: 0.85rem;
+}

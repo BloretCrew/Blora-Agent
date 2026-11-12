@@ -10,6 +10,20 @@ use serde_json::{Value, json};
 use crate::coordinator::{RunOptions, Runtime};
 
 impl Runtime {
+    pub fn list_teams(&self, workspace_path: &str) -> Result<Vec<TeamRecord>> {
+        self.store.list_teams(workspace_path)
+    }
+
+    pub fn team_board(
+        &self,
+        team_id: &TeamId,
+    ) -> Result<(Vec<TeamColumnRecord>, Vec<TeamTaskRecord>)> {
+        Ok((
+            self.store.list_team_columns(team_id)?,
+            self.store.list_team_tasks(team_id)?,
+        ))
+    }
+
     pub(crate) fn team_tool(
         &self,
         session_id: &SessionId,
