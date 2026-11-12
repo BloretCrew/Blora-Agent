@@ -133,6 +133,28 @@ impl ToolRegistry {
                 read_only: true,
             },
             ToolSpec {
+                name: "browser",
+                description: "Drive a headless Chrome/Chromium via CDP. Actions: open/navigate, snapshot, click, type, press, scroll, screenshot, evaluate, wait_for, back, forward, list, close. Use snapshot to get element refs, then click/type with ref.",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": ["open", "navigate", "snapshot", "click", "type", "press", "scroll", "screenshot", "evaluate", "wait_for", "back", "forward", "list", "close"]},
+                        "url": {"type": "string"},
+                        "selector": {"type": "string"},
+                        "ref": {"type": "string"},
+                        "text": {"type": "string"},
+                        "key": {"type": "string"},
+                        "x": {"type": "integer"},
+                        "y": {"type": "integer"},
+                        "full_page": {"type": "boolean"},
+                        "expression": {"type": "string"},
+                        "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 120}
+                    },
+                    "required": ["action"]
+                }),
+                read_only: false,
+            },
+            ToolSpec {
                 name: "execute_code",
                 description: "Run Python or JavaScript with a bridge to Blora tools. Scripts call call_tool(name, arguments), log(text), and finish(value). Allowed tools are read/write/edit/search/git/web/process/doc tools; recursive execute_code, subagents, user questions, and team/goal tools are blocked.",
                 parameters: json!({
@@ -762,6 +784,7 @@ impl ToolRegistry {
                     | "goal"
                     | "team"
                     | "team_task"
+                    | "browser"
             ),
             Mode::Work => !matches!(
                 name,
@@ -798,6 +821,9 @@ impl ToolRegistry {
         name: &str,
         arguments: &Value,
     ) -> Result<ToolOutcome> {
+        if name == "browser" {
+            return browser_outcome(backend, session_id, arguments);
+        }
         if name == "view_image" {
             let path = required_str(arguments, "path")?;
             let detail = optional_str(arguments, "detail").map(parse_detail);
@@ -1123,6 +1149,61 @@ fn generate_image(backend: &LocalBackend, session_id: &str, arguments: &Value) -
     let images = blora_imagine::fetch_images(&endpoint, &request)?;
     let saved = blora_imagine::write_images(backend.policy().workspace(), session_id, &images)?;
     Ok(blora_imagine::format_saved(&saved))
+}
+
+fn browser_outcome(
+    backend: &LocalBackend,
+    session_id: &str,
+    arguments: &Value,
+) -> Result<ToolOutcome> {
+    let action = required_str(arguments, "action")?;
+    if matches!(action, "open" | "navigate") {
+        let url = required_str(arguments, "url")?;
+        let parsed = blora_automation::validate_url(url)?;
+        backend.policy().require(
+            backend.policy().browser_navigate(parsed.as_str()),
+            &format!("browser {action} {url}"),
+        )?;
+    }
+    let output = blora_automation::action(
+        backend.policy().workspace(),
+        &blora_automation::BrowserRequest {
+            action: action.to_owned(),
+            url: optional_str(arguments, "url").map(str::to_owned),
+            selector: optional_str(arguments, "selector").map(str::to_owned),
+            reference: optional_str(arguments, "ref").map(str::to_owned),
+            text: optional_str(arguments, "text").map(str::to_owned),
+            key: optional_str(arguments, "key").map(str::to_owned),
+            x: arguments.get("x").and_then(Value::as_i64),
+            y: arguments.get("y").and_then(Value::as_i64),
+            full_page: optional_bool(arguments, "full_page"),
+            expression: optional_str(arguments, "expression").map(str::to_owned),
+            timeout_secs: arguments.get("timeout_seconds").and_then(Value::as_u64),
+        },
+    )?;
+    let Some(bytes) = output.image else {
+        return Ok(ToolOutcome::text(output.text));
+    };
+    let reference = AttachmentStore::new(backend.policy().workspace()).save_bytes(
+        session_id,
+        "image",
+        "image/png",
+        Some("browser.png"),
+        &bytes,
+    )?;
+    Ok(ToolOutcome::from_parts(vec![
+        ContentPart::text(output.text),
+        ContentPart::Image {
+            media_type: "image/png".to_owned(),
+            data: ImageData::Path {
+                path: reference.path,
+                sha256: Some(reference.sha256),
+                bytes: Some(reference.bytes),
+            },
+            detail: None,
+            alt: Some("browser screenshot".to_owned()),
+        },
+    ]))
 }
 
 fn parse_detail(value: &str) -> ImageDetail {

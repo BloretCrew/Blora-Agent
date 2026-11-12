@@ -4,6 +4,7 @@ members = [
     "crates/blora-types",
     "crates/blora-content",
     "crates/blora-auth",
+    "crates/blora-automation",
     "crates/blora-events",
     "crates/blora-session",
     "crates/blora-storage",
@@ -39,6 +40,7 @@ description = "Blora Agent: a local-first Code, Work, and Agent harness."
 blora-types = { path = "crates/blora-types" }
 blora-content = { path = "crates/blora-content" }
 blora-auth = { path = "crates/blora-auth" }
+blora-automation = { path = "crates/blora-automation" }
 blora-server = { path = "crates/blora-server" }
 blora-events = { path = "crates/blora-events" }
 blora-context = { path = "crates/blora-context" }
@@ -79,6 +81,7 @@ tokio-stream = "0.1"
 tower-http = { version = "0.6", features = ["cors", "fs"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tungstenite = "0.29"
 ureq = { version = "2", features = ["json"] }
 uuid = { version = "1", features = ["v7", "serde"] }
 unicode-width = "0.2"

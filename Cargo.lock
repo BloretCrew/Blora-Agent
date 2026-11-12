@@ -235,6 +235,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "blora-automation"
+version = "0.1.0-beta.3"
+dependencies = [
+ "base64",
+ "blora-types",
+ "serde_json",
+ "tempfile",
+ "tungstenite",
+ "url",
+]
+
+[[package]]
 name = "blora-catalog"
 version = "0.1.0-beta.3"
 dependencies = [
@@ -481,6 +493,7 @@ dependencies = [
 name = "blora-tools"
 version = "0.1.0-beta.3"
 dependencies = [
+ "blora-automation",
  "blora-content",
  "blora-context",
  "blora-exec",

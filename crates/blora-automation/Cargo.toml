@@ -1,0 +1,21 @@
+[package]
+name = "blora-automation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description = "Browser and desktop automation for Blora Agent."
+
+[dependencies]
+base64.workspace = true
+blora-types.workspace = true
+serde_json.workspace = true
+tungstenite.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
