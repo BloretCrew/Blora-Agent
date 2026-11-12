@@ -14,7 +14,8 @@
 
 ## 工具
 
-- `edit_image`：`/images/edits` multipart，输入 `path` 或 base64 `image`，返回编辑后的图片。
+- `edit_image`：`/images/edits` multipart，输入 `path` 或 base64 `image`，可带 `mask_path`，返回编辑后的图片。
+- `generate_image`：带 `image_path` 时走图生图（`/images/edits`），否则走文生图。
 - `generate_video`：`/videos/generations`，支持 `image_path`、`duration_seconds`、`aspect_ratio`；同步返回文件或 `id` 任务号。
 - `text_to_speech`：`/audio/speech`，返回 mp3/wav/opus/aac/flac 文件。
 - `vision_analyze`：`/chat/completions`，把图片作为 data URL 发送，返回文本分析。
