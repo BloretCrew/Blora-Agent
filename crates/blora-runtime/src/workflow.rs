@@ -19,6 +19,19 @@ impl Runtime {
         self.store.list_workflows(session_id)
     }
 
+    pub fn workflow_progress(
+        &self,
+        workflow_id: &WorkflowId,
+    ) -> Result<(Vec<Value>, Option<WorkflowRunRecord>)> {
+        let workflow = self.require_workflow(Some(workflow_id.clone()))?;
+        let definition: Value =
+            serde_json::from_str(&workflow.definition_json).unwrap_or(Value::Null);
+        Ok((
+            steps(&definition),
+            self.store.latest_workflow_run(workflow_id)?,
+        ))
+    }
+
     pub(crate) fn workflow_tool(
         &self,
         session_id: &SessionId,

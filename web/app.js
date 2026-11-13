@@ -486,16 +486,114 @@ function workPanel(title, rows) {
   return section;
 }
 
+function progressBar(value) {
+  const bar = document.createElement("progress");
+  bar.className = "ba-progress";
+  bar.max = 100;
+  bar.value = Math.max(0, Math.min(100, Number(value) || 0));
+  return bar;
+}
+
+function goalPanel(goals) {
+  const section = document.createElement("section");
+  section.className = "ba-work-panel";
+  const heading = document.createElement("h3");
+  heading.textContent = "目标";
+  const list = document.createElement("ul");
+  for (const goal of goals.slice(0, 12)) {
+    const item = document.createElement("li");
+    const label = document.createElement("span");
+    label.textContent = `${goal.status} · ${goal.title}`;
+    const bump = document.createElement("button");
+    bump.type = "button";
+    bump.className = "ba-work-action";
+    bump.textContent = "+10%";
+    bump.disabled = goal.progress >= 100;
+    bump.addEventListener("click", async () => {
+      bump.disabled = true;
+      try {
+        await api(`/api/goals/${encodeURIComponent(goal.id)}`, {
+          method: "POST",
+          body: JSON.stringify({ progress: Math.min(100, Number(goal.progress || 0) + 10) }),
+        });
+        await refreshWorkPanels();
+      } catch (error) {
+        bump.textContent = "失败";
+        bump.title = String(error);
+      }
+    });
+    item.append(label, progressBar(goal.progress), bump);
+    list.append(item);
+  }
+  section.append(heading, list);
+  return section;
+}
+
+function workflowPanel(workflows) {
+  const section = document.createElement("section");
+  section.className = "ba-work-panel";
+  const heading = document.createElement("h3");
+  heading.textContent = "工作流";
+  const list = document.createElement("ul");
+  for (const workflow of workflows.slice(0, 12)) {
+    const steps = workflow.steps || [];
+    const total = steps.length;
+    const current = Number(workflow.current_step || 0);
+    const item = document.createElement("li");
+    const label = document.createElement("span");
+    const status = workflow.run_status || workflow.status;
+    const step = steps[Math.min(current, Math.max(total - 1, 0))];
+    const stepLabel =
+      typeof step === "string" ? step : step && (step.title || step.name || step.action);
+    label.textContent = `${status} · ${workflow.name}${total ? ` · ${Math.min(current, total)}/${total}` : ""}${stepLabel ? ` · ${stepLabel}` : ""}`;
+    item.append(label, progressBar(total ? Math.round((current / total) * 100) : 0));
+    list.append(item);
+  }
+  section.append(heading, list);
+  return section;
+}
+
 function processPanel(processes) {
   const section = document.createElement("section");
   section.className = "ba-work-panel";
   const heading = document.createElement("h3");
   heading.textContent = "后台进程";
   const list = document.createElement("ul");
+  list.className = "ba-process-list";
   for (const process of processes.slice(0, 12)) {
     const item = document.createElement("li");
+    const row = document.createElement("div");
+    row.className = "ba-work-row";
     const label = document.createElement("span");
     label.textContent = `${process.status} ${process.command}`;
+    const actions = document.createElement("span");
+    actions.className = "ba-work-actions";
+    const output = document.createElement("pre");
+    output.className = "ba-process-output";
+    output.hidden = true;
+    const show = document.createElement("button");
+    show.type = "button";
+    show.className = "ba-work-action";
+    show.textContent = "输出";
+    show.addEventListener("click", async () => {
+      if (!output.hidden) {
+        output.hidden = true;
+        return;
+      }
+      show.disabled = true;
+      try {
+        const result = await api(
+          `/api/processes/${encodeURIComponent(process.id)}/output`,
+        );
+        output.textContent = result.output || "(no output)";
+        output.hidden = false;
+      } catch (error) {
+        output.textContent = String(error);
+        output.hidden = false;
+      } finally {
+        show.disabled = false;
+      }
+    });
     const kill = document.createElement("button");
     kill.type = "button";
     kill.className = "ba-work-action";
@@ -513,7 +611,9 @@ function processPanel(processes) {
         kill.title = String(error);
       }
     });
-    item.append(label, kill);
+    actions.append(show, kill);
+    row.append(label, actions);
+    item.append(row, output);
     list.append(item);
   }
   section.append(heading, list);
@@ -620,10 +720,10 @@ async function refreshWorkPanels() {
     if (state.sessionId !== sessionId) return;
     const sections = [];
     if (goals.goals && goals.goals.length) {
-      sections.push(workPanel("目标", goals.goals.map((goal) => `${goal.status} ${goal.progress}% ${goal.title}`)));
+      sections.push(goalPanel(goals.goals));
     }
     if (workflows.workflows && workflows.workflows.length) {
-      sections.push(workPanel("工作流", workflows.workflows.map((workflow) => `${workflow.status} ${workflow.name}`)));
+      sections.push(workflowPanel(workflows.workflows));
     }
     if (teams.teams && teams.teams.length) {
       try {

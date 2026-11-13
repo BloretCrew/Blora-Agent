@@ -14,6 +14,18 @@ impl Runtime {
         self.store.list_goals(session_id)
     }
 
+    pub fn update_goal_from_api(
+        &self,
+        goal_id: &GoalId,
+        status: Option<&str>,
+        progress: Option<i64>,
+        title: Option<&str>,
+        priority: Option<i64>,
+    ) -> Result<bool> {
+        self.store
+            .update_goal(goal_id, title, None, status, priority, progress, None)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn goal_tool(
         &self,
@@ -148,4 +160,49 @@ fn format_goal(goal: &GoalRecord) -> String {
             .map(|description| format!("  {description}"))
             .unwrap_or_default()
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use blora_storage::{CreateSession, SqliteStore};
+
+    #[test]
+    fn api_update_goal_changes_progress_and_status() {
+        let runtime = Runtime::new(SqliteStore::open_in_memory().unwrap());
+        let session_id = runtime
+            .create_session(CreateSession {
+                title: Some("t".to_owned()),
+                workspace_path: "/tmp".to_owned(),
+                mode: blora_types::Mode::Work,
+                parent_session_id: None,
+            })
+            .unwrap();
+        let now = Utc::now();
+        let goal_id = GoalId::generate();
+        runtime
+            .store
+            .insert_goal(&GoalRecord {
+                id: goal_id.clone(),
+                session_id,
+                parent_goal_id: None,
+                title: "Ship".to_owned(),
+                description: None,
+                status: "proposed".to_owned(),
+                priority: 0,
+                progress: 0,
+                due_at: None,
+                created_at: now,
+                updated_at: now,
+            })
+            .unwrap();
+        assert!(
+            runtime
+                .update_goal_from_api(&goal_id, Some("active"), Some(40), None, None)
+                .unwrap()
+        );
+        let goal = runtime.store.get_goal(&goal_id).unwrap().unwrap();
+        assert_eq!(goal.status, "active");
+        assert_eq!(goal.progress, 40);
+    }
 }

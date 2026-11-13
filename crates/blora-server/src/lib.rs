@@ -242,12 +242,14 @@ fn app(state: AppState) -> Router {
         .route("/api/sessions/{id}/mode", post(set_session_mode))
         .route("/api/sessions/{id}/permission", post(set_permission))
         .route("/api/sessions/{id}/goals", get(session_goals))
+        .route("/api/goals/{id}", post(update_goal))
         .route("/api/sessions/{id}/workflows", get(session_workflows))
         .route("/api/sessions/{id}/teams", get(session_teams))
         .route("/api/teams/{id}/board", get(team_board))
         .route("/api/teams/{id}/tasks/{task}/move", post(move_team_task))
         .route("/api/processes", get(list_processes))
         .route("/api/processes/{id}/kill", post(kill_process))
+        .route("/api/processes/{id}/output", get(process_output))
         .route("/api/mcp/servers", get(mcp_servers))
         .route("/api/sessions/{id}/images/{name}", get(session_image))
         .route("/api/sessions/{id}/attachments", post(upload_attachment))
@@ -946,6 +948,41 @@ async fn session_goals(
     })))
 }
 
+#[derive(Deserialize)]
+struct UpdateGoalRequest {
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    progress: Option<i64>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    priority: Option<i64>,
+}
+
+async fn update_goal(
+    State(state): State<AppState>,
+    _headers: HttpHeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<UpdateGoalRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let goal_id = blora_types::GoalId::parse(&id).map_err(ApiError::from)?;
+    let changed = state
+        .runtime
+        .update_goal_from_api(
+            &goal_id,
+            body.status.as_deref(),
+            body.progress,
+            body.title.as_deref(),
+            body.priority,
+        )
+        .map_err(ApiError::from)?;
+    if !changed {
+        return Err(ApiError("goal not found".to_owned()));
+    }
+    Ok(Json(json!({ "updated": true })))
+}
+
 async fn session_workflows(
     State(state): State<AppState>,
     headers: HttpHeaderMap,
@@ -958,12 +995,21 @@ async fn session_workflows(
         .list_workflows(&session_id)
         .map_err(ApiError::from)?;
     Ok(Json(json!({
-        "workflows": workflows.iter().map(|workflow| json!({
-            "id": workflow.id,
-            "name": workflow.name,
-            "status": workflow.status,
-            "updated_at": workflow.updated_at,
-        })).collect::<Vec<_>>()
+        "workflows": workflows.iter().map(|workflow| {
+            let (steps, run) = state
+                .runtime
+                .workflow_progress(&workflow.id)
+                .unwrap_or_default();
+            json!({
+                "id": workflow.id,
+                "name": workflow.name,
+                "status": workflow.status,
+                "updated_at": workflow.updated_at,
+                "steps": steps,
+                "current_step": run.as_ref().map_or(0, |run| run.current_step),
+                "run_status": run.as_ref().map(|run| run.status.as_str()),
+            })
+        }).collect::<Vec<_>>()
     })))
 }
 
@@ -1069,6 +1115,30 @@ async fn kill_process(
 ) -> Result<Json<Value>, ApiError> {
     let message = blora_exec::kill_process(&id).map_err(ApiError::from)?;
     Ok(Json(json!({ "message": message })))
+}
+
+async fn process_output(
+    State(_state): State<AppState>,
+    _headers: HttpHeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let info = blora_exec::process_infos()
+        .into_iter()
+        .find(|process| process.id == id || process.pid.to_string() == id)
+        .ok_or_else(|| ApiError("process not found".to_owned()))?;
+    let text = std::fs::read_to_string(&info.log_path).unwrap_or_default();
+    let truncated = text.len() > 64 * 1024;
+    let output: String = if truncated {
+        text.chars().take(64 * 1024).collect()
+    } else {
+        text
+    };
+    Ok(Json(json!({
+        "id": info.id,
+        "status": info.status,
+        "output": output,
+        "truncated": truncated,
+    })))
 }
 
 async fn mcp_servers(

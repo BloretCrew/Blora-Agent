@@ -208,6 +208,39 @@ paths:
       responses:
         "200": { description: Kill result }
         "400": { description: Unknown or already-exited process }
+  /api/goals/{id}:
+    post:
+      summary: Update goal status or progress
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status: { type: string }
+                progress: { type: integer }
+                title: { type: string }
+                priority: { type: integer }
+      responses:
+        "200": { description: Goal updated }
+        "400": { description: Goal not found }
+  /api/processes/{id}/output:
+    get:
+      summary: Read a tracked process log
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: Process output, capped at 64 KiB }
+        "400": { description: Unknown process }
   /api/settings:
     get:
       summary: Non-secret runtime settings
