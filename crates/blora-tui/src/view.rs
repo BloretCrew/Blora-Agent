@@ -251,13 +251,6 @@ impl<'a> FrameModel<'a> {
     }
 }
 
-impl ModeMenu {
-    #[must_use]
-    pub fn current(&self) -> ModeOption {
-        MODE_OPTIONS[self.selected.min(MODE_OPTIONS.len() - 1)]
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct ProjectPicker {
     pub selected: usize,
@@ -639,8 +632,6 @@ pub enum Hit {
     ProviderModelRow(usize),
     /// A row in the add-provider catalog list.
     AddProviderRow(usize),
-    /// Cycle the message-format step of the add-provider wizard.
-    AddProviderFormat,
     /// A scheme row inside the theme picker.
     ThemeRow(usize),
     /// Auto / light / dark section tab (`0` auto, `1` light, `2` dark).
@@ -2853,10 +2844,18 @@ fn paint_traffic_title(
 }
 
 fn git_indicator_text(status: &GitStatusInfo) -> String {
-    if status.clean {
-        format!("↑{} ↓{} ⍟{}", status.ahead, status.behind, status.stashes)
+    let branch = if status.branch.is_empty() {
+        String::new()
     } else {
-        format!("+{}-{}", status.added, status.removed)
+        format!("{} ", status.branch)
+    };
+    if status.clean {
+        format!(
+            "{branch}↑{} ↓{} ⍟{}",
+            status.ahead, status.behind, status.stashes
+        )
+    } else {
+        format!("{branch}+{}-{}", status.added, status.removed)
     }
 }
 

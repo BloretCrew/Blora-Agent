@@ -362,10 +362,12 @@ impl Theme {
         }
     }
 
+    #[cfg(test)]
     pub const fn dark() -> Self {
         Self::of(Palette::Coral, true)
     }
 
+    #[cfg(test)]
     pub const fn light() -> Self {
         Self::of(Palette::Coral, false)
     }

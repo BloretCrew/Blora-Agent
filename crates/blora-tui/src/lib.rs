@@ -6319,10 +6319,7 @@ fn dialog_accepts_hit(top: Option<DialogId>, hit: Option<&view::Hit>) -> bool {
                 Some(DialogId::Provider),
                 Some(Hit::ProviderRow(_) | Hit::ProviderModelRow(_))
             )
-            | (
-                Some(DialogId::AddProvider),
-                Some(Hit::AddProviderRow(_) | Hit::AddProviderFormat)
-            )
+            | (Some(DialogId::AddProvider), Some(Hit::AddProviderRow(_)))
             | (
                 Some(DialogId::Theme),
                 Some(Hit::ThemeRow(_) | Hit::ThemeTab(_))
