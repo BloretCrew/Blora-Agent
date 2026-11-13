@@ -529,18 +529,31 @@ async function teamBoardPanel(team) {
   const kanban = document.createElement("div");
   kanban.className = "ba-kanban";
   const byColumn = new Map((board.columns || []).map((column) => [column.id, []]));
+  const unassigned = [];
   for (const task of board.tasks || []) {
     const bucket = task.column_id ? byColumn.get(task.column_id) : null;
-    (bucket || []).push(task);
+    if (bucket) {
+      bucket.push(task);
+    } else {
+      unassigned.push(task);
+    }
   }
-  for (const column of board.columns || []) {
+  const lanes = (board.columns || []).map((column) => ({
+    id: column.id,
+    name: column.name,
+    tasks: byColumn.get(column.id) || [],
+  }));
+  if (unassigned.length) {
+    lanes.push({ id: "", name: "未分配", tasks: unassigned });
+  }
+  for (const laneInfo of lanes) {
     const lane = document.createElement("div");
     lane.className = "ba-kanban-column";
-    lane.dataset.columnId = column.id;
+    lane.dataset.columnId = laneInfo.id;
     const title = document.createElement("header");
-    title.textContent = `${column.name} · ${(byColumn.get(column.id) || []).length}`;
+    title.textContent = `${laneInfo.name} · ${laneInfo.tasks.length}`;
     lane.append(title);
-    for (const task of byColumn.get(column.id) || []) {
+    for (const task of laneInfo.tasks) {
       const card = document.createElement("article");
       card.className = "ba-kanban-card";
       card.draggable = true;
@@ -558,11 +571,13 @@ async function teamBoardPanel(team) {
       lane.append(card);
     }
     lane.addEventListener("dragover", (event) => {
+      if (!laneInfo.id) return;
       event.preventDefault();
       lane.classList.add("ba-kanban-drop");
     });
     lane.addEventListener("dragleave", () => lane.classList.remove("ba-kanban-drop"));
     lane.addEventListener("drop", async (event) => {
+      if (!laneInfo.id) return;
       event.preventDefault();
       lane.classList.remove("ba-kanban-drop");
       const taskId = event.dataTransfer.getData("text/plain");
@@ -572,7 +587,7 @@ async function teamBoardPanel(team) {
           `/api/teams/${encodeURIComponent(team.id)}/tasks/${encodeURIComponent(taskId)}/move`,
           {
             method: "POST",
-            body: JSON.stringify({ column_id: column.id }),
+            body: JSON.stringify({ column_id: laneInfo.id }),
           },
         );
         await refreshWorkPanels();
