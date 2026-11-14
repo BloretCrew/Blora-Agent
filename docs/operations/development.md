@@ -19,7 +19,7 @@ TUI 快捷键见 [`tui.md`](tui.md)。Provider 矩阵见 [`../architecture/provi
 
 请求层：`BLORA_MAX_RETRIES`（默认 5）、`BLORA_STREAM_IDLE_SECS`（默认 300）、`BLORA_MAX_OUTPUT_TOKENS`（默认 8192）、`BLORA_CONTEXT_WINDOW`（默认 128000）、`BLORA_COMPACT_PCT`（默认 85）。
 
-`blora gateway --bind 0.0.0.0:8787` 开启 token 鉴权。`blora user add NAME` 生成 `blt_` token。`blora plugin list|install|remove`。`blora memory distill ses_…`。
+`blora gateway --bind 0.0.0.0:8787` 开启 token 鉴权。`blora user add NAME` 生成 `blt_` token。`blora plugin list|install|remove`。`blora memory distill ses_…`。子代理：`blora agent list --session ses_…`、`blora agent steer agt_… "message"`、`blora agent cancel agt_…`。`blora session list` 默认只列根会话。
 
 `BLORA_HOME` 可指向临时目录做隔离测试。真实模型使用 `BLORA_API_KEY` / `BLORA_API_BASE` / `BLORA_MODEL` / `GEMINI_API_KEY`。
 

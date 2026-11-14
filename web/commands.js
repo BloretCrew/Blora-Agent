@@ -282,15 +282,18 @@
         await bridge.refreshSessions();
         if (name === "reload") notice("会话列表已刷新");
         else {
-          const rows = await bridge.api("/api/sessions");
+          // `goto` may target an agent's child session by exact id; `next` and
+          // `prev` stay on the root list the sidebar shows.
+          const rows = await bridge.api(name === "goto" ? "/api/sessions?include_children=1" : "/api/sessions");
           let selected;
           if (name === "goto") {
             if (!args) throw new Error("用法：/goto <id|title>");
             const query = args.toLowerCase();
-            selected = rows.find((row) => row.id === args) || rows.find((row) => `${row.id}\n${row.title || ""}`.toLowerCase().includes(query));
+            selected = rows.find((row) => row.id === args) || rows.find((row) => !row.parent_session_id && `${row.id}\n${row.title || ""}`.toLowerCase().includes(query));
           } else {
-            const index = rows.findIndex((row) => row.id === state.sessionId);
-            selected = rows[Math.max(0, Math.min(rows.length - 1, index + (name === "next" ? 1 : -1)))];
+            const roots = rows.filter((row) => !row.parent_session_id);
+            const index = roots.findIndex((row) => row.id === state.sessionId);
+            selected = roots[Math.max(0, Math.min(roots.length - 1, index + (name === "next" ? 1 : -1)))];
           }
           if (!selected) throw new Error("没有匹配的会话");
           await bridge.selectSession(selected.id);

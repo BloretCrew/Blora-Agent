@@ -3,8 +3,9 @@
 `blora web` 提供本地 HTTP API。Web UI 只通过这些接口访问 Runtime。
 
 ```text
-GET    /api/sessions          session summaries: id, title, workspace_path, mode, status, updated_at, last_sequence
-GET    /api/sessions?q=       same summary shape; full transcript stays on GET /api/sessions/:id
+GET    /api/sessions          session summaries: id, title, workspace_path, mode, status, updated_at, last_sequence; root sessions only
+GET    /api/sessions?q=       same summary shape; matches child sessions too (each row may carry parent_session_id)
+GET    /api/sessions?include_children=1  include subagent and fork children
 POST   /api/sessions
 GET    /api/sessions/:id
 POST   /api/sessions/:id/run         {"prompt", "permission_mode": "plan|default|acceptEdits|bypassPermissions", ...}

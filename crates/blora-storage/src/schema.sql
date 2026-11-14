@@ -91,6 +91,7 @@ CREATE TABLE IF NOT EXISTS agents (
     status TEXT NOT NULL,
     budget_turns INTEGER NOT NULL,
     summary TEXT,
+    owner_pid INTEGER,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     FOREIGN KEY (parent_session_id) REFERENCES sessions(id)

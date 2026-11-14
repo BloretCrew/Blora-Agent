@@ -1133,7 +1133,11 @@ fn sidebar_session_indices(sessions: &[SessionSummary], workspace: &Path) -> Vec
     sessions
         .iter()
         .enumerate()
-        .filter(|(_, session)| Path::new(&session.workspace_path) == workspace)
+        .filter(|(_, session)| {
+            // `delegate` / `fork` children stay reachable by id but do not
+            // clutter the project list.
+            session.parent_session_id.is_none() && Path::new(&session.workspace_path) == workspace
+        })
         .map(|(index, _)| index)
         .collect()
 }
@@ -8736,6 +8740,7 @@ mod tests {
                 workspace_path: "/tmp/中文项目".to_owned(),
                 mode: Mode::Code,
                 status: blora_types::SessionStatus::Active,
+                parent_session_id: None,
                 updated_at: chrono::Utc::now(),
                 last_sequence: 1,
             })

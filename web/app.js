@@ -1190,6 +1190,18 @@ function renderSubagents(items) {
       summary.textContent = item.summary;
       row.append(summary);
     }
+    if (item.child_session_id) {
+      const open = document.createElement("button");
+      open.type = "button";
+      open.className = "blora-button";
+      open.dataset.variant = "ghost";
+      open.dataset.size = "sm";
+      open.textContent = "打开子会话";
+      open.addEventListener("click", () => {
+        location.hash = `#/session/${encodeURIComponent(item.child_session_id)}`;
+      });
+      row.append(open);
+    }
     if (item.status === "running" && item.id) {
       const steer = document.createElement("button");
       steer.type = "button";

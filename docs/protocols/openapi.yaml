@@ -13,6 +13,10 @@ paths:
         - in: query
           name: q
           schema: { type: string }
+        - in: query
+          name: include_children
+          description: Include subagent and fork children (default false)
+          schema: { type: boolean, default: false }
       responses:
         "200": { description: Session list }
     post:

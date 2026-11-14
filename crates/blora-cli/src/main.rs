@@ -13,7 +13,7 @@ use std::sync::Arc;
 use blora_runtime::{CancelToken, DEFAULT_MAX_TURNS, PermissionMode, RunOptions, Runtime};
 use blora_session::TranscriptItem;
 use blora_storage::{CreateSession, CreateTask, SqliteStore};
-use blora_types::{Mode, SessionId, TaskId};
+use blora_types::{AgentId, Mode, SessionId, TaskId};
 use chrono::{Duration, Utc};
 use clap::{Parser, Subcommand};
 
@@ -177,6 +177,33 @@ enum Commands {
     Github {
         #[command(subcommand)]
         command: GithubCommands,
+    },
+    /// Subagent commands.
+    Agent {
+        #[command(subcommand)]
+        command: AgentCommands,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AgentCommands {
+    /// List subagents for a session.
+    List {
+        /// Session identifier (`ses_…`).
+        #[arg(long)]
+        session: String,
+    },
+    /// Queue a steering message for a running subagent.
+    Steer {
+        /// Subagent identifier (`agt_…`).
+        id: String,
+        /// Steering message.
+        message: String,
+    },
+    /// Request cancellation of a subagent.
+    Cancel {
+        /// Subagent identifier (`agt_…`).
+        id: String,
     },
 }
 
@@ -531,6 +558,34 @@ fn dispatch(
                 }
             }
         },
+        Commands::Agent { command } => match command {
+            AgentCommands::List { session } => {
+                let agents = runtime.list_subagents(&SessionId::parse(&session)?)?;
+                if agents.is_empty() {
+                    println!("no subagents");
+                } else {
+                    for agent in agents {
+                        println!(
+                            "{}  {}  {}  {}",
+                            agent.id,
+                            agent.role,
+                            agent.status,
+                            agent.summary.as_deref().unwrap_or("-")
+                        );
+                    }
+                }
+            }
+            AgentCommands::Steer { id, message } => {
+                let agent_id = AgentId::parse(&id)?;
+                runtime.steer_subagent(&agent_id, &message)?;
+                println!("queued for {agent_id}");
+            }
+            AgentCommands::Cancel { id } => {
+                let agent_id = AgentId::parse(&id)?;
+                runtime.cancel_subagent(&agent_id)?;
+                println!("cancel requested for {agent_id}");
+            }
+        },
         Commands::Tui { workspace } => {
             let workspace = workspace
                 .or(global_workspace)
@@ -556,7 +611,7 @@ fn dispatch(
                 println!("{id}");
             }
             SessionCommands::List => {
-                for session in runtime.list_sessions()? {
+                for session in runtime.list_root_sessions()? {
                     println!(
                         "{}  {}  {}  {}  seq={}",
                         session.id,
@@ -1162,6 +1217,42 @@ mod tests {
                 assert_eq!(path.unwrap(), PathBuf::from("/tmp/state.sqlite"));
             }
             other => panic!("expected backup, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agent_list_command_parses() {
+        let cli = Cli::try_parse_from(["blora", "agent", "list", "--session", "ses_x"]).unwrap();
+        match cli.command {
+            Some(Commands::Agent {
+                command: AgentCommands::List { session },
+            }) => assert_eq!(session, "ses_x"),
+            other => panic!("expected agent list, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agent_steer_command_parses() {
+        let cli = Cli::try_parse_from(["blora", "agent", "steer", "agt_x", "hello"]).unwrap();
+        match cli.command {
+            Some(Commands::Agent {
+                command: AgentCommands::Steer { id, message },
+            }) => {
+                assert_eq!(id, "agt_x");
+                assert_eq!(message, "hello");
+            }
+            other => panic!("expected agent steer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agent_cancel_command_parses() {
+        let cli = Cli::try_parse_from(["blora", "agent", "cancel", "agt_x"]).unwrap();
+        match cli.command {
+            Some(Commands::Agent {
+                command: AgentCommands::Cancel { id },
+            }) => assert_eq!(id, "agt_x"),
+            other => panic!("expected agent cancel, got {other:?}"),
         }
     }
 }

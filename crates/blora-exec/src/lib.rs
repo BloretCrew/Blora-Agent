@@ -8,10 +8,10 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use blora_policy::Policy;
-use blora_types::{BloraError, Result};
+use blora_types::{BloraError, CancelToken, Result};
 mod glob;
 mod host;
 mod isolation;
@@ -35,6 +35,8 @@ const MAX_SEARCH_MATCHES: usize = 80;
 const MAX_GLOB_MATCHES: usize = 200;
 const MAX_SHELL_BYTES: usize = 200_000;
 const DEFAULT_SHELL_TIMEOUT: Duration = Duration::from_secs(30);
+const SHELL_CANCEL_POLL: Duration = Duration::from_millis(50);
+const SHELL_CANCEL_SETTLE: Duration = Duration::from_millis(200);
 
 /// How [`LocalBackend::shell_prepared`] waits for the command.
 #[derive(Clone, Copy, Debug)]
@@ -272,6 +274,60 @@ impl LocalBackend {
     /// and the destination must already be a directory inside the workspace.
     /// Policy is applied to the caller's command, not to the directory prefix.
     pub fn shell_prepared(&self, command: &str, cwd: &str, kind: ShellKind) -> Result<ShellOutput> {
+        let run = self.prepared_run(command, cwd)?;
+        match kind {
+            ShellKind::Foreground(timeout) => {
+                let (text, success) = self.spawn_shell(&run, timeout)?;
+                Ok(ShellOutput { text, success })
+            }
+            ShellKind::Background => Ok(ShellOutput {
+                text: self.spawn_background_unchecked(&run)?,
+                success: true,
+            }),
+            ShellKind::Pty => {
+                let (text, success) = self
+                    .clone()
+                    .with_isolation(Isolation::Pty)
+                    .spawn_shell(&run, None)?;
+                Ok(ShellOutput { text, success })
+            }
+        }
+    }
+
+    /// Same as [`Self::shell_prepared`], except a `Foreground` command is
+    /// stopped with [`host::terminate_pid`] as soon as `cancel` is triggered,
+    /// returning [`BloraError::Cancelled`]. `Background` and `Pty` cannot be
+    /// cancelled and behave exactly like [`Self::shell_prepared`].
+    pub fn shell_prepared_cancellable(
+        &self,
+        command: &str,
+        cwd: &str,
+        kind: ShellKind,
+        cancel: &blora_types::CancelToken,
+    ) -> Result<ShellOutput> {
+        let run = self.prepared_run(command, cwd)?;
+        match kind {
+            ShellKind::Foreground(timeout) => {
+                let (text, success) = self.spawn_shell_cancellable(&run, timeout, Some(cancel))?;
+                Ok(ShellOutput { text, success })
+            }
+            ShellKind::Background => Ok(ShellOutput {
+                text: self.spawn_background_unchecked(&run)?,
+                success: true,
+            }),
+            ShellKind::Pty => {
+                let (text, success) = self
+                    .clone()
+                    .with_isolation(Isolation::Pty)
+                    .spawn_shell(&run, None)?;
+                Ok(ShellOutput { text, success })
+            }
+        }
+    }
+
+    /// Policy check, empty-command check, `cwd` normalization, and the bare
+    /// `cd` rewrite shared by both prepared entry points.
+    fn prepared_run(&self, command: &str, cwd: &str) -> Result<String> {
         self.policy.require(
             self.policy.shell_command(command),
             &format!("shell {command}"),
@@ -290,24 +346,7 @@ impl LocalBackend {
         } else {
             (command.to_owned(), effective)
         };
-        let run = wrap_cwd(&at, &run);
-        match kind {
-            ShellKind::Foreground(timeout) => {
-                let (text, success) = self.spawn_shell(&run, timeout)?;
-                Ok(ShellOutput { text, success })
-            }
-            ShellKind::Background => Ok(ShellOutput {
-                text: self.spawn_background_unchecked(&run)?,
-                success: true,
-            }),
-            ShellKind::Pty => {
-                let (text, success) = self
-                    .clone()
-                    .with_isolation(Isolation::Pty)
-                    .spawn_shell(&run, None)?;
-                Ok(ShellOutput { text, success })
-            }
-        }
+        Ok(wrap_cwd(&at, &run))
     }
 
     /// Workspace-relative directory, or `.` for the workspace root.
@@ -333,9 +372,26 @@ impl LocalBackend {
     }
 
     fn spawn_shell(&self, command: &str, timeout: Option<Duration>) -> Result<(String, bool)> {
+        self.spawn_shell_cancellable(command, timeout, None)
+    }
+
+    /// Spawn `command` and wait for it. `cancel` is polled while the process
+    /// runs; when triggered the process is terminated and
+    /// [`BloraError::Cancelled`] is returned. Output handling, success
+    /// determination, timeout termination, and the timeout error are identical
+    /// to the uncancellable path.
+    fn spawn_shell_cancellable(
+        &self,
+        command: &str,
+        timeout: Option<Duration>,
+        cancel: Option<&CancelToken>,
+    ) -> Result<(String, bool)> {
         let timeout = timeout.unwrap_or(DEFAULT_SHELL_TIMEOUT);
         if command.trim().is_empty() {
             return Err(BloraError::Exec("empty command".to_owned()));
+        }
+        if cancel.is_some_and(CancelToken::is_cancelled) {
+            return Err(BloraError::Cancelled);
         }
         let mut child = self
             .isolation
@@ -356,16 +412,39 @@ impl LocalBackend {
             let status = child.wait();
             let _ = tx.send(status);
         });
-        let status = match rx.recv_timeout(timeout) {
-            Ok(status) => status.map_err(BloraError::exec)?,
-            Err(_) => {
+        let started = Instant::now();
+        let status = loop {
+            if cancel.is_some_and(CancelToken::is_cancelled) {
                 let _ = terminate_pid(pid);
-                return Err(BloraError::Exec(format!(
-                    "command timed out after {}s",
-                    timeout.as_secs()
-                )));
+                settle_reader(stdout_handle, stderr_handle);
+                return Err(BloraError::Cancelled);
+            }
+            // Without a token this is exactly the original one-shot wait.
+            let wait = match cancel {
+                Some(_) => timeout
+                    .saturating_sub(started.elapsed())
+                    .min(SHELL_CANCEL_POLL),
+                None => timeout,
+            };
+            match rx.recv_timeout(wait) {
+                Ok(status) => break status,
+                // A poll interval lapsed before the deadline; look again.
+                Err(mpsc::RecvTimeoutError::Timeout)
+                    if cancel.is_some() && started.elapsed() < timeout =>
+                {
+                    continue;
+                }
+                // Timeout (or a vanished waiter) keeps the original error text.
+                Err(_) => {
+                    let _ = terminate_pid(pid);
+                    return Err(BloraError::Exec(format!(
+                        "command timed out after {}s",
+                        timeout.as_secs()
+                    )));
+                }
             }
         };
+        let status = status.map_err(BloraError::exec)?;
         let stdout = stdout_handle
             .join()
             .unwrap_or_else(|_| Ok(String::new()))
@@ -1073,6 +1152,26 @@ fn read_capped<R: Read>(reader: Option<R>, max: usize) -> Result<String> {
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
+/// After cancelling or timing out, give the reader threads a bounded moment to
+/// drain and exit so a killed child's pipes do not leave them running forever.
+/// Threads still blocked when the window closes are detached rather than
+/// delaying the caller.
+fn settle_reader(
+    stdout: thread::JoinHandle<Result<String>>,
+    stderr: thread::JoinHandle<Result<String>>,
+) {
+    let deadline = Instant::now() + SHELL_CANCEL_SETTLE;
+    while !(stdout.is_finished() && stderr.is_finished()) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    if stdout.is_finished() {
+        let _ = stdout.join();
+    }
+    if stderr.is_finished() {
+        let _ = stderr.join();
+    }
+}
+
 /// Counts the header indicator needs. Parsed from porcelain v2, which stays
 /// machine-readable when Git's human status is localized.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1188,7 +1287,9 @@ impl ExecutionBackend for LocalBackend {
 mod tests {
     use super::*;
     use blora_policy::Policy;
+    use blora_types::CancelToken;
     use std::process::Command;
+    use std::time::Instant;
 
     fn diff_repo() -> (tempfile::TempDir, LocalBackend) {
         let dir = tempfile::tempdir().unwrap();
@@ -1649,6 +1750,42 @@ mod tests {
         assert_eq!(join_cwd("src", "lib.rs"), "src/lib.rs");
         let escaped = backend.shell_prepared("cd ..", ".", ShellKind::Foreground(None));
         assert!(escaped.is_err());
+    }
+
+    #[test]
+    fn cancellable_shell_returns_cancelled_when_already_cancelled() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = LocalBackend::new(Policy::new(dir.path(), true).unwrap());
+        let cancel = CancelToken::new();
+        cancel.cancel();
+        let started = Instant::now();
+        let err = backend
+            .shell_prepared_cancellable("echo hi", ".", ShellKind::Foreground(None), &cancel)
+            .unwrap_err();
+        assert!(matches!(err, BloraError::Cancelled), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn cancellable_shell_stops_a_long_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = LocalBackend::new(Policy::new(dir.path(), true).unwrap());
+        let command = match host::host_shell() {
+            HostShell::Cmd => return,
+            HostShell::Posix | HostShell::PowerShell => "sleep 5",
+        };
+        let cancel = CancelToken::new();
+        let worker = cancel.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(100));
+            worker.cancel();
+        });
+        let started = Instant::now();
+        let err = backend
+            .shell_prepared_cancellable(command, ".", ShellKind::Foreground(None), &cancel)
+            .unwrap_err();
+        assert!(matches!(err, BloraError::Cancelled), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 
     #[test]

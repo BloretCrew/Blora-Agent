@@ -3,7 +3,9 @@
 
 use std::path::{Path, PathBuf};
 
-use blora_events::{KnownPayload, SubagentCompleted, SubagentFailed, SubagentMessage, SubagentSpawned};
+use blora_events::{
+    KnownPayload, SubagentCompleted, SubagentFailed, SubagentMessage, SubagentSpawned,
+};
 use blora_storage::{AgentRecord, CreateSession};
 use blora_types::{AgentId, BloraError, CancelToken, Mode, Result, SessionId};
 use chrono::Utc;
@@ -43,6 +45,69 @@ impl Runtime {
         self.store.get_agent(agent_id)
     }
 
+    /// Converge child agents left `running` by a dead process.
+    ///
+    /// Runs before a new child is admitted so a crash cannot permanently
+    /// occupy the per-parent concurrency cap. A child whose last run reached a
+    /// terminal state keeps that outcome; anything else is reported as
+    /// `interrupted`. Idempotent and safe to call from several threads: the
+    /// transition is a conditional update, so only the winner emits an event.
+    ///
+    /// A row is only reclaimed when its owning process is gone. TUI and the
+    /// local Web server share one database, so a row driven by the other
+    /// process must be left alone.
+    pub fn reconcile_stale_agents(&self) -> Result<usize> {
+        let mut converged = 0;
+        for agent in self.store.list_running_agents()? {
+            let live_here = self
+                .subagent_cancels
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains_key(&agent.id);
+            if live_here || agent.owner_pid.is_some_and(process_is_alive) {
+                continue;
+            }
+            let run_status = self
+                .show_session(&agent.child_session_id)
+                .ok()
+                .and_then(|projection| projection.runs.last().map(|run| run.status));
+            let (status, summary) = match run_status {
+                Some(blora_types::RunStatus::Completed) => ("completed", "completed"),
+                Some(blora_types::RunStatus::Cancelled) => ("cancelled", "cancelled"),
+                Some(blora_types::RunStatus::Failed) => ("failed", "failed"),
+                _ => ("failed", "interrupted"),
+            };
+            let summary = agent
+                .summary
+                .as_deref()
+                .filter(|text| !text.is_empty())
+                .unwrap_or(summary);
+            if !self
+                .store
+                .finish_agent_if_running(&agent.id, status, Some(summary), Utc::now())?
+            {
+                continue;
+            }
+            converged += 1;
+            let payload = if status == "completed" {
+                KnownPayload::SubagentCompleted(SubagentCompleted {
+                    agent_id: agent.id.clone(),
+                    summary: Some(summary.to_owned()),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    turns: 0,
+                })
+            } else {
+                KnownPayload::SubagentFailed(SubagentFailed {
+                    agent_id: agent.id.clone(),
+                    error: summary.to_owned(),
+                })
+            };
+            let _ = self.emit(&agent.parent_session_id, None, None, payload);
+        }
+        Ok(converged)
+    }
+
     pub fn spawn_subagent(
         &self,
         parent_session: &SessionId,
@@ -63,24 +128,37 @@ impl Runtime {
                 "subagent depth {depth} exceeds {MAX_SUBAGENT_DEPTH}"
             )));
         }
+        // A previous process may have died with children still marked running.
+        // Reclaim that concurrency budget before admitting a new child.
+        let _ = self.reconcile_stale_agents();
         let parent = self
             .show_session(parent_session)?
             .session
             .ok_or_else(|| BloraError::SessionNotFound(parent_session.to_string()))?;
         let spec = resolve_role(&parent.workspace_path, &role);
+        let child_workspace = parent.workspace_path.clone();
+        let child_mode = match parent.mode {
+            Mode::Imagine => Mode::Code,
+            mode => mode,
+        };
         let child_session = self.create_session(CreateSession {
             title: Some(format!("subagent:{role}")),
-            workspace_path: parent.workspace_path,
+            workspace_path: child_workspace,
             // Children keep the parent's strategy (Work children can research
             // the web); Imagine has no tool loop to delegate into.
-            mode: match parent.mode {
-                Mode::Imagine => Mode::Code,
-                mode => mode,
-            },
+            mode: child_mode,
             parent_session_id: Some(parent_session.clone()),
         })?;
         let agent_id = AgentId::generate();
         let now = Utc::now();
+        // Register the child token before the row becomes visible: reconcile
+        // treats a running row without a live token as abandoned, so the two
+        // steps must not interleave.
+        let child_cancel = cancel.child();
+        self.subagent_cancels
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(agent_id.clone(), child_cancel.clone());
         if let Err(err) = self.store.try_insert_running_agent(
             &AgentRecord {
                 id: agent_id.clone(),
@@ -91,26 +169,34 @@ impl Runtime {
                 status: "running".to_owned(),
                 budget_turns: spec.budget,
                 summary: None,
+                owner_pid: Some(std::process::id()),
                 created_at: now,
                 updated_at: now,
             },
             MAX_RUNNING_CHILDREN,
         ) {
-            let _ = self.store.archive_session(&child_session, Utc::now());
-            return Err(err);
-        }
-        let child_cancel = cancel.child();
-        {
             self.subagent_cancels
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(agent_id.clone(), child_cancel.clone());
+                .remove(&agent_id);
+            // Archive through the event log so projections and the sessions
+            // table agree that this child never ran.
+            let _ = self.archive_session(&child_session);
+            return Err(err);
         }
         let _guard = SubagentCancelGuard {
             runtime: self,
             agent_id: agent_id.clone(),
             child_session: child_session.clone(),
         };
+        // Interactive approvals raised by this child surface on the parent.
+        self.subagent_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                child_session.clone(),
+                (parent_session.clone(), role.clone()),
+            );
         self.emit(
             parent_session,
             None,
@@ -144,9 +230,18 @@ impl Runtime {
         let child_prompt = subagent_brief(&role, &spec.duty, prompt, depth < MAX_SUBAGENT_DEPTH);
         let result = self.run(&child_session, &child_prompt, &child_cancel, &child_options);
         let control = self.store.get_agent(&agent_id).ok();
-        let cancelled = child_cancel.is_cancelled()
-            || control.as_ref().is_some_and(|agent| agent.status == "cancelled");
         let projection = self.show_session(&child_session).ok();
+        // A run that reached a terminal state is authoritative: a parent cancel
+        // racing with the last child turn must not relabel a completed child.
+        let run_status = projection
+            .as_ref()
+            .and_then(|projection| projection.runs.last())
+            .map(|run| run.status);
+        let cancelled = child_was_cancelled(
+            run_status,
+            child_cancel.is_cancelled(),
+            control.as_ref().map(|agent| agent.status.as_str()),
+        );
         let last_assistant = projection.as_ref().and_then(|projection| {
             projection.transcript.iter().rev().find_map(|item| {
                 if let blora_session::TranscriptItem::Assistant { text, .. } = item {
@@ -177,7 +272,10 @@ impl Runtime {
             .unwrap_or_default();
 
         if cancelled {
-            if control.as_ref().is_none_or(|agent| agent.status == "running") {
+            if control
+                .as_ref()
+                .is_none_or(|agent| agent.status == "running")
+            {
                 self.store
                     .update_agent(&agent_id, "cancelled", Some("cancelled"), Utc::now())?;
                 self.emit(
@@ -360,6 +458,58 @@ impl Drop for SubagentCancelGuard<'_> {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&self.child_session);
+        self.runtime
+            .subagent_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.child_session);
+    }
+}
+
+/// Whether a finished child should be reported as cancelled.
+///
+/// The child run's terminal status wins over the cancel token: cancelling the
+/// parent while the last child turn is completing must not discard its result.
+fn child_was_cancelled(
+    run_status: Option<blora_types::RunStatus>,
+    token_cancelled: bool,
+    agent_status: Option<&str>,
+) -> bool {
+    match run_status {
+        Some(blora_types::RunStatus::Cancelled) => true,
+        Some(blora_types::RunStatus::Completed | blora_types::RunStatus::Failed) => false,
+        // No run was recorded (cancel before the first turn) or the run is
+        // still open (the provider ignored cancellation).
+        _ => token_cancelled || agent_status == Some("cancelled"),
+    }
+}
+
+/// Whether a process id still names a running process.
+///
+/// Rows written by older builds have no owner pid and are treated as orphaned.
+fn process_is_alive(pid: u32) -> bool {
+    #[cfg(windows)]
+    {
+        // `tasklist /FI` is local and fast enough for the rare reconcile path.
+        let output = std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output();
+        output
+            .is_ok_and(|output| String::from_utf8_lossy(&output.stdout).contains(&pid.to_string()))
+    }
+    #[cfg(not(windows))]
+    {
+        // Signal 0 probes existence without touching the process.
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
     }
 }
 
@@ -389,7 +539,8 @@ fn resolve_role(workspace: &str, role: &str) -> RoleSpec {
         return spec;
     }
     RoleSpec {
-        duty: "You are a subagent working on one self-contained task for a parent agent.".to_owned(),
+        duty: "You are a subagent working on one self-contained task for a parent agent."
+            .to_owned(),
         budget: SUBAGENT_TURNS,
         read_only: false,
     }
@@ -469,7 +620,8 @@ fn parse_role_markdown(raw: &str) -> RoleSpec {
                 let value = value.trim().trim_matches(|ch| ch == '"' || ch == '\'');
                 match key.as_str() {
                     "readonly" | "read_only" | "read-only" => {
-                        read_only = matches!(value.to_ascii_lowercase().as_str(), "true" | "yes" | "1");
+                        read_only =
+                            matches!(value.to_ascii_lowercase().as_str(), "true" | "yes" | "1");
                     }
                     "budget" | "budget_turns" | "turns" => {
                         if let Ok(turns) = value.parse::<u32>() {
@@ -588,9 +740,7 @@ mod tests {
             subagent_brief("code", &duty("code"), "x", false)
                 .contains("Do not spawn another subagent.")
         );
-        assert!(
-            subagent_brief("other", &duty("other"), "x", true).contains("self-contained task")
-        );
+        assert!(subagent_brief("other", &duty("other"), "x", true).contains("self-contained task"));
     }
 
     #[test]
@@ -633,7 +783,13 @@ mod tests {
             .unwrap();
         assert_eq!(runtime.session_depth(&grandchild).unwrap(), 2);
         let err = runtime
-            .spawn_subagent(&grandchild, "research", "too deep", &yolo(), &CancelToken::new())
+            .spawn_subagent(
+                &grandchild,
+                "research",
+                "too deep",
+                &yolo(),
+                &CancelToken::new(),
+            )
             .unwrap_err();
         assert!(err.to_string().contains("depth"));
     }
@@ -675,5 +831,280 @@ mod tests {
         assert_eq!(normalize_role("../x"), "worker");
         assert_eq!(normalize_role("review"), "review");
         assert_eq!(normalize_role(" custom_role "), "custom_role");
+    }
+
+    #[test]
+    fn finished_child_is_not_relabelled_by_a_racing_parent_cancel() {
+        use blora_types::RunStatus;
+        assert!(!child_was_cancelled(
+            Some(RunStatus::Completed),
+            true,
+            Some("running")
+        ));
+        assert!(!child_was_cancelled(
+            Some(RunStatus::Failed),
+            true,
+            Some("running")
+        ));
+        assert!(child_was_cancelled(Some(RunStatus::Cancelled), false, None));
+        assert!(child_was_cancelled(None, true, Some("running")));
+        assert!(child_was_cancelled(None, false, Some("cancelled")));
+        assert!(!child_was_cancelled(None, false, Some("running")));
+    }
+
+    #[test]
+    fn reconcile_marks_orphaned_running_agents_interrupted() {
+        let runtime = Runtime::new(SqliteStore::open_in_memory().unwrap());
+        let parent = session(&runtime, Mode::Code, ".");
+        let child = runtime
+            .create_session(CreateSession {
+                title: Some("subagent:worker".to_owned()),
+                workspace_path: ".".to_owned(),
+                mode: Mode::Code,
+                parent_session_id: Some(parent.clone()),
+            })
+            .unwrap();
+        let agent_id = AgentId::generate();
+        let now = Utc::now();
+        runtime
+            .store
+            .try_insert_running_agent(
+                &AgentRecord {
+                    id: agent_id.clone(),
+                    parent_session_id: parent.clone(),
+                    child_session_id: child.clone(),
+                    role: "worker".to_owned(),
+                    depth: 1,
+                    status: "running".to_owned(),
+                    budget_turns: SUBAGENT_TURNS,
+                    summary: None,
+                    owner_pid: None,
+                    created_at: now,
+                    updated_at: now,
+                },
+                u32::MAX,
+            )
+            .unwrap();
+        // The crashed process had already announced the spawn.
+        runtime
+            .append_event(
+                &parent,
+                None,
+                KnownPayload::SubagentSpawned(SubagentSpawned {
+                    agent_id: agent_id.clone(),
+                    role: "worker".to_owned(),
+                    child_session_id: Some(child),
+                    prompt: Some("do work".to_owned()),
+                    depth: 1,
+                }),
+            )
+            .unwrap();
+
+        assert_eq!(runtime.reconcile_stale_agents().unwrap(), 1);
+        let agent = runtime.get_subagent(&agent_id).unwrap();
+        assert_eq!(agent.status, "failed");
+        assert_eq!(agent.summary.as_deref(), Some("interrupted"));
+        let projection = runtime.show_session(&parent).unwrap();
+        assert!(
+            projection
+                .subagents
+                .iter()
+                .any(|agent| agent.id == agent_id && agent.status == "failed")
+        );
+        // Idempotent: a converged row is not reported twice.
+        assert_eq!(runtime.reconcile_stale_agents().unwrap(), 0);
+    }
+
+    #[test]
+    fn reconcile_skips_children_this_process_is_running() {
+        let runtime = Runtime::new(SqliteStore::open_in_memory().unwrap());
+        let parent = session(&runtime, Mode::Code, ".");
+        let child = runtime
+            .create_session(CreateSession {
+                title: Some("subagent:worker".to_owned()),
+                workspace_path: ".".to_owned(),
+                mode: Mode::Code,
+                parent_session_id: Some(parent),
+            })
+            .unwrap();
+        let agent_id = AgentId::generate();
+        let now = Utc::now();
+        runtime
+            .store
+            .try_insert_running_agent(
+                &AgentRecord {
+                    id: agent_id.clone(),
+                    parent_session_id: runtime.store.session_parent(&child).unwrap().unwrap(),
+                    child_session_id: child,
+                    role: "worker".to_owned(),
+                    depth: 1,
+                    status: "running".to_owned(),
+                    budget_turns: SUBAGENT_TURNS,
+                    summary: None,
+                    owner_pid: None,
+                    created_at: now,
+                    updated_at: now,
+                },
+                u32::MAX,
+            )
+            .unwrap();
+        runtime
+            .subagent_cancels
+            .lock()
+            .unwrap()
+            .insert(agent_id.clone(), CancelToken::new());
+        assert_eq!(runtime.reconcile_stale_agents().unwrap(), 0);
+        assert_eq!(runtime.get_subagent(&agent_id).unwrap().status, "running");
+    }
+
+    #[test]
+    fn reconcile_leaves_rows_owned_by_a_live_process_alone() {
+        let runtime = Runtime::new(SqliteStore::open_in_memory().unwrap());
+        let parent = session(&runtime, Mode::Code, ".");
+        let child = runtime
+            .create_session(CreateSession {
+                title: Some("subagent:worker".to_owned()),
+                workspace_path: ".".to_owned(),
+                mode: Mode::Code,
+                parent_session_id: Some(parent),
+            })
+            .unwrap();
+        let agent_id = AgentId::generate();
+        let now = Utc::now();
+        runtime
+            .store
+            .try_insert_running_agent(
+                &AgentRecord {
+                    id: agent_id.clone(),
+                    parent_session_id: runtime.store.session_parent(&child).unwrap().unwrap(),
+                    child_session_id: child,
+                    role: "worker".to_owned(),
+                    depth: 1,
+                    status: "running".to_owned(),
+                    budget_turns: SUBAGENT_TURNS,
+                    summary: None,
+                    // The current test process is still alive, so this is a
+                    // child another process (TUI vs Web) is driving.
+                    owner_pid: Some(std::process::id()),
+                    created_at: now,
+                    updated_at: now,
+                },
+                u32::MAX,
+            )
+            .unwrap();
+        assert_eq!(runtime.reconcile_stale_agents().unwrap(), 0);
+        assert_eq!(runtime.get_subagent(&agent_id).unwrap().status, "running");
+    }
+
+    #[test]
+    fn spawn_over_the_running_cap_archives_the_child_by_event() {
+        let runtime = Runtime::new(SqliteStore::open_in_memory().unwrap());
+        let parent = session(&runtime, Mode::Code, ".");
+        let now = Utc::now();
+        for _ in 0..MAX_RUNNING_CHILDREN {
+            let child = runtime
+                .create_session(CreateSession {
+                    title: Some("subagent:worker".to_owned()),
+                    workspace_path: ".".to_owned(),
+                    mode: Mode::Code,
+                    parent_session_id: Some(parent.clone()),
+                })
+                .unwrap();
+            let agent_id = AgentId::generate();
+            runtime
+                .store
+                .try_insert_running_agent(
+                    &AgentRecord {
+                        id: agent_id.clone(),
+                        parent_session_id: parent.clone(),
+                        child_session_id: child,
+                        role: "worker".to_owned(),
+                        depth: 1,
+                        status: "running".to_owned(),
+                        budget_turns: SUBAGENT_TURNS,
+                        summary: None,
+                        owner_pid: None,
+                        created_at: now,
+                        updated_at: now,
+                    },
+                    u32::MAX,
+                )
+                .unwrap();
+            // These children are "live" in this process, so stale reconcile
+            // leaves them alone and the cap actually applies.
+            runtime
+                .subagent_cancels
+                .lock()
+                .unwrap()
+                .insert(agent_id, CancelToken::new());
+        }
+        let err = runtime
+            .spawn_subagent(
+                &parent,
+                "research",
+                "one too many",
+                &yolo(),
+                &CancelToken::new(),
+            )
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("too many running subagents"),
+            "{err}"
+        );
+        // The rejected child was created and archived through the event log.
+        let child = runtime
+            .list_sessions()
+            .unwrap()
+            .into_iter()
+            .find(|session| session.title.as_deref() == Some("subagent:research"))
+            .expect("child session");
+        assert_eq!(child.status, blora_types::SessionStatus::Archived);
+        let projection = runtime.show_session(&child.id).unwrap();
+        assert_eq!(
+            projection.session.unwrap().status,
+            blora_types::SessionStatus::Archived
+        );
+    }
+
+    #[test]
+    fn subagent_approvals_surface_on_the_parent_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = Runtime::new(SqliteStore::open_in_memory().unwrap());
+        let parent = session(&runtime, Mode::Code, dir.path().to_str().unwrap());
+        std::thread::scope(|scope| {
+            let handle = scope.spawn(|| {
+                runtime.spawn_subagent(
+                    &parent,
+                    "code",
+                    "WRITE_FILE please",
+                    &RunOptions {
+                        mock: true,
+                        interactive: true,
+                        ..RunOptions::default()
+                    },
+                    &CancelToken::new(),
+                )
+            });
+            let pending = loop {
+                if let Ok(rows) = runtime.pending_approvals(&parent) {
+                    if let Some(row) = rows.into_iter().next() {
+                        break row;
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            };
+            assert!(
+                pending.summary.contains("[subagent:code]"),
+                "{}",
+                pending.summary
+            );
+            runtime.resolve_approval(&pending.id, true).unwrap();
+            let report = handle.join().unwrap().unwrap();
+            assert!(report.contains("status=\"completed\""), "{report}");
+        });
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("ok.txt")).unwrap(),
+            "ok"
+        );
     }
 }

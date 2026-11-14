@@ -143,6 +143,10 @@ pub struct Runtime {
     /// Structured `handoff` reports keyed by child session, preferred over the
     /// last assistant message when the parent collects a subagent result.
     pub(crate) subagent_handoffs: Mutex<HashMap<SessionId, String>>,
+    /// Child session -> (parent session, role). Approvals raised inside a
+    /// subagent are recorded on the parent so an interactive UI can answer
+    /// them; the child row is not where the user is looking.
+    pub(crate) subagent_owners: Mutex<HashMap<SessionId, (SessionId, String)>>,
     /// Scripted provider used by unit tests in place of the resolved chain.
     #[cfg(test)]
     pub(crate) test_provider: Mutex<Option<std::sync::Arc<dyn Provider>>>,
@@ -158,6 +162,7 @@ impl Runtime {
             input_answers: Mutex::new(std::collections::HashMap::new()),
             subagent_cancels: Mutex::new(HashMap::new()),
             subagent_handoffs: Mutex::new(HashMap::new()),
+            subagent_owners: Mutex::new(HashMap::new()),
             #[cfg(test)]
             test_provider: Mutex::new(None),
         }
@@ -563,6 +568,11 @@ impl Runtime {
 
     pub fn list_sessions(&self) -> Result<Vec<SessionSummary>> {
         self.store.list_sessions()
+    }
+
+    /// Root sessions only (no `delegate` / `fork` children), for pickers.
+    pub fn list_root_sessions(&self) -> Result<Vec<SessionSummary>> {
+        self.store.list_root_sessions()
     }
 
     pub fn list_sessions_for_user(&self, user_id: Option<&str>) -> Result<Vec<SessionSummary>> {
@@ -1693,7 +1703,7 @@ impl Runtime {
             }),
         )?;
         let execute = |backend: &LocalBackend| match call.name.as_str() {
-            "shell" => self.execute_shell(session_id, run_id, turn_id, backend, &arguments),
+            "shell" => self.execute_shell(session_id, run_id, turn_id, backend, &arguments, cancel),
             "delegate" => {
                 let prompt = arguments
                     .get("prompt")
@@ -2063,6 +2073,7 @@ impl Runtime {
         turn_id: &TurnId,
         backend: &LocalBackend,
         arguments: &Value,
+        cancel: &CancelToken,
     ) -> Result<String> {
         let command = arguments
             .get("command")
@@ -2103,7 +2114,7 @@ impl Runtime {
                 .map(|secs| std::time::Duration::from_secs(secs.clamp(1, 600)));
             ShellKind::Foreground(timeout)
         };
-        let output = backend.shell_prepared(command, &effective, kind)?;
+        let output = backend.shell_prepared_cancellable(command, &effective, kind, cancel)?;
         let next = backend.normalize_cwd(&shell_cwd_after(&effective, command, output.success))?;
         if next != previous {
             self.emit(
@@ -2204,13 +2215,7 @@ impl Provider for SharedProvider {
 fn runtime_handled_tool(name: &str) -> bool {
     matches!(
         name,
-        "recall"
-            | "update_plan"
-            | "shell"
-            | "ask_user"
-            | "session_search"
-            | "delegate"
-            | "handoff"
+        "recall" | "update_plan" | "shell" | "ask_user" | "session_search" | "delegate" | "handoff"
     )
 }
 

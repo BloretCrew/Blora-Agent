@@ -83,6 +83,8 @@ pub struct SessionSummary {
     pub workspace_path: String,
     pub mode: Mode,
     pub status: SessionStatus,
+    /// Set for child sessions created by `delegate` or `fork`.
+    pub parent_session_id: Option<SessionId>,
     pub updated_at: DateTime<Utc>,
     pub last_sequence: u64,
 }
@@ -202,6 +204,14 @@ impl SqliteStore {
             params![now],
         )
         .map_err(BloraError::storage)?;
+        // Rows written before this build have no owner; reconcile treats them
+        // as orphaned once their process is gone.
+        let _ = conn.execute("ALTER TABLE agents ADD COLUMN owner_pid INTEGER", []);
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (14, ?1)",
+            params![now],
+        )
+        .map_err(BloraError::storage)?;
         Ok(Self {
             conn: Mutex::new(conn),
             clock: SystemClock,
@@ -209,7 +219,7 @@ impl SqliteStore {
     }
 
     /// Current storage schema version written by this build.
-    pub const STORE_VERSION: u32 = 13;
+    pub const STORE_VERSION: u32 = 14;
 
     pub fn queue_steer(&self, session_id: &SessionId, message: &str) -> Result<()> {
         let conn = self.lock();
@@ -395,7 +405,8 @@ impl SqliteStore {
                                   WHERE e.session_id = s.id AND e.event_type = 'session.title.changed'
                                   ORDER BY e.sequence DESC LIMIT 1), s.title),
                         s.workspace_path, s.mode, s.status, s.updated_at,
-                        COALESCE((SELECT MAX(sequence) FROM events e WHERE e.session_id = s.id), 0)
+                        COALESCE((SELECT MAX(sequence) FROM events e WHERE e.session_id = s.id), 0),
+                        s.parent_session_id
                  FROM sessions s
                  ORDER BY s.updated_at DESC",
             )
@@ -410,12 +421,13 @@ impl SqliteStore {
                     row.get::<_, String>(4)?,
                     row.get::<_, String>(5)?,
                     row.get::<_, i64>(6)?,
+                    row.get::<_, Option<String>>(7)?,
                 ))
             })
             .map_err(BloraError::storage)?;
         let mut out = Vec::new();
         for row in rows {
-            let (id, title, workspace_path, mode, status, updated_at, last_sequence) =
+            let (id, title, workspace_path, mode, status, updated_at, last_sequence, parent) =
                 row.map_err(BloraError::storage)?;
             out.push(SessionSummary {
                 id: SessionId::parse(&id)?,
@@ -423,11 +435,21 @@ impl SqliteStore {
                 workspace_path,
                 mode: Mode::parse(&mode)?,
                 status: SessionStatus::parse(&status)?,
+                parent_session_id: parent.as_deref().map(SessionId::parse).transpose()?,
                 updated_at: parse_time(&updated_at)?,
                 last_sequence: u64::try_from(last_sequence).unwrap_or(0),
             });
         }
         Ok(out)
+    }
+
+    /// Sessions that are not children of another session (the sidebar list).
+    pub fn list_root_sessions(&self) -> Result<Vec<SessionSummary>> {
+        Ok(self
+            .list_sessions()?
+            .into_iter()
+            .filter(|session| session.parent_session_id.is_none())
+            .collect())
     }
 
     pub fn session_parent(&self, session_id: &SessionId) -> Result<Option<SessionId>> {
@@ -643,11 +665,6 @@ impl SqliteStore {
         Ok(())
     }
 
-    pub fn insert_agent(&self, record: &AgentRecord) -> Result<()> {
-        let conn = self.lock();
-        insert_agent_row(&conn, record)
-    }
-
     /// Insert a running child if this parent is under `max_running`. The store
     /// mutex serialises concurrent `delegate` calls so the cap is not racy.
     pub fn try_insert_running_agent(&self, record: &AgentRecord, max_running: u32) -> Result<()> {
@@ -684,16 +701,42 @@ impl SqliteStore {
         Ok(())
     }
 
-    pub fn running_child_count(&self, parent: &SessionId) -> Result<u32> {
+    /// Move a `running` agent to a terminal state. Returns false when another
+    /// caller already finished it, so races cannot emit duplicate events.
+    pub fn finish_agent_if_running(
+        &self,
+        agent_id: &AgentId,
+        status: &str,
+        summary: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Result<bool> {
         let conn = self.lock();
-        let count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM agents WHERE parent_session_id = ?1 AND status = 'running'",
-                params![parent.as_str()],
-                |row| row.get(0),
+        let changed = conn
+            .execute(
+                "UPDATE agents SET status = ?1, summary = ?2, updated_at = ?3
+                 WHERE id = ?4 AND status = 'running'",
+                params![status, summary, now.to_rfc3339(), agent_id.as_str()],
             )
             .map_err(BloraError::storage)?;
-        Ok(u32::try_from(count).unwrap_or(0))
+        Ok(changed > 0)
+    }
+
+    /// Every agent row still marked `running`, across all parents. Used by the
+    /// runtime to converge children left behind by a crashed process.
+    pub fn list_running_agents(&self) -> Result<Vec<AgentRecord>> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT {AGENT_COLUMNS}
+                 FROM agents WHERE status = 'running' ORDER BY created_at ASC"
+            ))
+            .map_err(BloraError::storage)?;
+        let rows = stmt.query_map([], agent_row).map_err(BloraError::storage)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row_to_agent(row.map_err(BloraError::storage)?)?);
+        }
+        Ok(out)
     }
 
     pub fn get_agent(&self, agent_id: &AgentId) -> Result<AgentRecord> {
@@ -707,44 +750,16 @@ impl SqliteStore {
     pub fn agent_for_child_session(&self, child: &SessionId) -> Result<Option<AgentRecord>> {
         let conn = self.lock();
         let mut stmt = conn
-            .prepare(
-                "SELECT id, parent_session_id, child_session_id, role, depth, status,
-                        budget_turns, summary, created_at, updated_at
-                 FROM agents WHERE child_session_id = ?1 LIMIT 1",
-            )
+            .prepare(&format!(
+                "SELECT {AGENT_COLUMNS}
+                 FROM agents WHERE child_session_id = ?1 LIMIT 1"
+            ))
             .map_err(BloraError::storage)?;
         let row = stmt
-            .query_row(params![child.as_str()], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, i64>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, i64>(6)?,
-                    row.get::<_, Option<String>>(7)?,
-                    row.get::<_, String>(8)?,
-                    row.get::<_, String>(9)?,
-                ))
-            })
+            .query_row(params![child.as_str()], agent_row)
             .optional()
             .map_err(BloraError::storage)?;
-        row.map(|(id, parent_id, child, role, depth, status, budget, summary, created, updated)| {
-            Ok(AgentRecord {
-                id: AgentId::parse(&id)?,
-                parent_session_id: SessionId::parse(&parent_id)?,
-                child_session_id: SessionId::parse(&child)?,
-                role,
-                depth: u32::try_from(depth).unwrap_or(0),
-                status,
-                budget_turns: u32::try_from(budget).unwrap_or(0),
-                summary,
-                created_at: parse_time(&created)?,
-                updated_at: parse_time(&updated)?,
-            })
-        })
-        .transpose()
+        row.map(row_to_agent).transpose()
     }
 
     pub fn archive_session(&self, session_id: &SessionId, now: DateTime<Utc>) -> Result<()> {
@@ -990,49 +1005,22 @@ impl SqliteStore {
     ) -> Result<Vec<AgentRecord>> {
         let conn = self.lock();
         let mut stmt = conn
-            .prepare(
-                "SELECT id, parent_session_id, child_session_id, role, depth, status,
-                        budget_turns, summary, created_at, updated_at
+            .prepare(&format!(
+                "SELECT {AGENT_COLUMNS}
                  FROM agents
                  WHERE (?1 IS NULL OR id = ?1) AND (?2 IS NULL OR parent_session_id = ?2)
-                 ORDER BY created_at ASC",
-            )
+                 ORDER BY created_at ASC"
+            ))
             .map_err(BloraError::storage)?;
         let rows = stmt
             .query_map(
                 params![agent_id.map(AgentId::as_str), parent.map(SessionId::as_str)],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, i64>(4)?,
-                        row.get::<_, String>(5)?,
-                        row.get::<_, i64>(6)?,
-                        row.get::<_, Option<String>>(7)?,
-                        row.get::<_, String>(8)?,
-                        row.get::<_, String>(9)?,
-                    ))
-                },
+                agent_row,
             )
             .map_err(BloraError::storage)?;
         let mut out = Vec::new();
         for row in rows {
-            let (id, parent_id, child, role, depth, status, budget, summary, created, updated) =
-                row.map_err(BloraError::storage)?;
-            out.push(AgentRecord {
-                id: AgentId::parse(&id)?,
-                parent_session_id: SessionId::parse(&parent_id)?,
-                child_session_id: SessionId::parse(&child)?,
-                role,
-                depth: u32::try_from(depth).unwrap_or(0),
-                status,
-                budget_turns: u32::try_from(budget).unwrap_or(0),
-                summary,
-                created_at: parse_time(&created)?,
-                updated_at: parse_time(&updated)?,
-            });
+            out.push(row_to_agent(row.map_err(BloraError::storage)?)?);
         }
         Ok(out)
     }
@@ -1042,12 +1030,63 @@ impl SqliteStore {
     }
 }
 
+type AgentRow = (
+    String,
+    String,
+    String,
+    String,
+    i64,
+    String,
+    i64,
+    Option<String>,
+    Option<i64>,
+    String,
+    String,
+);
+
+const AGENT_COLUMNS: &str = "id, parent_session_id, child_session_id, role, depth, status,
+        budget_turns, summary, owner_pid, created_at, updated_at";
+
+fn agent_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentRow> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+        row.get(6)?,
+        row.get(7)?,
+        row.get(8)?,
+        row.get(9)?,
+        row.get(10)?,
+    ))
+}
+
+fn row_to_agent(row: AgentRow) -> Result<AgentRecord> {
+    let (id, parent_id, child, role, depth, status, budget, summary, owner_pid, created, updated) =
+        row;
+    Ok(AgentRecord {
+        id: AgentId::parse(&id)?,
+        parent_session_id: SessionId::parse(&parent_id)?,
+        child_session_id: SessionId::parse(&child)?,
+        role,
+        depth: u32::try_from(depth).unwrap_or(0),
+        status,
+        budget_turns: u32::try_from(budget).unwrap_or(0),
+        summary,
+        owner_pid: owner_pid.and_then(|pid| u32::try_from(pid).ok()),
+        created_at: parse_time(&created)?,
+        updated_at: parse_time(&updated)?,
+    })
+}
+
 fn insert_agent_row(conn: &Connection, record: &AgentRecord) -> Result<()> {
     conn.execute(
         "INSERT INTO agents (
             id, parent_session_id, child_session_id, role, depth, status,
-            budget_turns, summary, created_at, updated_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            budget_turns, summary, owner_pid, created_at, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             record.id.as_str(),
             record.parent_session_id.as_str(),
@@ -1057,6 +1096,7 @@ fn insert_agent_row(conn: &Connection, record: &AgentRecord) -> Result<()> {
             record.status,
             record.budget_turns as i64,
             record.summary,
+            record.owner_pid.map(i64::from),
             record.created_at.to_rfc3339(),
             record.updated_at.to_rfc3339(),
         ],
@@ -1454,6 +1494,41 @@ mod tests {
                 .as_deref(),
             Some("手动标题")
         );
+    }
+
+    #[test]
+    fn root_session_list_excludes_delegate_children() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let root = store
+            .create_session(CreateSession {
+                title: Some("parent".to_owned()),
+                workspace_path: "/tmp/ws".to_owned(),
+                mode: Mode::Code,
+                parent_session_id: None,
+            })
+            .unwrap();
+        let child = store
+            .create_session(CreateSession {
+                title: Some("subagent:worker".to_owned()),
+                workspace_path: "/tmp/ws".to_owned(),
+                mode: Mode::Code,
+                parent_session_id: Some(root.clone()),
+            })
+            .unwrap();
+        let all = store.list_sessions().unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(
+            all.iter()
+                .find(|session| session.id == child)
+                .unwrap()
+                .parent_session_id
+                .as_ref(),
+            Some(&root)
+        );
+        let roots = store.list_root_sessions().unwrap();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].id, root);
+        assert!(roots[0].parent_session_id.is_none());
     }
 
     #[test]

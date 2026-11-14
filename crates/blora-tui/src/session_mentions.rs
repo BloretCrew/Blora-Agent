@@ -248,6 +248,7 @@ mod tests {
             workspace_path: project.into(),
             mode: blora_types::Mode::Code,
             status: blora_types::SessionStatus::Active,
+            parent_session_id: None,
             updated_at: chrono::Utc::now(),
             last_sequence: 0,
         }

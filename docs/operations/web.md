@@ -61,7 +61,7 @@ bridge 必需函数：`api(path, options)`、`getState()`、`stored(key, fallbac
 | install | 返回 false，复用原 app | POST /api/marketplace |
 | uninstall | 风险确认后卸载指定插件 | actions 请求 action=uninstall、name、confirmed=true，显示 output |
 | skills、mcp、hooks | 模块显示技能及配置标志 | GET /api/sessions/:id/extensions；不返回真实 MCP 命令 / Hook 路径，与 CLI 原始环境值不同 |
-| agents | 模块展示会话子代理 | 会话 JSON subagents |
+| agents | 模块展示会话子代理 | 会话 JSON subagents；运行中的子代理可插话/取消，任意状态可“打开子会话” |
 | steer-agent | 模块向运行中的子代理排队插话 | POST /api/agents/:id/steer，`{message}`；需当前会话 |
 | cancel-agent | 模块取消单个子代理 | POST /api/agents/:id/cancel；不停止父运行 |
 | git | 委托 Git 工作台 | 新会话 Git 协议由工作台实现；提交、选择文件、说明生成、push/pull、Git 图未在命令模块实现或验收 |

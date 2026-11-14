@@ -42,26 +42,41 @@ impl Runtime {
         summary: &str,
         cancel: &CancelToken,
     ) -> Result<bool> {
+        // A subagent's approvals belong to the parent conversation: that is the
+        // session an interactive client is watching. The summary names the role
+        // so the user knows who is asking.
+        let (owner_session, summary) = match self
+            .subagent_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(session_id)
+            .cloned()
+        {
+            Some((parent, role)) => (parent, format!("[subagent:{role}] {summary}")),
+            None => (session_id.clone(), summary.to_owned()),
+        };
         let approval_id = ApprovalId::generate();
         let now = Utc::now();
+        let owned_by_parent = owner_session != *session_id;
         self.store.insert_approval(&ApprovalRecord {
             id: approval_id.clone(),
-            session_id: session_id.clone(),
-            run_id: Some(run_id.clone()),
+            session_id: owner_session.clone(),
+            // A child run id would be foreign to the parent session's log.
+            run_id: (!owned_by_parent).then(|| run_id.clone()),
             capability: capability.to_owned(),
-            summary: summary.to_owned(),
+            summary: summary.clone(),
             status: "pending".to_owned(),
             created_at: now,
             updated_at: now,
         })?;
         self.emit(
-            session_id,
-            Some(run_id),
-            Some(turn_id),
+            &owner_session,
+            (!owned_by_parent).then_some(run_id),
+            (!owned_by_parent).then_some(turn_id),
             KnownPayload::ApprovalRequested(ApprovalRequested {
                 approval_id: approval_id.clone(),
                 capability: capability.to_owned(),
-                summary: summary.to_owned(),
+                summary: summary.clone(),
                 policy_version: blora_policy::POLICY_VERSION,
             }),
         )?;
@@ -76,9 +91,9 @@ impl Runtime {
             match record.status.as_str() {
                 "allow" => {
                     self.emit(
-                        session_id,
-                        Some(run_id),
-                        Some(turn_id),
+                        &owner_session,
+                        (!owned_by_parent).then_some(run_id),
+                        (!owned_by_parent).then_some(turn_id),
                         KnownPayload::ApprovalResolved(ApprovalResolved {
                             approval_id,
                             decision: "allow".to_owned(),
@@ -88,21 +103,21 @@ impl Runtime {
                 }
                 "deny" => {
                     self.emit(
-                        session_id,
-                        Some(run_id),
-                        Some(turn_id),
+                        &owner_session,
+                        (!owned_by_parent).then_some(run_id),
+                        (!owned_by_parent).then_some(turn_id),
                         KnownPayload::ApprovalResolved(ApprovalResolved {
                             approval_id,
                             decision: "deny".to_owned(),
                         }),
                     )?;
                     self.emit(
-                        session_id,
-                        Some(run_id),
-                        Some(turn_id),
+                        &owner_session,
+                        (!owned_by_parent).then_some(run_id),
+                        (!owned_by_parent).then_some(turn_id),
                         KnownPayload::PolicyDenied(PolicyDenied {
                             capability: capability.to_owned(),
-                            reason: summary.to_owned(),
+                            reason: summary.clone(),
                         }),
                     )?;
                     return Ok(false);

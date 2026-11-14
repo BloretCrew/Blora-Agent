@@ -96,6 +96,8 @@ struct SessionListItem {
     status: String,
     updated_at: String,
     last_sequence: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent_session_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -805,6 +807,10 @@ fn resolve_vendor(request: &str) -> Option<PathBuf> {
 #[derive(Deserialize)]
 struct SessionListQuery {
     q: Option<String>,
+    /// Include subagent / fork children. Defaults to root sessions only so the
+    /// sidebar matches the TUI.
+    #[serde(default)]
+    include_children: bool,
 }
 
 async fn list_sessions(
@@ -824,6 +830,7 @@ async fn list_sessions(
     };
     let out = sessions
         .into_iter()
+        .filter(|session| query.include_children || session.parent_session_id.is_none())
         .filter(|session| ensure_session(&state, &headers, &session.id).is_ok())
         .map(|session| SessionListItem {
             id: session.id.to_string(),
@@ -833,6 +840,7 @@ async fn list_sessions(
             status: session.status.as_str().to_owned(),
             updated_at: session.updated_at.to_rfc3339(),
             last_sequence: session.last_sequence,
+            parent_session_id: session.parent_session_id.map(|id| id.to_string()),
         })
         .collect();
     Ok(Json(out))
@@ -1224,7 +1232,10 @@ fn ensure_agent(
     headers: &HttpHeaderMap,
     agent_id: &AgentId,
 ) -> Result<blora_storage::AgentRecord, ApiError> {
-    let agent = state.runtime.get_subagent(agent_id).map_err(ApiError::from)?;
+    let agent = state
+        .runtime
+        .get_subagent(agent_id)
+        .map_err(ApiError::from)?;
     ensure_session(state, headers, &agent.parent_session_id)?;
     Ok(agent)
 }

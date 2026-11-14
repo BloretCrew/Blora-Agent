@@ -41,4 +41,8 @@ checkpoint.created
 
 ## 子代理
 
-`delegate` 创建子会话，深度上限 2、同一父会话并发 3。同一批多个 `delegate` 用 scoped thread 并行执行，结果仍按调用顺序落库。每个子代理有独立的 `CancelToken`（观察父 token，取消子代理不会取消父运行）。子代理收到按角色生成的任务说明：内置 research / review / plan 只读、code 可写；其它角色名读取 `.blora/agents/{role}.md`（可含 `readonly` / `budget` frontmatter），否则按可写 worker 处理。说明里写明交付格式：结论在前，附证据路径与命令、改动文件和未决问题。`subagent.spawned` 记录 `depth`，子会话的助手增量会写成父会话 `subagent.message`，`subagent.completed` 回写 token 与轮数。结果以 `<subagent>` 包裹返回父会话；子代理失败或取消也作为工具结果返回，不炸掉父 run。子代理调用 `handoff` 时，该摘要优先于最后一条助手文本。`steer_subagent` / `cancel_subagent`（TUI `/steer-agent` `/cancel-agent`，API `POST /api/agents/:id/steer|cancel`）可在运行中干预。
+`delegate` 创建子会话，深度上限 2、同一父会话并发 3。同一批多个 `delegate` 用 scoped thread 并行执行，结果仍按调用顺序落库。每个子代理有独立的 `CancelToken`（观察父 token，取消子代理不会取消父运行）。子代理收到按角色生成的任务说明：内置 research / review / plan 只读、code 可写；其它角色名读取 `.blora/agents/{role}.md`（可含 `readonly` / `budget` frontmatter），否则按可写 worker 处理。说明里写明交付格式：结论在前，附证据路径与命令、改动文件和未决问题。`subagent.spawned` 记录 `depth`，子会话的助手增量会写成父会话 `subagent.message`，`subagent.completed` 回写 token 与轮数。结果以 `<subagent>` 包裹返回父会话；子代理失败或取消也作为工具结果返回，不炸掉父 run。子代理调用 `handoff` 时，该摘要优先于最后一条助手文本。`steer_subagent` / `cancel_subagent`（TUI `/steer-agent` `/cancel-agent`，CLI `blora agent list|steer|cancel`，API `POST /api/agents/:id/steer|cancel`）可在运行中干预。
+
+可写子代理在 `ask` / `acceptEdits` 权限下触发的审批记录在**父会话**上（摘要带 `[subagent:{role}]` 前缀），TUI 右栏、`/approvals`、Web 审批面板都能看到并处理；子会话不再单独出现待审批而无人应答。子代理内的前台 `shell` 会轮询取消令牌，取消后终止进程并返回 `Cancelled`。
+
+进程异常退出后，遗留的 `running` 子代理行会在下次 `delegate` 或 `pump` 时收敛：子会话最后一次 run 已终态则沿用该结果，否则标为 `failed{interrupted}`。取消判定以子会话 run 终态为准，父取消与子完成竞争时不会把成功结果改标为 `cancelled`。子会话仍按 id 可访问（`/goto <id>`、Web 子代理面板“打开子会话”），但默认不出现在会话选择器、TUI 侧栏和 `GET /api/sessions`；`GET /api/sessions?include_children=1` 或 TUI `/sessions all` 可列出它们。

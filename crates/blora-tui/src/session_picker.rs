@@ -89,6 +89,11 @@ impl SessionPicker {
         self.rows = sessions
             .iter()
             .filter(|session| {
+                // Child sessions (`delegate` / `fork`) are reachable by id but
+                // do not appear in the picker.
+                if session.parent_session_id.is_some() {
+                    return false;
+                }
                 let project = std::path::Path::new(&session.workspace_path)
                     .file_name()
                     .unwrap_or_default()
@@ -351,6 +356,32 @@ mod tests {
         picker.edit(&sessions, 12);
         assert!(!picker.searching);
         assert!(picker.error.is_none());
+    }
+
+    #[test]
+    fn picker_lists_root_sessions_only() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let root = store
+            .create_session(CreateSession {
+                title: Some("parent".into()),
+                workspace_path: "/tmp/project".into(),
+                mode: Mode::Code,
+                parent_session_id: None,
+            })
+            .unwrap();
+        let child = store
+            .create_session(CreateSession {
+                title: Some("subagent:worker".into()),
+                workspace_path: "/tmp/project".into(),
+                mode: Mode::Code,
+                parent_session_id: Some(root.clone()),
+            })
+            .unwrap();
+        let sessions = store.list_sessions().unwrap();
+        let picker = SessionPicker::new(&sessions, Some(&root), 1);
+        assert_eq!(picker.rows.len(), 1);
+        assert_eq!(picker.rows[0].id, root);
+        assert!(picker.rows.iter().all(|row| row.id != child));
     }
 
     #[test]

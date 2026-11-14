@@ -150,6 +150,8 @@ Git 窗口默认打开“操作”页。单击文件行选中并查看差异，�
 
 工作：`/tasks` `/task` `/cron` `/loop` `/pause` `/unpause` `/cancel-task` `/pump` `/agents` `/steer-agent` `/cancel-agent` `/search` `/find` `/clear` `/tools` `/copy`
 
+子会话：`/sessions all` 列出 `delegate` / `fork` 产生的子会话；`/goto <完整会话 ID>` 可直接打开它们。默认 `/sessions`、侧栏和会话选择器只显示根会话。
+
 记忆：`/memory` `/remember` `/recall` `/forget` `/distill`
 
 扩展：`/plugins` `/marketplace` `/install` `/uninstall` `/skills` `/mcp` `/hooks` `/init`

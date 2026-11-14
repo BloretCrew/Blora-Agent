@@ -108,7 +108,9 @@ impl Runtime {
     /// Run every due task once. Claiming is compare-and-swap so two pumps never
     /// execute the same occurrence; a crash mid-run leaves the task `running`,
     /// which `recover_stale_tasks` turns into a retry on the next pump.
+    /// Subagent rows orphaned by a dead process are converged first.
     pub fn pump(&self) -> Result<Vec<TaskId>> {
+        let _ = self.reconcile_stale_agents();
         self.recover_stale_tasks()?;
         let claimed = self.store.claim_due_tasks(Utc::now())?;
         let mut finished = Vec::new();

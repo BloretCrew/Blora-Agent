@@ -5420,7 +5420,14 @@ fn slash(
         "settings" if args.is_empty() => SlashOutcome::SettingsDialog,
         "settings" => apply_settings(runtime, args, permission_mode, hide_tools, model, provider),
         "new" => open_session(runtime, workspace, sessions, index, Mode::Code, "tui"),
-        "sessions" => panel("sessions", list_session_lines(sessions)),
+        "sessions" => {
+            if args.trim() == "all" {
+                // `/sessions all` also lists `delegate` / `fork` children.
+                panel("sessions", format_session_lines(sessions.iter()))
+            } else {
+                panel("sessions", list_session_lines(sessions))
+            }
+        }
         "goto" => goto_session(sessions, index, args),
         "status" => SlashOutcome::Status(session_status(runtime, session_id)),
         "id" => SlashOutcome::Status(session_id.to_string()),
@@ -5917,8 +5924,18 @@ fn slash(
             SlashOutcome::Status(format!("{} sessions", sessions.len()))
         }
         "next" => {
-            if *index + 1 < sessions.len() {
+            // Step over child sessions so keyboard navigation stays on roots.
+            loop {
+                if *index + 1 >= sessions.len() {
+                    break;
+                }
                 *index += 1;
+                if sessions
+                    .get(*index)
+                    .is_some_and(|session| session.parent_session_id.is_none())
+                {
+                    break;
+                }
             }
             SlashOutcome::Status(
                 sessions
@@ -5928,7 +5945,18 @@ fn slash(
             )
         }
         "prev" => {
-            *index = index.saturating_sub(1);
+            loop {
+                if *index == 0 {
+                    break;
+                }
+                *index -= 1;
+                if sessions
+                    .get(*index)
+                    .is_some_and(|session| session.parent_session_id.is_none())
+                {
+                    break;
+                }
+            }
             SlashOutcome::Status(
                 sessions
                     .get(*index)
@@ -5975,21 +6003,32 @@ fn select_session(
 }
 
 fn list_session_lines(sessions: &[blora_storage::SessionSummary]) -> String {
-    if sessions.is_empty() {
-        return "no sessions".to_owned();
-    }
-    sessions
-        .iter()
+    format_session_lines(
+        sessions
+            .iter()
+            .filter(|session| session.parent_session_id.is_none()),
+    )
+}
+
+fn format_session_lines<'a>(
+    sessions: impl Iterator<Item = &'a blora_storage::SessionSummary>,
+) -> String {
+    let mut lines: Vec<String> = sessions
         .map(|session| {
             format!(
-                "{}  {}  {}",
+                "{}  {}  {}  {}",
                 session.id,
                 session.mode.as_str(),
+                session.status.as_str(),
                 session.title.as_deref().unwrap_or("-")
             )
         })
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect();
+    if lines.is_empty() {
+        return "no sessions".to_owned();
+    }
+    lines.sort();
+    lines.join("\n")
 }
 
 fn session_status(runtime: &Runtime, session_id: &SessionId) -> String {
@@ -6017,15 +6056,20 @@ fn goto_session(
         return SlashOutcome::Status("usage: /goto <id|title>".to_owned());
     }
     let needle = query.to_ascii_lowercase();
-    match sessions.iter().position(|session| {
-        session.id.as_str().to_ascii_lowercase().contains(&needle)
-            || session
-                .title
-                .as_deref()
-                .unwrap_or("")
-                .to_ascii_lowercase()
-                .contains(&needle)
-    }) {
+    // `/goto` accepts an exact child-session id so an agent's context stays
+    // reachable; title search stays on root sessions.
+    let hit = sessions.iter().position(|session| {
+        session.id.as_str().to_ascii_lowercase() == needle
+            || (session.parent_session_id.is_none()
+                && (session.id.as_str().to_ascii_lowercase().contains(&needle)
+                    || session
+                        .title
+                        .as_deref()
+                        .unwrap_or("")
+                        .to_ascii_lowercase()
+                        .contains(&needle)))
+    });
+    match hit {
         Some(found) => {
             *index = found;
             SlashOutcome::Status(sessions[found].id.to_string())
