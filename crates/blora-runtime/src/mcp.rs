@@ -77,8 +77,19 @@ impl McpManager {
     /// every server is disabled.
     #[must_use]
     pub fn load(workspace: &Path) -> Option<Self> {
+        Self::load_with(workspace, None, true, true)
+    }
+
+    /// Load servers from explicit paths and environment-compatible fallbacks.
+    #[must_use]
+    pub fn load_with(
+        workspace: &Path,
+        explicit_path: Option<&Path>,
+        include_workspace: bool,
+        inherit_env: bool,
+    ) -> Option<Self> {
         let mut configs = BTreeMap::new();
-        for path in config_paths(workspace) {
+        for path in config_paths_with(workspace, explicit_path, include_workspace, inherit_env) {
             let Ok(text) = std::fs::read_to_string(&path) else {
                 continue;
             };
@@ -88,7 +99,7 @@ impl McpManager {
             };
             configs.extend(file.servers);
         }
-        if configs.is_empty() {
+        if configs.is_empty() && inherit_env {
             if let Ok(command) = std::env::var("BLORA_MCP_COMMAND") {
                 let mut parts = command.split_whitespace();
                 if let Some(program) = parts.next() {
@@ -233,18 +244,31 @@ impl McpServer {
     }
 }
 
-fn config_paths(workspace: &Path) -> Vec<PathBuf> {
+fn config_paths_with(
+    workspace: &Path,
+    explicit_path: Option<&Path>,
+    include_workspace: bool,
+    inherit_env: bool,
+) -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    if let Ok(path) = std::env::var("BLORA_MCP_CONFIG") {
-        paths.push(PathBuf::from(path));
+    if let Some(path) = explicit_path {
+        paths.push(path.to_path_buf());
+    } else if inherit_env {
+        if let Ok(path) = std::env::var("BLORA_MCP_CONFIG") {
+            paths.push(PathBuf::from(path));
+        }
     }
-    paths.push(workspace.join(".blora/mcp.json"));
-    let home = std::env::var("BLORA_HOME")
-        .ok()
-        .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|home| home.join(".blora")));
-    if let Some(home) = home {
-        paths.push(home.join("mcp.json"));
+    if include_workspace {
+        paths.push(workspace.join(".blora/mcp.json"));
+    }
+    if inherit_env {
+        let home = std::env::var("BLORA_HOME")
+            .ok()
+            .map(PathBuf::from)
+            .or_else(|| dirs::home_dir().map(|home| home.join(".blora")));
+        if let Some(home) = home {
+            paths.push(home.join("mcp.json"));
+        }
     }
     paths
 }

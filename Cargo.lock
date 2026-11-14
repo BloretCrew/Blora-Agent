@@ -263,6 +263,7 @@ version = "0.1.0-beta.3"
 dependencies = [
  "blora-github",
  "blora-runtime",
+ "blora-sdk-protocol",
  "blora-server",
  "blora-session",
  "blora-storage",
@@ -429,8 +430,41 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror 2.0.20",
  "tracing",
  "ureq",
+]
+
+[[package]]
+name = "blora-sdk"
+version = "0.1.0-beta.3"
+dependencies = [
+ "blora-content",
+ "blora-events",
+ "blora-exec",
+ "blora-model",
+ "blora-policy",
+ "blora-runtime",
+ "blora-session",
+ "blora-storage",
+ "blora-types",
+ "blora-web",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "blora-sdk-protocol"
+version = "0.1.0-beta.3"
+dependencies = [
+ "blora-model",
+ "blora-sdk",
+ "blora-types",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

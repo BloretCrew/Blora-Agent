@@ -22,6 +22,8 @@ members = [
     "crates/blora-lsp",
     "crates/blora-tui",
     "crates/blora-server",
+    "crates/blora-sdk",
+    "crates/blora-sdk-protocol",
     "crates/blora-cli",
     "crates/blora-github",
 ]
@@ -55,6 +57,8 @@ blora-catalog = { path = "crates/blora-catalog" }
 blora-model = { path = "crates/blora-model" }
 blora-ptc = { path = "crates/blora-ptc" }
 blora-runtime = { path = "crates/blora-runtime" }
+blora-sdk = { path = "crates/blora-sdk" }
+blora-sdk-protocol = { path = "crates/blora-sdk-protocol" }
 blora-harness = { path = "crates/blora-harness" }
 blora-lsp = { path = "crates/blora-lsp" }
 blora-tui = { path = "crates/blora-tui" }

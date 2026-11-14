@@ -76,6 +76,9 @@ impl Runtime {
     /// Render durable memories into `.blora/memory.md` (read by the context
     /// compiler). Session summaries are excluded.
     pub(crate) fn write_memory_file(&self, workspace: &str) -> Result<()> {
+        if !self.config.features.memory || !self.config.context.include_memory {
+            return Ok(());
+        }
         let rows = self.store.list_memories(workspace)?;
         let body = rows
             .iter()

@@ -469,7 +469,7 @@ esac"#,
             let path = script(
                 dir.path(),
                 "fake",
-                &format!("printf '%s' \"$(printf 'x%.0s' {{1..1100000}})\""),
+                "printf '%s' \"$(printf 'x%.0s' {1..1100000})\"",
             );
             let mut req = request(kind, PermissionMode::Yolo);
             req.cwd = dir.path().into();

@@ -127,6 +127,8 @@ pub struct Policy {
     /// Set by [`Policy::granting`] after the user approved an action: every
     /// `Ask` becomes `Allow` for the retried call. `Deny` stays `Deny`.
     granted: bool,
+    /// Explicit network permission. `None` falls back to `BLORA_NETWORK`.
+    network: Option<bool>,
 }
 
 impl Policy {
@@ -156,7 +158,16 @@ impl Policy {
             workspace,
             mode,
             granted: false,
+            network: None,
         })
+    }
+
+    /// Override network permission for this policy. `None` keeps the
+    /// environment fallback.
+    #[must_use]
+    pub fn with_network(mut self, allowed: Option<bool>) -> Self {
+        self.network = allowed;
+        self
     }
 
     #[must_use]
@@ -183,6 +194,7 @@ impl Policy {
             workspace: self.workspace.clone(),
             mode: self.mode,
             granted: true,
+            network: self.network,
         }
     }
 
@@ -291,7 +303,8 @@ impl Policy {
 
     #[must_use]
     pub fn network(&self) -> Decision {
-        if env_flag("BLORA_NETWORK") {
+        let allowed = self.network.unwrap_or_else(|| env_flag("BLORA_NETWORK"));
+        if allowed {
             match self.mode {
                 PermissionMode::Plan => Decision::Deny,
                 PermissionMode::Yolo => Decision::Allow,

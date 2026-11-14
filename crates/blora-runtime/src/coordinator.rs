@@ -3,7 +3,7 @@
 
 use blora_content::ToolOutcome;
 use blora_context::{
-    EnvSnapshot, compile_messages_with_tools, compile_messages_with_tools_and_resolver,
+    CompileOptions, EnvSnapshot, compile_messages_with_options, compile_messages_with_tools,
     estimate_messages,
 };
 use blora_events::{
@@ -16,7 +16,7 @@ use blora_events::{
     StructuredOutput, ToolCompleted, ToolDiscovered, ToolFailed, ToolOutput, ToolRequested,
     ToolStarted, UsageRecorded, UserInput,
 };
-use blora_exec::{Isolation, LocalBackend, ShellKind, WorktreeHandle, shell_cwd_after};
+use blora_exec::{LocalBackend, ShellKind, WorktreeHandle, shell_cwd_after};
 use blora_model::retry::{self, RetryClass};
 use blora_model::{
     ChatMessage, Completion, CompletionRequest, Provider, StreamEvent, ToolCall, ToolDeclaration,
@@ -34,7 +34,9 @@ use std::sync::Mutex;
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 
 use crate::catalog;
+use crate::config::{HomeMode, ProviderSource, RuntimeConfig};
 use crate::hooks::{self, HookDecision};
+use crate::host_tools::{HostToolRegistry, KernelTool, KernelToolContext};
 
 /// Tool results larger than this are head/tail truncated before entering the log.
 const MAX_TOOL_RESULT_CHARS: usize = 24_000;
@@ -146,6 +148,8 @@ impl Default for RunOptions {
 #[derive(Clone)]
 pub struct Runtime {
     pub(crate) store: std::sync::Arc<SqliteStore>,
+    pub(crate) config: std::sync::Arc<RuntimeConfig>,
+    custom_tools: std::sync::Arc<Mutex<HostToolRegistry>>,
     pub(crate) foreground_sessions: std::sync::Arc<Mutex<std::collections::HashSet<SessionId>>>,
     /// Live event subscribers (SSE, TUI). Lossy: a slow subscriber drops events
     /// and must resynchronise from the store, which it can always do.
@@ -162,10 +166,19 @@ pub struct Runtime {
 }
 
 impl Runtime {
+    /// Historical constructor: environment-driven configuration.
     #[must_use]
     pub fn new(store: SqliteStore) -> Self {
+        Self::with_config(store, RuntimeConfig::legacy())
+    }
+
+    /// Construct a runtime with explicit configuration.
+    #[must_use]
+    pub fn with_config(store: SqliteStore, config: RuntimeConfig) -> Self {
         Self {
             store: std::sync::Arc::new(store),
+            config: std::sync::Arc::new(config),
+            custom_tools: std::sync::Arc::new(Mutex::new(HostToolRegistry::new())),
             foreground_sessions: std::sync::Arc::new(Mutex::new(std::collections::HashSet::new())),
             subscribers: std::sync::Arc::new(Mutex::new(Vec::new())),
             input_answers: std::sync::Arc::new(Mutex::new(std::collections::HashMap::new())),
@@ -175,16 +188,159 @@ impl Runtime {
         }
     }
 
-    fn provider_chain(&self, options: &RunOptions, requested: &str) -> Vec<Box<dyn Provider>> {
+    /// The configuration this runtime was built with.
+    #[must_use]
+    pub fn config(&self) -> &RuntimeConfig {
+        &self.config
+    }
+
+    /// Register a host-provided tool. Names must not collide with built-ins.
+    pub fn register_tool(&self, tool: std::sync::Arc<dyn KernelTool>) -> Result<()> {
+        let name = tool.declaration().name;
+        if ToolRegistry::specs().iter().any(|spec| spec.name == name) {
+            return Err(BloraError::Other(format!(
+                "host tool `{name}` collides with a built-in tool"
+            )));
+        }
+        self.custom_tools
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .register(tool)
+    }
+
+    fn host_tool(&self, name: &str) -> Option<std::sync::Arc<dyn KernelTool>> {
+        self.custom_tools
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(name)
+    }
+
+    fn host_tool_declarations(&self, read_only: bool, plan_mode: bool) -> Vec<ToolDeclaration> {
+        let registry = self
+            .custom_tools
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        registry
+            .declarations()
+            .into_iter()
+            .filter(|declaration| {
+                !self.config.tools.denylist.contains(&declaration.name)
+                    && (!read_only || registry.is_read_only(&declaration.name))
+                    && (!plan_mode
+                        || registry.is_read_only(&declaration.name)
+                        || declaration.name == "exit_plan_mode")
+            })
+            .collect()
+    }
+
+    fn tool_enabled(&self, name: &str) -> bool {
+        if self.config.tools.denylist.contains(name) {
+            return false;
+        }
+        if self.host_tool(name).is_some() {
+            return true;
+        }
+        self.builtin_tool_enabled(name)
+    }
+
+    fn builtin_tool_enabled(&self, name: &str) -> bool {
+        let features = &self.config.features;
+        if name == "execute_code" && !features.background_processes {
+            return false;
+        }
+        if name == "skill" && (!features.skills || !self.config.context.include_skills) {
+            return false;
+        }
+        if name == "skill_manage"
+            && (!features.skills
+                || !self.config.context.include_skills
+                || matches!(self.config.home, HomeMode::Disabled))
+        {
+            return false;
+        }
+        if !self.config.tools.allows(name) {
+            return false;
+        }
+        if name.starts_with("mcp__")
+            || name.starts_with("mcp_list_")
+            || name.starts_with("mcp_read_")
+            || name.starts_with("mcp_get_")
+        {
+            return features.mcp;
+        }
+        if name.starts_with("plugin__") {
+            return features.plugins;
+        }
+        match name {
+            "delegate" | "subagent" | "handoff" => features.subagents,
+            "schedule" | "schedule_task" => features.scheduler,
+            "goal" | "team" | "team_task" | "workflow" => features.subagents,
+            "session_search" => features.subagents,
+            "read_file" | "list_dir" | "search" | "grep" | "glob" | "view_image" => {
+                self.config.context.git_snapshot
+            }
+            "remember" | "recall" | "forget" => {
+                features.memory && self.config.context.include_memory
+            }
+            "skill" => features.skills && self.config.context.include_skills,
+            "skill_manage" => {
+                features.skills
+                    && self.config.context.include_skills
+                    && !matches!(self.config.home, HomeMode::Disabled)
+            }
+            "browser" | "computer" => features.background_processes,
+            "process" => features.background_processes,
+            "git_worktree" => features.worktree,
+            "artifact" => features.background_processes,
+            _ => true,
+        }
+    }
+
+    fn compile_options(&self) -> CompileOptions {
+        let (home, use_env_home) = match &self.config.home {
+            HomeMode::EnvironmentDefault => (None, self.config.inherit_env),
+            HomeMode::Explicit(path) => (Some(path.clone()), false),
+            HomeMode::Disabled => (None, false),
+        };
+        CompileOptions {
+            include_rules: self.config.context.include_rules
+                && self.config.features.workspace_rules,
+            include_skills: self.config.context.include_skills && self.config.features.skills,
+            include_memory: self.config.context.include_memory && self.config.features.memory,
+            home: self.config.context.home.clone().or(home),
+            use_env_home,
+            stable_prompt: self.config.prompt.system.clone(),
+            mode_label: self.config.prompt.mode_label.clone(),
+            ..CompileOptions::default()
+        }
+    }
+
+    fn provider_chain(
+        &self,
+        options: &RunOptions,
+        requested: &str,
+    ) -> Result<Vec<Box<dyn Provider>>> {
         #[cfg(test)]
         if let Some(mock) = self.test_provider.lock().unwrap().clone() {
-            return vec![Box::new(SharedProvider(mock))];
+            return Ok(vec![Box::new(SharedProvider(mock))]);
         }
-        resolve_provider_chain(
-            options.mock,
-            requested,
-            options.passport_user_token.as_deref(),
-        )
+        match &self.config.provider {
+            ProviderSource::FromEnvironment => Ok(resolve_provider_chain(
+                options.mock,
+                requested,
+                options.passport_user_token.as_deref(),
+            )),
+            ProviderSource::Explicit(provider) => {
+                Ok(vec![Box::new(SharedProvider(provider.clone()))])
+            }
+            ProviderSource::Chain(providers) => Ok(providers
+                .iter()
+                .map(|provider| Box::new(SharedProvider(provider.clone())) as Box<dyn Provider>)
+                .collect()),
+            ProviderSource::Disabled => Err(BloraError::Provider(
+                "no model provider is configured for this SDK agent".to_owned(),
+            )),
+        }
     }
 
     /// Receive every event appended by this runtime, across all sessions.
@@ -196,6 +352,35 @@ impl Runtime {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(tx);
         rx
+    }
+
+    /// Receive only events for one session. The underlying broadcast remains
+    /// lossy; callers that need lossless delivery must use [`Self::events_after`].
+    #[must_use]
+    pub fn subscribe_session(&self, session_id: &SessionId) -> Receiver<EventEnvelope> {
+        let source = self.subscribe();
+        let wanted = session_id.clone();
+        let (tx, rx) = sync_channel(256);
+        std::thread::spawn(move || {
+            while let Ok(event) = source.recv() {
+                if event.session_id != wanted {
+                    continue;
+                }
+                if tx.send(event).is_err() {
+                    break;
+                }
+            }
+        });
+        rx
+    }
+
+    /// Events after `after_sequence` for one session, in order.
+    pub fn events_after(
+        &self,
+        session_id: &SessionId,
+        after_sequence: u64,
+    ) -> Result<Vec<EventEnvelope>> {
+        self.store.load_events_after(session_id, after_sequence)
     }
 
     pub(crate) fn notify(&self, event: &EventEnvelope) {
@@ -248,7 +433,11 @@ impl Runtime {
         if let Some(created) = self.store.load_events(&id)?.into_iter().next() {
             self.notify(&created);
         }
-        hooks::fire(hooks::SESSION_START, id.as_str());
+        hooks::fire_in(
+            self.config.hooks_dir().as_deref(),
+            hooks::SESSION_START,
+            id.as_str(),
+        );
         Ok(id)
     }
 
@@ -541,11 +730,7 @@ impl Runtime {
         context: &str,
         options: &RunOptions,
     ) -> Result<String> {
-        let providers = resolve_provider_chain(
-            options.mock,
-            &options.provider,
-            options.passport_user_token.as_deref(),
-        );
+        let providers = self.provider_chain(options, &options.provider)?;
         let provider = &providers[0];
         if provider.name() == "mock" {
             return Err(BloraError::Provider(
@@ -557,7 +742,9 @@ impl Runtime {
         } else if provider.name() == "blora" {
             blora_model::PASSPORT_MODEL_NAME.to_owned()
         } else {
-            std::env::var("BLORA_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_owned())
+            self.config
+                .default_model()
+                .unwrap_or_else(|| "gpt-4o-mini".to_owned())
         };
         let request = CompletionRequest {
             model,
@@ -849,6 +1036,19 @@ impl Runtime {
         cancel: &CancelToken,
         options: &RunOptions,
     ) -> Result<RunId> {
+        self.run_with_id(session_id, RunId::generate(), prompt, cancel, options)
+    }
+
+    /// Run with a caller-supplied id so an SDK can subscribe to this run's
+    /// events before the blocking loop returns.
+    pub fn run_with_id(
+        &self,
+        session_id: &SessionId,
+        run_id: RunId,
+        prompt: &str,
+        cancel: &CancelToken,
+        options: &RunOptions,
+    ) -> Result<RunId> {
         if prompt.trim().is_empty() {
             return Err(BloraError::Other("prompt must not be empty".to_owned()));
         }
@@ -858,9 +1058,11 @@ impl Runtime {
             .as_ref()
             .ok_or_else(|| BloraError::SessionNotFound(session_id.to_string()))?;
         let workspace = session.workspace_path.clone();
-        let should_generate_title = self.session_needs_title(session_id, &projection)?;
+        let should_generate_title = self.config.auto_title
+            && self.config.features.auto_title
+            && self.session_needs_title(session_id, &projection)?;
         let mode = session.mode;
-        let worktree = if options.worktree || env_flag("BLORA_WORKTREE") {
+        let worktree = if options.worktree || self.config.worktree_enabled() {
             WorktreeHandle::create(&workspace, session_id.as_str()).ok()
         } else {
             None
@@ -871,7 +1073,11 @@ impl Runtime {
             .unwrap_or_else(|| workspace.clone());
         let _keep_worktree = worktree;
         let used = projection.input_tokens + projection.output_tokens;
-        if token_budget_exceeded(used) {
+        if self
+            .config
+            .max_tokens()
+            .is_some_and(|max| max > 0 && used > max)
+        {
             return Err(BloraError::Other(format!("token budget exceeded ({used})")));
         }
         let permission_mode = options
@@ -893,14 +1099,15 @@ impl Runtime {
         let mut effective_options = options.clone();
         effective_options.permission = Some(permission_mode);
         let options = &effective_options;
-        let policy = Policy::with_mode(&exec_root, permission_mode)?;
-        let backend = LocalBackend::new(policy).with_isolation(Isolation::from_env());
+        let policy = Policy::with_mode(&exec_root, permission_mode)?
+            .with_network(self.config.network_allowed());
+        let backend = LocalBackend::new(policy).with_isolation(self.config.isolation);
         let requested_provider = if options.provider.trim().is_empty() {
             projection.provider.clone().unwrap_or_default()
         } else {
             options.provider.clone()
         };
-        let providers = self.provider_chain(options, &requested_provider);
+        let providers = self.provider_chain(options, &requested_provider)?;
         let mut provider_index = 0;
         let model = if !options.model.trim().is_empty() {
             options.model.clone()
@@ -915,7 +1122,9 @@ impl Runtime {
         } else if providers[provider_index].name() == "blora" {
             blora_model::PASSPORT_MODEL_NAME.to_owned()
         } else {
-            std::env::var("BLORA_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_owned())
+            self.config
+                .default_model()
+                .unwrap_or_else(|| "gpt-4o-mini".to_owned())
         };
 
         // Prompt-submit hook may block or enrich the prompt before anything is logged.
@@ -932,7 +1141,8 @@ impl Runtime {
             .to_owned();
         let references = self.session_reference_context(session_id, prompt)?;
         let mut prompt = prompt.to_owned();
-        let submit = hooks::run(
+        let submit = hooks::run_in(
+            self.config.hooks_dir().as_deref(),
             hooks::USER_PROMPT_SUBMIT,
             &json!({"session_id": session_id.to_string(), "prompt": prompt}),
         );
@@ -961,7 +1171,6 @@ impl Runtime {
             prompt.push_str("\n</hook_context>");
         }
 
-        let run_id = RunId::generate();
         let turn_id = TurnId::generate();
         let wall_started = std::time::Instant::now();
         self.emit(
@@ -1007,7 +1216,11 @@ impl Runtime {
                 self.set_session_title(session_id, title, true)?;
             }
         }
-        let mut env = EnvSnapshot::capture_with_mode(&exec_root, permission_mode.as_str());
+        let mut env = EnvSnapshot::capture_with_options(
+            &exec_root,
+            permission_mode.as_str(),
+            self.config.context.git_snapshot,
+        );
         self.emit(
             session_id,
             Some(&run_id),
@@ -1017,29 +1230,46 @@ impl Runtime {
             }),
         )?;
 
-        let mcp = crate::mcp::McpManager::load(std::path::Path::new(&exec_root));
+        let mcp = if self.config.features.mcp {
+            crate::mcp::McpManager::load_with(
+                std::path::Path::new(&exec_root),
+                self.config.mcp_config_path().as_deref(),
+                self.config.mcp_workspace_enabled(),
+                self.config.inherit_env,
+            )
+        } else {
+            None
+        };
         let imagine = mode == Mode::Imagine;
         let mut plan_mode = permission_mode == PermissionMode::Plan;
         let mut base_tools = declared_tools(mode, options.read_only, plan_mode);
-        let mcp_tools: Vec<ToolDeclaration> = if imagine || plan_mode {
+        base_tools.retain(|tool| self.tool_enabled(&tool.name));
+        base_tools.extend(self.host_tool_declarations(options.read_only, plan_mode));
+        let mcp_tools: Vec<ToolDeclaration> = if imagine || plan_mode || !self.config.features.mcp {
             Vec::new()
         } else {
             mcp.as_ref()
                 .map(crate::mcp::McpManager::tool_declarations)
                 .unwrap_or_default()
         };
-        let plugins = crate::plugins::load(std::path::Path::new(&exec_root));
-        let plugin_tools: Vec<ToolDeclaration> = if options.read_only || imagine || plan_mode {
-            Vec::new()
-        } else {
-            plugins
-                .iter()
-                .map(crate::plugins::PluginSpec::declaration)
-                .collect()
-        };
+        let plugins = crate::plugins::load_with(
+            std::path::Path::new(&exec_root),
+            self.config.plugins_workspace_enabled(),
+            self.config.plugins_directory().as_deref(),
+            self.config.inherit_env,
+        );
+        let plugin_tools: Vec<ToolDeclaration> =
+            if options.read_only || imagine || plan_mode || !self.config.features.plugins {
+                Vec::new()
+            } else {
+                plugins
+                    .iter()
+                    .map(crate::plugins::PluginSpec::declaration)
+                    .collect()
+            };
         // MCP and plugin tools are deferred until `tool_search` enables them.
         // `BLORA_TOOL_SEARCH=0` restores eager declaration for compatibility.
-        let defer_external = std::env::var("BLORA_TOOL_SEARCH").map_or(true, |value| value != "0");
+        let defer_external = !self.config.tool_search_eager();
         let mut tools = base_tools.clone();
         if !defer_external {
             tools.extend(mcp_tools.clone());
@@ -1048,8 +1278,10 @@ impl Runtime {
         let attachments = blora_exec::AttachmentStore::new(backend.policy().workspace());
         let attachments: &dyn blora_content::AttachmentResolver = &attachments;
         let mut tool_names: Vec<String> = tools.iter().map(|tool| tool.name.clone()).collect();
-        let window = blora_context::context_window_for(blora_catalog::context_limit(&model));
-        let compact_at = window * blora_context::compact_threshold_pct() / 100;
+        let window = self
+            .config
+            .context_window(blora_catalog::context_limit(&model));
+        let compact_at = window * self.config.compact_pct() / 100;
         let mut last_fingerprint: Option<String> = None;
         let mut repeat_count: u32 = 0;
         let mut continuations: u32 = 0;
@@ -1116,7 +1348,7 @@ impl Runtime {
             if cancel.is_cancelled() {
                 return self.cancel_run(session_id, &run_id, &turn_id);
             }
-            if wall_clock_exceeded(wall_started) {
+            if wall_clock_exceeded(wall_started, self.config.max_wall_secs()) {
                 self.emit(
                     session_id,
                     Some(&run_id),
@@ -1167,6 +1399,8 @@ impl Runtime {
                 plan_mode = permission_mode == PermissionMode::Plan;
                 env.permission_mode = permission_mode.as_str().to_owned();
                 base_tools = declared_tools(mode, options.read_only, plan_mode);
+                base_tools.retain(|tool| self.tool_enabled(&tool.name));
+                base_tools.extend(self.host_tool_declarations(options.read_only, plan_mode));
             }
             let enabled: std::collections::HashSet<String> = self
                 .store
@@ -1195,11 +1429,12 @@ impl Runtime {
             }
             tool_names = tools.iter().map(|tool| tool.name.clone()).collect();
             let mut events = self.store.load_events(session_id)?;
-            let mut messages = compile_messages_with_tools_and_resolver(
+            let mut messages = compile_messages_with_options(
                 &events,
                 &exec_root,
                 mode.as_str(),
                 &env,
+                self.compile_options(),
                 &tool_names,
                 Some(attachments),
             )?;
@@ -1346,8 +1581,11 @@ impl Runtime {
                     }),
                 )?;
                 let _ = self.checkpoint(session_id, Some(&run_id), Some("run completed"));
-                let _ = self.distill_memories(session_id);
-                hooks::fire(
+                if self.config.features.memory && self.config.context.include_memory {
+                    let _ = self.distill_memories(session_id);
+                }
+                hooks::fire_in(
+                    self.config.hooks_dir().as_deref(),
                     hooks::STOP,
                     &json!({
                         "session_id": session_id.to_string(),
@@ -1407,11 +1645,12 @@ impl Runtime {
         // user is not left with a bare failure.
         if !cancel.is_cancelled() {
             let events = self.store.load_events(session_id)?;
-            let mut messages = compile_messages_with_tools_and_resolver(
+            let mut messages = compile_messages_with_options(
                 &events,
                 &exec_root,
                 mode.as_str(),
                 &env,
+                self.compile_options(),
                 &tool_names,
                 Some(attachments),
             )?;
@@ -2126,7 +2365,25 @@ impl Runtime {
             .map(crate::mcp::McpManager::tool_declarations)
             .unwrap_or_default();
         let plan_mode = options.permission_mode() == PermissionMode::Plan;
-        let entries = catalog::entries(mode, options.read_only || plan_mode, &mcp_tools, plugins);
+        let mut entries: Vec<_> =
+            catalog::entries(mode, options.read_only || plan_mode, &mcp_tools, plugins)
+                .into_iter()
+                .filter(|entry| self.tool_enabled(&entry.name))
+                .collect();
+        for declaration in self.host_tool_declarations(options.read_only || plan_mode, plan_mode) {
+            let read_only = self
+                .custom_tools
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_read_only(&declaration.name);
+            entries.push(catalog::ToolEntry {
+                name: declaration.name.clone(),
+                description: declaration.description.clone(),
+                source: catalog::ToolSource::Host,
+                read_only,
+                declaration,
+            });
+        }
         let query = arguments.get("query").and_then(Value::as_str);
         let select = arguments
             .get("select")
@@ -2188,10 +2445,12 @@ impl Runtime {
         // Read-only batches run concurrently unless hooks are installed, because a
         // tool-before hook must be able to veto before anything executes.
         let all_read_only = calls.len() > 1
-            && std::env::var_os("BLORA_HOOKS_DIR").is_none()
-            && calls
-                .iter()
-                .all(|call| ToolRegistry::is_read_only(&call.name));
+            && self.config.hooks_dir().is_none()
+            && calls.iter().all(|call| {
+                self.host_tool(&call.name).is_none()
+                    && self.tool_enabled(&call.name)
+                    && ToolRegistry::is_read_only(&call.name)
+            });
         let precomputed: Vec<Option<Result<ToolOutcome>>> = if all_read_only {
             std::thread::scope(|scope| {
                 let handles: Vec<_> = calls
@@ -2296,6 +2555,15 @@ impl Runtime {
                 return self.record_tool_failure(session_id, run_id, turn_id, call, message);
             }
         };
+        if !self.tool_enabled(&call.name) {
+            return self.record_tool_failure(
+                session_id,
+                run_id,
+                turn_id,
+                call,
+                format!("{} is not enabled for this agent", call.name),
+            );
+        }
         if mode == Mode::Imagine && call.name != "generate_image" {
             return self.record_tool_failure(
                 session_id,
@@ -2324,7 +2592,8 @@ impl Runtime {
                 format!("{} blocked in read-only role", call.name),
             );
         }
-        let before = hooks::run(
+        let before = hooks::run_in(
+            self.config.hooks_dir().as_deref(),
             hooks::TOOL_BEFORE,
             &json!({
                 "session_id": session_id.to_string(),
@@ -2399,8 +2668,23 @@ impl Runtime {
                 "structured_output" => {
                     self.structured_output_tool(session_id, run_id, turn_id, &arguments, options)
                 }
-                "execute_code" => self
-                    .execute_code_tool(session_id, run_id, turn_id, &arguments, backend, options),
+                "read_file" | "view_image" | "list_dir" | "search" | "grep" | "glob"
+                    if !self.config.context.git_snapshot =>
+                {
+                    Err(BloraError::Policy(
+                        "workspace read tools are disabled for this agent".to_owned(),
+                    ))
+                }
+                "execute_code" => {
+                    if !self.config.features.background_processes {
+                        return Err(BloraError::Policy(
+                            "execute_code is disabled for this agent".to_owned(),
+                        ));
+                    }
+                    self.execute_code_tool(
+                        session_id, run_id, turn_id, &arguments, backend, options,
+                    )
+                }
                 "workflow" => self.workflow_tool(session_id, run_id, turn_id, &arguments, options),
                 "goal" => self.goal_tool(session_id, run_id, turn_id, &arguments),
                 "team" => self.team_tool(session_id, run_id, turn_id, &arguments, options),
@@ -2525,25 +2809,35 @@ impl Runtime {
                     crate::plugins::execute(backend, plugins, name, &arguments)
                 }
                 "remember" => {
-                    let key = arguments
-                        .get("key")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default();
-                    let value = arguments
-                        .get("value")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default();
-                    if key.is_empty() {
-                        Err(BloraError::Other("remember needs key".to_owned()))
+                    if !self.config.context.include_memory {
+                        Err(BloraError::Policy(
+                            "memory tools are disabled for this agent".to_owned(),
+                        ))
                     } else {
-                        self.store
-                            .upsert_memory(workspace, key, value, chrono::Utc::now())?;
-                        self.write_memory_file(workspace)?;
-                        Ok(format!("remembered {key}"))
+                        let key = arguments
+                            .get("key")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+                        let value = arguments
+                            .get("value")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+                        if key.is_empty() {
+                            Err(BloraError::Other("remember needs key".to_owned()))
+                        } else {
+                            self.store
+                                .upsert_memory(workspace, key, value, chrono::Utc::now())?;
+                            self.write_memory_file(workspace)?;
+                            Ok(format!("remembered {key}"))
+                        }
                     }
                 }
                 "recall" => {
-                    if let Some(key) = arguments.get("key").and_then(Value::as_str) {
+                    if !self.config.context.include_memory {
+                        Err(BloraError::Policy(
+                            "memory tools are disabled for this agent".to_owned(),
+                        ))
+                    } else if let Some(key) = arguments.get("key").and_then(Value::as_str) {
                         Ok(self
                             .store
                             .get_memory(workspace, key)?
@@ -2563,13 +2857,19 @@ impl Runtime {
                     }
                 }
                 "forget" => {
-                    let key = arguments
-                        .get("key")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default();
-                    self.store.delete_memory(workspace, key)?;
-                    self.write_memory_file(workspace)?;
-                    Ok(format!("forgot {key}"))
+                    if !self.config.context.include_memory {
+                        Err(BloraError::Policy(
+                            "memory tools are disabled for this agent".to_owned(),
+                        ))
+                    } else {
+                        let key = arguments
+                            .get("key")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+                        self.store.delete_memory(workspace, key)?;
+                        self.write_memory_file(workspace)?;
+                        Ok(format!("forgot {key}"))
+                    }
                 }
                 "ask_user" => {
                     let questions = crate::input::normalize_questions(&arguments)?;
@@ -2583,25 +2883,47 @@ impl Runtime {
                         cancel,
                     )
                 }
-                "skill_manage" => self.manage_skill(
-                    session_id,
-                    run_id,
-                    turn_id,
-                    workspace,
-                    arguments
-                        .get("action")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default(),
-                    arguments
-                        .get("name")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default(),
-                    arguments.get("content").and_then(Value::as_str),
-                    arguments
-                        .get("scope")
-                        .and_then(Value::as_str)
-                        .unwrap_or("workspace"),
-                ),
+                "skill" => {
+                    if !self.config.features.skills || !self.config.context.include_skills {
+                        return Err(BloraError::Policy(
+                            "skill loading is disabled for this agent".to_owned(),
+                        ));
+                    }
+                    ToolRegistry::execute_outcome_for(
+                        backend,
+                        session_id.as_str(),
+                        &call.name,
+                        &arguments,
+                    )
+                    .map(|outcome| outcome.as_text())
+                }
+                "skill_manage" => {
+                    if !self.config.features.skills || !self.config.context.include_skills {
+                        Err(BloraError::Policy(
+                            "skill management is disabled for this agent".to_owned(),
+                        ))
+                    } else {
+                        self.manage_skill(
+                            session_id,
+                            run_id,
+                            turn_id,
+                            workspace,
+                            arguments
+                                .get("action")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default(),
+                            arguments
+                                .get("name")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default(),
+                            arguments.get("content").and_then(Value::as_str),
+                            arguments
+                                .get("scope")
+                                .and_then(Value::as_str)
+                                .unwrap_or("workspace"),
+                        )
+                    }
+                }
                 "session_search" => self.session_search_text(
                     session_id,
                     arguments
@@ -2668,9 +2990,43 @@ impl Runtime {
             };
             result.map(ToolOutcome::text)
         };
-        let first = match precomputed {
-            Some(result) => result,
-            None => execute(backend),
+        let first = if let Some(host) = self.host_tool(&call.name) {
+            let mut allowed = true;
+            if host.requires_approval() && options.permission_mode() != PermissionMode::Yolo {
+                if !options.interactive {
+                    return self.record_tool_failure(
+                        session_id,
+                        run_id,
+                        turn_id,
+                        call,
+                        format!("{} requires approval", call.name),
+                    );
+                }
+                let summary = format!("{} requires approval", call.name);
+                allowed =
+                    self.await_approval(session_id, run_id, turn_id, &call.name, &summary, cancel)?;
+            }
+            if allowed {
+                let context = KernelToolContext {
+                    session_id: session_id.clone(),
+                    run_id: run_id.clone(),
+                    call_id: call.id.clone(),
+                    workspace: Some(std::path::PathBuf::from(workspace)),
+                    cancel: cancel.clone(),
+                };
+                host.call(&context, arguments.clone())
+                    .map_err(|error| BloraError::Other(format!("{}: {}", call.name, error.message)))
+            } else {
+                Err(BloraError::Policy(format!(
+                    "{} was denied by the host",
+                    call.name
+                )))
+            }
+        } else {
+            match precomputed {
+                Some(result) => result,
+                None => execute(backend),
+            }
         };
         let intercepted = match first {
             Err(BloraError::ApprovalRequired(summary)) if options.interactive => {
@@ -2684,7 +3040,8 @@ impl Runtime {
             }
             other => other,
         };
-        let after = hooks::run(
+        let after = hooks::run_in(
+            self.config.hooks_dir().as_deref(),
             hooks::TOOL_AFTER,
             &json!({
                 "session_id": session_id.to_string(),
@@ -2712,10 +3069,12 @@ impl Runtime {
                 let truncated = text.chars().count() > MAX_TOOL_RESULT_CHARS;
                 let recorded = if truncated {
                     let mut cut = blora_context::head_tail(&text, MAX_TOOL_RESULT_CHARS);
-                    if let Some(saved) = spill_tool_output(workspace, &call.id, &text) {
-                        cut.push_str(&format!(
-                            "\n\n[full output saved to {saved}; page through it with read_file offset/limit]"
-                        ));
+                    if self.config.features.background_processes {
+                        if let Some(saved) = spill_tool_output(workspace, &call.id, &text) {
+                            cut.push_str(&format!(
+                                "\n\n[full output saved to {saved}; page through it with read_file offset/limit]"
+                            ));
+                        }
                     }
                     cut
                 } else {
@@ -2977,10 +3336,8 @@ fn render_plan(projection: &SessionProjection) -> Option<String> {
     Some(out)
 }
 
-#[cfg(test)]
 struct SharedProvider(std::sync::Arc<dyn Provider>);
 
-#[cfg(test)]
 impl Provider for SharedProvider {
     fn name(&self) -> &str {
         self.0.name()
@@ -3184,11 +3541,8 @@ fn sleep_cancellable(total: std::time::Duration, cancel: &CancelToken) -> bool {
     cancel.is_cancelled()
 }
 
-fn wall_clock_exceeded(started: std::time::Instant) -> bool {
-    let max = std::env::var("BLORA_MAX_WALL_SECS")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(900);
+fn wall_clock_exceeded(started: std::time::Instant, max_secs: Option<u64>) -> bool {
+    let max = max_secs.unwrap_or(900);
     max > 0 && started.elapsed().as_secs() > max
 }
 
@@ -3259,19 +3613,6 @@ fn truncate_title(title: &str, max_bytes: usize) -> String {
         end = end.saturating_sub(1);
     }
     format!("{}…", title[..end].trim_end())
-}
-
-fn token_budget_exceeded(used: u64) -> bool {
-    std::env::var("BLORA_MAX_TOKENS")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .is_some_and(|max| max > 0 && used > max)
-}
-
-fn env_flag(name: &str) -> bool {
-    std::env::var(name).ok().is_some_and(|value| {
-        value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("yes")
-    })
 }
 
 #[cfg(test)]

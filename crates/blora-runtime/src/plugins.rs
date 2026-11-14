@@ -39,8 +39,22 @@ impl PluginSpec {
 }
 
 pub fn load(workspace: &Path) -> Vec<PluginSpec> {
-    let mut dirs = vec![workspace.join(".blora/plugins")];
-    if let Ok(extra) = std::env::var("BLORA_PLUGINS_DIR") {
+    load_with(workspace, true, None, true)
+}
+
+pub fn load_with(
+    workspace: &Path,
+    include_workspace: bool,
+    explicit_dir: Option<&Path>,
+    inherit_env: bool,
+) -> Vec<PluginSpec> {
+    let mut dirs = Vec::new();
+    if include_workspace {
+        dirs.push(workspace.join(".blora/plugins"));
+    }
+    if let Some(dir) = explicit_dir {
+        dirs.push(dir.to_path_buf());
+    } else if inherit_env && let Ok(extra) = std::env::var("BLORA_PLUGINS_DIR") {
         dirs.push(Path::new(&extra).to_path_buf());
     }
     let mut out = Vec::new();

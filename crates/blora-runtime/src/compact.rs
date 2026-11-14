@@ -57,7 +57,8 @@ impl Runtime {
                 "compaction breaker open after {consecutive} failures"
             )));
         }
-        let hook = crate::hooks::run(
+        let hook = crate::hooks::run_in(
+            self.config.hooks_dir().as_deref(),
             crate::hooks::PRE_COMPACT,
             &serde_json::json!({"session_id": session_id.to_string(), "reason": reason}),
         );
@@ -141,27 +142,31 @@ impl Runtime {
                 tokens_after,
             }),
         )?;
-        let artifact_id = ArtifactId::generate();
-        self.store.insert_artifact(
-            &artifact_id,
-            session_id,
-            "compaction",
-            None,
-            Some(&summary),
-            Utc::now(),
-        )?;
-        self.emit(
-            session_id,
-            None,
-            None,
-            KnownPayload::ArtifactCreated(ArtifactCreated {
-                artifact_id,
-                kind: "compaction".to_owned(),
-                path: "sqlite:artifacts".to_owned(),
-            }),
-        )?;
+        if self.config.features.background_processes {
+            let artifact_id = ArtifactId::generate();
+            self.store.insert_artifact(
+                &artifact_id,
+                session_id,
+                "compaction",
+                None,
+                Some(&summary),
+                Utc::now(),
+            )?;
+            self.emit(
+                session_id,
+                None,
+                None,
+                KnownPayload::ArtifactCreated(ArtifactCreated {
+                    artifact_id,
+                    kind: "compaction".to_owned(),
+                    path: "sqlite:artifacts".to_owned(),
+                }),
+            )?;
+        }
         self.checkpoint(session_id, None, Some("compaction"))?;
-        let _ = self.distill_memories(session_id);
+        if self.config.features.memory && self.config.context.include_memory {
+            let _ = self.distill_memories(session_id);
+        }
         Ok(CompactionReport {
             summary,
             tokens_before,

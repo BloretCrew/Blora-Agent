@@ -14,6 +14,7 @@ path = "src/main.rs"
 [dependencies]
 blora-github.workspace = true
 blora-runtime.workspace = true
+blora-sdk-protocol.workspace = true
 blora-server.workspace = true
 blora-session.workspace = true
 blora-storage.workspace = true

@@ -1,0 +1,41 @@
+name: SDK conformance
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  sdk:
+    runs-on: ubuntu-latest
+    env:
+      BLORA_API_KEY: ""
+      OPENAI_API_KEY: ""
+      ANTHROPIC_API_KEY: ""
+      GEMINI_API_KEY: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Rust format and lint
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy -p blora-sdk -p blora-sdk-protocol -p blora-runtime -p blora-context -p blora-policy --all-targets -- -D warnings
+      - name: Rust workspace tests
+        run: cargo test --workspace
+      - name: Build CLI
+        run: cargo build -p blora-cli
+      - name: Node SDK
+        run: ./scripts/check-sdk-node.sh
+      - name: Python SDK
+        run: ./scripts/check-sdk-python.sh

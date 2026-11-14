@@ -9,7 +9,7 @@
 
 use std::path::Path;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use blora_events::{AskedQuestion, InputProvided, InputRequested, KnownPayload, QuestionChoice};
 use blora_policy::Policy;
@@ -17,6 +17,7 @@ use blora_types::{BloraError, CancelToken, Result, RunId, SessionId, TurnId};
 use serde_json::Value;
 
 use crate::Runtime;
+use crate::config::{QuestionAnswer, QuestionPolicy, QuestionRequest};
 
 /// Answer returned to the model when nobody can be asked.
 pub const NO_USER: &str = "The user is not available to answer in this run (non-interactive). Make a reasonable, reversible choice, state the assumption in your final answer, and continue.";
@@ -97,6 +98,10 @@ impl Runtime {
         if !interactive {
             return Ok(NO_USER.to_owned());
         }
+        let policy = self.config.callbacks.question.clone();
+        if matches!(policy, QuestionPolicy::Dismiss) {
+            return Ok(NO_USER.to_owned());
+        }
         let summary = questions
             .iter()
             .map(|question| question.question.clone())
@@ -122,12 +127,67 @@ impl Runtime {
                 question: summary.chars().take(2_000).collect(),
                 options,
                 call_id: Some(call_id.to_owned()),
-                questions,
+                questions: questions.clone(),
             }),
         )?;
+
+        if let QuestionPolicy::Auto(handler) = &policy {
+            let request = QuestionRequest {
+                session_id: session_id.clone(),
+                run_id: run_id.clone(),
+                request_id: request_id.clone(),
+                questions: questions.clone(),
+            };
+            match handler.answer(&request) {
+                QuestionAnswer::Answer(answer) => {
+                    self.emit(
+                        session_id,
+                        Some(run_id),
+                        Some(turn_id),
+                        KnownPayload::InputProvided(InputProvided {
+                            request_id,
+                            answer: Some(answer.clone()),
+                        }),
+                    )?;
+                    return Ok(format!("User answered:\n{answer}"));
+                }
+                QuestionAnswer::Dismiss => {
+                    self.emit(
+                        session_id,
+                        Some(run_id),
+                        Some(turn_id),
+                        KnownPayload::InputProvided(InputProvided {
+                            request_id,
+                            answer: None,
+                        }),
+                    )?;
+                    return Ok("The user dismissed the question without answering. Proceed with your best judgement and say which assumption you made.".to_owned());
+                }
+                QuestionAnswer::AskUser => {}
+            }
+        }
+
+        let deadline = match &policy {
+            QuestionPolicy::Manual { timeout } => *timeout,
+            QuestionPolicy::Auto(_) => Some(Duration::from_secs(300)),
+            QuestionPolicy::Dismiss => None,
+        };
+        let started = Instant::now();
         loop {
             if cancel.is_cancelled() {
                 return Err(BloraError::Cancelled);
+            }
+            if deadline.is_some_and(|limit| started.elapsed() >= limit) {
+                self.emit(
+                    session_id,
+                    Some(run_id),
+                    Some(turn_id),
+                    KnownPayload::InputProvided(InputProvided {
+                        request_id,
+                        answer: None,
+                    }),
+                )?;
+                return Ok("The user did not answer before the timeout. Proceed with your best judgement and say which assumption you made.".to_owned());
             }
             let answered = self
                 .input_answers

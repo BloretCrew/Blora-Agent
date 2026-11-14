@@ -1,0 +1,18 @@
+[package]
+name = "blora-sdk-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description = "stdio JSON-RPC protocol for the Blora Agent SDK."
+
+[dependencies]
+blora-model.workspace = true
+blora-sdk.workspace = true
+blora-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

@@ -18,6 +18,7 @@ pub enum ToolSource {
     Builtin,
     Mcp,
     Plugin,
+    Host,
 }
 
 impl ToolSource {
@@ -27,6 +28,7 @@ impl ToolSource {
             Self::Builtin => "builtin",
             Self::Mcp => "mcp",
             Self::Plugin => "plugin",
+            Self::Host => "host",
         }
     }
 }

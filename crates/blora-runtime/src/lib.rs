@@ -7,11 +7,13 @@ mod agents;
 mod approvals;
 mod catalog;
 mod compact;
+mod config;
 mod coordinator;
 mod cron;
 mod external;
 mod goals;
 pub mod hooks;
+pub mod host_tools;
 mod input;
 mod market;
 mod mcp;
@@ -31,8 +33,14 @@ pub use blora_exec::{GitIndicator, command, open_url};
 pub use blora_policy::PermissionMode;
 pub use blora_types::CancelToken;
 pub use compact::{COMPACTION_BREAKER, CompactionReport};
+pub use config::{
+    ApprovalDecision, ApprovalHandler, ApprovalPolicy, ApprovalRequest, CallbackConfig,
+    ContextConfig, Features, HomeMode, Limits, PromptConfig, ProviderSource, QuestionAnswer,
+    QuestionHandler, QuestionPolicy, QuestionRequest, RuntimeConfig, ToolPolicy,
+};
 pub use coordinator::{DEFAULT_MAX_TURNS, MockRunOptions, RunOptions, Runtime, WorkspaceInfo};
 pub use cron::next_cron;
+pub use host_tools::{HostToolRegistry, KernelTool, KernelToolContext, KernelToolError};
 pub use input::{NO_USER, format_question_answers};
 pub use market::{
     Marketplace, install as install_plugin, load_index, uninstall as uninstall_plugin,

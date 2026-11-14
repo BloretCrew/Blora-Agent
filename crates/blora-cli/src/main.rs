@@ -116,6 +116,15 @@ enum Commands {
     },
     /// Agent Client Protocol over stdin/stdout.
     Acp,
+    /// Agent SDK JSON-RPC protocol over stdin/stdout.
+    Sdk {
+        /// Use newline-delimited JSON-RPC on stdin/stdout.
+        #[arg(long, default_value_t = true)]
+        stdio: bool,
+        /// Enable deterministic scripted providers for offline tests only.
+        #[arg(long)]
+        allow_test_provider: bool,
+    },
     /// Open the local Web UI.
     Web {
         #[arg(long, default_value = "127.0.0.1:8787")]
@@ -359,6 +368,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let workspace = cli.workspace.unwrap_or(std::env::current_dir()?);
             acp::serve(&runtime, &workspace)
         }
+        Some(Commands::Sdk {
+            stdio: _,
+            allow_test_provider,
+        }) => blora_sdk_protocol::serve_stdio(allow_test_provider).map_err(|error| error.into()),
         Some(Commands::Backup { path }) => backup_state(cli.home.as_deref(), path),
         Some(Commands::Restore { path }) => restore_state(cli.home.as_deref(), &path),
         Some(Commands::User { command }) => {
@@ -453,6 +466,7 @@ fn dispatch(
         | Commands::Web { .. }
         | Commands::Serve { .. }
         | Commands::Acp
+        | Commands::Sdk { .. }
         | Commands::Backup { .. }
         | Commands::Restore { .. }
         | Commands::Usage { .. }

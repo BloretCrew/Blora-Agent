@@ -145,6 +145,11 @@ pub fn fire(event: &str, payload: &str) {
     let _ = run(event, &json!({"text": payload}));
 }
 
+/// Fire-and-forget variant with an explicit hooks directory.
+pub fn fire_in(dir: Option<&std::path::Path>, event: &str, payload: &str) {
+    let _ = run_in(dir, event, &json!({"text": payload}));
+}
+
 fn hook_command(path: &Path) -> std::process::Command {
     #[cfg(windows)]
     {

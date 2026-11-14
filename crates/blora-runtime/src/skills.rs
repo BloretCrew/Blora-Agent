@@ -65,6 +65,11 @@ impl Runtime {
         content: Option<&str>,
         scope: &str,
     ) -> Result<String> {
+        if !self.config.features.skills || !self.config.context.include_skills {
+            return Err(BloraError::Policy(
+                "skill management is disabled for this agent".to_owned(),
+            ));
+        }
         let name = name.trim();
         if !valid_name(name) {
             return Err(BloraError::Other(format!(

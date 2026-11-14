@@ -47,11 +47,22 @@ impl EnvSnapshot {
 
     #[must_use]
     pub fn capture_with_mode(workspace: &str, permission_mode: &str) -> Self {
+        Self::capture_with_options(workspace, permission_mode, true)
+    }
+
+    #[must_use]
+    pub fn capture_with_options(
+        workspace: &str,
+        permission_mode: &str,
+        include_git_snapshot: bool,
+    ) -> Self {
         Self {
             workspace: workspace.to_owned(),
             date: chrono::Utc::now().date_naive().to_string(),
             os: std::env::consts::OS.to_owned(),
-            git: git_snapshot(workspace),
+            git: include_git_snapshot
+                .then(|| git_snapshot(workspace))
+                .flatten(),
             permission_mode: permission_mode.to_owned(),
             shell_cwd: ".".to_owned(),
             plan: None,
@@ -112,7 +123,7 @@ impl EnvSnapshot {
 
 /// Knobs for tool-result hygiene. Defaults mirror the microcompact behaviour
 /// that Anthropic-lineage harnesses converge on.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct CompileOptions {
     /// Keep the most recent N tool results verbatim.
     pub keep_recent_tool_results: usize,
@@ -120,6 +131,20 @@ pub struct CompileOptions {
     pub microcompact_threshold_chars: usize,
     /// Cap on any single tool result kept in the prompt.
     pub max_tool_result_chars: usize,
+    /// Include discovered project rules in the context block.
+    pub include_rules: bool,
+    /// Include workspace/global skill summaries.
+    pub include_skills: bool,
+    /// Include `.blora/memory.md`.
+    pub include_memory: bool,
+    /// Override the global Blora home for rules and skills.
+    pub home: Option<std::path::PathBuf>,
+    /// When `home` is `None`, fall back to `BLORA_HOME`/`~/.blora`.
+    pub use_env_home: bool,
+    /// Replace the built-in stable system prompt.
+    pub stable_prompt: Option<String>,
+    /// Replace the `Mode: …` label in the context block.
+    pub mode_label: Option<String>,
 }
 
 impl Default for CompileOptions {
@@ -128,6 +153,13 @@ impl Default for CompileOptions {
             keep_recent_tool_results: 5,
             microcompact_threshold_chars: 60_000,
             max_tool_result_chars: 24_000,
+            include_rules: true,
+            include_skills: true,
+            include_memory: true,
+            home: None,
+            use_env_home: true,
+            stable_prompt: None,
+            mode_label: None,
         }
     }
 }
@@ -257,6 +289,15 @@ pub fn context_prompt(workspace: &str, mode: &str) -> String {
 /// An empty list falls back to the built-in tool set.
 #[must_use]
 pub fn context_prompt_with_tools(workspace: &str, mode: &str, tool_names: &[String]) -> String {
+    context_prompt_with_options(workspace, mode, tool_names, &CompileOptions::default())
+}
+
+fn context_prompt_with_options(
+    workspace: &str,
+    mode: &str,
+    tool_names: &[String],
+    options: &CompileOptions,
+) -> String {
     let tools = if mode == "imagine" {
         "generate_image".to_owned()
     } else if tool_names.is_empty() {
@@ -264,22 +305,31 @@ pub fn context_prompt_with_tools(workspace: &str, mode: &str, tool_names: &[Stri
     } else {
         tool_names.join(", ")
     };
-    let mut out = format!("Mode: {mode}\nTools: {tools}");
+    let label = options.mode_label.as_deref().unwrap_or(mode);
+    let mut out = format!("Mode: {label}\nTools: {tools}");
     if mode == "imagine" {
         return out;
     }
-    if let Some(rules) = project_rules(workspace) {
+    if options.include_rules
+        && let Some(rules) =
+            project_rules_with(workspace, options.home.as_deref(), options.use_env_home)
+    {
         out.push_str("\n\nProject rules:\n");
         out.push_str(&rules);
     }
-    if let Some(skills) = skill_summaries(workspace) {
+    if options.include_skills
+        && let Some(skills) =
+            skill_summaries_with(workspace, options.home.as_deref(), options.use_env_home)
+    {
         out.push_str("\n\nSkills:\n");
         out.push_str(&skills);
     }
-    if let Some(memory) = read_capped(
-        &std::path::Path::new(workspace).join(".blora/memory.md"),
-        3000,
-    ) {
+    if options.include_memory
+        && let Some(memory) = read_capped(
+            &std::path::Path::new(workspace).join(".blora/memory.md"),
+            3000,
+        )
+    {
         out.push_str("\n\nMemories:\n");
         out.push_str(&memory);
     }
@@ -304,10 +354,17 @@ fn read_capped(path: &std::path::Path, max: usize) -> Option<String> {
 /// / `CLAUDE.md` from the repository root down to the workspace, then the
 /// workspace's own `.blora/rules.md`. The walk stops at the directory that
 /// holds `.git` (or six levels up when there is none).
-fn project_rules(workspace: &str) -> Option<String> {
+fn project_rules_with(
+    workspace: &str,
+    home: Option<&std::path::Path>,
+    use_env_home: bool,
+) -> Option<String> {
     let root = std::path::Path::new(workspace);
     let mut chunks = Vec::new();
-    if let Some(home) = blora_home()
+    let home = home
+        .map(std::path::Path::to_path_buf)
+        .or_else(|| if use_env_home { blora_home() } else { None });
+    if let Some(home) = home
         && let Some(text) = read_capped(&home.join("rules.md"), 4000)
     {
         chunks.push(format!("# ~/.blora/rules.md (global)\n{text}"));
@@ -445,8 +502,15 @@ fn skill_blurb(text: &str) -> String {
     }
 }
 
-fn skill_summaries(workspace: &str) -> Option<String> {
-    let found = discover_skills(workspace);
+fn skill_summaries_with(
+    workspace: &str,
+    home: Option<&std::path::Path>,
+    use_env_home: bool,
+) -> Option<String> {
+    let home = home
+        .map(std::path::Path::to_path_buf)
+        .or_else(|| if use_env_home { blora_home() } else { None });
+    let found = discover_skills_in(workspace, home.as_deref());
     if found.is_empty() {
         return None;
     }
@@ -568,10 +632,28 @@ pub fn context_window() -> u64 {
 /// known window (passed in by the caller), then [`DEFAULT_CONTEXT_WINDOW`].
 #[must_use]
 pub fn context_window_for(model_window: Option<u64>) -> u64 {
-    std::env::var("BLORA_CONTEXT_WINDOW")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
+    context_window_for_override(model_window, None, true)
+}
+
+/// Context window with an explicit override and optional environment fallback.
+#[must_use]
+pub fn context_window_for_override(
+    model_window: Option<u64>,
+    override_window: Option<u64>,
+    use_env: bool,
+) -> u64 {
+    override_window
         .filter(|value| *value > 0)
+        .or_else(|| {
+            use_env
+                .then(|| {
+                    std::env::var("BLORA_CONTEXT_WINDOW")
+                        .ok()
+                        .and_then(|value| value.parse::<u64>().ok())
+                        .filter(|value| *value > 0)
+                })
+                .flatten()
+        })
         .or(model_window.filter(|value| *value > 0))
         .unwrap_or(DEFAULT_CONTEXT_WINDOW)
 }
@@ -579,10 +661,24 @@ pub fn context_window_for(model_window: Option<u64>) -> u64 {
 /// Auto-compaction threshold as a percentage of the window (default 85).
 #[must_use]
 pub fn compact_threshold_pct() -> u64 {
-    std::env::var("BLORA_COMPACT_PCT")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
+    compact_threshold_pct_override(None, true)
+}
+
+/// Auto-compaction threshold with an explicit override and optional env fallback.
+#[must_use]
+pub fn compact_threshold_pct_override(override_pct: Option<u64>, use_env: bool) -> u64 {
+    override_pct
         .filter(|value| *value > 0 && *value <= 100)
+        .or_else(|| {
+            use_env
+                .then(|| {
+                    std::env::var("BLORA_COMPACT_PCT")
+                        .ok()
+                        .and_then(|value| value.parse::<u64>().ok())
+                        .filter(|value| *value > 0 && *value <= 100)
+                })
+                .flatten()
+        })
         .unwrap_or(85)
 }
 
@@ -799,7 +895,7 @@ pub fn compile_messages_with_tools_and_resolver(
     tool_names: &[String],
     resolver: Option<&dyn AttachmentResolver>,
 ) -> Result<Vec<ChatMessage>> {
-    compile_inner(
+    compile_messages_with_options(
         events,
         workspace,
         mode,
@@ -808,6 +904,19 @@ pub fn compile_messages_with_tools_and_resolver(
         tool_names,
         resolver,
     )
+}
+
+/// Full control over context inclusion and prompt overrides.
+pub fn compile_messages_with_options(
+    events: &[EventEnvelope],
+    workspace: &str,
+    mode: &str,
+    env: &EnvSnapshot,
+    options: CompileOptions,
+    tool_names: &[String],
+    resolver: Option<&dyn AttachmentResolver>,
+) -> Result<Vec<ChatMessage>> {
+    compile_inner(events, workspace, mode, env, options, tool_names, resolver)
 }
 
 pub fn compile_with_options(
@@ -830,11 +939,15 @@ fn compile_inner(
     resolver: Option<&dyn AttachmentResolver>,
 ) -> Result<Vec<ChatMessage>> {
     let split = split_at_compaction(events);
+    let stable = options
+        .stable_prompt
+        .clone()
+        .unwrap_or_else(|| stable_prompt(mode));
     let mut messages = vec![
-        ChatMessage::text("system", stable_prompt(mode)).with_breakpoint(),
+        ChatMessage::text("system", stable).with_breakpoint(),
         ChatMessage::text(
             "system",
-            context_prompt_with_tools(workspace, mode, tool_names),
+            context_prompt_with_options(workspace, mode, tool_names, &options),
         )
         .with_breakpoint(),
     ];
