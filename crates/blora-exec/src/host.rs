@@ -45,6 +45,12 @@ pub fn host_shell() -> HostShell {
     launch().kind
 }
 
+/// Program selected for the host shell.
+#[must_use]
+pub fn host_shell_program() -> &'static str {
+    &launch().program
+}
+
 /// Run `script` in the host shell with `workspace` as the working directory.
 pub fn shell_command(workspace: &Path, script: &str) -> Command {
     let launch = launch();
