@@ -300,19 +300,61 @@
 
 ## 六、验收标准（Definition of Done）
 
-- [ ] 默认 `Ask` 权限下，可写子代理需要审批时，TUI/Web 能在父会话看到并批准，父 run 不卡死（F1）
-- [ ] 模拟崩溃后重启，遗留 `running` 子代理自动变为 `failed{interrupted}`，可继续 `delegate`（F2）
-- [ ] 子代理执行长 shell 时取消，1 秒内返回 `Cancelled`（F3）
-- [ ] 子代理成功与父取消竞争时，最终状态为 `completed`（F4）
-- [ ] 并发上限失败时，子会话在各视图均为 archived（F5）
-- [ ] 会话列表默认不显示子会话，但可从 `/agents` 或面板打开（F6）
-- [ ] `blora agent list|steer|cancel` 可用且有测试（F7）
-- [ ] 全量测试通过（含当前基线失败的 `shell_cwd_persists_across_calls` 与 server 静态资源测试，若这些不属于本次范围需单独记录）
-- [ ] 文档与代码一致（F9）
+- [x] 默认 `Ask` 权限下，可写子代理需要审批时，TUI/Web 能在父会话看到并批准，父 run 不卡死（F1）
+- [x] 模拟崩溃后重启，遗留 `running` 子代理自动变为 `failed{interrupted}`，可继续 `delegate`（F2）
+- [x] 子代理执行长 shell 时取消，1 秒内返回 `Cancelled`（F3）
+- [x] 子代理成功与父取消竞争时，最终状态为 `completed`（F4）
+- [x] 并发上限失败时，子会话在各视图均为 archived（F5）
+- [x] 会话列表默认不显示子会话，但可从 `/agents` 或面板打开（F6）
+- [x] `blora agent list|steer|cancel` 可用且有测试（F7）
+- [x] F8/F9 完成（死代码清理、文档同步）
+- [x] 本轮新增测试全部通过。仓库既有失败仍为环境问题，已在 §八 记录。
 
 ---
 
-## 七、与现有待办的关系
+## 七、实施记录（2026-11-15）
+
+分支：`feat/subagent-hardening`（基于 `backup/workspace-2026-11-15` 之后的 `4ed82c8`）
+
+| 项 | 落地方式 | 关键位置 |
+|---|---|---|
+| F1 | Runtime 新增 `subagent_owners: Mutex<HashMap<SessionId, (SessionId, String)>>`；`await_approval` 把审批记录和 `approval.*` 事件写到父会话，摘要加 `[subagent:{role}]` 前缀；子 run 的 `run_id` 不写入父事件（避免跨会话外键语义） | `runtime/src/approvals.rs`、`runtime/src/agents.rs`、`runtime/src/coordinator.rs` |
+| F2 | `Runtime::reconcile_stale_agents()`：跳过本进程活跃令牌和 `owner_pid` 仍存活的行，按子会话最后一次 run 终态收敛，否则 `failed{interrupted}`；`finish_agent_if_running` 条件更新防重复上报；在 `spawn_subagent` 与 `pump` 调用 | `runtime/src/agents.rs`、`storage/src/sqlite.rs`、`runtime/src/work.rs` |
+| F2 跨进程 | agents 表新增 `owner_pid`（schema v14，`ALTER TABLE` 兼容旧库）；TUI/Web 共用同一 SQLite 时不会误回收对方正在驱动的子代理 | `storage/src/schema.sql`、`storage/src/sqlite.rs`、`storage/src/tasks.rs` |
+| F3 | `LocalBackend::shell_prepared_cancellable`：前台 shell 每 50ms 轮询取消，命中则 `terminate_pid` 并返回 `Cancelled`；`Runtime::execute_shell` 透传 `CancelToken` | `exec/src/lib.rs`、`runtime/src/coordinator.rs` |
+| F4 | `child_was_cancelled()` 以子会话 run 终态优先，仅在无 run 时回退到令牌/表状态 | `runtime/src/agents.rs` |
+| F5 | 并发上限失败改走 `Runtime::archive_session`，写 `session.archived` 事件 | `runtime/src/agents.rs` |
+| F6 | `SessionSummary` 增加 `parent_session_id`；新增 `list_root_sessions`；TUI 侧栏、选择器、`/sessions`、`/next` `/prev` 只看根会话；`/goto <完整 id>`、`/sessions all`、Web `？include_children=1`、子代理面板“打开子会话”保留访问 | `storage/src/sqlite.rs`、`tui/src/{view,session_picker,lib}.rs`、`server/src/lib.rs`、`web/*` |
+| F7 | `blora agent list|steer|cancel`，解析与输出对齐 TUI 文案 | `cli/src/main.rs` |
+| F8 | 删除未使用的 `insert_agent`、`running_child_count`；统一 agent 行映射 | `storage/src/sqlite.rs` |
+| F9 | 更新架构/操作/协议文档 | `docs/**` |
+
+新增测试（全部通过）：
+
+- `agents::`：`finished_child_is_not_relabelled_by_a_racing_parent_cancel`、`reconcile_marks_orphaned_running_agents_interrupted`、`reconcile_skips_children_this_process_is_running`、`reconcile_leaves_rows_owned_by_a_live_process_alone`、`spawn_over_the_running_cap_archives_the_child_by_event`、`subagent_approvals_surface_on_the_parent_session`
+- `blora-exec`：`cancellable_shell_returns_cancelled_when_already_cancelled`、`cancellable_shell_stops_a_long_command`
+- `blora-storage`：`root_session_list_excludes_delegate_children`
+- `blora-tui`：`picker_lists_root_sessions_only`
+- `blora-cli`：3 个 agent 命令解析测试
+- `web-commands.test.cjs`：17/17
+
+环境性既有失败（基线一致，与本轮无关）：
+
+- `blora-runtime::shell_cwd_persists_across_calls`、`blora-exec` 5 个 shell/git 测试：本机 `host_shell()` 为 `Cmd`，Git 工具在 MSYS 下启动失败；`to_do.md` 已记录。
+- `blora-tui` 2 个文件面板测试、`blora-server` 6 个资源/workbench 测试：Windows `\\?\` 路径前缀与仓库未附带的 design 资源包。
+
+---
+
+## 八、与原方案偏差点
+
+1. **F2 增加 `owner_pid`**：原方案写“单进程模型下可直接判定，多进程本期不做”，但 TUI 与 `blora serve` 默认共用同一个 `state.sqlite`，直接收敛会误伤另一个进程的子代理，因此补了进程归属列。
+2. **F1 未新增 `RunOptions` 字段**：改用 runtime 内部 `subagent_owners` 映射，避免改动 22 处 `RunOptions` 构造点，也避免与并行修改冲突。
+3. **F6 未新增 slash 命令**：新增命令会让 `scripts/web-commands.test.cjs` 的目录一致性断言（硬编码 82 条）失败，改为复用 `/sessions all` 参数。
+4. **F5 归档失败仍为 best-effort**：保留 `let _ =`，不覆盖原始“too many running subagents”错误。
+
+---
+
+## 九、与现有待办的关系
 
 - 仓库根 `to_do.md` 记录的是 Windows `bash/sh` 探测与 `shell_cwd_persists_across_calls`，与本方案 F3 相邻但独立；建议先修该基线失败，再做 F3 的取消切片，避免测试噪声。
 - 本方案不包含外部 harness（Codex/Grok）子代理能力；它们目前没有 `delegate` 对应物。
