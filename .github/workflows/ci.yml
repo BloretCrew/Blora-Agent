@@ -35,17 +35,18 @@ jobs:
       - name: Test
         shell: bash
         run: |
-          set -o pipefail
-          cargo test --workspace --locked 2>&1 | tee test.log
+          # GitHub runs this script with -e; turn it off so a failing test run
+          # still reaches the annotation block below.
+          set +e
+          cargo test --workspace --locked --no-fail-fast 2>&1 | tee test.log
           status=${PIPESTATUS[0]}
           if [ "$status" -ne 0 ]; then
-            # Surface the failure as annotations; job logs need admin rights.
             {
               grep -E '^(error(\[[A-Za-z0-9]+\])?: |    [a-zA-Z0-9_:]+$|failures:)' test.log | head -30
               tail -20 test.log
             } | sed 's/^/::error::/' || true
-            exit "$status"
           fi
+          exit "$status"
 
   policy:
     name: Licenses & sources
