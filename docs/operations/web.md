@@ -85,6 +85,19 @@ bridge 必需函数：`api(path, options)`、`getState()`、`stored(key, fallbac
 
 任务请求 auto_approve=true 必须同时 confirmed=true；/plan prompt 绕过权限运行也发送 confirmed=true。确认取消均不执行对应请求；/plan 已创建的会话仍保留。
 
+## 样式与设计系统
+
+Web 界面使用 `@bloret-crew/blora-design` 2.1.0（Apache-2.0）及其 `layout`、`markdown`、`theming` 三个 addon。资源放在 `web/vendor/design/`，由 `crates/blora-server/build.rs` 在构建时嵌入二进制，因此发布出来的 `blora` 自带样式，离线可用。
+
+这些资源此前从仓库根下被 `.gitignore` 的 `blora-design/` 本地检出读取，导致开发机和发布包都取不到样式表，页面完全没有样式。改为内嵌后：
+
+- 新增或更新设计系统时，用 `npm pack` 下载后覆盖 `web/vendor/design/`，保留 `LICENSE`。
+- `blora.css` 通过 `@import` 引入 87 个组件表，浏览器逐个请求；服务端全部内嵌返回。
+- `app.css` 使用 1.x 令牌名（`--blora-color-canvas`、`--blora-color-text` 等），`index.html` 里有到 2.x 名称的映射块。删改这些映射会让对应规则静默失效。
+- 主题以 `data-blora-theme`（`coral`/`indigo`/`graphite`/`mono`/`circuit`/`dusk`）和 `data-blora-color-scheme`（`light`/`dark`）驱动，色值与 TUI `crates/blora-tui/src/theme.rs` 的 `Theme::of()` 一致。
+
+回归检查：`node scripts/web-style-check.cjs [url]` 驱动真实浏览器，断言样式表已解析、设计令牌解析为与 TUI 相同的色值、旧令牌名映射生效、关键自定义元素已注册。需要 Chrome 或 Edge，可用 `CHROME_PATH` 指定。服务端单测 `every_stylesheet_index_html_references_is_embedded` 等会在 CI 中校验内嵌完整性。
+
 ## 验证记录与外部依赖限度
 
 本子任务已运行 `node --test scripts/web-commands.test.cjs`：15 项独立 Node 单测通过，覆盖全部 79 项 CLI 目录、别名、hint/group/顺序、以 `/` 开头的模糊匹配、核心回退、帮助窗口、权限优先级与取消、任务确认字段、参数设置和重绘、退出刷新、记忆删除、actions 危险确认、缺少确认入口、运行中限制、plan prompt 及模式/路由/本地筛选。测试用 VM 与 Mock bridge，不代表真实 HTTP 或浏览器验证。

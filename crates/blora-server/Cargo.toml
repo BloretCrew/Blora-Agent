@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 description = "Local HTTP and SSE server for Blora Agent."
+build = "build.rs"
 
 [dependencies]
 axum.workspace = true

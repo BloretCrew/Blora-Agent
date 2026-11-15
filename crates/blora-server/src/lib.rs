@@ -742,16 +742,13 @@ async fn thinking_orbs_host() -> Response {
 }
 
 async fn vendor_asset(Path(path): Path<String>) -> Response {
-    let Some(disk) = resolve_vendor(&path) else {
+    let Some(body) = resolve_vendor(&path) else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    match std::fs::read_to_string(&disk) {
-        Ok(body) if path.ends_with(".css") => css_owned(body),
-        Ok(body) => js_owned(body),
-        Err(_) if path == "blora.css" => css(
-            ":root { --blora-background:#faf7f8; --blora-text:#2a1f24; --blora-primary:#9f5964; }",
-        ),
-        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    if path.ends_with(".css") {
+        css(body)
+    } else {
+        js(body)
     }
 }
 
@@ -766,11 +763,16 @@ async fn favicon() -> Response {
     (headers, FAVICON_SVG).into_response()
 }
 
-fn vendor_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../blora-design")
+/// Blora Design assets, embedded at build time by `build.rs`.
+///
+/// These used to be read from `blora-design/` next to the source tree, which is
+/// gitignored and absent from released binaries — so every stylesheet 404ed and
+/// the Web UI rendered unstyled.
+mod vendor_assets {
+    include!(concat!(env!("OUT_DIR"), "/vendor_assets.rs"));
 }
 
-fn resolve_vendor(request: &str) -> Option<PathBuf> {
+fn resolve_vendor(request: &str) -> Option<&'static str> {
     let request = request.trim_start_matches('/');
     if request.is_empty() {
         return None;
@@ -788,20 +790,10 @@ fn resolve_vendor(request: &str) -> Option<PathBuf> {
     if !matches!(ext, "css" | "js") {
         return None;
     }
-    let root = vendor_root();
-    let disk = match request {
-        "layout.css" | "layout.global.js" => {
-            root.join("addons/layout/dist").join(path.file_name()?)
-        }
-        "theming.css" | "theming.global.js" => {
-            root.join("addons/theming/dist").join(path.file_name()?)
-        }
-        "markdown.css" | "markdown.global.js" => {
-            root.join("addons/markdown/dist").join(path.file_name()?)
-        }
-        _ => root.join("packages/blora-design/dist").join(path),
-    };
-    disk.is_file().then_some(disk)
+    vendor_assets::VENDOR_ASSETS
+        .iter()
+        .find(|(name, _)| *name == request)
+        .map(|(_, body)| *body)
 }
 
 #[derive(Deserialize)]
@@ -2123,25 +2115,7 @@ fn css(body: &'static str) -> Response {
     (headers, body).into_response()
 }
 
-fn css_owned(body: String) -> Response {
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("text/css; charset=utf-8"),
-    );
-    (headers, body).into_response()
-}
-
 fn js(body: &'static str) -> Response {
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("text/javascript; charset=utf-8"),
-    );
-    (headers, body).into_response()
-}
-
-fn js_owned(body: String) -> Response {
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CONTENT_TYPE,
@@ -3148,32 +3122,105 @@ mod tests {
 
     #[test]
     fn serves_nested_component_css() {
-        let path = resolve_vendor("components/alert/alert.css").expect("alert.css");
-        assert!(path.ends_with("alert.css"));
-        assert!(std::fs::read_to_string(path).unwrap().contains("blora"));
+        let css = resolve_vendor("components/alert/alert.css").expect("alert.css");
+        assert!(css.contains("blora"));
     }
 
     #[test]
     fn serves_foundation_imports_and_addons() {
-        assert!(resolve_vendor("tokens.css").is_some());
-        assert!(resolve_vendor("foundations/reset.css").is_some());
-        assert!(resolve_vendor("foundations/base.css").is_some());
-        assert!(resolve_vendor("foundations/layout.css").is_some());
-        assert!(
-            resolve_vendor("layout.css")
-                .unwrap()
-                .to_string_lossy()
-                .contains("addons/layout")
-        );
-        assert!(
-            resolve_vendor("markdown.css")
-                .unwrap()
-                .to_string_lossy()
-                .contains("addons/markdown")
-        );
-        assert!(resolve_vendor("markdown.global.js").is_some());
+        for asset in [
+            "tokens.css",
+            "foundations/reset.css",
+            "foundations/base.css",
+            "foundations/layout.css",
+            "layout.css",
+            "layout.global.js",
+            "theming.css",
+            "theming.global.js",
+            "markdown.css",
+            "markdown.global.js",
+            "blora.global.js",
+        ] {
+            assert!(resolve_vendor(asset).is_some(), "missing embedded {asset}");
+        }
         assert!(resolve_vendor("../secret.css").is_none());
         assert!(resolve_vendor("components/alert/alert.rs").is_none());
+    }
+
+    /// The Web UI once shipped unstyled because every stylesheet lived in a
+    /// gitignored checkout next to the source tree. These assets are now
+    /// embedded, so a release binary cannot lose them; this test guards the
+    /// pages that reference them.
+    #[test]
+    fn every_stylesheet_index_html_references_is_embedded() {
+        let mut checked = 0;
+        for line in INDEX_HTML.lines() {
+            let Some(rest) = line
+                .trim()
+                .strip_prefix(r#"<link rel="stylesheet" href="/vendor/"#)
+            else {
+                continue;
+            };
+            let href = rest.split('"').next().unwrap_or_default();
+            assert!(
+                resolve_vendor(href).is_some(),
+                "index.html links /vendor/{href} but it is not embedded"
+            );
+            checked += 1;
+        }
+        assert_eq!(
+            checked, 6,
+            "expected index.html to link six vendor stylesheets"
+        );
+    }
+
+    #[test]
+    fn every_script_index_html_references_is_embedded() {
+        let mut checked = 0;
+        for line in INDEX_HTML.lines() {
+            let Some(rest) = line.trim().strip_prefix(r#"<script src="/vendor/"#) else {
+                continue;
+            };
+            let src = rest.split('"').next().unwrap_or_default();
+            assert!(
+                resolve_vendor(src).is_some(),
+                "index.html loads /vendor/{src} but it is not embedded"
+            );
+            checked += 1;
+        }
+        assert_eq!(
+            checked, 4,
+            "expected index.html to load four vendor scripts"
+        );
+    }
+
+    /// app.css predates the 2.x token rename; index.html maps the old names.
+    /// If a mapping disappears, those rules silently fall back to invalid.
+    #[test]
+    fn index_html_maps_legacy_tokens_to_current_ones() {
+        let mappings = [
+            ("--blora-color-canvas", "--blora-color-surface-canvas"),
+            ("--blora-color-surface", "--blora-color-surface-default"),
+            ("--blora-color-raised", "--blora-color-surface-raised"),
+            ("--blora-color-sunken", "--blora-color-surface-sunken"),
+            ("--blora-color-text", "--blora-color-text-primary"),
+            ("--blora-color-border", "--blora-color-border-subtle"),
+            (
+                "--blora-color-action-primary",
+                "--blora-color-action-primary-default",
+            ),
+        ];
+        let tokens = resolve_vendor("tokens.css").unwrap();
+        for (legacy, current) in mappings {
+            assert!(
+                INDEX_HTML.contains(&format!("{legacy}: var({current})")),
+                "index.html must map {legacy} to {current}"
+            );
+            assert!(
+                tokens.contains(&format!("{current}:")),
+                "the design system no longer defines {current}"
+            );
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3318,7 +3365,7 @@ mod tests {
 
     #[test]
     fn blora_css_imports_are_on_disk() {
-        let css = std::fs::read_to_string(resolve_vendor("blora.css").unwrap()).unwrap();
+        let css = resolve_vendor("blora.css").unwrap();
         for line in css.lines() {
             let Some(rest) = line.trim().strip_prefix("@import \"") else {
                 continue;

@@ -28,6 +28,20 @@
     <link rel="stylesheet" href="/vendor/layout.css" />
     <link rel="stylesheet" href="/vendor/theming.css" />
     <link rel="stylesheet" href="/vendor/markdown.css" />
+    <!-- Blora Design 2.x renamed these tokens; keep the 1.x names app.css uses
+         pointed at their 2.x equivalents so no rule silently loses its value. -->
+    <style>
+      :root {
+        --blora-color-canvas: var(--blora-color-surface-canvas);
+        --blora-color-surface: var(--blora-color-surface-default);
+        --blora-color-raised: var(--blora-color-surface-raised);
+        --blora-color-sunken: var(--blora-color-surface-sunken);
+        --blora-color-text: var(--blora-color-text-primary);
+        --blora-color-border: var(--blora-color-border-subtle);
+        --blora-color-action-primary: var(--blora-color-action-primary-default);
+        --blora-border-width: 1px;
+      }
+    </style>
     <link rel="stylesheet" href="/app.css" />
   </head>
   <body class="blora-page blora-scope">
@@ -125,7 +139,7 @@
               <button type="button" class="blora-button" data-variant="ghost" data-size="sm" id="archive">归档</button>
               <button type="button" class="blora-button" data-variant="ghost" data-size="sm" id="resume">恢复</button>
               <button type="button" class="blora-button" data-variant="ghost" data-size="sm" id="export-session">导出</button>
-              <blora-spinner id="page-loading" label="加载中" hidden></blora-spinner>
+              <span class="blora-spinner" id="page-loading" role="status" aria-label="加载中" hidden></span>
             </div>
           </header>
           <nav class="ba-workbench" aria-label="会话工作台">

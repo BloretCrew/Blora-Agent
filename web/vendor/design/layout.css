@@ -1,0 +1,501 @@
+/* Blora Design 2.0 - Layout add-on CSS */
+
+/* Sidebar layout
+ * Drawer mode is driven by component width (ResizeObserver → [data-drawer]).
+ * Default / compact cards keep an in-flow overlay (absolute) so Storybook
+ * and nested demos do not cover the whole page. variant=seamless is page
+ * chrome: the drawer is a viewport sheet (fixed), matching 1.x.
+ */
+.blora-sidebar-layout {
+  --blora-sidebar-drawer-at: 900px;
+
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(12rem, var(--blora-sidebar-width, 17rem)) minmax(0, 1fr);
+  min-height: var(--blora-sidebar-min-height, 28rem);
+  border: 1px solid var(--blora-color-border-subtle);
+  border-radius: var(--blora-radius-xl);
+  overflow: hidden;
+  background: var(--blora-color-surface-canvas);
+  isolation: isolate;
+  container-type: inline-size;
+  container-name: blora-sidebar;
+}
+
+blora-sidebar-layout {
+  display: block;
+  min-width: 0;
+  width: 100%;
+
+  /* Re-establish defaults on every host. Nested shells (page chrome + a demo,
+     or an app with two layouts) must not inherit ancestor --blora-sidebar-*
+     tokens — otherwise a 100dvh / transparent page shell explodes the inner
+     card. Authors still override on the host they own. */
+  --blora-sidebar-width: 17rem;
+  --blora-sidebar-min-height: 28rem;
+  --blora-sidebar-aside-padding: var(--blora-space-5);
+  --blora-sidebar-aside-background: var(--blora-color-surface-default);
+  --blora-sidebar-content-padding: var(--blora-space-6);
+  --blora-sidebar-sticky-offset: var(--blora-space-5);
+  --blora-sidebar-sticky-height: auto;
+  --blora-sidebar-drawer-aside-padding: var(--blora-space-5);
+  --blora-sidebar-drawer-aside-background: var(--blora-color-surface-default);
+  --blora-sidebar-drawer-content-padding: var(--blora-space-6);
+  --blora-sidebar-toggle-min-height: auto;
+}
+
+blora-sidebar-layout[compact] {
+  --blora-sidebar-min-height: 20rem;
+}
+
+.blora-sidebar-layout[data-variant="seamless"] {
+  border: 0;
+  border-radius: 0;
+  overflow: visible;
+  background: transparent;
+  isolation: auto;
+  container-type: normal;
+}
+
+/* Page shell stays a page. Do not wrap it in the demo-card chrome. */
+.blora-sidebar-layout[data-variant="seamless"][data-drawer] {
+  overflow: visible;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  isolation: auto;
+}
+
+.blora-sidebar-layout__aside {
+  min-width: 0;
+  padding: var(--blora-sidebar-aside-padding, var(--blora-space-5));
+  border-inline-end: 1px solid var(--blora-color-border-subtle);
+  background: var(--blora-sidebar-aside-background, var(--blora-color-surface-default));
+  box-sizing: border-box;
+}
+
+.blora-sidebar-layout__content {
+  grid-column: 2;
+  min-width: 0;
+  padding: var(--blora-sidebar-content-padding, var(--blora-space-6));
+  box-sizing: border-box;
+}
+
+.blora-sidebar-layout__toggle {
+  display: none;
+}
+
+.blora-sidebar-layout__mask {
+  display: none;
+}
+
+.blora-sidebar-layout--compact {
+  --blora-sidebar-min-height: 20rem;
+}
+
+.blora-sidebar-layout[data-sticky] .blora-sidebar-layout__aside {
+  position: sticky;
+  inset-block-start: var(--blora-sidebar-sticky-offset, var(--blora-space-5));
+  align-self: start;
+  height: var(--blora-sidebar-sticky-height, auto);
+  overflow: hidden auto;
+  overscroll-behavior: contain;
+}
+
+/* Soften the scroll clip on desktop sticky sidebars. Drawer sheets remain
+   fully opaque so mobile navigation never fades while scrolling. */
+.blora-sidebar-layout[data-sticky]:not([data-drawer], .blora-sidebar-layout--drawer)
+  .blora-sidebar-layout__aside {
+  --blora-sidebar-fade-from: var(--blora-color-surface-default);
+  --blora-sidebar-edge-size: var(--blora-space-8);
+}
+
+.blora-sidebar-layout[data-variant="seamless"][data-sticky]:not(
+    [data-drawer],
+    .blora-sidebar-layout--drawer
+  )
+  .blora-sidebar-layout__aside {
+  --blora-sidebar-fade-from: var(--blora-color-surface-canvas);
+}
+
+.blora-sidebar-layout[data-sticky]:not([data-drawer], .blora-sidebar-layout--drawer)
+  .blora-sidebar-layout__aside[data-overflow-start] {
+  mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    rgb(0 0 0) var(--blora-sidebar-edge-size),
+    rgb(0 0 0) 100%
+  );
+}
+
+.blora-sidebar-layout[data-sticky]:not([data-drawer], .blora-sidebar-layout--drawer)
+  .blora-sidebar-layout__aside[data-overflow-end] {
+  mask-image: linear-gradient(
+    to bottom,
+    rgb(0 0 0) 0,
+    rgb(0 0 0) calc(100% - var(--blora-sidebar-edge-size)),
+    transparent 100%
+  );
+}
+
+.blora-sidebar-layout[data-sticky]:not([data-drawer], .blora-sidebar-layout--drawer)
+  .blora-sidebar-layout__aside[data-overflow-start][data-overflow-end] {
+  mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    rgb(0 0 0) var(--blora-sidebar-edge-size),
+    rgb(0 0 0) calc(100% - var(--blora-sidebar-edge-size)),
+    transparent 100%
+  );
+}
+
+.blora-sidebar-layout[data-sticky]:not([data-drawer], .blora-sidebar-layout--drawer)
+  .blora-sidebar-layout__aside::before,
+.blora-sidebar-layout[data-sticky]:not([data-drawer], .blora-sidebar-layout--drawer)
+  .blora-sidebar-layout__aside::after {
+  display: block;
+  height: var(--blora-sidebar-edge-size);
+  pointer-events: none;
+  box-sizing: border-box;
+  opacity: 0;
+  z-index: var(--blora-z-sticky);
+  content: "";
+  transition: opacity var(--blora-duration-fast) var(--blora-easing-standard);
+  backdrop-filter: blur(12px);
+}
+
+.blora-sidebar-layout[data-sticky]:not([data-drawer], .blora-sidebar-layout--drawer)
+  .blora-sidebar-layout__aside::before {
+  position: absolute;
+  inset-block-start: 0;
+  inset-inline: 0;
+  margin-block-end: 0;
+  background: linear-gradient(
+    to bottom,
+    color-mix(in srgb, var(--blora-sidebar-fade-from) 42%, transparent) 0%,
+    color-mix(in srgb, var(--blora-sidebar-fade-from) 12%, transparent) 55%,
+    transparent 100%
+  );
+  mask-image: linear-gradient(to bottom, rgb(0 0 0) 0%, rgb(0 0 0 / 45%) 50%, transparent 100%);
+}
+
+.blora-sidebar-layout[data-sticky]:not([data-drawer], .blora-sidebar-layout--drawer)
+  .blora-sidebar-layout__aside::after {
+  position: absolute;
+  inset-block-end: 0;
+  inset-inline: 0;
+  margin-block-start: 0;
+  background: linear-gradient(
+    to top,
+    color-mix(in srgb, var(--blora-sidebar-fade-from) 42%, transparent) 0%,
+    color-mix(in srgb, var(--blora-sidebar-fade-from) 12%, transparent) 55%,
+    transparent 100%
+  );
+  mask-image: linear-gradient(to top, rgb(0 0 0) 0%, rgb(0 0 0 / 45%) 50%, transparent 100%);
+}
+
+.blora-sidebar-layout[data-sticky]:not([data-drawer], .blora-sidebar-layout--drawer)
+  .blora-sidebar-layout__aside[data-overflow-start]::before,
+.blora-sidebar-layout[data-sticky]:not([data-drawer], .blora-sidebar-layout--drawer)
+  .blora-sidebar-layout__aside[data-overflow-end]::after {
+  opacity: 1;
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .blora-sidebar-layout[data-sticky]:not([data-drawer], .blora-sidebar-layout--drawer)
+    .blora-sidebar-layout__aside::before,
+  .blora-sidebar-layout[data-sticky]:not([data-drawer], .blora-sidebar-layout--drawer)
+    .blora-sidebar-layout__aside::after {
+    backdrop-filter: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .blora-sidebar-layout[data-sticky]:not([data-drawer], .blora-sidebar-layout--drawer)
+    .blora-sidebar-layout__aside::before,
+  .blora-sidebar-layout[data-sticky]:not([data-drawer], .blora-sidebar-layout--drawer)
+    .blora-sidebar-layout__aside::after {
+    transition-duration: 0.01ms;
+  }
+}
+
+/* Shared drawer rules — applied via @container and @media fallback */
+.blora-sidebar-layout--drawer,
+.blora-sidebar-layout[data-drawer] {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.blora-sidebar-layout--drawer .blora-sidebar-layout__toggle,
+.blora-sidebar-layout[data-drawer] .blora-sidebar-layout__toggle {
+  display: inline-flex;
+  place-self: start start;
+  width: max-content;
+  max-width: calc(100% - 2 * var(--blora-space-4));
+  height: auto;
+  min-height: var(--blora-sidebar-toggle-min-height, auto);
+  margin: var(--blora-space-4) var(--blora-space-4) 0;
+  position: relative;
+  z-index: var(--blora-z-base);
+}
+
+/* Page chrome: official FAB at the viewport start/bottom, not an in-flow pill. */
+.blora-sidebar-layout[data-variant="seamless"][data-drawer] .blora-sidebar-layout__toggle.blora-fab,
+.blora-sidebar-layout[data-variant="seamless"].blora-sidebar-layout--drawer
+  .blora-sidebar-layout__toggle.blora-fab {
+  display: grid;
+  place-items: center;
+  place-self: start;
+  box-sizing: border-box;
+  width: 56px;
+  height: 56px;
+  min-width: 56px;
+  min-height: 56px;
+  max-width: none;
+  margin: 0;
+  padding: 0;
+  position: fixed;
+  inset-inline: max(var(--blora-space-5), env(safe-area-inset-inline-start, 0px)) auto;
+  right: auto;
+  left: max(var(--blora-space-5), env(safe-area-inset-left, 0px));
+  bottom: max(var(--blora-space-5), env(safe-area-inset-bottom, 0px));
+  z-index: calc(var(--blora-z-drawer) + 1);
+}
+
+.blora-sidebar-layout--drawer[data-open] .blora-sidebar-layout__toggle,
+.blora-sidebar-layout[data-drawer][data-open] .blora-sidebar-layout__toggle,
+.blora-sidebar-layout[data-variant="seamless"][data-drawer][data-open]
+  .blora-sidebar-layout__toggle {
+  display: none;
+}
+
+[dir="rtl"]
+  .blora-sidebar-layout[data-variant="seamless"][data-drawer]
+  .blora-sidebar-layout__toggle.blora-fab,
+[dir="rtl"]
+  .blora-sidebar-layout[data-variant="seamless"].blora-sidebar-layout--drawer
+  .blora-sidebar-layout__toggle.blora-fab {
+  left: auto;
+  right: max(var(--blora-space-5), env(safe-area-inset-right, 0px));
+}
+
+@media (max-width: 560px) {
+  .blora-sidebar-layout[data-variant="seamless"][data-drawer]
+    .blora-sidebar-layout__toggle.blora-fab,
+  .blora-sidebar-layout[data-variant="seamless"].blora-sidebar-layout--drawer
+    .blora-sidebar-layout__toggle.blora-fab {
+    inset-inline: max(var(--blora-space-4), env(safe-area-inset-inline-start, 0px)) auto;
+    left: max(var(--blora-space-4), env(safe-area-inset-left, 0px));
+    bottom: max(var(--blora-space-4), env(safe-area-inset-bottom, 0px));
+    width: 3rem;
+    height: 3rem;
+    min-width: 3rem;
+    min-height: 3rem;
+  }
+
+  [dir="rtl"]
+    .blora-sidebar-layout[data-variant="seamless"][data-drawer]
+    .blora-sidebar-layout__toggle.blora-fab,
+  [dir="rtl"]
+    .blora-sidebar-layout[data-variant="seamless"].blora-sidebar-layout--drawer
+    .blora-sidebar-layout__toggle.blora-fab {
+    left: auto;
+    right: max(var(--blora-space-4), env(safe-area-inset-right, 0px));
+  }
+}
+
+.blora-sidebar-layout--drawer .blora-sidebar-layout__content,
+.blora-sidebar-layout[data-drawer] .blora-sidebar-layout__content {
+  grid-column: 1;
+  padding: var(
+    --blora-sidebar-drawer-content-padding,
+    var(--blora-sidebar-content-padding, var(--blora-space-6))
+  );
+}
+
+.blora-sidebar-layout--drawer .blora-sidebar-layout__aside,
+.blora-sidebar-layout[data-drawer] .blora-sidebar-layout__aside {
+  --blora-sidebar-fade-from: var(
+    --blora-sidebar-drawer-aside-background,
+    var(--blora-color-surface-default)
+  );
+
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  inset-inline-start: 0;
+  z-index: var(--blora-z-dropdown);
+  width: min(20rem, 86%);
+  max-width: 20rem;
+  height: 100%;
+  max-height: 100%;
+  overflow: hidden auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  border-inline-end: 1px solid var(--blora-color-border-subtle);
+  box-shadow: var(--blora-shadow-4);
+  transform: translateX(-105%);
+  transition: transform var(--blora-duration-slow, 0.35s) var(--blora-easing-standard);
+
+  /* Keep above mask; always paint as a solid sheet */
+  padding: var(--blora-sidebar-drawer-aside-padding, var(--blora-space-5));
+  background: var(--blora-sidebar-drawer-aside-background, var(--blora-color-surface-default));
+}
+
+.blora-sidebar-layout[data-initializing] .blora-sidebar-layout__aside {
+  transition: none;
+}
+
+[dir="rtl"] .blora-sidebar-layout--drawer .blora-sidebar-layout__aside,
+[dir="rtl"] .blora-sidebar-layout[data-drawer] .blora-sidebar-layout__aside {
+  transform: translateX(105%);
+}
+
+.blora-sidebar-layout--drawer[data-open] .blora-sidebar-layout__aside,
+.blora-sidebar-layout[data-drawer][data-open] .blora-sidebar-layout__aside {
+  transform: translateX(0);
+}
+
+.blora-sidebar-layout--drawer .blora-sidebar-layout__mask,
+.blora-sidebar-layout[data-drawer] .blora-sidebar-layout__mask {
+  position: absolute;
+  inset: 0;
+  z-index: var(--blora-z-sticky);
+  display: block;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: var(--blora-color-overlay-drawer, rgb(7 6 10 / 55%));
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  cursor: pointer;
+  transition:
+    opacity var(--blora-duration-base, 0.26s) var(--blora-easing-standard),
+    visibility 0s linear var(--blora-duration-base, 0.26s);
+}
+
+.blora-sidebar-layout--drawer[data-open] .blora-sidebar-layout__mask,
+.blora-sidebar-layout[data-drawer][data-open] .blora-sidebar-layout__mask {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transition-delay: 0s;
+}
+
+/* Seamless = app/page chrome. Sheet + mask pin to the viewport like 1.x,
+   not to the content column. Sticky must not win over fixed here. */
+.blora-sidebar-layout[data-variant="seamless"][data-drawer] .blora-sidebar-layout__aside,
+.blora-sidebar-layout[data-variant="seamless"][data-drawer][data-sticky]
+  .blora-sidebar-layout__aside,
+.blora-sidebar-layout[data-variant="seamless"].blora-sidebar-layout--drawer
+  .blora-sidebar-layout__aside {
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  inset-inline-start: 0;
+  height: 100dvh;
+  max-height: 100dvh;
+  z-index: var(--blora-z-drawer);
+}
+
+.blora-sidebar-layout[data-variant="seamless"][data-drawer] .blora-sidebar-layout__mask,
+.blora-sidebar-layout[data-variant="seamless"].blora-sidebar-layout--drawer
+  .blora-sidebar-layout__mask {
+  position: fixed;
+  inset: 0;
+  z-index: calc(var(--blora-z-drawer) - 1);
+}
+
+/* Component-width driven (Storybook canvas, nested layouts) */
+@container blora-sidebar (max-width: 900px) {
+  .blora-sidebar-layout {
+    /* class toggled by JS; container alone cannot set host class.
+       Host uses [data-drawer] from controller. */
+  }
+}
+
+/* Viewport fallback when container queries unavailable — controller still
+   sets [data-drawer] from ResizeObserver so styles apply either way. */
+
+/* Affix */
+.blora-affix {
+  position: relative;
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+.blora-affix__inner {
+  display: flex;
+  flex-flow: row nowrap;
+  align-items: center;
+  gap: 0.75rem;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  white-space: nowrap;
+  word-break: keep-all;
+  overflow-wrap: normal;
+}
+
+.blora-affix__inner > * {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  word-break: keep-all;
+}
+
+.blora-affix.is-fixed > .blora-affix__inner,
+.blora-affix[data-fixed] > .blora-affix__inner {
+  position: fixed;
+  z-index: var(--blora-z-sticky, 100);
+  border-radius: var(--blora-radius-lg);
+  box-shadow: var(--blora-shadow-2);
+
+  /* width/left set by controller — never collapse to a vertical strip */
+  min-width: min(100%, 20rem);
+  max-width: calc(100vw - 2rem);
+  width: var(--blora-affix-width, 100%);
+  box-sizing: border-box;
+  white-space: nowrap;
+}
+
+/* Anchor / spy links */
+.blora-anchor {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15em;
+  position: sticky;
+  top: var(--blora-space-5);
+}
+
+.blora-anchor__link,
+[data-blora-spy] a[href^="#"] {
+  display: block;
+  padding: 0.35em 0.65em;
+  border-radius: var(--blora-radius-sm);
+  color: var(--blora-color-text-muted);
+  font-size: var(--blora-text-sm);
+  text-decoration: none;
+  transition:
+    color var(--blora-duration-fast) var(--blora-easing-standard),
+    background var(--blora-duration-fast) var(--blora-easing-standard);
+}
+
+.blora-anchor__link:hover,
+[data-blora-spy] a[href^="#"]:hover {
+  color: var(--blora-color-text-primary);
+  background: var(--blora-color-surface-raised);
+}
+
+.blora-anchor__link[data-active],
+[data-blora-spy] a[data-active] {
+  color: var(--blora-color-action-primary-default);
+  background: var(--blora-color-action-primary-tint);
+  font-weight: 600;
+}
+
+.blora-anchor__link--l2 {
+  padding-inline-start: 1.25em;
+  font-size: var(--blora-text-xs);
+}
