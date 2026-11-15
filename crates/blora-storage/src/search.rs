@@ -13,6 +13,9 @@ use serde::Serialize;
 
 use crate::sqlite::SqliteStore;
 
+/// One page of matches plus the `(at, rowid)` cursor for the next page.
+pub type SearchPage = (Vec<SearchMatch>, Option<(String, i64)>);
+
 const CREATE: &str = "CREATE VIRTUAL TABLE IF NOT EXISTS transcript_fts USING fts5(
     body,
     session_id UNINDEXED,
@@ -193,7 +196,7 @@ impl SqliteStore {
         exclude: Option<&SessionId>,
         user_id: Option<&str>,
         cursor: Option<&(String, i64)>,
-    ) -> Result<(Vec<SearchMatch>, Option<(String, i64)>)> {
+    ) -> Result<SearchPage> {
         self.search_transcripts_page_inner(query, limit, exclude, user_id, cursor, false)
     }
 
@@ -206,7 +209,7 @@ impl SqliteStore {
         user_id: Option<&str>,
         cursor: Option<&(String, i64)>,
         roots_only: bool,
-    ) -> Result<(Vec<SearchMatch>, Option<(String, i64)>)> {
+    ) -> Result<SearchPage> {
         let (fts, short) = fts_query(query);
         if fts.is_none() && short.is_empty() {
             return Ok((Vec::new(), None));

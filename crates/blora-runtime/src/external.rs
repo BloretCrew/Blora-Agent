@@ -2,7 +2,6 @@
 // Copyright (C) 2026 Blora Agent contributors
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
 
 use blora_events::{
     AssistantDelta, AssistantMessageCompleted, AssistantReasoning, ExternalSessionBound,
@@ -175,7 +174,7 @@ impl Runtime {
         }
         let binding = projection.external_sessions.iter().find(|binding| {
             binding.harness == harness
-                && PathBuf::from(&binding.cwd) == cwd
+                && cwd.as_path() == std::path::Path::new(&binding.cwd)
                 && binding.synced_sequence <= projection.last_sequence
         });
         let request = RunRequest {

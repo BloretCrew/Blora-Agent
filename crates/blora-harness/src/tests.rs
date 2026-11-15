@@ -447,11 +447,14 @@ esac"#,
         let out = execute(&path, &req, &CancelToken::new(), &mut events).unwrap();
         assert_eq!(out.session_id.as_deref(), Some("s"));
         assert!(events.contains(&HarnessEvent::Text { text: "hi".into() }));
+        // The shell resolves /var to /private/var on macOS, so compare against
+        // the canonical workspace path.
+        let expected = dir.path().canonicalize().unwrap();
         assert_eq!(
             std::fs::read_to_string(dir.path().join("cwd"))
                 .unwrap()
                 .trim(),
-            dir.path().to_str().unwrap()
+            expected.to_str().unwrap()
         );
         assert!(
             std::fs::read_to_string(dir.path().join("args"))

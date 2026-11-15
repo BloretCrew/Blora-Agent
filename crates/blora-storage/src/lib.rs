@@ -12,7 +12,7 @@ mod tasks;
 mod users;
 
 pub use approvals::ApprovalRecord;
-pub use search::SearchMatch;
+pub use search::{SearchMatch, SearchPage};
 pub use sqlite::{
     ArtifactRecord, CreateSession, MemoryRecord, SessionSpan, SessionSummary, SqliteStore,
     UsageActivity, UsageSample, UsageTotals,

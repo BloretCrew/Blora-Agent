@@ -1,0 +1,58 @@
+# Dependency policy for Blora Agent.
+#
+# Run locally with: cargo deny check
+# The CI job in .github/workflows/ci.yml runs the same command on every PR.
+
+[graph]
+# Match the targets built by the release workflow so target-specific
+# dependencies are covered rather than silently pruned.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]
+
+[advisories]
+# Do not add blanket ignores here. An advisory that does not affect the shipped
+# targets gets a scoped ignore with a reason and a removal date.
+ignore = []
+
+[licenses]
+# The project itself is GPL-3.0-or-later; every dependency license below is
+# compatible with it. LGPL-2.1-or-later is only one alternative of r-efi's
+# tri-license and is compatible with GPLv3 via LGPL-3.0.
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "GPL-3.0-or-later",
+    "ISC",
+    "LGPL-2.1-or-later",
+    "MIT",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.9
+exceptions = []
+
+[bans]
+multiple-versions = "warn"
+wildcards = "warn"
+deny = []
+skip = []
+
+[sources]
+# Only crates.io is allowed; a git or alternative-registry dependency needs a
+# deliberate policy change.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
