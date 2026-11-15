@@ -197,7 +197,7 @@
       if (!name.value.trim() || !display.value.trim() || !key.value || !base.reportValidity()) throw new Error('请填写供应商、API 地址和密钥。');
       if (new URL(base.value).protocol !== 'https:') throw new Error('API 地址必须使用 HTTPS。');
       try { await post('/api/providers', { id: name.value.trim(), name: display.value.trim(), base_url: base.value, format: format.value, models: model.value ? [{ id: model.value, name: model.value }] : [], api_key: key.value }); }
-      catch (err) { throw new Error(`供应商保存失败${err.status ? `（HTTP ${err.status}）` : ''}，请检查配置或服务端日志。`); } finally { key.value = ''; }
+      catch (err) { const detail = String(err.message || '').trim(); throw new Error(`供应商保存失败${err.status ? `（HTTP ${err.status}）` : ''}${detail ? `：${detail}` : '，请检查配置或服务端日志。'}`); } finally { key.value = ''; }
       await win.close(true); if (dialogs.top()?.name === 'provider') { await dialogs.close(); open('provider'); }
     }, true);
     win.onClose = () => { key.value = ''; };

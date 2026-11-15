@@ -6134,10 +6134,13 @@ fn render_add_provider_dialog(
     if inner.height == 0 {
         return hits;
     }
+    // Validation and I/O failures can be long; give them two wrapped rows
+    // instead of clipping the reason the user needs to act on.
+    let hint_height = if dialog.error.is_some() { 3 } else { 1 };
     let [_, body, hint_row] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(3),
-        Constraint::Length(1),
+        Constraint::Length(hint_height),
     ])
     .areas(inner);
     if dialog.minimized {
@@ -6336,8 +6339,9 @@ fn render_add_provider_dialog(
     }
     if let Some(err) = &dialog.error {
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(err.clone(), theme.fg(theme.rust))))
-                .style(theme.base()),
+            Paragraph::new(err.clone())
+                .wrap(ratatui::widgets::Wrap { trim: true })
+                .style(theme.base().fg(theme.rust)),
             hint_row,
         );
     } else {
@@ -9720,6 +9724,54 @@ mod tests {
         assert!(joined.contains("fusion"));
         assert!(joined.contains("OpenAIChatCompletions"));
         assert!(joined.contains("enter保存"));
+    }
+
+    #[test]
+    fn add_provider_long_error_wraps_instead_of_clipping() {
+        let dialog = AddProviderDialog {
+            step: AddProviderStep::Review,
+            catalog: Vec::new(),
+            selected: 0,
+            filter: String::new(),
+            custom_id: "crewrouter".to_owned(),
+            custom_base: "https://router.bloret.net".to_owned(),
+            api_key: "sk-test".to_owned(),
+            format: blora_catalog::MessageFormat::Openai,
+            preview_models: Vec::new(),
+            resolved_base: "https://router.bloret.net/v1".to_owned(),
+            // The shape of a real I/O failure from `blora-catalog`.
+            error: Some(
+                "替换 C:\\Users\\me\\AppData\\Roaming\\blora\\providers.json 失败：拒绝访问。 \
+                 (os error 5)；请确认该文件不是只读、不是同名目录，且所在目录可写"
+                    .to_owned(),
+            ),
+            fullscreen: false,
+            minimized: false,
+        };
+        let (lines, _) = render_add_provider_with_hits(Rect::new(0, 0, 80, 24), &dialog, None);
+        // Wrapping may split the message across rows, so compare without
+        // whitespace; the point is that nothing is dropped.
+        let joined: String = lines
+            .iter()
+            .map(|line| flatten(line))
+            .collect::<String>()
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect();
+        assert!(
+            joined.contains("providers.json"),
+            "the path must survive rendering, got {joined}"
+        );
+        // Provenance matters: the reader must see the OS error and the hint,
+        // not just "cannot save provider".
+        assert!(
+            joined.contains("oserror") && joined.contains("拒绝访问"),
+            "the OS error must survive rendering, got {joined}"
+        );
+        assert!(
+            joined.contains("请确认该文件不是只读"),
+            "the actionable hint must survive rendering, got {joined}"
+        );
     }
 
     #[test]

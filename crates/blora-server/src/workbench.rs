@@ -6,7 +6,6 @@ use blora_catalog::SavedProvider;
 use blora_types::HarnessKind;
 use serde_json::{Value, json};
 
-static PROVIDER_LOCK: Mutex<()> = Mutex::new(());
 static GIT_LOCK: Mutex<()> = Mutex::new(());
 
 pub(super) fn routes() -> Router<AppState> {
@@ -257,41 +256,8 @@ async fn save_provider(
         ));
     }
     blocking(move || {
-        let _lock = PROVIDER_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let path = blora_catalog::config_path();
-        let parent = path.parent().ok_or_else(ApiError::forbidden)?;
-        std::fs::create_dir_all(parent).map_err(|_| ApiError("cannot save provider".to_owned()))?;
-        if std::fs::symlink_metadata(&path).is_ok_and(|meta| meta.file_type().is_symlink()) {
-            return Err(ApiError::forbidden());
-        }
-        let mut saved = blora_catalog::load_saved();
-        saved.retain(|item| !item.id.eq_ignore_ascii_case(&body.id));
         let result = provider_json(&body);
-        saved.push(body);
-        let raw = serde_json::to_vec_pretty(&saved)
-            .map_err(|_| ApiError("cannot save provider".to_owned()))?;
-        let temp = parent.join(format!(".providers-{}.tmp", SessionId::generate()));
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options
-            .open(&temp)
-            .map_err(|_| ApiError("cannot save provider".to_owned()))?;
-        use std::io::Write;
-        let write = file
-            .write_all(&raw)
-            .and_then(|()| file.sync_all())
-            .and_then(|()| std::fs::rename(&temp, &path));
-        if write.is_err() {
-            let _ = std::fs::remove_file(&temp);
-            return Err(ApiError("cannot save provider".to_owned()));
-        }
+        blora_catalog::save_provider(body).map_err(|err| ApiError(err.to_string()))?;
         Ok(Json(json!({"provider": result})))
     })
     .await

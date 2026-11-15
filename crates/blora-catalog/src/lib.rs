@@ -5,8 +5,9 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use blora_types::{BloraError, Result};
 use serde::{Deserialize, Serialize};
@@ -244,6 +245,8 @@ fn family_context(model: &str) -> Option<u64> {
         .map(|(_, tokens)| *tokens)
 }
 
+/// Where saved providers live: `dirs::config_dir()/blora/providers.json`.
+#[must_use]
 pub fn config_path() -> PathBuf {
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -251,22 +254,78 @@ pub fn config_path() -> PathBuf {
         .join("providers.json")
 }
 
+static SAVED_LOCK: Mutex<()> = Mutex::new(());
+
+/// Lenient read for display paths. A missing, unreadable, or malformed file
+/// yields an empty list; writes go through [`save_provider`], which refuses to
+/// overwrite a file it could not parse.
+#[must_use]
 pub fn load_saved() -> Vec<SavedProvider> {
-    let path = config_path();
-    let Ok(raw) = fs::read_to_string(path) else {
-        return Vec::new();
-    };
-    serde_json::from_str(&raw).unwrap_or_default()
+    read_saved(&config_path()).unwrap_or_default()
 }
 
+#[must_use]
 pub fn find_saved(id: &str) -> Option<SavedProvider> {
     load_saved()
         .into_iter()
         .find(|item| item.id.eq_ignore_ascii_case(id))
 }
 
+/// Read saved providers from `path`.
+///
+/// A missing file is an empty list. An unreadable, symlinked, or malformed file
+/// is an error so a writer never replaces data it could not see.
+fn read_saved(path: &Path) -> Result<Vec<SavedProvider>> {
+    if fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        return Err(BloraError::Other(format!(
+            "{} 是符号链接，拒绝读写供应商配置",
+            path.display()
+        )));
+    }
+    if path.is_dir() {
+        return Err(BloraError::Other(format!(
+            "{} 是一个目录，无法作为供应商配置；请移走该目录后重试",
+            path.display()
+        )));
+    }
+    match fs::read_to_string(path) {
+        Ok(raw) if raw.trim().is_empty() => Ok(Vec::new()),
+        Ok(raw) => serde_json::from_str(&raw).map_err(|err| {
+            BloraError::Other(format!(
+                "无法解析 {}：{err}；为避免覆盖已保存的供应商，请修正或删除该文件后重试",
+                path.display()
+            ))
+        }),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(err) => Err(io_error("读取", path, &err)),
+    }
+}
+
+fn io_error(action: &str, path: &Path, err: &std::io::Error) -> BloraError {
+    let mut message = format!("{action} {} 失败：{err}", path.display());
+    match err.kind() {
+        std::io::ErrorKind::PermissionDenied => {
+            message.push_str("；请确认该文件不是只读、不是同名目录，且所在目录可写");
+        }
+        // `create_dir_all` only reports this when a file blocks the path.
+        std::io::ErrorKind::AlreadyExists => {
+            message.push_str("；同名路径已存在但不是目录，请移走后重试");
+        }
+        _ => {}
+    }
+    BloraError::Other(message)
+}
+
+/// Add or replace one provider and persist atomically.
 pub fn save_provider(provider: SavedProvider) -> Result<()> {
-    let mut all = load_saved();
+    save_provider_at(&config_path(), provider)
+}
+
+fn save_provider_at(path: &Path, provider: SavedProvider) -> Result<()> {
+    let _lock = SAVED_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut all = read_saved(path)?;
     if let Some(existing) = all
         .iter_mut()
         .find(|item| item.id.eq_ignore_ascii_case(&provider.id))
@@ -275,13 +334,77 @@ pub fn save_provider(provider: SavedProvider) -> Result<()> {
     } else {
         all.push(provider);
     }
-    let path = config_path();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|err| BloraError::Other(err.to_string()))?;
+    let raw = serde_json::to_vec_pretty(&all).map_err(|err| BloraError::Other(err.to_string()))?;
+    write_atomic(path, &raw)
+}
+
+/// Write `bytes` through a same-directory temp file and a rename, so a failed
+/// write never truncates the previous configuration.
+fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| BloraError::Other(format!("{} 没有父目录", path.display())))?;
+    fs::create_dir_all(parent).map_err(|err| io_error("创建目录", parent, &err))?;
+    if path.is_dir() {
+        return Err(BloraError::Other(format!(
+            "{} 是一个目录，无法写入供应商配置；请移走该目录后重试",
+            path.display()
+        )));
     }
-    let json =
-        serde_json::to_string_pretty(&all).map_err(|err| BloraError::Other(err.to_string()))?;
-    fs::write(path, json).map_err(|err| BloraError::Other(err.to_string()))?;
+    if fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        return Err(BloraError::Other(format!(
+            "{} 是符号链接，拒绝覆盖",
+            path.display()
+        )));
+    }
+    prepare_replace(path)?;
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos());
+    let temp = parent.join(format!(".providers-{}-{unique}.tmp", std::process::id()));
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&temp)
+        .map_err(|err| io_error("创建临时文件", &temp, &err))?;
+    use std::io::Write;
+    let written = file.write_all(bytes).and_then(|()| file.sync_all());
+    drop(file);
+    let result = written
+        .map_err(|err| io_error("写入临时文件", &temp, &err))
+        .and_then(|()| fs::rename(&temp, path).map_err(|err| io_error("替换", path, &err)));
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    result
+}
+
+/// Windows refuses to replace a read-only file and reports os error 5. This
+/// file belongs to Blora, so clear the attribute before the rename.
+///
+/// The lint's Unix caveat does not apply: this is Windows-only, where clearing
+/// read-only simply drops `FILE_ATTRIBUTE_READONLY`.
+#[cfg(windows)]
+#[allow(clippy::permissions_set_readonly_false)]
+fn prepare_replace(path: &Path) -> Result<()> {
+    let Ok(meta) = fs::metadata(path) else {
+        return Ok(());
+    };
+    if !meta.permissions().readonly() {
+        return Ok(());
+    }
+    let mut permissions = meta.permissions();
+    permissions.set_readonly(false);
+    fs::set_permissions(path, permissions).map_err(|err| io_error("清除只读属性", path, &err))
+}
+
+#[cfg(not(windows))]
+fn prepare_replace(_path: &Path) -> Result<()> {
     Ok(())
 }
 
@@ -449,5 +572,114 @@ mod tests {
             openai_base_candidates("https://api.openai.com/v1/"),
             vec!["https://api.openai.com/v1".to_owned()]
         );
+    }
+
+    fn provider(id: &str) -> SavedProvider {
+        SavedProvider {
+            id: id.to_owned(),
+            name: format!("{id} name"),
+            api_key: format!("{id}-key"),
+            base_url: "https://example.com/v1".to_owned(),
+            format: MessageFormat::Openai,
+            models: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn save_provider_creates_file_and_replaces_by_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blora/providers.json");
+
+        save_provider_at(&path, provider("alpha")).unwrap();
+        save_provider_at(&path, provider("beta")).unwrap();
+        let mut updated = provider("alpha");
+        updated.api_key = "rotated".to_owned();
+        save_provider_at(&path, updated).unwrap();
+
+        let saved = read_saved(&path).unwrap();
+        assert_eq!(saved.len(), 2);
+        assert_eq!(
+            saved
+                .iter()
+                .find(|item| item.id == "alpha")
+                .unwrap()
+                .api_key,
+            "rotated"
+        );
+    }
+
+    #[test]
+    fn malformed_file_is_not_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("providers.json");
+        fs::write(&path, b"{not json").unwrap();
+
+        let err = save_provider_at(&path, provider("alpha"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("无法解析"), "unexpected error: {err}");
+        // The original bytes survive so the user can repair them.
+        assert_eq!(fs::read_to_string(&path).unwrap(), "{not json");
+    }
+
+    #[test]
+    fn directory_at_config_path_is_reported_without_deleting_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("providers.json");
+        fs::create_dir(&path).unwrap();
+
+        let err = save_provider_at(&path, provider("alpha"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("是一个目录"), "unexpected error: {err}");
+        assert!(path.is_dir());
+    }
+
+    #[test]
+    fn atomic_write_leaves_no_temp_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("providers.json");
+        save_provider_at(&path, provider("alpha")).unwrap();
+
+        let leftovers: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "leftover temp files: {leftovers:?}");
+    }
+
+    /// Reproduces the reported `os error 5`: Windows refuses to rename over a
+    /// read-only file. Writing must clear the attribute instead of failing.
+    #[cfg(windows)]
+    #[test]
+    fn read_only_config_is_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("providers.json");
+        save_provider_at(&path, provider("alpha")).unwrap();
+        let mut permissions = fs::metadata(&path).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&path, permissions).unwrap();
+
+        save_provider_at(&path, provider("beta")).unwrap();
+
+        let saved = read_saved(&path).unwrap();
+        assert_eq!(saved.len(), 2);
+    }
+
+    #[test]
+    fn empty_file_reads_as_no_providers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("providers.json");
+        fs::write(&path, b"  \n").unwrap();
+        assert!(read_saved(&path).unwrap().is_empty());
+    }
+
+    #[test]
+    fn missing_file_reads_as_no_providers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing/providers.json");
+        assert!(read_saved(&path).unwrap().is_empty());
     }
 }
