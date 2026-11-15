@@ -44,7 +44,7 @@ cargo run -p blora-cli -- task pump
 cargo run -p blora-cli -- acp
 ```
 
-## 0.1.0 测试版
+## 27.0 Beta 测试版
 
 GitHub 测试版和 npm 安装器发布后，可以这样安装：
 

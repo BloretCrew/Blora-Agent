@@ -226,7 +226,7 @@ dependencies = [
 
 [[package]]
 name = "blora-auth"
-version = "0.1.0-beta.3"
+version = "27.0.0-beta"
 dependencies = [
  "serde",
  "serde_json",
@@ -236,7 +236,7 @@ dependencies = [
 
 [[package]]
 name = "blora-automation"
-version = "0.1.0-beta.3"
+version = "27.0.0-beta"
 dependencies = [
  "base64",
  "blora-types",
@@ -248,7 +248,7 @@ dependencies = [
 
 [[package]]
 name = "blora-catalog"
-version = "0.1.0-beta.3"
+version = "27.0.0-beta"
 dependencies = [
  "blora-types",
  "dirs",
@@ -259,7 +259,7 @@ dependencies = [
 
 [[package]]
 name = "blora-cli"
-version = "0.1.0-beta.3"
+version = "27.0.0-beta"
 dependencies = [
  "blora-github",
  "blora-runtime",
@@ -280,7 +280,7 @@ dependencies = [
 
 [[package]]
 name = "blora-content"
-version = "0.1.0-beta.3"
+version = "27.0.0-beta"
 dependencies = [
  "serde",
  "serde_json",
@@ -288,7 +288,7 @@ dependencies = [
 
 [[package]]
 name = "blora-context"
-version = "0.1.0-beta.3"
+version = "27.0.0-beta"
 dependencies = [
  "base64",
  "blora-content",
@@ -303,7 +303,7 @@ dependencies = [
 
 [[package]]
 name = "blora-events"
-version = "0.1.0-beta.3"
+version = "27.0.0-beta"
 dependencies = [
  "blora-content",
  "blora-types",
@@ -314,7 +314,7 @@ dependencies = [
 
 [[package]]
 name = "blora-exec"
-version = "0.1.0-beta.3"
+version = "27.0.0-beta"
 dependencies = [
  "base64",
  "blora-content",
@@ -331,7 +331,7 @@ dependencies = [
 
 [[package]]
 name = "blora-github"
-version = "0.1.0-beta.3"
+version = "27.0.0-beta"
 dependencies = [
  "chrono",
  "regex",
@@ -342,7 +342,7 @@ dependencies = [
 
 [[package]]
 name = "blora-harness"
-version = "0.1.0-beta.3"
+version = "27.0.0-beta"
 dependencies = [
  "blora-policy",
  "blora-types",
@@ -355,7 +355,7 @@ dependencies = [
 
 [[package]]
 name = "blora-imagine"
-version = "0.1.0-beta.3"
+version = "27.0.0-beta"
 dependencies = [
  "base64",
  "blora-types",
@@ -366,7 +366,7 @@ dependencies = [
 
 [[package]]
 name = "blora-lsp"
-version = "0.1.0-beta.3"
+version = "27.0.0-beta"
 dependencies = [
  "blora-types",
  "dirs",
@@ -378,7 +378,7 @@ dependencies = [
 
 [[package]]
 name = "blora-model"
-version = "0.1.0-beta.3"
+version = "27.0.0-beta"
 dependencies = [
  "blora-auth",
  "blora-catalog",
@@ -391,7 +391,7 @@ dependencies = [
 
 [[package]]
 name = "blora-policy"
-version = "0.1.0-beta.3"
+version = "27.0.0-beta"
 dependencies = [
  "blora-types",
  "tempfile",
@@ -399,7 +399,7 @@ dependencies = [
 
 [[package]]
 name = "blora-ptc"
-version = "0.1.0-beta.3"
+version = "27.0.0-beta"
 dependencies = [
  "blora-types",
  "serde_json",
@@ -409,7 +409,7 @@ dependencies = [
 
 [[package]]
 name = "blora-runtime"
-version = "0.1.0-beta.3"
+version = "27.0.0-beta"
 dependencies = [
  "blora-catalog",
  "blora-content",
@@ -439,7 +439,7 @@ dependencies = [
 
 [[package]]
 name = "blora-sdk"
-version = "0.1.0-beta.3"
+version = "27.0.0-beta"
 dependencies = [
  "blora-content",
  "blora-events",
@@ -460,7 +460,7 @@ dependencies = [
 
 [[package]]
 name = "blora-sdk-protocol"
-version = "0.1.0-beta.3"
+version = "27.0.0-beta"
 dependencies = [
  "blora-model",
  "blora-sdk",
@@ -473,7 +473,7 @@ dependencies = [
 
 [[package]]
 name = "blora-server"
-version = "0.1.0-beta.3"
+version = "27.0.0-beta"
 dependencies = [
  "axum",
  "blora-auth",
@@ -501,7 +501,7 @@ dependencies = [
 
 [[package]]
 name = "blora-session"
-version = "0.1.0-beta.3"
+version = "27.0.0-beta"
 dependencies = [
  "blora-content",
  "blora-events",
@@ -513,7 +513,7 @@ dependencies = [
 
 [[package]]
 name = "blora-storage"
-version = "0.1.0-beta.3"
+version = "27.0.0-beta"
 dependencies = [
  "blora-content",
  "blora-events",
@@ -531,7 +531,7 @@ dependencies = [
 
 [[package]]
 name = "blora-tools"
-version = "0.1.0-beta.3"
+version = "27.0.0-beta"
 dependencies = [
  "base64",
  "blora-automation",
@@ -551,7 +551,7 @@ dependencies = [
 
 [[package]]
 name = "blora-tui"
-version = "0.1.0-beta.3"
+version = "27.0.0-beta"
 dependencies = [
  "base64",
  "blora-auth",
@@ -583,7 +583,7 @@ dependencies = [
 
 [[package]]
 name = "blora-types"
-version = "0.1.0-beta.3"
+version = "27.0.0-beta"
 dependencies = [
  "chrono",
  "serde",
@@ -593,7 +593,7 @@ dependencies = [
 
 [[package]]
 name = "blora-web"
-version = "0.1.0-beta.3"
+version = "27.0.0-beta"
 dependencies = [
  "blora-types",
  "flate2",
