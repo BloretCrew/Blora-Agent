@@ -18,7 +18,7 @@ additive and carry `#[serde(default)]` semantics.
 
 | Method | Params | Result |
 |---|---|---|
-| `initialize` | `protocolVersion`, `profile`, `persistence`, `provider`, `workspace`, `features`, `hostTools`, `callbacks` | `serverInfo`, `capabilities` |
+| `initialize` | `protocolVersion`, `profile`, `persistence`, `provider`, `workspace`, `features`, `hostTools`, `callbacks`, `search?`, `fetch?` | `serverInfo`, `capabilities` |
 | `agent.shutdown` | `cancelRunning`, `timeoutMs` | `{}` |
 | `session.create` | `title?`, `mode?`, `workspace?`, `permission?` | `sessionId`, `sequence` |
 | `session.resume` / `session.fork` / `session.archive` | `sessionId` | `sessionId` |

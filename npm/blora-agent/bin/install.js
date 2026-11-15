@@ -18,11 +18,16 @@ const destination = path.join(installDir, executable);
 const DOWNLOAD_TIMEOUT_MS = 120_000;
 const MAX_ATTEMPTS = 4;
 
-function platformAsset() {
-  const arch = process.arch === "x64" ? "x86_64" : process.arch;
-  const platform = process.platform === "win32" ? "windows" : process.platform;
-  const ext = platform === "windows" ? "zip" : "tar.gz";
-  return `blora-${version}-${platform}-${arch}.${ext}`;
+function platformAsset(platform = process.platform, architecture = process.arch) {
+  const arch = architecture === "x64" ? "x86_64" : architecture === "arm64" ? "aarch64" : architecture;
+  const platformName = {
+    linux: "linux",
+    darwin: "macos",
+    win32: "windows",
+  }[platform];
+  if (!platformName) throw new Error(`unsupported platform: ${platform}`);
+  const ext = platformName === "windows" ? "zip" : "tar.gz";
+  return `blora-${version}-${platformName}-${arch}.${ext}`;
 }
 
 function wait(ms) {
@@ -155,4 +160,8 @@ async function main() {
   }
 }
 
-main();
+if (require.main === module) {
+  main();
+}
+
+module.exports = { platformAsset };

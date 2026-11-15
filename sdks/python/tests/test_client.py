@@ -33,6 +33,10 @@ class AgentTests(unittest.TestCase):
         finally:
             agent.close()
 
+    def _reentrant_tool(self, args):
+        self._callback_session.project()
+        return f"echo:{args.get('text', '')}"
+
     def test_host_tool(self):
         agent = Agent.start(
             binary_path=BINARY,
@@ -62,12 +66,13 @@ class AgentTests(unittest.TestCase):
                         "properties": {"text": {"type": "string"}},
                     },
                     "read_only": True,
-                    "handler": lambda args: f"echo:{args.get('text', '')}",
+                    "handler": lambda args: self._reentrant_tool(args),
                 }
             ],
         )
         try:
             session = agent.create_session()
+            self._callback_session = session
             run = session.run("use echo")
             outcome = run.wait()
             self.assertEqual(outcome["status"], "completed")

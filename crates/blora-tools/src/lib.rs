@@ -14,6 +14,9 @@ use blora_types::{BloraError, Mode, Result};
 use serde_json::{Value, json};
 
 mod notebook;
+mod services;
+
+pub use services::ToolServices;
 
 #[derive(Clone, Debug)]
 pub struct ToolSpec {
@@ -934,6 +937,25 @@ impl ToolRegistry {
         name: &str,
         arguments: &Value,
     ) -> Result<ToolOutcome> {
+        Self::execute_outcome_with_services(
+            backend,
+            session_id,
+            name,
+            arguments,
+            &ToolServices::legacy(),
+        )
+    }
+
+    pub fn execute_outcome_with_services(
+        backend: &LocalBackend,
+        session_id: &str,
+        name: &str,
+        arguments: &Value,
+        services: &ToolServices,
+    ) -> Result<ToolOutcome> {
+        if name == "generate_image" {
+            return generate_image(backend, session_id, arguments, services).map(ToolOutcome::text);
+        }
         if name == "browser" {
             return browser_outcome(backend, session_id, arguments);
         }
@@ -944,7 +966,7 @@ impl ToolRegistry {
             name,
             "edit_image" | "generate_video" | "text_to_speech" | "vision_analyze"
         ) {
-            return media_tool_outcome(backend, session_id, name, arguments);
+            return media_tool_outcome(backend, session_id, name, arguments, services);
         }
         if name == "view_image" {
             let path = required_str(arguments, "path")?;
@@ -961,7 +983,53 @@ impl ToolRegistry {
                 return media_outcome(backend, session_id, path, None);
             }
         }
-        Self::execute_for(backend, session_id, name, arguments).map(ToolOutcome::text)
+        match name {
+            "web_search" => {
+                backend
+                    .policy()
+                    .require(backend.policy().network(), "web_search")?;
+                let config = services.search.as_ref().ok_or_else(|| {
+                    BloraError::Other("web_search is not configured for this agent".to_owned())
+                })?;
+                let query = required_str(arguments, "query")?;
+                let limit = arguments
+                    .get("limit")
+                    .and_then(Value::as_u64)
+                    .map_or(8, |n| n as usize);
+                let hits = blora_web::search(config, query, limit)?;
+                Ok(ToolOutcome::text(blora_web::format_hits(
+                    config.backend,
+                    query,
+                    &hits,
+                )))
+            }
+            "web_fetch" => {
+                let url = required_str(arguments, "url")?;
+                backend
+                    .policy()
+                    .require(backend.policy().network(), &format!("web_fetch {url}"))?;
+                let options = services.fetch.as_ref().ok_or_else(|| {
+                    BloraError::Other("web_fetch is not configured for this agent".to_owned())
+                })?;
+                let page = blora_web::fetch(url, options)?;
+                let body = page_lines(&page.text, arguments);
+                Ok(ToolOutcome::text(format!(
+                    "<web_page url=\"{}\" content_type=\"{}\"{}>\\n{body}\\n</web_page>",
+                    page.url,
+                    page.content_type,
+                    if page.truncated {
+                        " truncated=\"true\""
+                    } else {
+                        ""
+                    }
+                )))
+            }
+            "edit_image" | "generate_video" | "text_to_speech" | "vision_analyze" => {
+                media_tool_outcome(backend, session_id, name, arguments, services)
+            }
+            _ => Self::execute_with_services(backend, session_id, name, arguments, services)
+                .map(ToolOutcome::text),
+        }
     }
 
     pub fn execute_for(
@@ -969,6 +1037,22 @@ impl ToolRegistry {
         session_id: &str,
         name: &str,
         arguments: &Value,
+    ) -> Result<String> {
+        Self::execute_with_services(
+            backend,
+            session_id,
+            name,
+            arguments,
+            &ToolServices::legacy(),
+        )
+    }
+
+    pub fn execute_with_services(
+        backend: &LocalBackend,
+        session_id: &str,
+        name: &str,
+        arguments: &Value,
+        services: &ToolServices,
     ) -> Result<String> {
         match name {
             "read_file" => {
@@ -1072,12 +1156,7 @@ impl ToolRegistry {
                     .unwrap_or(false)
                 {
                     ShellKind::Background
-                } else if arguments
-                    .get("pty")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false)
-                    || std::env::var("BLORA_PTY").ok().as_deref() == Some("1")
-                {
+                } else if optional_bool(arguments, "pty") || services.pty_enabled {
                     ShellKind::Pty
                 } else {
                     let timeout = arguments
@@ -1152,18 +1231,20 @@ impl ToolRegistry {
                 let files = optional_str(arguments, "files").unwrap_or("");
                 Ok(format!("HANDOFF\n{summary}\n{files}"))
             }
-            "generate_image" => generate_image(backend, session_id, arguments),
+            "generate_image" => generate_image(backend, session_id, arguments, services),
             "web_search" => {
                 backend
                     .policy()
                     .require(backend.policy().network(), "web_search")?;
-                let config = blora_web::SearchConfig::from_env()?;
+                let config = services.search.as_ref().ok_or_else(|| {
+                    BloraError::Other("web_search is not configured for this agent".to_owned())
+                })?;
                 let query = required_str(arguments, "query")?;
                 let limit = arguments
                     .get("limit")
                     .and_then(Value::as_u64)
                     .map_or(8, |n| n as usize);
-                let hits = blora_web::search(&config, query, limit)?;
+                let hits = blora_web::search(config, query, limit)?;
                 Ok(blora_web::format_hits(config.backend, query, &hits))
             }
             "web_fetch" => {
@@ -1171,7 +1252,10 @@ impl ToolRegistry {
                 backend
                     .policy()
                     .require(backend.policy().network(), &format!("web_fetch {url}"))?;
-                let page = blora_web::fetch(url, &blora_web::FetchOptions::default())?;
+                let options = services.fetch.as_ref().ok_or_else(|| {
+                    BloraError::Other("web_fetch is not configured for this agent".to_owned())
+                })?;
+                let page = blora_web::fetch(url, options)?;
                 let body = page_lines(&page.text, arguments);
                 Ok(format!(
                     "<web_page url=\"{}\" content_type=\"{}\"{}>\n{body}\n</web_page>",
@@ -1251,7 +1335,12 @@ fn slice_lines(text: &str, offset: Option<u64>, limit: Option<u64>) -> String {
     out.join("\n")
 }
 
-fn generate_image(backend: &LocalBackend, session_id: &str, arguments: &Value) -> Result<String> {
+fn generate_image(
+    backend: &LocalBackend,
+    session_id: &str,
+    arguments: &Value,
+    services: &ToolServices,
+) -> Result<String> {
     if session_id.is_empty() {
         return Err(BloraError::Other(
             "generate_image needs a session id".to_owned(),
@@ -1274,9 +1363,10 @@ fn generate_image(backend: &LocalBackend, session_id: &str, arguments: &Value) -
         let resolved = backend.policy().resolve(image_path)?;
         let mime = image_mime_for(&resolved).unwrap_or("image/png");
         let bytes = backend.read_media_bytes(image_path)?;
-        let endpoint = blora_imagine::MediaEndpoint::from_env()
-            .ok_or_else(|| BloraError::Other("media endpoint is not configured".to_owned()))?;
-        let file = blora_imagine::edit_image(&endpoint, &bytes, mime, None, &request.prompt, None)?;
+        let endpoint = services.media.as_ref().ok_or_else(|| {
+            BloraError::Other("media endpoint is not configured for this agent".to_owned())
+        })?;
+        let file = blora_imagine::edit_image(endpoint, &bytes, mime, None, &request.prompt, None)?;
         let saved = blora_imagine::write_images(
             backend.policy().workspace(),
             session_id,
@@ -1287,8 +1377,10 @@ fn generate_image(backend: &LocalBackend, session_id: &str, arguments: &Value) -
         )?;
         return Ok(blora_imagine::format_saved(&saved));
     }
-    let endpoint = blora_imagine::ImageEndpoint::from_env()?;
-    let images = blora_imagine::fetch_images(&endpoint, &request)?;
+    let endpoint = services.image.as_ref().ok_or_else(|| {
+        BloraError::Other("image generation is not configured for this agent".to_owned())
+    })?;
+    let images = blora_imagine::fetch_images(endpoint, &request)?;
     let saved = blora_imagine::write_images(backend.policy().workspace(), session_id, &images)?;
     Ok(blora_imagine::format_saved(&saved))
 }
@@ -1298,20 +1390,19 @@ fn media_tool_outcome(
     session_id: &str,
     name: &str,
     arguments: &Value,
+    services: &ToolServices,
 ) -> Result<ToolOutcome> {
     backend
         .policy()
         .require(backend.policy().media_generate(), name)?;
-    let endpoint = blora_imagine::MediaEndpoint::from_env().ok_or_else(|| {
-        BloraError::Other(
-            "media endpoint is not configured; set BLORA_API_KEY or BLORA_MEDIA_KEY".to_owned(),
-        )
+    let endpoint = services.media.as_ref().ok_or_else(|| {
+        BloraError::Other("media endpoint is not configured for this agent".to_owned())
     })?;
     match name {
         "vision_analyze" => {
             let (bytes, mime) = media_image(backend, arguments)?;
             let prompt = required_str(arguments, "prompt")?;
-            let text = blora_imagine::vision_analyze(&endpoint, &bytes, &mime, prompt)?;
+            let text = blora_imagine::vision_analyze(endpoint, &bytes, &mime, prompt)?;
             Ok(ToolOutcome::text(text))
         }
         "edit_image" => {
@@ -1328,7 +1419,7 @@ fn media_tool_outcome(
                 .as_ref()
                 .map(|(bytes, mime)| (bytes.as_slice(), mime.as_str()));
             let file = blora_imagine::edit_image(
-                &endpoint,
+                endpoint,
                 &bytes,
                 &mime,
                 mask_ref,
@@ -1362,7 +1453,7 @@ fn media_tool_outcome(
                 .map(|path| backend.read_media_bytes(path))
                 .transpose()?;
             let output = blora_imagine::generate_video(
-                &endpoint,
+                endpoint,
                 prompt,
                 image.as_deref(),
                 arguments
@@ -1401,7 +1492,7 @@ fn media_tool_outcome(
         "text_to_speech" => {
             let text = required_str(arguments, "text")?;
             let file = blora_imagine::text_to_speech(
-                &endpoint,
+                endpoint,
                 text,
                 optional_str(arguments, "voice"),
                 optional_str(arguments, "format"),

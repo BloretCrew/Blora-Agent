@@ -87,10 +87,17 @@ impl Profile {
                 config.auto_title = false;
                 config.auto_compact = true;
                 config.network = Some(true);
+                config.web_profile_lock = true;
                 config.limits.max_turns = 16;
-                config.tools = ToolPolicy::only(["structured_output", "update_plan", "ask_user"]);
+                config.tools = ToolPolicy::only([
+                    "web_search",
+                    "web_fetch",
+                    "structured_output",
+                    "update_plan",
+                ]);
                 config.callbacks.approval = ApprovalPolicy::AllowReadOnly;
                 config.callbacks.question = QuestionPolicy::Dismiss;
+                config.tool_services.fetch = blora_runtime::ToolServices::sdk_default().fetch;
             }
             Self::ReadOnlyWorkspace => {
                 config.features = Features {
@@ -115,6 +122,7 @@ impl Profile {
                 config.context.git_snapshot = true;
                 config.auto_title = false;
                 config.network = Some(false);
+                config.web_profile_lock = false;
                 config.tools = ToolPolicy::only([
                     "read_file",
                     "view_image",

@@ -24,12 +24,15 @@ use blora_model::{
 };
 use blora_policy::{PermissionMode, Policy};
 use blora_session::SessionProjection;
-use blora_storage::{ArtifactRecord, CreateSession, CreateTask, SessionSummary, SqliteStore};
+use blora_storage::{
+    ArtifactRecord, CreateSession, CreateTask, RuntimeStore, SessionSummary, SqliteStore,
+};
 use blora_tools::ToolRegistry;
 use blora_types::{
     AgentId, ArtifactId, BloraError, CancelToken, Mode, Result, RunId, SessionId, TurnId,
 };
 use serde_json::{Value, json};
+use std::path::Path;
 use std::sync::Mutex;
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 
@@ -147,7 +150,7 @@ impl Default for RunOptions {
 
 #[derive(Clone)]
 pub struct Runtime {
-    pub(crate) store: std::sync::Arc<SqliteStore>,
+    pub(crate) store: std::sync::Arc<dyn RuntimeStore>,
     pub(crate) config: std::sync::Arc<RuntimeConfig>,
     custom_tools: std::sync::Arc<Mutex<HostToolRegistry>>,
     pub(crate) foreground_sessions: std::sync::Arc<Mutex<std::collections::HashSet<SessionId>>>,
@@ -175,8 +178,14 @@ impl Runtime {
     /// Construct a runtime with explicit configuration.
     #[must_use]
     pub fn with_config(store: SqliteStore, config: RuntimeConfig) -> Self {
+        Self::from_store(std::sync::Arc::new(store), config)
+    }
+
+    /// Construct a runtime over a custom object-safe store implementation.
+    #[must_use]
+    pub fn from_store(store: std::sync::Arc<dyn RuntimeStore>, config: RuntimeConfig) -> Self {
         Self {
-            store: std::sync::Arc::new(store),
+            store,
             config: std::sync::Arc::new(config),
             custom_tools: std::sync::Arc::new(Mutex::new(HostToolRegistry::new())),
             foreground_sessions: std::sync::Arc::new(Mutex::new(std::collections::HashSet::new())),
@@ -245,6 +254,51 @@ impl Runtime {
 
     fn builtin_tool_enabled(&self, name: &str) -> bool {
         let features = &self.config.features;
+        if self.config.web_profile_lock
+            && matches!(
+                name,
+                "read_file"
+                    | "write_file"
+                    | "view_image"
+                    | "list_dir"
+                    | "search"
+                    | "grep"
+                    | "glob"
+                    | "shell"
+                    | "process"
+                    | "notebook_edit"
+                    | "lsp"
+                    | "apply_patch"
+                    | "git_worktree"
+                    | "artifact"
+                    | "remember"
+                    | "recall"
+                    | "forget"
+                    | "skill"
+                    | "skill_manage"
+                    | "delegate"
+                    | "subagent"
+                    | "handoff"
+                    | "execute_code"
+                    | "browser"
+                    | "computer"
+                    | "generate_image"
+                    | "edit_image"
+                    | "generate_video"
+                    | "text_to_speech"
+                    | "vision_analyze"
+                    | "read_document"
+                    | "schedule"
+                    | "schedule_task"
+                    | "goal"
+                    | "team"
+                    | "team_task"
+                    | "workflow"
+                    | "session_search"
+            )
+        {
+            return false;
+        }
         if name == "execute_code" && !features.background_processes {
             return false;
         }
@@ -256,6 +310,9 @@ impl Runtime {
                 || !self.config.context.include_skills
                 || matches!(self.config.home, HomeMode::Disabled))
         {
+            return false;
+        }
+        if self.config.web_profile_lock {
             return false;
         }
         if !self.config.tools.allows(name) {
@@ -1058,11 +1115,23 @@ impl Runtime {
             .as_ref()
             .ok_or_else(|| BloraError::SessionNotFound(session_id.to_string()))?;
         let workspace = session.workspace_path.clone();
+        if self.config.web_profile_lock && Path::new(&workspace).join(".git").exists() {
+            return Err(BloraError::Policy(
+                "web profile rejects workspace sessions rooted in a repository".to_owned(),
+            ));
+        }
         let should_generate_title = self.config.auto_title
             && self.config.features.auto_title
             && self.session_needs_title(session_id, &projection)?;
         let mode = session.mode;
-        let worktree = if options.worktree || self.config.worktree_enabled() {
+        if options.worktree && !self.config.features.worktree {
+            return Err(BloraError::Policy(
+                "worktree execution is disabled for this agent profile".to_owned(),
+            ));
+        }
+        let worktree = if self.config.features.worktree
+            && (options.worktree || self.config.worktree_enabled())
+        {
             WorktreeHandle::create(&workspace, session_id.as_str()).ok()
         } else {
             None
@@ -1101,7 +1170,9 @@ impl Runtime {
         let options = &effective_options;
         let policy = Policy::with_mode(&exec_root, permission_mode)?
             .with_network(self.config.network_allowed());
-        let backend = LocalBackend::new(policy).with_isolation(self.config.isolation);
+        let backend = LocalBackend::new(policy)
+            .with_isolation(self.config.isolation)
+            .with_pty_enabled(self.config.tool_services.pty_enabled);
         let requested_provider = if options.provider.trim().is_empty() {
             projection.provider.clone().unwrap_or_default()
         } else {
@@ -1957,8 +2028,14 @@ impl Runtime {
                 .map_or(50, |value| value.clamp(1, 200) as usize),
         };
         let output = blora_ptc::run(&request, backend.policy().workspace(), |tool, args| {
-            ToolRegistry::execute_outcome_for(backend, session_id.as_str(), tool, args)
-                .map(|outcome| outcome.as_text())
+            ToolRegistry::execute_outcome_with_services(
+                backend,
+                session_id.as_str(),
+                tool,
+                args,
+                &self.config.tool_services,
+            )
+            .map(|outcome| outcome.as_text())
         })?;
         let mut out = String::new();
         if !output.stdout.is_empty() {
@@ -2469,11 +2546,12 @@ impl Runtime {
                                     "Imagine mode only runs generate_image".to_owned(),
                                 ))
                             } else {
-                                ToolRegistry::execute_outcome_for(
+                                ToolRegistry::execute_outcome_with_services(
                                     backend,
                                     session_id.as_str(),
                                     &call.name,
                                     &arguments,
+                                    &self.config.tool_services,
                                 )
                             }
                         }))
@@ -2699,11 +2777,12 @@ impl Runtime {
                             session_id, run_id, turn_id, action, &arguments, backend,
                         )
                     } else {
-                        ToolRegistry::execute_outcome_for(
+                        ToolRegistry::execute_outcome_with_services(
                             backend,
                             session_id.as_str(),
                             "git_worktree",
                             &arguments,
+                            &self.config.tool_services,
                         )
                         .map(|outcome| outcome.as_text())
                     }
@@ -2889,11 +2968,12 @@ impl Runtime {
                             "skill loading is disabled for this agent".to_owned(),
                         ));
                     }
-                    ToolRegistry::execute_outcome_for(
+                    ToolRegistry::execute_outcome_with_services(
                         backend,
                         session_id.as_str(),
                         &call.name,
                         &arguments,
+                        &self.config.tool_services,
                     )
                     .map(|outcome| outcome.as_text())
                 }
@@ -2980,11 +3060,12 @@ impl Runtime {
                     Ok(format!("plan recorded ({done}/{total} done)"))
                 }
                 _ => {
-                    return ToolRegistry::execute_outcome_for(
+                    return ToolRegistry::execute_outcome_with_services(
                         backend,
                         session_id.as_str(),
                         &call.name,
                         &arguments,
+                        &self.config.tool_services,
                     );
                 }
             };
@@ -3066,10 +3147,15 @@ impl Runtime {
                         "\n\n<system-reminder>You have issued the same tool call several times in a row. Change approach or finish with a final answer.</system-reminder>",
                     );
                 }
-                let truncated = text.chars().count() > MAX_TOOL_RESULT_CHARS;
+                let limit = self
+                    .config
+                    .limits
+                    .max_tool_result_chars
+                    .unwrap_or(MAX_TOOL_RESULT_CHARS);
+                let truncated = text.chars().count() > limit;
                 let recorded = if truncated {
-                    let mut cut = blora_context::head_tail(&text, MAX_TOOL_RESULT_CHARS);
-                    if self.config.features.background_processes {
+                    let mut cut = blora_context::head_tail(&text, limit);
+                    if self.config.tool_services.persist_tool_output {
                         if let Some(saved) = spill_tool_output(workspace, &call.id, &text) {
                             cut.push_str(&format!(
                                 "\n\n[full output saved to {saved}; page through it with read_file offset/limit]"

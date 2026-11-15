@@ -30,7 +30,7 @@ jobs:
       - name: Rust format and lint
         run: |
           cargo fmt --all -- --check
-          cargo clippy -p blora-sdk -p blora-sdk-protocol -p blora-runtime -p blora-context -p blora-policy --all-targets -- -D warnings
+          cargo clippy -p blora-sdk -p blora-sdk-protocol -p blora-runtime -p blora-storage -p blora-tools -p blora-exec -p blora-web -p blora-context -p blora-policy --all-targets -- -D warnings
       - name: Rust workspace tests
         run: cargo test --workspace
       - name: Build CLI

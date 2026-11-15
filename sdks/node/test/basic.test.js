@@ -51,7 +51,11 @@ test("host tool round-trip", async () => {
         description: "Echo text",
         parameters: { type: "object", properties: { text: { type: "string" } } },
         readOnly: true,
-        handler: async ({ text }) => `echo:${text}`,
+        handler: async ({ text }) => {
+          const session = await agent.createSession();
+          await session.project();
+          return `echo:${text}`;
+        },
       },
     ],
   });

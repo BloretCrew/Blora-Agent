@@ -27,7 +27,7 @@ impl SearchBackend {
         }
     }
 
-    fn parse(value: &str) -> Option<Self> {
+    pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "searxng" => Some(Self::Searxng),
             "brave" => Some(Self::Brave),

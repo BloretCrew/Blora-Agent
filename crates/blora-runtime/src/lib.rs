@@ -31,6 +31,7 @@ mod workflow;
 pub use agents::{MAX_RUNNING_CHILDREN, MAX_SUBAGENT_DEPTH, SUBAGENT_TURNS};
 pub use blora_exec::{GitIndicator, command, open_url};
 pub use blora_policy::PermissionMode;
+pub use blora_tools::ToolServices;
 pub use blora_types::CancelToken;
 pub use compact::{COMPACTION_BREAKER, CompactionReport};
 pub use config::{

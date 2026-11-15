@@ -52,6 +52,7 @@ pub use blora_runtime::{
 };
 pub use blora_session::{SessionProjection, TranscriptItem};
 pub use blora_types::{ApprovalId, BloraError, CancelToken, Mode, RunId, RunStatus, SessionId};
+pub use blora_web::{FetchOptions, SearchBackend, SearchConfig};
 
 /// SDK protocol version understood by the Rust facade.
 pub const SDK_PROTOCOL_VERSION: &str = "1.0";

@@ -421,10 +421,12 @@ dependencies = [
  "blora-model",
  "blora-policy",
  "blora-ptc",
+ "blora-sdk",
  "blora-session",
  "blora-storage",
  "blora-tools",
  "blora-types",
+ "blora-web",
  "chrono",
  "dirs",
  "serde",
@@ -447,9 +449,9 @@ dependencies = [
  "blora-runtime",
  "blora-session",
  "blora-storage",
+ "blora-tools",
  "blora-types",
  "blora-web",
- "chrono",
  "serde",
  "serde_json",
  "tempfile",
@@ -465,6 +467,8 @@ dependencies = [
  "blora-types",
  "serde",
  "serde_json",
+ "tempfile",
+ "uuid",
 ]
 
 [[package]]
@@ -513,6 +517,7 @@ version = "0.1.0-beta.3"
 dependencies = [
  "blora-content",
  "blora-events",
+ "blora-runtime",
  "blora-session",
  "blora-types",
  "chrono",

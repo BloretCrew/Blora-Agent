@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use blora_exec::Isolation;
 use blora_model::Provider;
+use blora_tools::ToolServices;
 use blora_types::{ApprovalId, RunId, SessionId};
 
 /// Where the runtime looks for global Blora state.
@@ -239,6 +240,7 @@ pub struct Limits {
     pub max_tokens: Option<u64>,
     pub context_window: Option<u64>,
     pub compact_pct: Option<u64>,
+    pub max_tool_result_chars: Option<usize>,
 }
 
 impl Default for Limits {
@@ -249,6 +251,7 @@ impl Default for Limits {
             max_tokens: None,
             context_window: None,
             compact_pct: None,
+            max_tool_result_chars: None,
         }
     }
 }
@@ -278,6 +281,9 @@ pub struct RuntimeConfig {
     pub prompt: PromptConfig,
     pub context: ContextConfig,
     pub callbacks: CallbackConfig,
+    pub tool_services: ToolServices,
+    /// Hard capability boundary applied even if a caller later broadens the tool allowlist.
+    pub web_profile_lock: bool,
     pub features: Features,
 }
 
@@ -306,6 +312,8 @@ impl RuntimeConfig {
             prompt: PromptConfig::default(),
             context: ContextConfig::default(),
             callbacks: CallbackConfig::default(),
+            tool_services: ToolServices::legacy(),
+            web_profile_lock: false,
             features: Features::default(),
         }
     }
@@ -342,13 +350,11 @@ impl RuntimeConfig {
             prompt: PromptConfig::default(),
             context,
             callbacks: CallbackConfig {
-                approval: ApprovalPolicy::Manual {
-                    timeout: Some(Duration::from_secs(300)),
-                },
-                question: QuestionPolicy::Manual {
-                    timeout: Some(Duration::from_secs(300)),
-                },
+                approval: ApprovalPolicy::AllowReadOnly,
+                question: QuestionPolicy::Dismiss,
             },
+            tool_services: ToolServices::sdk_default(),
+            web_profile_lock: true,
             features: Features {
                 mcp: false,
                 hooks: false,

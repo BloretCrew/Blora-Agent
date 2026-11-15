@@ -61,6 +61,7 @@ pub struct ShellOutput {
 pub struct LocalBackend {
     policy: Policy,
     isolation: Isolation,
+    pty_enabled: bool,
 }
 
 impl LocalBackend {
@@ -69,12 +70,19 @@ impl LocalBackend {
         Self {
             policy,
             isolation: Isolation::Local,
+            pty_enabled: false,
         }
     }
 
     #[must_use]
     pub fn with_isolation(mut self, isolation: Isolation) -> Self {
         self.isolation = isolation;
+        self
+    }
+
+    #[must_use]
+    pub fn with_pty_enabled(mut self, enabled: bool) -> Self {
+        self.pty_enabled = enabled;
         self
     }
 
@@ -329,6 +337,11 @@ impl LocalBackend {
                 success: true,
             }),
             ShellKind::Pty => {
+                if !self.pty_enabled {
+                    return Err(BloraError::Policy(
+                        "PTY is disabled for this backend".to_owned(),
+                    ));
+                }
                 let (text, success) = self
                     .clone()
                     .with_isolation(Isolation::Pty)

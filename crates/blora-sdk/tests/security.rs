@@ -73,7 +73,7 @@ fn sessions_cannot_escape_the_web_profile_workspace() {
 
 #[test]
 fn sdk_store_trait_is_implemented_by_sqlite() {
-    let store = blora_storage::SqliteStore::open_in_memory().unwrap();
+    let store = blora_storage::InMemoryStore::new().unwrap();
     let store: Arc<dyn blora_sdk::Store> = Arc::new(store);
     let workspace = tempfile::tempdir().unwrap();
     let id = store

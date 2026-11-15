@@ -32,6 +32,10 @@ ureq.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+blora-model.workspace = true
+blora-sdk.workspace = true
+blora-tools.workspace = true
+blora-web.workspace = true
 
 [lints]
 workspace = true

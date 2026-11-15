@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Blora Agent contributors
 
 use blora_events::{KnownPayload, WorkflowUpdated};
-use blora_exec::{Isolation, LocalBackend};
+use blora_exec::LocalBackend;
 use blora_policy::Policy;
 use blora_storage::{WorkflowRecord, WorkflowRunRecord};
 use blora_tools::ToolRegistry;
@@ -231,7 +231,9 @@ impl Runtime {
             else {
                 return;
             };
-            let backend = LocalBackend::new(policy).with_isolation(Isolation::from_env());
+            let backend = LocalBackend::new(policy)
+                .with_isolation(runtime.config.isolation)
+                .with_pty_enabled(runtime.config.tool_services.pty_enabled);
             let Some(workflow) = runtime.store.get_workflow(&workflow_id).ok().flatten() else {
                 return;
             };

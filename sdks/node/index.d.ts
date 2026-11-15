@@ -6,6 +6,18 @@ export interface ProviderConfig {
   completions?: unknown[];
 }
 
+export interface SearchConfig {
+  backend: "searxng" | "brave" | "tavily" | "exa";
+  credential: string;
+  endpoint?: string;
+}
+
+export interface FetchConfig {
+  maxBytes?: number;
+  timeoutMs?: number;
+  allowPrivate?: false;
+}
+
 export interface ToolDefinition {
   name: string;
   description?: string;
@@ -25,6 +37,8 @@ export interface AgentOptions {
     approval?: "manual" | "deny" | "allow" | "read-only";
     question?: "manual" | "dismiss";
   };
+  search?: SearchConfig;
+  fetch?: FetchConfig;
   tools?: ToolDefinition[];
   onApproval?: (request: unknown) => unknown | Promise<unknown>;
   onQuestion?: (request: unknown) => string | null | Promise<string | null>;

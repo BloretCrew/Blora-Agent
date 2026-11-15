@@ -8,7 +8,6 @@ authors.workspace = true
 description = "Embeddable Blora Agent SDK facade."
 
 [dependencies]
-chrono.workspace = true
 blora-content.workspace = true
 blora-events.workspace = true
 blora-exec.workspace = true
@@ -23,6 +22,11 @@ serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+blora-model.workspace = true
+blora-tools.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

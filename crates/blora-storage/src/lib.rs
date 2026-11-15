@@ -8,6 +8,7 @@ mod onboarding;
 mod preferences;
 mod search;
 mod sqlite;
+mod store;
 mod tasks;
 mod users;
 
@@ -18,5 +19,6 @@ pub use sqlite::{
     SqliteStore, TeamAttachmentRecord, TeamColumnRecord, TeamLinkRecord, TeamRecord,
     TeamTaskRecord, UsageActivity, UsageSample, UsageTotals, WorkflowRecord, WorkflowRunRecord,
 };
+pub use store::{InMemoryStore, RuntimeStore};
 pub use tasks::{AgentRecord, CreateTask, TaskRecord};
 pub use users::UserRecord;

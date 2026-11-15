@@ -21,6 +21,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+blora-runtime.workspace = true
 
 [lints]
 workspace = true

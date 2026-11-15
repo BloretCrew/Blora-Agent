@@ -184,6 +184,10 @@ class Agent:
         self._runs: dict[str, Run] = {}
         self._buffered: dict[str, list[dict[str, Any]]] = {}
         self._finished_early: dict[str, dict[str, Any]] = {}
+        self._subscriptions: dict[str, dict[str, Any]] = {}
+        self._dispatch: queue.Queue[Any] = queue.Queue()
+        self._dispatcher = threading.Thread(target=self._dispatch_loop, daemon=True)
+        self._dispatcher.start()
         self._tools = {
             tool["name"]: tool for tool in options.get("tools", []) if "name" in tool
         }
@@ -222,6 +226,8 @@ class Agent:
                 "provider": self._options.get("provider", {"kind": "mock"}),
                 "workspace": self._options.get("workspace"),
                 "callbacks": self._options.get("callbacks"),
+                **({"search": self._options["search"]} if self._options.get("search") is not None else {}),
+                **({"fetch": self._options["fetch"]} if self._options.get("fetch") is not None else {}),
                 "hostTools": tools,
             },
         )
@@ -230,7 +236,7 @@ class Agent:
         if self._closed:
             return
         try:
-            self._request("agent.shutdown", {"cancelRunning": True})
+            self._request("agent.shutdown", {"cancelRunning": True, "timeoutMs": 5000})
         except Exception:
             pass
         self._closed = True
@@ -239,9 +245,13 @@ class Agent:
         except Exception:
             pass
         try:
-            self._process.wait(timeout=2)
-        except Exception:
+            self._process.wait(timeout=6)
+        except subprocess.TimeoutExpired:
             self._process.kill()
+            self._process.wait(timeout=2)
+        self._dispatch.put(_END)
+        for subscription in self._subscriptions.values():
+            subscription["queue"].put(_END)
 
     # -- sessions ------------------------------------------------------
 
@@ -269,16 +279,21 @@ class Agent:
             self._next_id += 1
             waiter: queue.Queue[Any] = queue.Queue()
             self._pending[request_id] = waiter
-        self._send(
-            {
+        try:
+            self._send({
                 "jsonrpc": "2.0",
                 "id": request_id,
                 "method": method,
                 "params": params or {},
-            }
-        )
-        try:
-            result = waiter.get(timeout=310)
+            })
+            try:
+                result = waiter.get(timeout=310)
+            except queue.Empty as error:
+                raise BloraError(f"request {method} timed out") from error
+        except Exception:
+            with self._lock:
+                self._pending.pop(request_id, None)
+            raise
         finally:
             with self._lock:
                 self._pending.pop(request_id, None)
@@ -292,6 +307,37 @@ class Agent:
         self._process.stdin.write(json.dumps(value) + "\n")
         self._process.stdin.flush()
 
+    def _dispatch_loop(self) -> None:
+        while True:
+            message = self._dispatch.get()
+            if message is _END:
+                return
+            self._handle_message(message)
+
+    def subscribe(self, session_id: str, after_sequence: int = 0) -> Iterator[dict[str, Any]]:
+        result = self._request(
+            "session.subscribe",
+            {"sessionId": session_id, "afterSequence": after_sequence},
+        )
+        subscription_id = result["subscriptionId"]
+        subscription = {"queue": queue.Queue(), "session_id": session_id}
+        self._subscriptions[subscription_id] = subscription
+        try:
+            while True:
+                event = subscription["queue"].get()
+                if event is _END:
+                    return
+                yield event
+        finally:
+            self._subscriptions.pop(subscription_id, None)
+            try:
+                self._request("session.unsubscribe", {"subscriptionId": subscription_id})
+            except Exception:
+                pass
+
+    def archive_session(self, session_id: str) -> None:
+        self._request("session.archive", {"sessionId": session_id})
+
     def _read_loop(self) -> None:
         assert self._process.stdout is not None
         for line in self._process.stdout:
@@ -302,7 +348,7 @@ class Agent:
             except json.JSONDecodeError:
                 continue
             if "method" in message:
-                self._handle_message(message)
+                self._dispatch.put(message)
                 continue
             with self._lock:
                 waiter = self._pending.get(message.get("id"))
@@ -318,6 +364,9 @@ class Agent:
         params = message.get("params") or {}
         if method == "event":
             event = params["event"]
+            for subscription in self._subscriptions.values():
+                if subscription["session_id"] == event.get("session_id"):
+                    subscription["queue"].put(event)
             run = self._runs.get(event.get("run_id"))
             if run is not None:
                 run._push(event)
@@ -329,6 +378,11 @@ class Agent:
                 run._end(params)
             else:
                 self._finished_early[params.get("runId")] = params
+            self._runs.pop(params.get("runId"), None)
+        elif method == "stream.lagged":
+            handler = self._options.get("on_stream_lagged")
+            if handler is not None:
+                threading.Thread(target=handler, args=(params,), daemon=True).start()
         elif method == "approval.requested":
             threading.Thread(
                 target=self._handle_approval, args=(params,), daemon=True
@@ -338,7 +392,9 @@ class Agent:
                 target=self._handle_question, args=(params,), daemon=True
             ).start()
         elif method == "host_tool.invoke":
-            self._handle_host_tool(message)
+            threading.Thread(
+                target=self._handle_host_tool, args=(message,), daemon=True
+            ).start()
 
     def _handle_approval(self, params: dict[str, Any]) -> None:
         allow = False

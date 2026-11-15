@@ -6,99 +6,11 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use blora_runtime::HostToolRegistry;
-use blora_storage::SqliteStore;
+pub use blora_storage::RuntimeStore as Store;
 use blora_types::{BloraError, CancelToken, SessionId};
 use serde_json::Value;
 
 use crate::error::{Result, SdkError};
-
-/// A clonable, single-agent store contract that custom stores can implement.
-pub trait Store: Send + Sync {
-    /// Optional escape hatch used while the runtime migrations converge on a
-    /// fully trait-backed store. Returning `None` makes `Agent::builder().store`
-    /// reject the custom backend instead of silently ignoring it.
-    fn as_sqlite(&self) -> Option<&SqliteStore> {
-        None
-    }
-
-    fn create_session(&self, spec: blora_storage::CreateSession) -> Result<SessionId>;
-    fn append(&self, new: blora_events::NewEvent) -> Result<blora_events::EventEnvelope>;
-    fn load_events(&self, session: &SessionId) -> Result<Vec<blora_events::EventEnvelope>>;
-    fn load_events_after(
-        &self,
-        session: &SessionId,
-        after: u64,
-    ) -> Result<Vec<blora_events::EventEnvelope>>;
-    fn last_sequence(&self, session: &SessionId) -> Result<u64>;
-    fn load_projection(&self, session: &SessionId) -> Result<blora_session::SessionProjection>;
-    fn list_sessions(&self) -> Result<Vec<blora_storage::SessionSummary>>;
-    fn queue_steer(&self, session: &SessionId, message: &str) -> Result<()>;
-    fn list_pending_approvals(
-        &self,
-        session: &SessionId,
-    ) -> Result<Vec<blora_storage::ApprovalRecord>>;
-    fn resolve_approval(&self, id: &blora_types::ApprovalId, allow: bool) -> Result<()>;
-}
-
-/// SQLite implementation of the SDK store interface.
-impl Store for SqliteStore {
-    fn as_sqlite(&self) -> Option<&SqliteStore> {
-        Some(self)
-    }
-
-    fn create_session(&self, spec: blora_storage::CreateSession) -> Result<SessionId> {
-        Ok(SqliteStore::create_session(self, spec)?)
-    }
-
-    fn append(&self, new: blora_events::NewEvent) -> Result<blora_events::EventEnvelope> {
-        Ok(SqliteStore::append(self, new)?)
-    }
-
-    fn load_events(&self, session: &SessionId) -> Result<Vec<blora_events::EventEnvelope>> {
-        Ok(SqliteStore::load_events(self, session)?)
-    }
-
-    fn load_events_after(
-        &self,
-        session: &SessionId,
-        after: u64,
-    ) -> Result<Vec<blora_events::EventEnvelope>> {
-        Ok(SqliteStore::load_events_after(self, session, after)?)
-    }
-
-    fn last_sequence(&self, session: &SessionId) -> Result<u64> {
-        Ok(SqliteStore::last_sequence(self, session)?)
-    }
-
-    fn load_projection(&self, session: &SessionId) -> Result<blora_session::SessionProjection> {
-        Ok(SqliteStore::load_projection(self, session)?)
-    }
-
-    fn list_sessions(&self) -> Result<Vec<blora_storage::SessionSummary>> {
-        Ok(SqliteStore::list_sessions(self)?)
-    }
-
-    fn queue_steer(&self, session: &SessionId, message: &str) -> Result<()> {
-        Ok(SqliteStore::queue_steer(self, session, message)?)
-    }
-
-    fn list_pending_approvals(
-        &self,
-        session: &SessionId,
-    ) -> Result<Vec<blora_storage::ApprovalRecord>> {
-        Ok(SqliteStore::list_pending_approvals(self, session)?)
-    }
-
-    fn resolve_approval(&self, id: &blora_types::ApprovalId, allow: bool) -> Result<()> {
-        let decision = if allow { "allow" } else { "deny" };
-        if !SqliteStore::resolve_approval_row(self, id, decision, chrono::Utc::now())? {
-            return Err(SdkError::Kernel(BloraError::Other(format!(
-                "approval {id} is not pending"
-            ))));
-        }
-        Ok(())
-    }
-}
 
 /// Web/chat boundary: denies filesystem, shell, and process capabilities.
 ///

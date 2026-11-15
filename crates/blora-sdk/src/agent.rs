@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use blora_runtime::{
     ApprovalPolicy, PermissionMode, QuestionPolicy, Runtime, RuntimeConfig, ToolPolicy,
@@ -241,6 +242,38 @@ impl AgentBuilder {
     }
 
     #[must_use]
+    pub fn search_config(mut self, config: blora_web::SearchConfig) -> Self {
+        self.config.tool_services.search = Some(config);
+        self
+    }
+
+    #[must_use]
+    pub fn search(
+        self,
+        backend: blora_web::SearchBackend,
+        credential: impl Into<String>,
+        endpoint: Option<String>,
+    ) -> Self {
+        self.search_config(blora_web::SearchConfig {
+            backend,
+            credential: credential.into(),
+            endpoint,
+        })
+    }
+
+    #[must_use]
+    pub fn fetch_options(mut self, options: blora_web::FetchOptions) -> Self {
+        self.config.tool_services.fetch = Some(options);
+        self
+    }
+
+    #[must_use]
+    pub fn tool_services(mut self, services: blora_runtime::ToolServices) -> Self {
+        self.config.tool_services = services;
+        self
+    }
+
+    #[must_use]
     pub fn tool_policy(mut self, policy: ToolPolicy) -> Self {
         self.config.tools = policy;
         self
@@ -334,27 +367,39 @@ impl AgentBuilder {
         };
 
         let mut config = self.config;
+        if self.profile == Profile::Web {
+            config.tool_services.fetch = Some(blora_web::FetchOptions {
+                max_bytes: 2_000_000,
+                timeout: std::time::Duration::from_secs(20),
+                allow_private: false,
+            });
+            config.tool_services.pty_enabled = false;
+            config.tool_services.persist_tool_output = false;
+        }
         let provider_model = provider.model();
         config.provider = provider.into_source();
         if config.default_model.is_none() {
             config.default_model = provider_model;
         }
-        if self.custom_store.is_some() {
-            return Err(SdkError::Unsupported(
-                "custom Store adapters are declared but not yet wired into the current Runtime"
-                    .to_owned(),
-            ));
-        }
-        let store = match &self.storage {
-            Storage::Memory => SqliteStore::open_in_memory()?,
-            Storage::File(path) => {
-                if let Some(parent) = path.parent() {
-                    std::fs::create_dir_all(parent)?;
+        let store: Arc<dyn blora_storage::RuntimeStore> = if let Some(store) = self.custom_store {
+            store
+        } else {
+            match &self.storage {
+                Storage::Memory => Arc::new(blora_storage::InMemoryStore::new()?),
+                Storage::File(path) => {
+                    if let Some(parent) = path.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    Arc::new(SqliteStore::open(path)?)
                 }
-                SqliteStore::open(path)?
             }
         };
-        let runtime = Runtime::with_config(store, config);
+        if self.profile == Profile::Web && config.tool_services.search.is_none() {
+            if let Some(allowed) = config.tools.allowlist.as_mut() {
+                allowed.remove("web_search");
+            }
+        }
+        let runtime = Runtime::from_store(store, config);
         for tool in self.tools {
             runtime.register_tool(Arc::new(ToolAdapter(tool)))?;
         }
@@ -486,7 +531,42 @@ impl Agent {
         for run in active.values() {
             run.cancel.cancel();
         }
-        Ok(())
+        drop(active);
+        self.wait_active(Duration::from_secs(5))
+    }
+
+    pub fn shutdown_timeout(&self, timeout: Duration) -> Result<()> {
+        self.inner.shutdown.store(true, Ordering::SeqCst);
+        {
+            let active = self
+                .inner
+                .active
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for run in active.values() {
+                run.cancel.cancel();
+            }
+        }
+        self.wait_active(timeout)
+    }
+
+    fn wait_active(&self, timeout: Duration) -> Result<()> {
+        let started = std::time::Instant::now();
+        loop {
+            if self
+                .inner
+                .active
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty()
+            {
+                return Ok(());
+            }
+            if started.elapsed() >= timeout {
+                return Err(SdkError::RunTimeout("shutdown".to_owned()));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 }
 
@@ -507,6 +587,10 @@ impl Session {
         Ok(self.inner.runtime.show_session(&self.id)?)
     }
 
+    pub fn last_sequence(&self) -> Result<u64> {
+        Ok(self.inner.runtime.last_sequence(&self.id)?)
+    }
+
     /// Replay events after `after_sequence`.
     pub fn events_from(&self, after_sequence: u64) -> EventStream {
         EventStream::new(
@@ -521,10 +605,14 @@ impl Session {
 
     /// Tail live session events. The stream stays open until dropped.
     pub fn live_events(&self) -> EventStream {
+        self.live_events_from(0)
+    }
+
+    pub fn live_events_from(&self, after_sequence: u64) -> EventStream {
         EventStream::new(
             self.inner.runtime.clone(),
             self.id.clone(),
-            0,
+            after_sequence,
             Some(self.inner.runtime.subscribe_session(&self.id)),
             None,
             None,

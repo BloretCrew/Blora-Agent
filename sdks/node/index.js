@@ -170,9 +170,12 @@ export class Agent {
     this.options = options;
     this.nextId = 1;
     this.pending = new Map();
+    this.callbackQueue = [];
+    this.callbackRunning = false;
     this.runs = new Map();
     this.buffered = new Map();
     this.finishedEarly = new Map();
+    this.subscriptions = new Map();
     this.closed = false;
     this.tools = new Map((options.tools ?? []).map((tool) => [tool.name, tool]));
 
@@ -192,6 +195,7 @@ export class Agent {
       }
       this.pending.clear();
       for (const run of this.runs.values()) run.end();
+      for (const subscription of this.subscriptions.values()) subscription.end();
     });
   }
 
@@ -203,6 +207,8 @@ export class Agent {
       provider: this.options.provider ?? { kind: "mock" },
       workspace: this.options.workspace,
       callbacks: this.options.callbacks,
+      ...(this.options.search ? { search: this.options.search } : {}),
+      ...(this.options.fetch ? { fetch: this.options.fetch } : {}),
       hostTools: (this.options.tools ?? []).map((tool) => ({
         name: tool.name,
         description: tool.description ?? "",
@@ -219,8 +225,21 @@ export class Agent {
     }
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
-      this.send({ jsonrpc: "2.0", id, method, params });
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new BloraError(`request ${method} timed out`));
+      }, this.options.requestTimeoutMs ?? 310000);
+      this.pending.set(id, {
+        resolve: (value) => { clearTimeout(timer); resolve(value); },
+        reject: (error) => { clearTimeout(timer); reject(error); },
+      });
+      try {
+        this.send({ jsonrpc: "2.0", id, method, params });
+      } catch (error) {
+        this.pending.delete(id);
+        clearTimeout(timer);
+        reject(error);
+      }
     });
   }
 
@@ -248,6 +267,9 @@ export class Agent {
     switch (message.method) {
       case "event": {
         const event = params.event;
+        for (const subscription of this.subscriptions.values()) {
+          if (subscription.sessionId === event.session_id) subscription.queue.push(event);
+        }
         const run = this.runs.get(event.run_id);
         if (run) {
           run.push(event);
@@ -265,29 +287,45 @@ export class Agent {
         } else {
           this.finishedEarly.set(params.runId, params);
         }
+        this.runs.delete(params.runId);
+        break;
+      }
+      case "stream.lagged": {
+        this.options.onStreamLagged?.(params);
         break;
       }
       case "approval.requested": {
-        this.handleApproval(params).catch((error) =>
-          this.options.onError?.(error),
-        );
+        this.enqueueCallback(() => this.handleApproval(params));
         break;
       }
       case "input.requested": {
-        this.handleQuestion(params).catch((error) =>
-          this.options.onError?.(error),
-        );
+        this.enqueueCallback(() => this.handleQuestion(params));
         break;
       }
       case "host_tool.invoke": {
-        this.handleHostTool(message).catch((error) =>
-          this.options.onError?.(error),
-        );
+        this.enqueueCallback(() => this.handleHostTool(message));
         break;
       }
       default:
         break;
     }
+  }
+
+  enqueueCallback(callback) {
+    this.callbackQueue.push(callback);
+    if (this.callbackRunning) return;
+    this.callbackRunning = true;
+    setImmediate(async () => {
+      while (this.callbackQueue.length) {
+        const next = this.callbackQueue.shift();
+        try {
+          await next();
+        } catch (error) {
+          this.options.onError?.(error);
+        }
+      }
+      this.callbackRunning = false;
+    });
   }
 
   async handleApproval(params) {
@@ -377,12 +415,51 @@ export class Agent {
     return result.sessions;
   }
 
+  async archiveSession(sessionId) {
+    return this.request("session.archive", { sessionId });
+  }
+
+  async *subscribe(sessionId, afterSequence = 0) {
+    const result = await this.request("session.subscribe", { sessionId, afterSequence });
+    const subscriptionId = result.subscriptionId;
+    const queue = [];
+    const waiters = [];
+    const subscription = {
+      sessionId,
+      queue,
+      push(value) {
+        const waiter = waiters.shift();
+        if (waiter) waiter(value);
+        else queue.push(value);
+      },
+      end() { for (const waiter of waiters.splice(0)) waiter(END); },
+      next() {
+        if (queue.length) return Promise.resolve(queue.shift());
+        return new Promise((resolve) => waiters.push(resolve));
+      },
+    };
+    this.subscriptions.set(subscriptionId, subscription);
+    try {
+      while (true) {
+        const event = await subscription.next();
+        if (event === END) return;
+        yield event;
+      }
+    } finally {
+      this.subscriptions.delete(subscriptionId);
+      await this.request("session.unsubscribe", { subscriptionId }).catch(() => {});
+    }
+  }
+
   async close() {
     if (this.closed) return;
-    await this.request("agent.shutdown", { cancelRunning: true }).catch(() => {});
+    await this.request("agent.shutdown", { cancelRunning: true, timeoutMs: 5000 }).catch(() => {});
     this.child.stdin.end();
-    const timer = setTimeout(() => this.child.kill(), 1000);
-    timer.unref?.();
+    await new Promise((resolve) => {
+      if (this.child.exitCode !== null) return resolve();
+      this.child.once("exit", resolve);
+      setTimeout(() => this.child.kill(), 6000).unref?.();
+    });
     this.closed = true;
   }
 }
