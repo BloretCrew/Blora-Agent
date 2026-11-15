@@ -358,3 +358,56 @@
 
 - 仓库根 `to_do.md` 记录的是 Windows `bash/sh` 探测与 `shell_cwd_persists_across_calls`，与本方案 F3 相邻但独立；建议先修该基线失败，再做 F3 的取消切片，避免测试噪声。
 - 本方案不包含外部 harness（Codex/Grok）子代理能力；它们目前没有 `delegate` 对应物。
+
+---
+
+## 十、后续只读复查发现（2026-11-15）
+
+复查基线：`2f82ddc`（代码实现为 `124ad15`）。本次仅走查当前代码和依赖的反序列化实现，未修改业务代码、未重新执行全量测试。第六节勾选项描述上一轮已实现并由局部测试覆盖的主流程，不代表以下边界已完成验收。
+
+### F10（优先）：子会话没有继承用户归属
+
+- 代码证据：`runtime/src/agents.rs:144-151` 创建子会话后未绑定父用户；`storage/src/sqlite.rs:273-291` 的创建 SQL 不写入 `user_id`。
+- 影响一：鉴权 Gateway 下，`server/src/lib.rs:1913-1930` 拒绝访问无 owner 的子会话，Web 的“打开子会话”仍可能返回 403。
+- 影响二：Agent 模式的子代理可以调用 `session_search`；`runtime/src/skills.rs:139-150` 用当前会话的 `user_id` 决定过滤条件，而 `storage/src/search.rs:238-241` 在该值为空时不加用户过滤。因此多用户环境中存在跨用户检索历史记录的风险。这不应视为普通体验优化。
+- 建议：创建委派会话时在同一事务中继承父用户，并让需要用户隔离的检索在缺少归属时失败关闭；补两个用户的隔离回归测试。
+
+### F11（优先）：子代理的问答及多级审批仍存在等待边界
+
+- 子代理设置 `can_ask=false`，但保留父 `interactive`（`runtime/src/agents.rs:212-218`）；实际执行问答时使用 `options.can_ask || options.interactive`（`runtime/src/coordinator.rs:1807-1816`）。交互式父运行下，子代理仍可进入 `input.rs:128-143` 的等待循环，而提问事件只写在子会话。
+- `await_approval` 只向直接父会话上浮（`runtime/src/approvals.rs:48-57`）。深度 2 的子代理触发审批时，请求会停在中间子会话，根会话的 UI 依然看不到。
+- 取消等待审批时只修改审批表、未发送 `ApprovalResolved`（`approvals.rs:83-88`），事件投影中的审批可能继续显示 pending。
+- 建议：分离“可请求工具审批”与“可向用户提问”，明确阻止子代理问答或将问题上浮；审批沿代理归属链路路由到用户可见的会话；取消也通过规范事件收敛。
+
+### F12（优先）：跨进程取消目前只改变记录，不能保证停止执行
+
+- CLI 每次运行创建新的 `Runtime`（`cli/src/main.rs:466-468`），其中没有 TUI/Web 进程的内存取消令牌。
+- `cancel_subagent` 只在本实例的 `subagent_cancels` 找到令牌时发出实际取消，随后无条件把数据库状态写成 cancelled（`runtime/src/agents.rs:339-363`）。执行进程没有轮询这个数据库状态来取消自己的令牌。
+- 触发场景：终端 A 的 TUI 正在执行子代理，终端 B 执行 `blora agent cancel agt_…`。B 可以报告成功，A 里的模型或 shell 却继续执行，最后还可能把状态写回 completed。
+- 建议：增加持久化 `cancel_requested` 或本地 IPC；由属主进程观察请求并触发本地令牌，执行退出后统一写终态。补两个 Runtime/同一个数据库的集成测试。
+
+### F13（小修复，建议尽早）：`include_children=1` 与 bool 解析不匹配
+
+- `web/commands.js:287` 发出 `/api/sessions?include_children=1`，但 `server/src/lib.rs:808-813` 将该字段声明为普通 `bool`。
+- 当前锁定的 `serde_urlencoded 0.7.1` 对 bool 使用 Rust `parse::<bool>()`，接受 `true` / `false`，不接受 `1` / `0`。因此请求会在 Axum Query 提取阶段失败，Web `/goto` 可能直接返回 400。
+- 建议：统一使用 `include_children=true` 并同步文档，或显式兼容 1/0；新增真实 Query 解析测试，而不是只断言前端发出了 URL。
+
+### F14（健壮性）：恢复报告和终态事件尚未做到原子一致
+
+- `reconcile_stale_agents` 在恢复 completed 时仅写入通用摘要 `completed`，并将 token/轮数填 0，没有重建子会话的最终回答及用量（`runtime/src/agents.rs:70-99`）。
+- 先把 agent 行更新为终态，再单独发事件，且忽略事件写入错误（`:85-106`）。在两步之间崩溃或事件落库失败后，下次只查询 running 行将不会重试，父会话投影可永久保留 running。
+- `cancel_subagent` 与成功收尾仍分别无条件 `update_agent`，没有共同的终态竞争协议。F4 的纯函数测试不足以覆盖取消请求和收尾写入的实际竞态。
+- 建议：将 agent 终态与父会话事件放进同一存储事务，或使用可重试 outbox；恢复时从子会话事件重建摘要和用量，并增加完成/取消竞态与故障注入测试。
+
+### F15（测试与取消边界）：PTY、Unix 子进程树和 Windows 实测仍不足
+
+- `shell_prepared_cancellable` 的 PTY 分支仍调用不带令牌的 `spawn_shell`（`exec/src/lib.rs:297-324`）。
+- Unix `terminate_pid` 仅向直接 PID 发信号，没有终止整个进程组（`exec/src/host.rs:145-152`）；shell 派生的子进程可能继续运行。
+- 长命令取消测试在 `HostShell::Cmd` 分支直接 return（`exec/src/lib.rs:1770-1776`）。因此上轮该测试被统计为通过，并不证明当前 Windows Cmd 环境实际覆盖了运行中取消。
+- 建议：为 PTY 接入取消，Unix 管理独立进程组；添加 Cmd 原生命令的长任务测试，并检测后代进程和输出管道是否都已结束。
+
+### 后续建议顺序
+
+1. F10（用户隔离）、F11（等待路由）、F12（真实取消）优先，不能只作为界面小修。
+2. F13 属于小改动，适合尽快修正 URL 并补端到端查询参数测试。
+3. F14/F15 补齐恢复与取消的故障边界；不要把“已有失败在基线上存在”直接等同于环境无需修复，Windows shell 探测和测试夹具仍需单独治理。
