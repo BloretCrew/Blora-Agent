@@ -32,10 +32,10 @@ jobs:
           cargo fmt --all -- --check
           cargo clippy -p blora-sdk -p blora-sdk-protocol -p blora-runtime -p blora-storage -p blora-tools -p blora-exec -p blora-web -p blora-context -p blora-policy --all-targets -- -D warnings
       - name: Rust workspace tests
-        run: cargo test --workspace
+        run: env -u BLORA_API_KEY -u OPENAI_API_KEY -u ANTHROPIC_API_KEY -u GEMINI_API_KEY cargo test --workspace
       - name: Build CLI
         run: cargo build -p blora-cli
       - name: Node SDK
-        run: ./scripts/check-sdk-node.sh
+        run: sh scripts/check-sdk-node.sh
       - name: Python SDK
-        run: ./scripts/check-sdk-python.sh
+        run: sh scripts/check-sdk-python.sh
