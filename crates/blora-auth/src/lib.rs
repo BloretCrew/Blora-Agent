@@ -508,8 +508,6 @@ mod tests {
 
     #[test]
     fn poll_device_keeps_polling_through_authorization_pending() {
-        use std::io::Read;
-
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let server = thread::spawn(move || {
@@ -519,11 +517,10 @@ mod tests {
                     return;
                 };
                 let mut stream = stream;
-                let mut buffer = [0u8; 4096];
-                let Ok(read) = Read::read(&mut stream, &mut buffer) else {
-                    continue;
+                let request = match read_request(&mut stream) {
+                    Ok(request) => request,
+                    Err(_) => continue,
                 };
-                let request = String::from_utf8_lossy(&buffer[..read]).into_owned();
                 if request.starts_with("POST /oauth/token") {
                     if pending {
                         pending = false;
@@ -880,6 +877,35 @@ mod tests {
         );
         let received = server.join().unwrap();
         assert!(received[1].duration_since(received[0]) >= Duration::from_millis(5900));
+    }
+
+    /// Read a complete HTTP request, including any body described by
+    /// `Content-Length`. Closing a socket with unread request bytes makes the
+    /// kernel send RST, which surfaces as a header error in the client.
+    fn read_request(stream: &mut std::net::TcpStream) -> std::io::Result<String> {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 1024];
+        loop {
+            let read = stream.read(&mut chunk)?;
+            if read == 0 {
+                break;
+            }
+            buf.extend_from_slice(&chunk[..read]);
+            let Some(head_end) = buf.windows(4).position(|window| window == b"\r\n\r\n") else {
+                continue;
+            };
+            let head = String::from_utf8_lossy(&buf[..head_end]).to_ascii_lowercase();
+            let length = head
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length:"))
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            if buf.len() >= head_end + 4 + length {
+                break;
+            }
+        }
+        Ok(String::from_utf8_lossy(&buf).into_owned())
     }
 
     fn write_response(stream: &mut std::net::TcpStream, status: u16, text: &str, body: &[u8]) {
