@@ -390,6 +390,7 @@ mod tests {
                 workspace_path: "/tmp".to_owned(),
                 mode: Mode::Agent,
                 parent_session_id: None,
+                user_id: None,
             })
             .unwrap();
         for text in texts {
@@ -525,6 +526,7 @@ mod tests {
                 workspace_path: "/tmp".to_owned(),
                 mode: Mode::Agent,
                 parent_session_id: Some(root.clone()),
+                user_id: None,
             })
             .unwrap();
         store

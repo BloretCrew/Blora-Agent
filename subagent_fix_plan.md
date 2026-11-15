@@ -411,3 +411,34 @@
 1. F10（用户隔离）、F11（等待路由）、F12（真实取消）优先，不能只作为界面小修。
 2. F13 属于小改动，适合尽快修正 URL 并补端到端查询参数测试。
 3. F14/F15 补齐恢复与取消的故障边界；不要把“已有失败在基线上存在”直接等同于环境无需修复，Windows shell 探测和测试夹具仍需单独治理。
+
+---
+
+## 十一、第十节实施记录（2026-11-15）
+
+分支：`feat/subagent-hardening`（基线 `1f6ae43`）
+
+| 项 | 落地方式 | 关键位置 |
+|---|---|---|
+| F10 | `CreateSession` 增加 `user_id`；存储层在同一插入事务内继承父会话的 owner（`fork` 也走这条路径）；`session_search` 在存在已归属会话的库里对无归属调用返回空结果 | `storage/src/sqlite.rs`（`create_session`）、`storage/src/users.rs`（`has_owned_sessions`）、`runtime/src/skills.rs` |
+| F11 | `ask_user` 只依据 `can_ask`，子代理固定 `false`；`await_approval` 沿 `subagent_owners` 链上浮到根会话，摘要串联整条角色路径；取消等待中的审批补发 `approval.resolved{deny}` | `runtime/src/coordinator.rs`、`runtime/src/approvals.rs` |
+| F12 | `agents.cancel_requested`（schema v15）；非属主进程调用 `cancel_subagent` 只写请求；属主在子 run 期间每 250ms 轮询并触发本地令牌；`pump` 也会投递请求 | `storage/src/sqlite.rs`、`storage/src/schema.sql`、`runtime/src/agents.rs`、`runtime/src/work.rs` |
+| F13 | 查询参数解析兼容 `true/false` 与 `1/0`；Web `/goto` 改用 `include_children=true`；补解析测试与真实 HTTP 列表测试 | `server/src/lib.rs`、`web/commands.js`、`docs/protocols/local-api.md` |
+| F14 | 新增 `SqliteStore::finish_agent_with_event`：终态更新与父会话事件在同一 `IMMEDIATE` 事务；恢复时从子会话事件重建最后回答与 token/轮数；所有写事务改为 `IMMEDIATE`，消除跨连接 `SQLITE_BUSY` | `storage/src/sqlite.rs`、`runtime/src/agents.rs` |
+| F15 | PTY 分支接入取消；Unix 命令使用独立进程组并整组终止；新增 PTY 取消测试与 Windows Cmd 下真实 `ping` 长任务测试 | `exec/src/lib.rs`、`exec/src/host.rs` |
+
+新增测试（全部通过）：
+
+- `agents::`：`delegated_child_inherits_the_parent_user`、`search_fails_closed_for_unowned_sessions_in_a_multi_user_store`、`subagents_never_block_on_ask_user`、`nested_subagent_approvals_reach_the_root_session`、`cross_process_cancel_request_stops_the_owner`、`reconcile_rebuilds_the_child_report_and_usage`
+- `blora-exec`：`cancellable_pty_shell_stops_a_long_command`，`cancellable_shell_stops_a_long_command` 现在在 Windows Cmd 下也实际执行
+- `blora-server`：`session_list_query_accepts_boolean_spellings`、`session_list_hides_children_unless_include_children`
+- 既有 `ask_user_waits_for_an_answer_in_interactive_runs` 改为显式 `can_ask: true`，与新的语义分离保持一致
+
+行为变化（需要调用方注意）：
+
+- 子代理不再通过 `interactive` 间接获得提问能力；只有 `can_ask: true` 的运行会阻塞。
+- `cancel_subagent` 在非属主进程返回成功仅表示“请求已记录”，终态由执行进程写入。
+- 多用户数据库中，无归属会话的 `session_search` 返回空结果。
+- `CreateSession` 新增字段，所有构造点已同步；外部若直接使用该结构需要补 `user_id: None`。
+
+剩余基线失败（未在本轮修复）：`blora-runtime::shell_cwd_persists_across_calls`、`blora-exec` 5 个 shell/git 测试、`blora-tui` 2 个文件面板测试、`blora-server` 6 个静态资源/workbench 测试。本轮新增用例没有再引入失败。

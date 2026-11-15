@@ -284,7 +284,7 @@
         else {
           // `goto` may target an agent's child session by exact id; `next` and
           // `prev` stay on the root list the sidebar shows.
-          const rows = await bridge.api(name === "goto" ? "/api/sessions?include_children=1" : "/api/sessions");
+          const rows = await bridge.api(name === "goto" ? "/api/sessions?include_children=true" : "/api/sessions");
           let selected;
           if (name === "goto") {
             if (!args) throw new Error("用法：/goto <id|title>");

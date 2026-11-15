@@ -42,19 +42,11 @@ impl Runtime {
         summary: &str,
         cancel: &CancelToken,
     ) -> Result<bool> {
-        // A subagent's approvals belong to the parent conversation: that is the
-        // session an interactive client is watching. The summary names the role
-        // so the user knows who is asking.
-        let (owner_session, summary) = match self
-            .subagent_owners
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(session_id)
-            .cloned()
-        {
-            Some((parent, role)) => (parent, format!("[subagent:{role}] {summary}")),
-            None => (session_id.clone(), summary.to_owned()),
-        };
+        // A subagent's approvals belong to the root conversation: that is the
+        // session an interactive client is watching. Depth-2 children resolve to
+        // the root, not their intermediate parent. The summary names each role
+        // on the path so the user knows who is asking.
+        let (owner_session, summary) = self.approval_owner(session_id, summary)?;
         let approval_id = ApprovalId::generate();
         let now = Utc::now();
         let owned_by_parent = owner_session != *session_id;
@@ -82,9 +74,7 @@ impl Runtime {
         )?;
         loop {
             if cancel.is_cancelled() {
-                let _ = self
-                    .store
-                    .resolve_approval_row(&approval_id, "deny", Utc::now());
+                self.settle_cancelled_approval(&owner_session, &approval_id)?;
                 return Err(BloraError::Cancelled);
             }
             let record = self.store.get_approval(&approval_id)?;
@@ -125,5 +115,67 @@ impl Runtime {
                 _ => thread::sleep(Duration::from_millis(80)),
             }
         }
+    }
+
+    /// Resolve which session should display an approval raised by `session_id`,
+    /// following the live subagent chain up to the first session that is not a
+    /// child. Also prefixes every role on the chain.
+    pub(crate) fn approval_owner(
+        &self,
+        session_id: &SessionId,
+        summary: &str,
+    ) -> Result<(SessionId, String)> {
+        let owners = self
+            .subagent_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut current = session_id.clone();
+        let mut roles = Vec::new();
+        let mut hops = 0;
+        while let Some((parent, role)) = owners.get(&current).cloned() {
+            hops += 1;
+            if hops > 8 {
+                break;
+            }
+            roles.push(role);
+            current = parent;
+        }
+        drop(owners);
+        let summary = if roles.is_empty() {
+            summary.to_owned()
+        } else {
+            roles.reverse();
+            let tag = roles
+                .iter()
+                .map(|role| format!("subagent:{role}"))
+                .collect::<Vec<_>>()
+                .join(" > ");
+            format!("[{tag}] {summary}")
+        };
+        Ok((current, summary))
+    }
+
+    /// Mark a pending approval denied and record the decision on the event log,
+    /// so projections do not keep showing a pending approval forever.
+    fn settle_cancelled_approval(
+        &self,
+        owner_session: &SessionId,
+        approval_id: &ApprovalId,
+    ) -> Result<()> {
+        if self
+            .store
+            .resolve_approval_row(approval_id, "deny", Utc::now())?
+        {
+            self.emit(
+                owner_session,
+                None,
+                None,
+                KnownPayload::ApprovalResolved(ApprovalResolved {
+                    approval_id: approval_id.clone(),
+                    decision: "deny".to_owned(),
+                }),
+            )?;
+        }
+        Ok(())
     }
 }

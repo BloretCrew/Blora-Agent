@@ -131,7 +131,8 @@ pub fn sandbox_path() -> String {
     }
 }
 
-/// Stop a process spawned by Blora. Unix uses `kill`; Windows uses `taskkill /T /F`.
+/// Stop a process spawned by Blora. Unix signals the whole process group
+/// (commands run with their own group); Windows uses `taskkill /T /F`.
 pub fn terminate_pid(pid: u32) -> std::io::Result<std::process::ExitStatus> {
     #[cfg(windows)]
     {
@@ -144,6 +145,17 @@ pub fn terminate_pid(pid: u32) -> std::io::Result<std::process::ExitStatus> {
     }
     #[cfg(not(windows))]
     {
+        // Negative pid addresses the group created via `process_group(0)`.
+        // Fall back to the single process when no group exists.
+        let group = command("kill")
+            .args(["-TERM", &format!("-{pid}")])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        if group.is_ok_and(|status| status.success()) {
+            return group;
+        }
         command("kill")
             .arg(pid.to_string())
             .stdin(Stdio::null())

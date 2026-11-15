@@ -513,6 +513,7 @@ impl RightPanel {
                     workspace_path: workspace.display().to_string(),
                     mode: Mode::Code,
                     parent_session_id: None,
+                    user_id: None,
                 }) {
                     Ok(session) => {
                         self.chat = Some(SideChat {
@@ -2823,6 +2824,7 @@ mod tests {
                 workspace_path: "/tmp".into(),
                 mode: Mode::Code,
                 parent_session_id: None,
+                user_id: None,
             })
             .unwrap();
         let mut panel = RightPanel::default();

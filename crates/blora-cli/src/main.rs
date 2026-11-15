@@ -607,6 +607,7 @@ fn dispatch(
                         .to_string(),
                     mode: Mode::parse(&mode)?,
                     parent_session_id: None,
+                    user_id: None,
                 })?;
                 println!("{id}");
             }
@@ -838,6 +839,7 @@ fn headless(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             workspace_path,
             mode: Mode::Code,
             parent_session_id: None,
+            user_id: None,
         })?
     };
     let permission = cli.permission;

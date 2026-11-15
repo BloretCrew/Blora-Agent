@@ -237,6 +237,7 @@ mod tests {
                 workspace_path: ".".to_owned(),
                 mode: Mode::Code,
                 parent_session_id: None,
+                user_id: None,
             })
             .unwrap()
     }

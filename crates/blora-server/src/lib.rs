@@ -808,9 +808,25 @@ fn resolve_vendor(request: &str) -> Option<PathBuf> {
 struct SessionListQuery {
     q: Option<String>,
     /// Include subagent / fork children. Defaults to root sessions only so the
-    /// sidebar matches the TUI.
-    #[serde(default)]
+    /// sidebar matches the TUI. Accepts `true`/`false` and `1`/`0`.
+    #[serde(default, deserialize_with = "deserialize_query_bool")]
     include_children: bool,
+}
+
+fn deserialize_query_bool<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    let value = Option::<String>::deserialize(deserializer)?;
+    match value.as_deref().map(str::trim) {
+        None | Some("") => Ok(false),
+        Some("true" | "1" | "yes" | "on") => Ok(true),
+        Some("false" | "0" | "no" | "off") => Ok(false),
+        Some(other) => Err(D::Error::custom(format!(
+            "include_children must be true/false or 1/0, got {other}"
+        ))),
+    }
 }
 
 async fn list_sessions(
@@ -869,6 +885,7 @@ async fn create_session(
             workspace_path: workspace,
             mode,
             parent_session_id: None,
+            user_id: None,
         })
         .map_err(ApiError::from)?;
     if let Some(user) = current_user(&state, &headers)? {
@@ -3021,6 +3038,23 @@ mod tests {
         }
     }
 
+    #[test]
+    fn session_list_query_accepts_boolean_spellings() {
+        // Axum's Query extractor delegates to serde_urlencoded, so this is the
+        // same parsing the endpoint performs.
+        let parse = |query: &str| {
+            serde_urlencoded::from_str::<SessionListQuery>(query)
+                .map(|value| value.include_children)
+        };
+        assert!(!parse("").unwrap());
+        assert!(parse("include_children=true").unwrap());
+        assert!(parse("include_children=1").unwrap());
+        assert!(!parse("include_children=false").unwrap());
+        assert!(!parse("include_children=0").unwrap());
+        assert!(parse("q=x&include_children=1").unwrap());
+        assert!(parse("include_children=maybe").is_err());
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cancel_and_expiry_discard_inflight_success() {
         for cancel in [true, false] {
@@ -3210,6 +3244,76 @@ mod tests {
         assert_eq!(contents, "hello");
         assert!(THINKING_ORBS_ENGINE.contains("resolvePreset"));
         assert!(THINKING_ORBS_HOST.contains("attachThinkingOrb"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn session_list_hides_children_unless_include_children() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(Runtime::new(
+            blora_storage::SqliteStore::open(dir.path().join("state.sqlite")).unwrap(),
+        ));
+        let root = runtime
+            .create_session(blora_storage::CreateSession {
+                title: Some("root".to_owned()),
+                workspace_path: dir.path().display().to_string(),
+                mode: blora_types::Mode::Code,
+                parent_session_id: None,
+                user_id: None,
+            })
+            .unwrap();
+        let child = runtime
+            .create_session(blora_storage::CreateSession {
+                title: Some("subagent:worker".to_owned()),
+                workspace_path: dir.path().display().to_string(),
+                mode: blora_types::Mode::Code,
+                parent_session_id: Some(root.clone()),
+                user_id: None,
+            })
+            .unwrap();
+        let state = AppState {
+            runtime,
+            workspace: dir.path().to_path_buf(),
+            cancels: Arc::new(Mutex::new(HashMap::new())),
+            require_auth: false,
+            passport: None,
+            device_attempts: Arc::new(Mutex::new(HashMap::new())),
+            passport_sessions: Arc::new(Mutex::new(HashMap::new())),
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app(state)).await.ok();
+        });
+        let (default_list, with_children, numeric) = tokio::task::spawn_blocking(move || {
+            let get = |suffix: &str| -> serde_json::Value {
+                let url = format!("http://{addr}/api/sessions{suffix}");
+                for _ in 0..40 {
+                    match ureq::get(&url).call() {
+                        Ok(ok) => return ok.into_json().unwrap(),
+                        Err(_) => std::thread::sleep(Duration::from_millis(25)),
+                    }
+                }
+                panic!("session list did not start serving");
+            };
+            (
+                get(""),
+                get("?include_children=true"),
+                get("?include_children=1"),
+            )
+        })
+        .await
+        .unwrap();
+        let ids = |rows: &serde_json::Value| -> Vec<String> {
+            rows.as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|row| row["id"].as_str().map(str::to_owned))
+                .collect()
+        };
+        assert!(ids(&default_list).contains(&root.to_string()));
+        assert!(!ids(&default_list).contains(&child.to_string()));
+        assert!(ids(&with_children).contains(&child.to_string()));
+        assert!(ids(&numeric).contains(&child.to_string()));
     }
 
     #[test]

@@ -357,6 +357,7 @@ pub fn run(runtime: &Runtime, workspace: &Path) -> Result<()> {
             workspace_path: workspace.display().to_string(),
             mode: Mode::Code,
             parent_session_id: None,
+            user_id: None,
         })?;
         sessions = runtime.list_sessions()?;
         let _ = id;
@@ -4169,6 +4170,7 @@ fn create_session(
         workspace_path: workspace.display().to_string(),
         mode,
         parent_session_id: None,
+        user_id: None,
     })
 }
 

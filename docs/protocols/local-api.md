@@ -5,7 +5,7 @@
 ```text
 GET    /api/sessions          session summaries: id, title, workspace_path, mode, status, updated_at, last_sequence; root sessions only
 GET    /api/sessions?q=       same summary shape; matches child sessions too (each row may carry parent_session_id)
-GET    /api/sessions?include_children=1  include subagent and fork children
+GET    /api/sessions?include_children=true  include subagent and fork children (`1` also accepted)
 POST   /api/sessions
 GET    /api/sessions/:id
 POST   /api/sessions/:id/run         {"prompt", "permission_mode": "plan|default|acceptEdits|bypassPermissions", ...}

@@ -264,6 +264,21 @@ impl SqliteStore {
         Ok(out)
     }
 
+    /// True when any session has an owner, i.e. this database is multi-user.
+    /// Callers use it to fail closed rather than leak every user's history to
+    /// a session that somehow lacks an owner.
+    pub fn has_owned_sessions(&self) -> Result<bool> {
+        let conn = self.lock();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE user_id IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(BloraError::storage)?;
+        Ok(count > 0)
+    }
+
     pub fn session_user_id(&self, session_id: &SessionId) -> Result<Option<String>> {
         let conn = self.lock();
         conn.query_row(

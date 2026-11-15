@@ -47,6 +47,9 @@ pub struct AgentRecord {
     pub summary: Option<String>,
     /// OS process driving the child. `None` for rows written by older builds.
     pub owner_pid: Option<u32>,
+    /// Another process asked this child to stop. The owner polls it and
+    /// cancels its in-memory token.
+    pub cancel_requested: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

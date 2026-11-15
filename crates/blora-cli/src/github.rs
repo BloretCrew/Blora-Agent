@@ -141,6 +141,7 @@ impl AgentDriver for RuntimeAgent<'_> {
                 workspace_path: request.workspace.display().to_string(),
                 mode: Mode::Code,
                 parent_session_id: None,
+                user_id: None,
             })
             .map_err(|err| blora_github::GithubError::new(err.to_string()))?;
         self.runtime

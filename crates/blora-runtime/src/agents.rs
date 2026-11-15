@@ -67,43 +67,75 @@ impl Runtime {
             if live_here || agent.owner_pid.is_some_and(process_is_alive) {
                 continue;
             }
-            let run_status = self
-                .show_session(&agent.child_session_id)
-                .ok()
-                .and_then(|projection| projection.runs.last().map(|run| run.status));
-            let (status, summary) = match run_status {
+            let projection = self.show_session(&agent.child_session_id).ok();
+            let run_status = projection
+                .as_ref()
+                .and_then(|projection| projection.runs.last())
+                .map(|run| run.status);
+            let (status, fallback) = match run_status {
                 Some(blora_types::RunStatus::Completed) => ("completed", "completed"),
                 Some(blora_types::RunStatus::Cancelled) => ("cancelled", "cancelled"),
                 Some(blora_types::RunStatus::Failed) => ("failed", "failed"),
                 _ => ("failed", "interrupted"),
             };
+            // Rebuild the report from the child's own event log instead of a
+            // placeholder, so a recovered completion still tells the parent
+            // what the child did and what it cost.
+            let child_report = projection.as_ref().and_then(|projection| {
+                projection.transcript.iter().rev().find_map(|item| {
+                    if let blora_session::TranscriptItem::Assistant { text, .. } = item {
+                        Some(text.clone())
+                    } else {
+                        None
+                    }
+                })
+            });
             let summary = agent
                 .summary
                 .as_deref()
                 .filter(|text| !text.is_empty())
-                .unwrap_or(summary);
-            if !self
-                .store
-                .finish_agent_if_running(&agent.id, status, Some(summary), Utc::now())?
-            {
-                continue;
-            }
-            converged += 1;
+                .map(str::to_owned)
+                .or(child_report)
+                .unwrap_or_else(|| fallback.to_owned());
+            let (input_tokens, output_tokens, turns) = projection
+                .as_ref()
+                .map(|projection| {
+                    let turns = projection
+                        .transcript
+                        .iter()
+                        .filter(|item| {
+                            matches!(item, blora_session::TranscriptItem::Assistant { .. })
+                        })
+                        .count() as u32;
+                    (projection.input_tokens, projection.output_tokens, turns)
+                })
+                .unwrap_or_default();
             let payload = if status == "completed" {
                 KnownPayload::SubagentCompleted(SubagentCompleted {
                     agent_id: agent.id.clone(),
-                    summary: Some(summary.to_owned()),
-                    input_tokens: 0,
-                    output_tokens: 0,
-                    turns: 0,
+                    summary: Some(summary.clone()),
+                    input_tokens,
+                    output_tokens,
+                    turns,
                 })
             } else {
                 KnownPayload::SubagentFailed(SubagentFailed {
                     agent_id: agent.id.clone(),
-                    error: summary.to_owned(),
+                    error: summary.clone(),
                 })
             };
-            let _ = self.emit(&agent.parent_session_id, None, None, payload);
+            // The conditional update and the parent event commit together; a
+            // crash between them cannot leave a terminal row with no report.
+            if !self.store.finish_agent_with_event(
+                &agent.id,
+                status,
+                Some(&summary),
+                payload,
+                Utc::now(),
+            )? {
+                continue;
+            }
+            converged += 1;
         }
         Ok(converged)
     }
@@ -148,6 +180,9 @@ impl Runtime {
             // the web); Imagine has no tool loop to delegate into.
             mode: child_mode,
             parent_session_id: Some(parent_session.clone()),
+            // Inherited from the parent inside the insert transaction, so a
+            // delegated child is never visible without its owner.
+            user_id: None,
         })?;
         let agent_id = AgentId::generate();
         let now = Utc::now();
@@ -170,6 +205,7 @@ impl Runtime {
                 budget_turns: spec.budget,
                 summary: None,
                 owner_pid: Some(std::process::id()),
+                cancel_requested: false,
                 created_at: now,
                 updated_at: now,
             },
@@ -228,7 +264,36 @@ impl Runtime {
             },
         };
         let child_prompt = subagent_brief(&role, &spec.duty, prompt, depth < MAX_SUBAGENT_DEPTH);
-        let result = self.run(&child_session, &child_prompt, &child_cancel, &child_options);
+        let result = {
+            // Another process can only ask us to stop through the database.
+            // Watch that flag for the lifetime of the child run.
+            let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+            let watcher = {
+                let store = self.store.clone();
+                let agent_id = agent_id.clone();
+                let token = child_cancel.clone();
+                std::thread::spawn(move || {
+                    loop {
+                        match stop_rx.recv_timeout(std::time::Duration::from_millis(250)) {
+                            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                                // A busy write can briefly fail this read; the
+                                // next tick retries, and a real cancel request
+                                // stays visible until the child finishes.
+                                if store.agent_cancel_requested(&agent_id).unwrap_or(false) {
+                                    token.cancel();
+                                    return;
+                                }
+                            }
+                            _ => return,
+                        }
+                    }
+                })
+            };
+            let result = self.run(&child_session, &child_prompt, &child_cancel, &child_options);
+            drop(stop_tx);
+            let _ = watcher.join();
+            result
+        };
         let control = self.store.get_agent(&agent_id).ok();
         let projection = self.show_session(&child_session).ok();
         // A run that reached a terminal state is authoritative: a parent cancel
@@ -276,16 +341,15 @@ impl Runtime {
                 .as_ref()
                 .is_none_or(|agent| agent.status == "running")
             {
-                self.store
-                    .update_agent(&agent_id, "cancelled", Some("cancelled"), Utc::now())?;
-                self.emit(
-                    parent_session,
-                    None,
-                    None,
+                self.store.finish_agent_with_event(
+                    &agent_id,
+                    "cancelled",
+                    Some("cancelled"),
                     KnownPayload::SubagentFailed(SubagentFailed {
                         agent_id: agent_id.clone(),
                         error: "cancelled".to_owned(),
                     }),
+                    Utc::now(),
                 )?;
             }
             return Ok(format!(
@@ -296,19 +360,18 @@ impl Runtime {
 
         match result {
             Ok(_) => {
-                self.store
-                    .update_agent(&agent_id, "completed", Some(&summary), Utc::now())?;
-                self.emit(
-                    parent_session,
-                    None,
-                    None,
+                self.store.finish_agent_with_event(
+                    &agent_id,
+                    "completed",
+                    Some(&summary),
                     KnownPayload::SubagentCompleted(SubagentCompleted {
-                        agent_id,
+                        agent_id: agent_id.clone(),
                         summary: Some(summary.clone()),
                         input_tokens,
                         output_tokens,
                         turns,
                     }),
+                    Utc::now(),
                 )?;
                 Ok(format!(
                     "<subagent role=\"{role}\" status=\"completed\" turns=\"{turns}\" tokens=\"{}\">\n{summary}\n</subagent>",
@@ -317,16 +380,15 @@ impl Runtime {
             }
             Err(err) => {
                 let error = err.to_string();
-                self.store
-                    .update_agent(&agent_id, "failed", Some(&error), Utc::now())?;
-                self.emit(
-                    parent_session,
-                    None,
-                    None,
+                self.store.finish_agent_with_event(
+                    &agent_id,
+                    "failed",
+                    Some(&error),
                     KnownPayload::SubagentFailed(SubagentFailed {
-                        agent_id,
+                        agent_id: agent_id.clone(),
                         error: error.clone(),
                     }),
+                    Utc::now(),
                 )?;
                 Ok(format!(
                     "<subagent role=\"{role}\" status=\"failed\" turns=\"{turns}\" tokens=\"{}\">\n{error}\n</subagent>",
@@ -337,30 +399,65 @@ impl Runtime {
     }
 
     /// Mark a running subagent as cancelled and interrupt its child run.
+    ///
+    /// When this process owns the child, the in-memory token stops it. When
+    /// another process owns it, the request is persisted and the owner polls
+    /// it; we never claim the child finished unless the row is ours.
     pub fn cancel_subagent(&self, agent_id: &AgentId) -> Result<()> {
         let agent = self.store.get_agent(agent_id)?;
         if agent.status != "running" {
             return Ok(());
         }
-        if let Some(token) = self
+        let local_token = self
             .subagent_cancels
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(agent_id)
-        {
+            .cloned();
+        if let Some(token) = local_token {
             token.cancel();
+            // The run loop owns the terminal transition; only claim it here if
+            // the child is still running, so a completed result is not lost.
+            self.store.finish_agent_with_event(
+                agent_id,
+                "cancelled",
+                Some("cancelled"),
+                KnownPayload::SubagentFailed(SubagentFailed {
+                    agent_id: agent_id.clone(),
+                    error: "cancelled".to_owned(),
+                }),
+                Utc::now(),
+            )?;
+            return Ok(());
         }
-        self.store
-            .update_agent(agent_id, "cancelled", Some("cancelled"), Utc::now())?;
-        self.emit(
-            &agent.parent_session_id,
-            None,
-            None,
-            KnownPayload::SubagentFailed(SubagentFailed {
-                agent_id: agent_id.clone(),
-                error: "cancelled".to_owned(),
-            }),
-        )
+        // Owned by another live process: hand the request over and let the
+        // owner report the terminal state once its run actually stops.
+        if self.store.request_agent_cancel(agent_id, Utc::now())? {
+            return Ok(());
+        }
+        // The owner is gone and the request could not be recorded; nothing is
+        // running any more, so converge the row instead of leaving it stuck.
+        self.reconcile_stale_agents()?;
+        Ok(())
+    }
+
+    /// Forward cross-process cancel requests to this process's own tokens.
+    /// Called from `pump` and the TUI/Web run loops.
+    pub fn drain_cancel_requests(&self) -> Result<usize> {
+        let mut delivered = 0;
+        for agent in self.store.list_cancel_requested_agents()? {
+            let token = self
+                .subagent_cancels
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&agent.id)
+                .cloned();
+            if let Some(token) = token {
+                token.cancel();
+                delivered += 1;
+            }
+        }
+        Ok(delivered)
     }
 
     /// Queue a steering message for a running subagent. It is delivered as the
@@ -689,6 +786,7 @@ mod tests {
                 workspace_path: workspace.to_owned(),
                 mode,
                 parent_session_id: None,
+                user_id: None,
             })
             .unwrap()
     }
@@ -771,6 +869,7 @@ mod tests {
                 workspace_path: ".".to_owned(),
                 mode: Mode::Code,
                 parent_session_id: Some(root),
+                user_id: None,
             })
             .unwrap();
         let grandchild = runtime
@@ -779,6 +878,7 @@ mod tests {
                 workspace_path: ".".to_owned(),
                 mode: Mode::Code,
                 parent_session_id: Some(child),
+                user_id: None,
             })
             .unwrap();
         assert_eq!(runtime.session_depth(&grandchild).unwrap(), 2);
@@ -862,6 +962,7 @@ mod tests {
                 workspace_path: ".".to_owned(),
                 mode: Mode::Code,
                 parent_session_id: Some(parent.clone()),
+                user_id: None,
             })
             .unwrap();
         let agent_id = AgentId::generate();
@@ -879,6 +980,7 @@ mod tests {
                     budget_turns: SUBAGENT_TURNS,
                     summary: None,
                     owner_pid: None,
+                    cancel_requested: false,
                     created_at: now,
                     updated_at: now,
                 },
@@ -916,6 +1018,93 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_rebuilds_the_child_report_and_usage() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = Runtime::new(SqliteStore::open_in_memory().unwrap());
+        let parent = session(&runtime, Mode::Code, dir.path().to_str().unwrap());
+        let child = runtime
+            .create_session(CreateSession {
+                title: Some("subagent:worker".to_owned()),
+                workspace_path: dir.path().to_str().unwrap().to_owned(),
+                mode: Mode::Code,
+                parent_session_id: Some(parent.clone()),
+                user_id: None,
+            })
+            .unwrap();
+        // A crashed child that had already produced a final answer and usage.
+        runtime
+            .run_mock(
+                &child,
+                "measure",
+                &CancelToken::new(),
+                &crate::MockRunOptions {
+                    chunks: vec!["measured 42 widgets".to_owned()],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        runtime
+            .append_event(
+                &child,
+                None,
+                KnownPayload::UsageRecorded(blora_events::UsageRecorded {
+                    input_tokens: 11,
+                    output_tokens: 7,
+                    cached_tokens: 0,
+                }),
+            )
+            .unwrap();
+        let agent_id = AgentId::generate();
+        let now = Utc::now();
+        runtime
+            .store
+            .try_insert_running_agent(
+                &AgentRecord {
+                    id: agent_id.clone(),
+                    parent_session_id: parent.clone(),
+                    child_session_id: child.clone(),
+                    role: "worker".to_owned(),
+                    depth: 1,
+                    status: "running".to_owned(),
+                    budget_turns: SUBAGENT_TURNS,
+                    summary: None,
+                    owner_pid: None,
+                    cancel_requested: false,
+                    created_at: now,
+                    updated_at: now,
+                },
+                u32::MAX,
+            )
+            .unwrap();
+        runtime
+            .append_event(
+                &parent,
+                None,
+                KnownPayload::SubagentSpawned(SubagentSpawned {
+                    agent_id: agent_id.clone(),
+                    role: "worker".to_owned(),
+                    child_session_id: Some(child),
+                    prompt: Some("measure".to_owned()),
+                    depth: 1,
+                }),
+            )
+            .unwrap();
+
+        assert_eq!(runtime.reconcile_stale_agents().unwrap(), 1);
+        let agent = runtime.get_subagent(&agent_id).unwrap();
+        assert_eq!(agent.status, "completed");
+        assert_eq!(agent.summary.as_deref(), Some("measured 42 widgets"));
+        let events = runtime.events(&parent).unwrap();
+        let done = events
+            .iter()
+            .find(|event| event.event_type == "subagent.completed")
+            .expect("completed event");
+        assert_eq!(done.payload["input_tokens"], 11);
+        assert_eq!(done.payload["output_tokens"], 7);
+        assert_eq!(done.payload["turns"], 1);
+    }
+
+    #[test]
     fn reconcile_skips_children_this_process_is_running() {
         let runtime = Runtime::new(SqliteStore::open_in_memory().unwrap());
         let parent = session(&runtime, Mode::Code, ".");
@@ -925,6 +1114,7 @@ mod tests {
                 workspace_path: ".".to_owned(),
                 mode: Mode::Code,
                 parent_session_id: Some(parent),
+                user_id: None,
             })
             .unwrap();
         let agent_id = AgentId::generate();
@@ -942,6 +1132,7 @@ mod tests {
                     budget_turns: SUBAGENT_TURNS,
                     summary: None,
                     owner_pid: None,
+                    cancel_requested: false,
                     created_at: now,
                     updated_at: now,
                 },
@@ -967,6 +1158,7 @@ mod tests {
                 workspace_path: ".".to_owned(),
                 mode: Mode::Code,
                 parent_session_id: Some(parent),
+                user_id: None,
             })
             .unwrap();
         let agent_id = AgentId::generate();
@@ -986,6 +1178,7 @@ mod tests {
                     // The current test process is still alive, so this is a
                     // child another process (TUI vs Web) is driving.
                     owner_pid: Some(std::process::id()),
+                    cancel_requested: false,
                     created_at: now,
                     updated_at: now,
                 },
@@ -1008,6 +1201,7 @@ mod tests {
                     workspace_path: ".".to_owned(),
                     mode: Mode::Code,
                     parent_session_id: Some(parent.clone()),
+                    user_id: None,
                 })
                 .unwrap();
             let agent_id = AgentId::generate();
@@ -1024,6 +1218,7 @@ mod tests {
                         budget_turns: SUBAGENT_TURNS,
                         summary: None,
                         owner_pid: None,
+                        cancel_requested: false,
                         created_at: now,
                         updated_at: now,
                     },
@@ -1067,6 +1262,134 @@ mod tests {
     }
 
     #[test]
+    fn delegated_child_inherits_the_parent_user() {
+        let runtime = Runtime::new(SqliteStore::open_in_memory().unwrap());
+        let (alice, _) = runtime.create_user("alice").unwrap();
+        let parent = session(&runtime, Mode::Code, ".");
+        runtime.set_session_user(&parent, &alice.id).unwrap();
+        let child = runtime
+            .create_session(CreateSession {
+                title: Some("subagent:worker".to_owned()),
+                workspace_path: ".".to_owned(),
+                mode: Mode::Code,
+                parent_session_id: Some(parent.clone()),
+                user_id: None,
+            })
+            .unwrap();
+        assert_eq!(
+            runtime.session_user_id(&child).unwrap().as_deref(),
+            Some(alice.id.as_str())
+        );
+        // A root session created without a parent is still unowned.
+        let other = session(&runtime, Mode::Code, ".");
+        assert!(runtime.session_user_id(&other).unwrap().is_none());
+    }
+
+    #[test]
+    fn search_fails_closed_for_unowned_sessions_in_a_multi_user_store() {
+        let runtime = Runtime::new(SqliteStore::open_in_memory().unwrap());
+        let (alice, _) = runtime.create_user("alice").unwrap();
+        let owned = session(&runtime, Mode::Code, ".");
+        runtime.set_session_user(&owned, &alice.id).unwrap();
+        runtime
+            .append_event(
+                &owned,
+                None,
+                KnownPayload::UserInput(blora_events::UserInput {
+                    text: "alice secret plan".to_owned(),
+                }),
+            )
+            .unwrap();
+        let unowned = session(&runtime, Mode::Code, ".");
+        let hits = runtime
+            .session_search(Some(&unowned), "alice secret plan", 10)
+            .unwrap();
+        assert!(hits.is_empty(), "{hits:?}");
+        // Another session of the same owner still sees that history.
+        let sibling = session(&runtime, Mode::Code, ".");
+        runtime.set_session_user(&sibling, &alice.id).unwrap();
+        let hits = runtime
+            .session_search(Some(&sibling), "alice secret plan", 10)
+            .unwrap();
+        assert!(!hits.is_empty());
+    }
+
+    #[test]
+    fn subagents_never_block_on_ask_user() {
+        let runtime = Runtime::new(SqliteStore::open_in_memory().unwrap());
+        let parent = session(&runtime, Mode::Code, ".");
+        // Interactive for approvals, but a child must not wait for a person.
+        let report = runtime
+            .spawn_subagent(
+                &parent,
+                "research",
+                "ask the user something",
+                &RunOptions {
+                    mock: true,
+                    interactive: true,
+                    ..RunOptions::default()
+                },
+                &CancelToken::new(),
+            )
+            .unwrap();
+        assert!(report.contains("status=\"completed\""), "{report}");
+        // Nothing is left waiting for input anywhere.
+        assert!(
+            runtime
+                .show_session(&parent)
+                .unwrap()
+                .pending_input
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn cross_process_cancel_request_stops_the_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("state.sqlite");
+        let owner = Runtime::new(SqliteStore::open(&db).unwrap());
+        let outsider = Runtime::new(SqliteStore::open(&db).unwrap());
+        let parent = {
+            let id = owner
+                .create_session(CreateSession {
+                    title: Some("parent".to_owned()),
+                    workspace_path: dir.path().to_str().unwrap().to_owned(),
+                    mode: Mode::Code,
+                    parent_session_id: None,
+                    user_id: None,
+                })
+                .unwrap();
+            id
+        };
+        *owner.test_provider.lock().unwrap() = Some(Arc::new(HangUntilCancel));
+        std::thread::scope(|scope| {
+            let handle = scope.spawn(|| {
+                owner.spawn_subagent(
+                    &parent,
+                    "research",
+                    "hang until cancelled from elsewhere",
+                    &yolo(),
+                    &CancelToken::new(),
+                )
+            });
+            let agent_id = loop {
+                if let Ok(rows) = outsider.list_subagents(&parent) {
+                    if let Some(row) = rows.into_iter().find(|row| row.status == "running") {
+                        break row.id;
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            };
+            // The outsider has no in-memory token; it must persist the request.
+            outsider.cancel_subagent(&agent_id).unwrap();
+            let report = handle.join().unwrap().unwrap();
+            assert!(report.contains("status=\"cancelled\""), "{report}");
+            let agent = owner.get_subagent(&agent_id).unwrap();
+            assert_eq!(agent.status, "cancelled");
+        });
+    }
+
+    #[test]
     fn subagent_approvals_surface_on_the_parent_session() {
         let dir = tempfile::tempdir().unwrap();
         let runtime = Runtime::new(SqliteStore::open_in_memory().unwrap());
@@ -1106,5 +1429,43 @@ mod tests {
             std::fs::read_to_string(dir.path().join("ok.txt")).unwrap(),
             "ok"
         );
+    }
+
+    #[test]
+    fn nested_subagent_approvals_reach_the_root_session() {
+        let runtime = Runtime::new(SqliteStore::open_in_memory().unwrap());
+        let root = session(&runtime, Mode::Code, ".");
+        let middle = runtime
+            .create_session(CreateSession {
+                title: Some("subagent:worker".to_owned()),
+                workspace_path: ".".to_owned(),
+                mode: Mode::Code,
+                parent_session_id: Some(root.clone()),
+                user_id: None,
+            })
+            .unwrap();
+        let leaf = runtime
+            .create_session(CreateSession {
+                title: Some("subagent:code".to_owned()),
+                workspace_path: ".".to_owned(),
+                mode: Mode::Code,
+                parent_session_id: Some(middle.clone()),
+                user_id: None,
+            })
+            .unwrap();
+        runtime
+            .subagent_owners
+            .lock()
+            .unwrap()
+            .insert(middle.clone(), (root.clone(), "worker".to_owned()));
+        runtime
+            .subagent_owners
+            .lock()
+            .unwrap()
+            .insert(leaf.clone(), (middle.clone(), "code".to_owned()));
+        let (owner, summary) = runtime.approval_owner(&leaf, "write ok.txt").unwrap();
+        assert_eq!(owner, root);
+        assert!(summary.contains("subagent:worker"), "{summary}");
+        assert!(summary.contains("subagent:code"), "{summary}");
     }
 }

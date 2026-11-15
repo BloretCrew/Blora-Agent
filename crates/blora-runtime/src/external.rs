@@ -547,6 +547,7 @@ mod tests {
                 workspace_path: cwd.into(),
                 mode: Mode::Code,
                 parent_session_id: None,
+                user_id: None,
             })
             .unwrap()
     }

@@ -703,6 +703,8 @@ impl Runtime {
             workspace_path: session.workspace_path,
             mode: session.mode,
             parent_session_id: Some(source.clone()),
+            // Forks inherit the source owner in the same transaction.
+            user_id: None,
         })?;
         self.emit(
             &child,
@@ -1806,14 +1808,12 @@ impl Runtime {
             }
             "ask_user" => {
                 let questions = crate::input::normalize_questions(&arguments)?;
+                // Only a run attached to a person may block on a question.
+                // Children keep `interactive` for tool approvals but must never
+                // wait for an answer nobody can see.
+                let can_ask = options.can_ask;
                 self.ask_user(
-                    session_id,
-                    run_id,
-                    turn_id,
-                    &call.id,
-                    questions,
-                    options.can_ask || options.interactive,
-                    cancel,
+                    session_id, run_id, turn_id, &call.id, questions, can_ask, cancel,
                 )
             }
             "skill_manage" => self.manage_skill(
@@ -2432,6 +2432,7 @@ mod tests {
                 workspace_path: ".".to_owned(),
                 mode: Mode::Code,
                 parent_session_id: None,
+                user_id: None,
             })
             .unwrap();
         runtime
@@ -2470,6 +2471,7 @@ mod tests {
                     workspace_path: ".".to_owned(),
                     mode: Mode::Code,
                     parent_session_id: None,
+                    user_id: None,
                 })
                 .unwrap();
             runtime
@@ -2551,6 +2553,7 @@ mod tests {
                     workspace_path: ".".to_owned(),
                     mode: Mode::Code,
                     parent_session_id: child.then(|| parent.clone()),
+                    user_id: None,
                 })
                 .unwrap();
             if let Some(title) = explicit_title {
@@ -2589,6 +2592,7 @@ mod tests {
                 workspace_path: workspace.to_owned(),
                 mode,
                 parent_session_id: None,
+                user_id: None,
             })
             .unwrap()
     }
@@ -3509,6 +3513,9 @@ mod tests {
                     &CancelToken::new(),
                     &RunOptions {
                         interactive: true,
+                        // Asking a person requires `can_ask`; `interactive`
+                        // only governs tool approvals.
+                        can_ask: true,
                         ..yolo()
                     },
                 )

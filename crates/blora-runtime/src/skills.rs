@@ -136,6 +136,10 @@ impl Runtime {
     }
 
     /// Full-text search over earlier sessions, excluding the current one.
+    ///
+    /// On a database that contains user-owned sessions, a caller without an
+    /// owner is refused results instead of seeing everyone else's history.
+    /// Local single-user databases (no owners at all) keep working.
     pub fn session_search(
         &self,
         session_id: Option<&SessionId>,
@@ -146,6 +150,9 @@ impl Runtime {
             Some(id) => self.store.session_user_id(id)?,
             None => None,
         };
+        if user.is_none() && self.store.has_owned_sessions()? {
+            return Ok(Vec::new());
+        }
         self.store
             .search_transcripts(query, limit, session_id, user.as_deref())
     }

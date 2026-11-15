@@ -294,10 +294,11 @@ impl LocalBackend {
         }
     }
 
-    /// Same as [`Self::shell_prepared`], except a `Foreground` command is
-    /// stopped with [`host::terminate_pid`] as soon as `cancel` is triggered,
-    /// returning [`BloraError::Cancelled`]. `Background` and `Pty` cannot be
-    /// cancelled and behave exactly like [`Self::shell_prepared`].
+    /// Same as [`Self::shell_prepared`], except a `Foreground` or `Pty` command
+    /// is stopped with [`host::terminate_pid`] as soon as `cancel` is triggered,
+    /// returning [`BloraError::Cancelled`]. `Background` cannot be cancelled
+    /// (it is not attached to a running turn) and behaves like
+    /// [`Self::shell_prepared`].
     pub fn shell_prepared_cancellable(
         &self,
         command: &str,
@@ -319,7 +320,7 @@ impl LocalBackend {
                 let (text, success) = self
                     .clone()
                     .with_isolation(Isolation::Pty)
-                    .spawn_shell(&run, None)?;
+                    .spawn_shell_cancellable(&run, None, Some(cancel))?;
                 Ok(ShellOutput { text, success })
             }
         }
@@ -393,9 +394,17 @@ impl LocalBackend {
         if cancel.is_some_and(CancelToken::is_cancelled) {
             return Err(BloraError::Cancelled);
         }
-        let mut child = self
+        let mut command = self
             .isolation
-            .shell_command(self.policy.workspace(), command)?
+            .shell_command(self.policy.workspace(), command)?;
+        #[cfg(unix)]
+        {
+            // Give the shell its own process group so cancellation can stop
+            // children it spawned, not just the shell itself.
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        let mut child = command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -1770,9 +1779,10 @@ mod tests {
     fn cancellable_shell_stops_a_long_command() {
         let dir = tempfile::tempdir().unwrap();
         let backend = LocalBackend::new(Policy::new(dir.path(), true).unwrap());
+        // Cover the host shell actually in use, including Cmd on Windows.
         let command = match host::host_shell() {
-            HostShell::Cmd => return,
-            HostShell::Posix | HostShell::PowerShell => "sleep 5",
+            HostShell::Cmd => "ping -n 30 127.0.0.1",
+            HostShell::Posix | HostShell::PowerShell => "sleep 30",
         };
         let cancel = CancelToken::new();
         let worker = cancel.clone();
@@ -1785,7 +1795,37 @@ mod tests {
             .shell_prepared_cancellable(command, ".", ShellKind::Foreground(None), &cancel)
             .unwrap_err();
         assert!(matches!(err, BloraError::Cancelled), "{err}");
-        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn cancellable_pty_shell_stops_a_long_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = LocalBackend::new(Policy::new(dir.path(), true).unwrap());
+        let command = match host::host_shell() {
+            HostShell::Cmd => "ping -n 30 127.0.0.1",
+            HostShell::Posix | HostShell::PowerShell => "sleep 30",
+        };
+        let cancel = CancelToken::new();
+        let worker = cancel.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(100));
+            worker.cancel();
+        });
+        let started = Instant::now();
+        let err = backend
+            .shell_prepared_cancellable(command, ".", ShellKind::Pty, &cancel)
+            .unwrap_err();
+        assert!(matches!(err, BloraError::Cancelled), "{err}");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
     }
 
     #[test]

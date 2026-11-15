@@ -23,6 +23,9 @@ pub struct CreateSession {
     pub workspace_path: String,
     pub mode: Mode,
     pub parent_session_id: Option<SessionId>,
+    /// Owner of the session. `None` copies `parent_session_id`'s owner in the
+    /// same transaction, so delegated children never escape user isolation.
+    pub user_id: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -89,8 +92,11 @@ pub struct SessionSummary {
     pub last_sequence: u64,
 }
 
+/// Shared handle to one SQLite database. Cloning is cheap and lets background
+/// threads (for example a subagent's cancel watcher) observe the same store.
+#[derive(Clone)]
 pub struct SqliteStore {
-    conn: Mutex<Connection>,
+    conn: std::sync::Arc<Mutex<Connection>>,
     clock: SystemClock,
 }
 
@@ -212,14 +218,24 @@ impl SqliteStore {
             params![now],
         )
         .map_err(BloraError::storage)?;
+        // Cross-process cancel handshake: the owner process watches this flag.
+        let _ = conn.execute(
+            "ALTER TABLE agents ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (15, ?1)",
+            params![now],
+        )
+        .map_err(BloraError::storage)?;
         Ok(Self {
-            conn: Mutex::new(conn),
+            conn: std::sync::Arc::new(Mutex::new(conn)),
             clock: SystemClock,
         })
     }
 
     /// Current storage schema version written by this build.
-    pub const STORE_VERSION: u32 = 14;
+    pub const STORE_VERSION: u32 = 15;
 
     pub fn queue_steer(&self, session_id: &SessionId, message: &str) -> Result<()> {
         let conn = self.lock();
@@ -234,7 +250,9 @@ impl SqliteStore {
     /// Pop every unconsumed steering message for the session, oldest first.
     pub fn take_steers(&self, session_id: &SessionId) -> Result<Vec<String>> {
         let mut conn = self.lock();
-        let tx = conn.transaction().map_err(BloraError::storage)?;
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(BloraError::storage)?;
         let pending: Vec<(i64, String)> = {
             let mut stmt = tx
                 .prepare(
@@ -274,10 +292,30 @@ impl SqliteStore {
         let session_id = SessionId::generate();
         let now = self.clock.now();
         let mut conn = self.lock();
-        let tx = conn.transaction().map_err(BloraError::storage)?;
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(BloraError::storage)?;
+        // Inherit the parent's owner unless the caller named one explicitly.
+        // This runs inside the insert transaction so a child can never be
+        // observed without an owner.
+        let user_id = match spec.user_id {
+            Some(user_id) => Some(user_id),
+            None => match &spec.parent_session_id {
+                Some(parent) => tx
+                    .query_row(
+                        "SELECT user_id FROM sessions WHERE id = ?1",
+                        params![parent.as_str()],
+                        |row| row.get::<_, Option<String>>(0),
+                    )
+                    .optional()
+                    .map_err(BloraError::storage)?
+                    .flatten(),
+                None => None,
+            },
+        };
         tx.execute(
-            "INSERT INTO sessions (id, title, workspace_path, mode, status, parent_session_id, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO sessions (id, title, workspace_path, mode, status, parent_session_id, user_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 session_id.as_str(),
                 spec.title,
@@ -285,6 +323,7 @@ impl SqliteStore {
                 spec.mode.as_str(),
                 SessionStatus::Active.as_str(),
                 spec.parent_session_id.as_ref().map(SessionId::as_str),
+                user_id,
                 now.to_rfc3339(),
                 now.to_rfc3339(),
             ],
@@ -318,7 +357,9 @@ impl SqliteStore {
 
     pub fn append(&self, new: NewEvent) -> Result<EventEnvelope> {
         let mut conn = self.lock();
-        let tx = conn.transaction().map_err(BloraError::storage)?;
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(BloraError::storage)?;
         session_exists(&tx, &new.session_id)?;
         let next = next_sequence(&tx, &new.session_id)?;
         let envelope = EventEnvelope::from_new(new, next, &self.clock)?;
@@ -721,6 +762,100 @@ impl SqliteStore {
         Ok(changed > 0)
     }
 
+    /// Finish the agent and append the parent-facing event in one transaction.
+    ///
+    /// Either both land or neither does. Returns false when the row was already
+    /// terminal, so a competing cancel/finish cannot duplicate the report.
+    pub fn finish_agent_with_event(
+        &self,
+        agent_id: &AgentId,
+        status: &str,
+        summary: Option<&str>,
+        payload: KnownPayload,
+        now: DateTime<Utc>,
+    ) -> Result<bool> {
+        let mut conn = self.lock();
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(BloraError::storage)?;
+        let changed = tx
+            .execute(
+                "UPDATE agents SET status = ?1, summary = ?2, updated_at = ?3
+                 WHERE id = ?4 AND status = 'running'",
+                params![status, summary, now.to_rfc3339(), agent_id.as_str()],
+            )
+            .map_err(BloraError::storage)?;
+        if changed == 0 {
+            tx.commit().map_err(BloraError::storage)?;
+            return Ok(false);
+        }
+        let session_id: String = tx
+            .query_row(
+                "SELECT parent_session_id FROM agents WHERE id = ?1",
+                params![agent_id.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(BloraError::storage)?;
+        let session_id = SessionId::parse(&session_id)?;
+        session_exists(&tx, &session_id)?;
+        let sequence = next_sequence(&tx, &session_id)?;
+        let clock = blora_types::FrozenClock(now);
+        let envelope =
+            EventEnvelope::from_new(NewEvent::new(session_id, payload), sequence, &clock)?;
+        envelope.validate()?;
+        insert_event(&tx, &envelope)?;
+        apply_denormalized(&tx, &envelope)?;
+        crate::search::index_event(&tx, &envelope)?;
+        tx.commit().map_err(BloraError::storage)?;
+        Ok(true)
+    }
+
+    /// Ask another process to stop a child. The owner polls `agent_cancel_requested`
+    /// and turns it into an in-memory token cancellation.
+    pub fn request_agent_cancel(&self, agent_id: &AgentId, now: DateTime<Utc>) -> Result<bool> {
+        let conn = self.lock();
+        let changed = conn
+            .execute(
+                "UPDATE agents SET cancel_requested = 1, updated_at = ?1
+                 WHERE id = ?2 AND status = 'running'",
+                params![now.to_rfc3339(), agent_id.as_str()],
+            )
+            .map_err(BloraError::storage)?;
+        Ok(changed > 0)
+    }
+
+    /// True when a cancel was requested for this agent by any process.
+    pub fn agent_cancel_requested(&self, agent_id: &AgentId) -> Result<bool> {
+        let conn = self.lock();
+        let requested: Option<i64> = conn
+            .query_row(
+                "SELECT cancel_requested FROM agents WHERE id = ?1",
+                params![agent_id.as_str()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(BloraError::storage)?;
+        Ok(requested.unwrap_or(0) != 0)
+    }
+
+    /// Running agents whose owner asked them to stop.
+    pub fn list_cancel_requested_agents(&self) -> Result<Vec<AgentRecord>> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT {AGENT_COLUMNS}
+                 FROM agents WHERE status = 'running' AND cancel_requested = 1
+                 ORDER BY created_at ASC"
+            ))
+            .map_err(BloraError::storage)?;
+        let rows = stmt.query_map([], agent_row).map_err(BloraError::storage)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row_to_agent(row.map_err(BloraError::storage)?)?);
+        }
+        Ok(out)
+    }
+
     /// Every agent row still marked `running`, across all parents. Used by the
     /// runtime to converge children left behind by a crashed process.
     pub fn list_running_agents(&self) -> Result<Vec<AgentRecord>> {
@@ -1040,12 +1175,13 @@ type AgentRow = (
     i64,
     Option<String>,
     Option<i64>,
+    bool,
     String,
     String,
 );
 
 const AGENT_COLUMNS: &str = "id, parent_session_id, child_session_id, role, depth, status,
-        budget_turns, summary, owner_pid, created_at, updated_at";
+        budget_turns, summary, owner_pid, cancel_requested, created_at, updated_at";
 
 fn agent_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentRow> {
     Ok((
@@ -1058,14 +1194,27 @@ fn agent_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentRow> {
         row.get(6)?,
         row.get(7)?,
         row.get(8)?,
-        row.get(9)?,
+        row.get::<_, i64>(9)? != 0,
         row.get(10)?,
+        row.get(11)?,
     ))
 }
 
 fn row_to_agent(row: AgentRow) -> Result<AgentRecord> {
-    let (id, parent_id, child, role, depth, status, budget, summary, owner_pid, created, updated) =
-        row;
+    let (
+        id,
+        parent_id,
+        child,
+        role,
+        depth,
+        status,
+        budget,
+        summary,
+        owner_pid,
+        cancel_requested,
+        created,
+        updated,
+    ) = row;
     Ok(AgentRecord {
         id: AgentId::parse(&id)?,
         parent_session_id: SessionId::parse(&parent_id)?,
@@ -1076,6 +1225,7 @@ fn row_to_agent(row: AgentRow) -> Result<AgentRecord> {
         budget_turns: u32::try_from(budget).unwrap_or(0),
         summary,
         owner_pid: owner_pid.and_then(|pid| u32::try_from(pid).ok()),
+        cancel_requested,
         created_at: parse_time(&created)?,
         updated_at: parse_time(&updated)?,
     })
@@ -1085,8 +1235,8 @@ fn insert_agent_row(conn: &Connection, record: &AgentRecord) -> Result<()> {
     conn.execute(
         "INSERT INTO agents (
             id, parent_session_id, child_session_id, role, depth, status,
-            budget_turns, summary, owner_pid, created_at, updated_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            budget_turns, summary, owner_pid, cancel_requested, created_at, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
             record.id.as_str(),
             record.parent_session_id.as_str(),
@@ -1097,6 +1247,7 @@ fn insert_agent_row(conn: &Connection, record: &AgentRecord) -> Result<()> {
             record.budget_turns as i64,
             record.summary,
             record.owner_pid.map(i64::from),
+            i64::from(record.cancel_requested),
             record.created_at.to_rfc3339(),
             record.updated_at.to_rfc3339(),
         ],
@@ -1447,6 +1598,7 @@ mod tests {
                     workspace_path: "/tmp/ws".to_owned(),
                     mode: Mode::Code,
                     parent_session_id: None,
+                    user_id: None,
                 })
                 .unwrap();
             for title in ["自动标题", "手动标题"] {
@@ -1505,6 +1657,7 @@ mod tests {
                 workspace_path: "/tmp/ws".to_owned(),
                 mode: Mode::Code,
                 parent_session_id: None,
+                user_id: None,
             })
             .unwrap();
         let child = store
@@ -1513,6 +1666,7 @@ mod tests {
                 workspace_path: "/tmp/ws".to_owned(),
                 mode: Mode::Code,
                 parent_session_id: Some(root.clone()),
+                user_id: None,
             })
             .unwrap();
         let all = store.list_sessions().unwrap();
@@ -1550,6 +1704,7 @@ mod tests {
                     workspace_path: "/tmp/ws".to_owned(),
                     mode: Mode::Code,
                     parent_session_id: None,
+                    user_id: None,
                 })
                 .unwrap();
             store
@@ -1581,6 +1736,7 @@ mod tests {
                 workspace_path: "/tmp/ws".to_owned(),
                 mode: Mode::Code,
                 parent_session_id: None,
+                user_id: None,
             })
             .unwrap();
         let conn = store.lock();
@@ -1602,6 +1758,7 @@ mod tests {
                 workspace_path: "/tmp/ws".to_owned(),
                 mode: Mode::Code,
                 parent_session_id: None,
+                user_id: None,
             })
             .unwrap();
         let fable = RunId::generate();

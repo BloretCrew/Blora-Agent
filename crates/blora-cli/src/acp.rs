@@ -39,6 +39,7 @@ pub fn serve(
                     workspace_path: cwd,
                     mode: Mode::Code,
                     parent_session_id: None,
+                    user_id: None,
                 })?;
                 json!({"sessionId": session.to_string()})
             }

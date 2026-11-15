@@ -251,6 +251,7 @@ mod tests {
                 workspace_path: "/tmp/project".into(),
                 mode: Mode::Code,
                 parent_session_id: None,
+                user_id: None,
             })
             .unwrap();
         for _ in 0..45 {
@@ -319,6 +320,7 @@ mod tests {
                 workspace_path: "/tmp/project".into(),
                 mode: Mode::Code,
                 parent_session_id: None,
+                user_id: None,
             })
             .unwrap();
         let mut sessions = store.list_sessions().unwrap();
@@ -367,6 +369,7 @@ mod tests {
                 workspace_path: "/tmp/project".into(),
                 mode: Mode::Code,
                 parent_session_id: None,
+                user_id: None,
             })
             .unwrap();
         let child = store
@@ -375,6 +378,7 @@ mod tests {
                 workspace_path: "/tmp/project".into(),
                 mode: Mode::Code,
                 parent_session_id: Some(root.clone()),
+                user_id: None,
             })
             .unwrap();
         let sessions = store.list_sessions().unwrap();
@@ -393,6 +397,7 @@ mod tests {
                 workspace_path: "/tmp/project".into(),
                 mode: Mode::Code,
                 parent_session_id: None,
+                user_id: None,
             })
             .unwrap();
         let b = store
@@ -401,6 +406,7 @@ mod tests {
                 workspace_path: "/tmp/project".into(),
                 mode: Mode::Code,
                 parent_session_id: None,
+                user_id: None,
             })
             .unwrap();
         let sessions = store.list_sessions().unwrap();

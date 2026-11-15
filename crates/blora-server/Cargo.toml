@@ -30,6 +30,7 @@ tracing.workspace = true
 blora-events.workspace = true
 tempfile.workspace = true
 ureq.workspace = true
+serde_urlencoded = "0.7"
 
 [lints]
 workspace = true
