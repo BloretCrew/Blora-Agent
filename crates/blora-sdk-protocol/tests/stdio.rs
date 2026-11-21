@@ -13,19 +13,50 @@ struct Peer {
     buffered: Vec<Value>,
 }
 
+/// Test binaries are built without their sibling CLI binaries, so a clean
+/// `cargo test --workspace` checkout has no `target/debug/blora` yet. Build it
+/// once rather than depending on a previous `cargo build`.
+fn cli_binary() -> std::path::PathBuf {
+    if let Ok(binary) = std::env::var("BLORA_BIN") {
+        return binary.into();
+    }
+    if let Ok(binary) = std::env::var("CARGO_BIN_EXE_blora") {
+        return binary.into();
+    }
+    let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("crate lives under the workspace")
+        .to_path_buf();
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(std::path::PathBuf::from)
+        .map(|path| {
+            if path.is_absolute() {
+                path
+            } else {
+                workspace.join(path)
+            }
+        })
+        .unwrap_or_else(|| workspace.join("target"));
+    let name = if cfg!(windows) { "blora.exe" } else { "blora" };
+    let binary = target.join("debug").join(name);
+    if !binary.is_file() {
+        static BUILD: std::sync::Once = std::sync::Once::new();
+        BUILD.call_once(|| {
+            let status = Command::new(env!("CARGO"))
+                .args(["build", "--quiet", "-p", "blora-cli", "--bin", "blora"])
+                .current_dir(&workspace)
+                .status()
+                .expect("failed to run cargo build for blora-cli");
+            assert!(status.success(), "cargo build for blora-cli failed");
+        });
+    }
+    binary
+}
+
 impl Peer {
     fn start() -> Self {
-        let binary = std::env::var("BLORA_BIN")
-            .or_else(|_| std::env::var("CARGO_BIN_EXE_blora"))
-            .unwrap_or_else(|_| {
-                let deps = std::env::current_exe().unwrap();
-                deps.ancestors()
-                    .find(|path| path.file_name().is_some_and(|name| name == "debug"))
-                    .map(|debug| debug.join("blora"))
-                    .unwrap_or_else(|| std::path::PathBuf::from("target/debug/blora"))
-                    .to_string_lossy()
-                    .into_owned()
-            });
+        let binary = cli_binary();
         let mut child = Command::new(binary)
             .args(["sdk", "--stdio", "--allow-test-provider"])
             .stdin(Stdio::piped())
