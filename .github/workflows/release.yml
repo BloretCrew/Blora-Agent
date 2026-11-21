@@ -22,13 +22,14 @@ jobs:
             archive: tar.gz
             binary: blora
           - name: macos-x86_64
-            os: macos-14
-            # macos-14 is arm64; Rust/Apple clang cross-build this x86_64 target.
+            # Intel runner: the arm64 macos-14 configuration is unavailable for
+            # this repository, and Apple clang cross-builds aarch64 from Intel.
+            os: macos-15-intel
             target: x86_64-apple-darwin
             archive: tar.gz
             binary: blora
           - name: macos-aarch64
-            os: macos-14
+            os: macos-15-intel
             target: aarch64-apple-darwin
             archive: tar.gz
             binary: blora
@@ -79,12 +80,17 @@ jobs:
           path: assets
           pattern: blora-*
           merge-multiple: true
-      - name: Create prerelease
+      - name: Publish prerelease assets
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" assets/* \
+          if ! gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "Blora Agent $GITHUB_REF_NAME" \
+              --prerelease \
+              --generate-notes
+          fi
+          gh release upload "$GITHUB_REF_NAME" assets/* \
             --repo "$GITHUB_REPOSITORY" \
-            --title "Blora Agent $GITHUB_REF_NAME" \
-            --prerelease \
-            --generate-notes
+            --clobber
