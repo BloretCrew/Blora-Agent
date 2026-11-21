@@ -472,7 +472,8 @@ esac"#,
             let path = script(
                 dir.path(),
                 "fake",
-                "printf '%s' \"$(printf 'x%.0s' {1..1100000})\"",
+                // POSIX sh: dash has no {1..N} brace expansion.
+                "head -c 1100000 /dev/zero | tr '\\000' x",
             );
             let mut req = request(kind, PermissionMode::Yolo);
             req.cwd = dir.path().into();

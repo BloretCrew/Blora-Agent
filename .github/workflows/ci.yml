@@ -35,15 +35,18 @@ jobs:
       - name: Test
         shell: bash
         run: |
-          set -o pipefail
-          cargo test --workspace --locked 2>&1 | tee test.log
+          # GitHub runs this script with -e; turn it off so a failing test run
+          # still reaches the annotation block below.
+          set +e
+          cargo test --workspace --locked --no-fail-fast 2>&1 | tee test.log
           status=${PIPESTATUS[0]}
           if [ "$status" -ne 0 ]; then
-            # Surface failing test names as annotations; job logs need admin rights.
-            grep -E '^(failures:|    [a-zA-Z0-9_:]+)$' test.log \
-              | sed 's/^/::error::/' || true
-            exit "$status"
+            {
+              grep -E '^(error(\[[A-Za-z0-9]+\])?: |    [a-zA-Z0-9_:]+$|failures:)' test.log | head -30
+              tail -20 test.log
+            } | sed 's/^/::error::/' || true
           fi
+          exit "$status"
 
   policy:
     name: Licenses & sources
@@ -52,7 +55,7 @@ jobs:
       - uses: actions/checkout@v4
       # Advisories are checked separately once the dependency upgrades land.
       # See docs/operations/security.md for the current list.
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: taiki-e/install-action@v2
         with:
-          command: check
-          arguments: licenses bans sources
+          tool: cargo-deny
+      - run: cargo deny check licenses bans sources
