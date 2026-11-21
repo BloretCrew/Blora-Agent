@@ -27,7 +27,16 @@ portable-pty = "0.9"
 vt100 = "0.15"
 unicode-width.workspace = true
 tempfile.workspace = true
-syntect = { version = "5.3", default-features = false, features = ["default-fancy"] }
+syntect = { version = "5.3", default-features = false, features = [
+    "parsing",
+    "default-syntaxes",
+    "default-themes",
+    "html",
+    "plist-load",
+    "dump-load",
+    "dump-create",
+    "regex-fancy",
+] }
 regex.workspace = true
 memchr = "2"
 base64 = "0.22"

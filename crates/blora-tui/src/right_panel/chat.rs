@@ -4,6 +4,126 @@ use super::*;
 use ratatui::text::Line;
 
 impl SideChat {
+    pub(super) fn run_command(&mut self, runtime: &Runtime, command: &str) {
+        let trimmed = command.trim();
+        let (name, args) = trimmed
+            .strip_prefix('/')
+            .unwrap_or(trimmed)
+            .split_once(' ')
+            .map_or((trimmed.trim_start_matches('/'), ""), |(name, args)| {
+                (name, args.trim())
+            });
+        let allowed = matches!(
+            name,
+            "id" | "status"
+                | "context"
+                | "compact"
+                | "checkpoint"
+                | "cancel"
+                | "resume"
+                | "archive"
+                | "usage"
+                | "approvals"
+                | "steer"
+                | "mode"
+        );
+        self.slash_notice = Some(if !allowed {
+            format!("侧聊暂不支持 /{name}")
+        } else {
+            match name {
+                "id" => self.id.to_string(),
+                "status" => runtime
+                    .show_session(&self.id)
+                    .map(|p| {
+                        format!(
+                            "{} · seq {} · {}",
+                            self.title(),
+                            p.last_sequence,
+                            if self.running { "running" } else { "idle" }
+                        )
+                    })
+                    .unwrap_or_else(|e| e.to_string()),
+                "context" => runtime
+                    .show_session(&self.id)
+                    .map(|p| {
+                        format!(
+                            "seq={} in={} out={} ws={}",
+                            p.last_sequence,
+                            p.input_tokens,
+                            p.output_tokens,
+                            p.session.map(|s| s.workspace_path).unwrap_or_default()
+                        )
+                    })
+                    .unwrap_or_else(|e| e.to_string()),
+                "compact" => runtime
+                    .compact(&self.id)
+                    .map(|_| {
+                        if args.is_empty() {
+                            "compacted".to_owned()
+                        } else {
+                            format!("compacted ({args})")
+                        }
+                    })
+                    .unwrap_or_else(|e| e.to_string()),
+                "checkpoint" => runtime
+                    .checkpoint(&self.id, None, Some("manual"))
+                    .map(|_| "checkpointed".to_owned())
+                    .unwrap_or_else(|e| e.to_string()),
+                "cancel" => {
+                    self.cancel.cancel();
+                    self.queue.clear();
+                    "side chat cancelled; queue cleared".to_owned()
+                }
+                "resume" => runtime
+                    .resume_session(&self.id)
+                    .map(|_| "resumed".to_owned())
+                    .unwrap_or_else(|e| e.to_string()),
+                "archive" => runtime
+                    .archive_session(&self.id)
+                    .map(|_| "archived".to_owned())
+                    .unwrap_or_else(|e| e.to_string()),
+                "usage" => runtime
+                    .usage(Some(&self.id))
+                    .map(|u| {
+                        format!(
+                            "in={} out={} cached={}",
+                            u.input_tokens, u.output_tokens, u.cached_tokens
+                        )
+                    })
+                    .unwrap_or_else(|e| e.to_string()),
+                "approvals" => runtime
+                    .pending_approvals(&self.id)
+                    .map(|rows| {
+                        if rows.is_empty() {
+                            "no pending approvals".to_owned()
+                        } else {
+                            rows.into_iter()
+                                .map(|r| format!("{} {}", r.id, r.summary))
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        }
+                    })
+                    .unwrap_or_else(|e| e.to_string()),
+                "steer" if !args.is_empty() => runtime
+                    .queue_steer(&self.id, args)
+                    .map(|_| "message queued for this side chat".to_owned())
+                    .unwrap_or_else(|e| e.to_string()),
+                "steer" => "usage: /steer <message>".to_owned(),
+                "mode" => runtime
+                    .show_session(&self.id)
+                    .ok()
+                    .and_then(|p| p.session)
+                    .map(|s| s.mode.as_str().to_owned())
+                    .unwrap_or_else(|| "unknown".to_owned()),
+                _ => unreachable!("side chat command allowlist must match implementation"),
+            }
+        });
+        self.draft.clear();
+        self.cursor = 0;
+        self.history_index = None;
+        self.slash_selected = 0;
+        self.slash_dismissed = false;
+    }
     pub(crate) fn title(&self) -> String {
         self.projection
             .session
@@ -45,9 +165,25 @@ impl SideChat {
         }
         distance
     }
+    pub(super) fn scroll_page(&self, down: bool, page: usize) {
+        let next = if down {
+            self.scroll.get().saturating_sub(page)
+        } else {
+            self.scroll
+                .get()
+                .saturating_add(page)
+                .min(self.max_scroll.get())
+        };
+        self.scroll.set(next);
+        if next == 0 {
+            self.unread.set(0);
+        }
+    }
     pub(super) fn insert(&mut self, text: &str) {
         crate::conversation::insert_input(&mut self.draft, &mut self.cursor, text);
         self.history_index = None;
+        self.slash_dismissed = false;
+        self.slash_notice = None;
     }
     pub(super) fn edit(&mut self, key: crossterm::event::KeyEvent) {
         match key.code {
@@ -61,8 +197,12 @@ impl SideChat {
                 if matches!(key.code, KeyCode::Backspace | KeyCode::Delete) {
                     self.history_index = None;
                 }
+                self.slash_dismissed = false;
+                self.slash_notice = None;
             }
-            KeyCode::Up | KeyCode::Down => {
+            KeyCode::Up | KeyCode::Down
+                if self.history_index.is_some() || !self.draft.contains('\n') =>
+            {
                 crate::conversation::browse_input_history(
                     &self.history,
                     &mut self.history_index,
@@ -71,6 +211,11 @@ impl SideChat {
                     key.code == KeyCode::Up,
                 );
                 self.cursor = self.draft.len();
+            }
+            KeyCode::Up | KeyCode::Down => {
+                crate::conversation::edit_input(&mut self.draft, &mut self.cursor, key);
+                self.slash_dismissed = false;
+                self.slash_notice = None;
             }
             KeyCode::Enter
                 if key

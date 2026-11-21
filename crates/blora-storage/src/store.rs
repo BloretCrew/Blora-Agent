@@ -184,8 +184,10 @@ pub trait RuntimeStore: Send + Sync {
         review_state: Option<&str>,
     ) -> Result<bool>;
     fn set_tui_message_roles(&self, enabled: bool) -> Result<()>;
+    fn set_tui_reduce_motion(&self, enabled: bool) -> Result<()>;
     fn take_steers(&self, session_id: &SessionId) -> Result<Vec<String>>;
     fn tui_message_roles(&self) -> Result<bool>;
+    fn tui_reduce_motion(&self) -> Result<bool>;
     fn update_agent(
         &self,
         agent_id: &AgentId,
@@ -600,11 +602,17 @@ impl RuntimeStore for SqliteStore {
     fn set_tui_message_roles(&self, enabled: bool) -> Result<()> {
         SqliteStore::set_tui_message_roles(self, enabled)
     }
+    fn set_tui_reduce_motion(&self, enabled: bool) -> Result<()> {
+        SqliteStore::set_tui_reduce_motion(self, enabled)
+    }
     fn take_steers(&self, session_id: &SessionId) -> Result<Vec<String>> {
         SqliteStore::take_steers(self, session_id)
     }
     fn tui_message_roles(&self) -> Result<bool> {
         SqliteStore::tui_message_roles(self)
+    }
+    fn tui_reduce_motion(&self) -> Result<bool> {
+        SqliteStore::tui_reduce_motion(self)
     }
     fn update_agent(
         &self,
@@ -1087,11 +1095,17 @@ impl RuntimeStore for InMemoryStore {
     fn set_tui_message_roles(&self, enabled: bool) -> Result<()> {
         SqliteStore::set_tui_message_roles(&self.inner, enabled)
     }
+    fn set_tui_reduce_motion(&self, enabled: bool) -> Result<()> {
+        SqliteStore::set_tui_reduce_motion(&self.inner, enabled)
+    }
     fn take_steers(&self, session_id: &SessionId) -> Result<Vec<String>> {
         SqliteStore::take_steers(&self.inner, session_id)
     }
     fn tui_message_roles(&self) -> Result<bool> {
         SqliteStore::tui_message_roles(&self.inner)
+    }
+    fn tui_reduce_motion(&self) -> Result<bool> {
+        SqliteStore::tui_reduce_motion(&self.inner)
     }
     fn update_agent(
         &self,

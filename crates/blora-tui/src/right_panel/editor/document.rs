@@ -66,6 +66,7 @@ struct EditGroup {
     anchor_after: Option<usize>,
 }
 
+#[derive(Clone)]
 pub(super) struct Document {
     text: String,
     line_starts: Vec<usize>,

@@ -35,14 +35,18 @@
 ```bash
 cargo test --workspace
 cargo run -p blora-cli --                  # TUI
-cargo run -p blora-cli -- --web            # Web UI，默认 http://127.0.0.1:8787
+cargo run -p blora-cli -- --web            # Web UI，默认 http://127.0.0.1:8787（仅回环）
 cargo run -p blora-cli -- web              # 同上
+cargo run -p blora-cli -- user add me      # 创建网关用户，打印一次性令牌 blt_…
+cargo run -p blora-cli -- gateway          # 多用户网关，默认 0.0.0.0:8787，需令牌
 cargo run -p blora-cli -- session create --workspace .
 cargo run -p blora-cli -- run --session ses_… --mock --yes "list files"
 cargo run -p blora-cli -- task create --session ses_… --title scan --prompt "list files" --cron "0 * * * *" --mock --yes
 cargo run -p blora-cli -- task pump
 cargo run -p blora-cli -- acp
 ```
+
+单用户 Web 只接受回环 `Host`，绑定 `0.0.0.0` 会直接报错；需要从局域网访问时请用 `gateway`，它要求 `blt_…` 令牌。这样默认配置下，浏览器里的任意网页无法通过 DNS rebinding 驱动本机 Agent。
 
 ## 27.0 Beta 测试版
 

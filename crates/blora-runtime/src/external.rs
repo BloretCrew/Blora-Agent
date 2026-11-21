@@ -175,7 +175,7 @@ impl Runtime {
         }
         let binding = projection.external_sessions.iter().find(|binding| {
             binding.harness == harness
-                && Path::new(&binding.cwd) == cwd.as_path()
+                && cwd.as_path() == Path::new(&binding.cwd)
                 && binding.synced_sequence <= projection.last_sequence
         });
         let request = RunRequest {

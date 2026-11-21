@@ -14,7 +14,7 @@ pub(super) enum FindFocus {
     Replacement,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct FindState {
     pub(super) open: bool,
     pub(super) replace: bool,

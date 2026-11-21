@@ -42,7 +42,7 @@ struct Cli {
     /// Open the local Web UI instead of the TUI.
     #[arg(long)]
     web: bool,
-    /// Bind address used with `--web` (default: 127.0.0.1:8787).
+    /// Bind address used with `--web` (default: 127.0.0.1:8787; loopback only).
     #[arg(long, default_value = "127.0.0.1:8787")]
     bind: String,
     /// Headless one-shot. Creates a session, runs the prompt, prints the result, and exits.
@@ -916,6 +916,22 @@ fn parse_permission(text: &str) -> Result<PermissionMode, String> {
     })
 }
 
+/// Single-user Web mode trusts every loopback request, so it must never listen
+/// on an address reachable from the network. Remote use goes through `gateway`,
+/// which requires a token.
+fn check_web_bind(addr: SocketAddr, require_auth: bool) -> Result<(), std::io::Error> {
+    if !require_auth && !addr.ip().is_loopback() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "single-user web only binds loopback addresses (got {addr}); \
+                 use `blora gateway` with a token for network access"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 fn serve_web(
     home: Option<&std::path::Path>,
     bind: &str,
@@ -925,6 +941,7 @@ fn serve_web(
     let runtime = Arc::new(Runtime::new(open_store(home)?));
     let workspace = workspace.unwrap_or(std::env::current_dir()?);
     let addr: SocketAddr = bind.parse()?;
+    check_web_bind(addr, require_auth)?;
     let url = format!("http://{addr}");
     if require_auth {
         println!("Blora Agent gateway: {url}  (token auth required)");
@@ -1084,6 +1101,20 @@ mod tests {
             Some(Commands::Web { bind, .. }) => assert_eq!(bind, "127.0.0.1:9000"),
             other => panic!("expected web, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn single_user_web_rejects_non_loopback_bind() {
+        let addr: SocketAddr = "0.0.0.0:8787".parse().unwrap();
+        let err = check_web_bind(addr, false).unwrap_err();
+        assert!(err.to_string().contains("loopback"), "{err}");
+
+        for loopback in ["127.0.0.1:8787", "[::1]:8787"] {
+            let addr: SocketAddr = loopback.parse().unwrap();
+            assert!(check_web_bind(addr, false).is_ok(), "{loopback}");
+        }
+        // Gateway mode is allowed to listen on the network; it requires tokens.
+        assert!(check_web_bind(addr, true).is_ok());
     }
 
     #[test]

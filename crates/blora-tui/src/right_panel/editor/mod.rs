@@ -6,8 +6,8 @@
 pub(super) mod document;
 mod find;
 pub(super) mod highlight;
-mod preview;
-pub(super) mod render;
+pub(super) mod preview;
+mod render;
 
 pub(super) use preview::Preview;
 
@@ -263,10 +263,6 @@ impl Editor {
         self.viewport_rows.set(rows.max(1));
     }
 
-    pub(super) fn language(&self) -> &'static str {
-        self.highlight.borrow().language()
-    }
-
     pub(super) fn key(&mut self, key: KeyEvent) {
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -409,6 +405,85 @@ impl Editor {
         self.doc.text()[start..end].to_owned()
     }
 
+    pub(super) fn language(&self) -> &'static str {
+        self.highlight.borrow().language()
+    }
+
+    pub(super) fn clone_state(&self) -> Self {
+        let dark = self.highlight.borrow().is_dark();
+        let clone = Self {
+            doc: self.doc.clone(),
+            path: self.path.clone(),
+            canonical: self.canonical.clone(),
+            original: self.original.clone(),
+            metadata: self.metadata.clone(),
+            find: self.find.clone(),
+            goto: self.goto.clone(),
+            highlight: RefCell::new(HighlightCache::new(&self.path, self.doc.text(), dark)),
+            warm: RefCell::new(None),
+            bracket: RefCell::new(None),
+            viewport_rows: Cell::new(self.viewport_rows.get()),
+            last_processed: Cell::new(self.last_processed.get()),
+        };
+        clone.start_warm();
+        clone
+    }
+
+    pub(super) fn check(&self, root: &Path) -> Result<(), String> {
+        let root = root.canonicalize().map_err(|error| error.to_string())?;
+        let path = self
+            .path
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        if path != self.canonical || !path.starts_with(&root) {
+            return Err("路径已改变或超出项目边界，未保存".into());
+        }
+        let metadata = fs::metadata(&path).map_err(|error| error.to_string())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if metadata.dev() != self.metadata.dev() || metadata.ino() != self.metadata.ino() {
+                return Err("文件已被外部替换，未保存".into());
+            }
+        }
+        if metadata.modified().ok() != self.metadata.modified().ok()
+            || metadata.permissions() != self.metadata.permissions()
+            || fs::read(&path).map_err(|error| error.to_string())? != self.original
+        {
+            return Err("文件已被外部修改，未保存；请保留草稿后重新打开".into());
+        }
+        Ok(())
+    }
+
+    pub(super) fn goto_view(&self) -> Option<&str> {
+        self.goto.as_deref()
+    }
+
+    pub(super) fn goto_set(&mut self, value: String) {
+        self.goto = Some(value);
+    }
+
+    pub(super) fn goto_append(&mut self, ch: char) {
+        if let Some(buffer) = self.goto.as_mut() {
+            buffer.push(ch);
+        }
+    }
+
+    pub(super) fn goto_backspace(&mut self) {
+        if let Some(buffer) = self.goto.as_mut() {
+            buffer.pop();
+        }
+    }
+
+    pub(super) fn goto_line(&mut self, line: usize) {
+        let row = line
+            .saturating_sub(1)
+            .min(self.doc.line_count().saturating_sub(1));
+        let byte = self.doc.line_start(row);
+        self.doc.set_cursor(byte);
+        self.goto = None;
+    }
+
     pub(super) fn find_view(&self) -> Option<FindView<'_>> {
         self.find.open.then(|| FindView {
             query: &self.find.query,
@@ -465,11 +540,11 @@ impl Editor {
                 FindAction::Handled
             }
             KeyCode::Enter if control && alt => {
-                self.replace_all();
+                self.replace_all_editor();
                 FindAction::ReplaceAll
             }
             KeyCode::Enter if alt => {
-                self.replace_current();
+                self.replace_current_editor();
                 FindAction::Replace
             }
             KeyCode::Enter if shift => {
@@ -510,6 +585,74 @@ impl Editor {
         self.refresh_selection();
     }
 
+    pub(super) fn has_find(&self) -> bool {
+        self.find.open
+    }
+
+    pub(super) fn selected_text(&self) -> Option<&str> {
+        self.doc.selected_text()
+    }
+
+    pub(super) fn selection_range(&self) -> Option<std::ops::Range<usize>> {
+        self.doc.selection().map(|(start, end)| start..end)
+    }
+
+    pub(super) fn find_query_matches(&self, text: &str) -> Vec<std::ops::Range<usize>> {
+        let Some(view) = self.find_view() else {
+            return Vec::new();
+        };
+        if view.query.is_empty() {
+            return Vec::new();
+        }
+        text.match_indices(view.query)
+            .map(|(start, found)| start..start + found.len())
+            .collect()
+    }
+
+    pub(super) fn replace_all_query(&mut self) -> usize {
+        self.replace_all()
+    }
+
+    pub(super) fn replace_current_query(&mut self) -> bool {
+        self.replace_current()
+    }
+
+    pub(super) fn begin_mouse_selection(&mut self, line: usize, column: usize, extend: bool) {
+        let anchor = self
+            .doc
+            .selection()
+            .map_or(self.doc.cursor(), |(start, _)| start);
+        self.doc.move_to_display_position(line, column);
+        if extend {
+            let cursor = self.doc.cursor();
+            self.doc.select(anchor, cursor);
+        }
+    }
+
+    pub(super) fn goto_is_open(&self) -> bool {
+        self.goto.is_some()
+    }
+
+    pub(super) fn replace_current(&mut self) -> bool {
+        let before = self.doc.version();
+        self.replace_current_editor();
+        self.doc.version() != before
+    }
+
+    pub(super) fn replace_all(&mut self) -> usize {
+        let before = self.find.matches.len();
+        self.replace_all_editor();
+        before.saturating_sub(self.find.matches.len())
+    }
+
+    pub(super) fn indent_lines(&mut self, outdent: bool) {
+        if outdent {
+            self.doc.outdent();
+        } else {
+            self.doc.tab();
+        }
+    }
+
     pub(super) fn find_paste(&mut self, text: &str) {
         let text = text.replace(['\r', '\n'], " ");
         if let Some(field) = self.find.focus_mut() {
@@ -535,7 +678,7 @@ impl Editor {
         self.refresh_selection();
     }
 
-    fn replace_current(&mut self) {
+    fn replace_current_editor(&mut self) {
         let Some(range) = self.find.current() else {
             return;
         };
@@ -546,7 +689,7 @@ impl Editor {
         self.refresh_selection();
     }
 
-    fn replace_all(&mut self) {
+    fn replace_all_editor(&mut self) {
         let ranges = self.find.all_ranges();
         let replacement = self.find.replacement.clone();
         self.doc.replace_all(&ranges, &replacement);
@@ -556,10 +699,6 @@ impl Editor {
 
     pub(super) fn goto_open(&mut self) {
         self.goto = Some(String::new());
-    }
-
-    pub(super) fn goto_view(&self) -> Option<&str> {
-        self.goto.as_deref()
     }
 
     pub(super) fn goto_key(&mut self, key: KeyEvent) -> GotoAction {
@@ -740,7 +879,7 @@ impl Editor {
         pair
     }
 
-    fn check(&self, root: &Path) -> Result<(), String> {
+    fn check_disk_identity(&self, root: &Path) -> Result<(), String> {
         let root = root.canonicalize().map_err(|error| error.to_string())?;
         let path = self
             .path

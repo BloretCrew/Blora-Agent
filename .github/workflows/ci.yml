@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.1"
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all -- --check
+      # Clippy is not gated yet: the TUI has ~45 pre-existing lints on the
+      # pinned toolchain. Clean those up first, then add:
+      #   cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Test
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --workspace --locked 2>&1 | tee test.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            # Surface failing test names as annotations; job logs need admin rights.
+            grep -E '^(failures:|    [a-zA-Z0-9_:]+)$' test.log \
+              | sed 's/^/::error::/' || true
+            exit "$status"
+          fi
+
+  policy:
+    name: Licenses & sources
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Advisories are checked separately once the dependency upgrades land.
+      # See docs/operations/security.md for the current list.
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          arguments: licenses bans sources

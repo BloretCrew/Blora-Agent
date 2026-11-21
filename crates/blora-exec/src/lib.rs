@@ -1439,10 +1439,11 @@ mod tests {
         assert!(backend.git_diff().unwrap().contains("tracked.txt"));
         assert!(!backend.git_diff().unwrap().contains("@@"));
         assert_eq!(backend.git_file_diff("./tracked.txt").unwrap(), diff);
+        // Canonicalize because /var is a symlink to /private/var on macOS and
+        // the policy compares against the canonical workspace root.
+        let absolute = dir.path().join("tracked.txt").canonicalize().unwrap();
         assert_eq!(
-            backend
-                .git_file_diff(dir.path().join("tracked.txt").to_str().unwrap())
-                .unwrap(),
+            backend.git_file_diff(absolute.to_str().unwrap()).unwrap(),
             diff
         );
     }

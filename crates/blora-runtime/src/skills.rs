@@ -162,7 +162,7 @@ impl Runtime {
         query: &str,
         limit: usize,
         cursor: Option<&(String, i64)>,
-    ) -> Result<(Vec<blora_storage::SearchMatch>, Option<(String, i64)>)> {
+    ) -> Result<blora_storage::SearchPage> {
         self.store
             .search_transcripts_page(query, limit, None, None, cursor)
     }
